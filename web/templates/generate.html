@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}页面2 - 我的任务{% endblock %}
+{% block content %}
+<div class="hero-bar d-flex justify-content-between align-items-center">
+    <div>
+        <h1>页面2 · 我的任务</h1>
+        <p class="mb-0">查看分配给您的任务列表，更新完成状态或填写占位符生成文档。</p>
+    </div>
+    <div id="heroBarActions" class="text-end">
+        <span id="userInfo" class="badge bg-light text-dark me-2"></span>
+        <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="card-title mb-0">我的任务列表</h5>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#tasksFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="tasksFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-3">
+                    <input type="text" class="form-control form-control-sm" id="filterTaskProject" placeholder="项目名称">
+                </div>
+                <div class="col-md-3">
+                    <input type="text" class="form-control form-control-sm" id="filterTaskFile" placeholder="文件名称">
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select form-select-sm" id="filterTaskType">
+                        <option value="">全部任务类型</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select form-select-sm" id="filterTaskStatus">
+                        <option value="">全部状态</option>
+                        <option value="未完成">未完成</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <p class="text-muted small">以下为分配给您的任务，可以直接标记完成状态或展开填写占位符。支持拖动排序。</p>
+        <div class="mb-2">
+            <span class="me-2">分组：</span>
+            <div class="btn-group btn-group-sm" role="group">
+                <input type="radio" class="btn-check" name="myTasksGroupBy" id="myTasksGroupByNone" value="none" checked>
+                <label class="btn btn-outline-secondary" for="myTasksGroupByNone">不分组</label>
+                <input type="radio" class="btn-check" name="myTasksGroupBy" id="myTasksGroupByProject" value="project">
+                <label class="btn btn-outline-secondary" for="myTasksGroupByProject">按项目</label>
+            </div>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-bordered table-hover align-middle table-selectable" id="myTasksTable">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 50px;">序号</th>
+                        <th class="th-sortable" data-sort-key="projectName" style="width: 120px;">项目名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="fileName" style="width: 120px;">文件名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="taskType" style="width: 90px;">任务类型 <span class="sort-indicator"></span></th>
+                        <th style="width: 90px;">来源</th>
+                        <th style="width: 120px;">文档链接</th>
+                        <th class="th-sortable" data-sort-key="dueDate" style="width: 85px;">截止日期 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="businessSide" style="width: 80px;">影响业务方 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="product" style="width: 70px;">产品 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="country" style="width: 60px;">国家 <span class="sort-indicator"></span></th>
+                        <th style="width: 80px;">下发任务备注</th>
+                        <th style="width: 90px;">执行任务备注</th>
+                        <th style="width: 120px;">完成状态</th>
+                        <th style="width: 100px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="myTasksBody">
+                    <!-- 动态生成 -->
+                </tbody>
+            </table>
+        </div>
+        
+        <div id="noTasksAlert" class="alert alert-info d-none">
+            当前没有分配给您的任务。
+        </div>
+    </div>
+</div>
+
+<!-- 填写占位符弹窗 -->
+<div class="modal fade" id="placeholderModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">填写占位符 - <span id="modalTaskTitle"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="placeholderForm">
+                    <input type="hidden" id="modalUploadId">
+                    <div id="modalPlaceholderFields" class="row g-3">
+                        <!-- 动态生成占位符输入框 -->
+                    </div>
+                    <div id="modalNoPlaceholders" class="alert alert-warning d-none">
+                        该模板没有识别到占位符。
+                    </div>
+                    <div class="mt-3">
+                        <label class="form-label">输出文件名（可选）</label>
+                        <input type="text" class="form-control" id="modalOutputName" placeholder="不填写则自动命名">
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success" id="modalGenerateBtn">生成文档</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="alert alert-secondary">
+    <strong>说明：</strong> 
+    <ul class="mb-0">
+        <li>此页面仅显示分配给您的任务（根据编写人员或负责人匹配）</li>
+        <li>可直接在下拉框中选择完成状态进行标记</li>
+        <li>如需填写占位符生成文档，点击"填写"按钮</li>
+        <li>如果是链接类型的任务，可以直接访问链接填写后标记状态</li>
+    </ul>
+</div>
+{% endblock %}

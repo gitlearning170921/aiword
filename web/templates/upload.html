@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+{% block title %}页面1 - 上传{% endblock %}
+{% block content %}
+<div class="hero-bar">
+    <h1>页面1 · 模板上传与任务管理</h1>
+    <p>批量录入任务信息，支持上传模板文件或输入文档链接，自动发送钉钉通知。</p>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="card-title mb-0">任务录入</h5>
+            <div>
+                <button type="button" class="btn btn-outline-primary btn-sm" id="addRowBtn">+ 添加一行</button>
+                <button type="button" class="btn btn-success btn-sm ms-2" id="saveAllBtn">保存全部</button>
+            </div>
+        </div>
+        <p class="text-muted small mb-3">每行一条任务。重复校验基于：项目名称 + 文件名称 + 任务类型 + 编写人。</p>
+        
+        <div class="table-responsive">
+            <table class="table table-bordered align-middle" id="taskInputTable">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 110px;">项目名称 *</th>
+                        <th style="width: 110px;">文件名称 *</th>
+                        <th style="width: 100px;">任务类型</th>
+                        <th style="width: 160px;">文档链接 / 模板</th>
+                        <th style="width: 90px;">编写人员 *</th>
+                        <th style="width: 90px;">截止日期</th>
+                        <th style="width: 90px;">影响业务方</th>
+                        <th style="width: 80px;">产品</th>
+                        <th style="width: 70px;">国家</th>
+                        <th style="width: 80px;">下发任务备注</th>
+                        <th style="width: 50px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="taskInputBody">
+                    <!-- 动态行 -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="mt-3">
+            <h6 class="form-section-title">占位符识别结果</h6>
+            <div id="placeholderResult" class="border rounded p-3 bg-light">
+                <p class="mb-0 text-muted">保存后这里会展示模板中识别到的占位符。</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 已保存的任务列表：单独一块区域，避免拥挤 -->
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="card-title mb-0">已保存的任务列表</h5>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#recordsFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="recordsFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-3">
+                    <input type="text" class="form-control form-control-sm" id="filterRecordProject" placeholder="项目名称">
+                </div>
+                <div class="col-md-3">
+                    <input type="text" class="form-control form-control-sm" id="filterRecordFile" placeholder="文件名称">
+                </div>
+                <div class="col-md-3">
+                    <input type="text" class="form-control form-control-sm" id="filterRecordAuthor" placeholder="编写人员">
+                </div>
+                <div class="col-md-3">
+                    <select class="form-select form-select-sm" id="filterRecordStatus">
+                        <option value="">全部状态</option>
+                        <option value="pending">待办</option>
+                        <option value="completed">已完成</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <p class="text-muted small">支持拖动调整排序。</p>
+        <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
+            <span class="me-2">分组：</span>
+            <div class="btn-group btn-group-sm" role="group">
+                <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByNone" value="none" checked>
+                <label class="btn btn-outline-secondary" for="recordsGroupByNone">不分组</label>
+                <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByProject" value="project">
+                <label class="btn btn-outline-secondary" for="recordsGroupByProject">按项目</label>
+                <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByAuthor" value="author">
+                <label class="btn btn-outline-secondary" for="recordsGroupByAuthor">按编写人</label>
+                <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByProjectAuthor" value="project_author">
+                <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
+        </div>
+        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+            <table class="table table-bordered table-hover align-middle table-sm table-selectable" id="recordsTable">
+                <thead class="table-light sticky-top">
+                    <tr>
+                        <th style="width:40px"><input type="checkbox" class="form-check-input" id="recordSelectAll" title="全选"></th>
+                        <th style="width:40px">序号</th>
+                        <th class="th-sortable" data-sort-key="projectName">项目名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="fileName">文件名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="taskType">任务类型 <span class="sort-indicator"></span></th>
+                        <th>来源</th>
+                        <th class="th-sortable" data-sort-key="author">编写人员 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="dueDate">截止日期 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="businessSide">影响业务方 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="product">产品 <span class="sort-indicator"></span></th>
+                                <th class="th-sortable" data-sort-key="country">国家 <span class="sort-indicator"></span></th>
+                                <th class="th-sortable" data-sort-key="taskStatus">状态 <span class="sort-indicator"></span></th>
+                                <th>审核状态</th>
+                                <th>下发任务备注</th>
+                                <th>执行任务备注</th>
+                                <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="recordsTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-body">
+                <h5 class="card-title">账号管理（页面2登录）</h5>
+                <form id="userForm" class="mb-3">
+                    <div class="mb-2">
+                        <input type="text" class="form-control form-control-sm" id="newUsername" placeholder="用户名 *" required>
+                    </div>
+                    <div class="mb-2">
+                        <input type="password" class="form-control form-control-sm" id="newPassword" placeholder="密码 *" required>
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" class="form-control form-control-sm" id="newDisplayName" placeholder="显示名称（可选）">
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" class="form-control form-control-sm" id="newMobile" placeholder="手机号（钉钉@用，可选）">
+                    </div>
+                    <button type="submit" class="btn btn-success btn-sm w-100">创建账号</button>
+                </form>
+                <hr>
+                <div class="table-responsive" style="max-height: 150px; overflow-y: auto;">
+                    <table class="table table-sm table-bordered align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>用户名</th>
+                                <th>手机号</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">配置管理</h5>
+                <div class="mb-3">
+                    <label class="form-label small fw-bold">任务类型</label>
+                    <div class="input-group input-group-sm mb-2">
+                        <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
+                        <button class="btn btn-outline-success" type="button" id="addTaskTypeBtn">+</button>
+                    </div>
+                    <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
+                </div>
+                <hr>
+                <div>
+                    <label class="form-label small fw-bold">完成状态（页面2）</label>
+                    <div class="input-group input-group-sm mb-2">
+                        <input type="text" class="form-control" id="newCompletionStatus" placeholder="新增完成状态">
+                        <button class="btn btn-outline-success" type="button" id="addCompletionStatusBtn">+</button>
+                    </div>
+                    <div id="completionStatusesList" class="d-flex flex-wrap gap-1"></div>
+                </div>
+                <hr>
+                <div>
+                    <label class="form-label small fw-bold">审核状态（页面1）</label>
+                    <div class="input-group input-group-sm mb-2">
+                        <input type="text" class="form-control" id="newAuditStatus" placeholder="新增审核状态">
+                        <button class="btn btn-outline-success" type="button" id="addAuditStatusBtn">+</button>
+                    </div>
+                    <div id="auditStatusesList" class="d-flex flex-wrap gap-1"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑用户手机号弹窗 -->
+<div class="modal fade" id="editUserMobileModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑手机号（钉钉@）</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editUserMobileId">
+                <div class="mb-2">
+                    <label class="form-label small">用户名</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserMobileUsername" readonly>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">手机号</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserMobileValue" placeholder="用于钉钉@提醒">
+                </div>
+                <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑任务弹窗（页面1） -->
+<div class="modal fade" id="editRecordModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑任务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editRecordId">
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <label class="form-label small">项目名称 *</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordProject" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">文件名称 *</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordFile" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">任务类型</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordTaskType" placeholder="可选">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">编写人员 *</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordAuthor" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">截止日期</label>
+                        <input type="date" class="form-control form-control-sm" id="editRecordDueDate">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">负责人（钉钉@）</label>
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control" id="editRecordAssignee" placeholder="可选，需与账号管理中姓名一致">
+                            <button type="button" class="btn btn-outline-success" id="editRecordQuickUserBtn" title="快捷创建账号">+ 账号</button>
+                        </div>
+                        <div id="editRecordAssigneeMobileHint" class="form-text small text-muted"></div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">审核状态</label>
+                        <select class="form-select form-select-sm" id="editRecordAuditStatus">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">影响业务方</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordBusinessSide">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">产品</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordProduct">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">国家</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordCountry">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">文档链接（每行一个）</label>
+                        <textarea class="form-control form-control-sm" id="editRecordTemplateLinks" rows="2" placeholder="可选，多行"></textarea>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">下发任务备注</label>
+                        <input type="text" class="form-control form-control-sm" id="editRecordNotes">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="saveEditRecordBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 批量编辑任务弹窗 -->
+<div class="modal fade" id="batchEditRecordModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">批量编辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">以下字段将统一应用到所选任务，留空则不修改该字段。</p>
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <label class="form-label small">任务类型</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditTaskType" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">编写人员</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditAuthor" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">负责人</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditAssignee" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">截止日期</label>
+                        <input type="date" class="form-control form-control-sm" id="batchEditDueDate" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">影响业务方</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditBusinessSide" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">产品</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditProduct" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">国家</label>
+                        <input type="text" class="form-control form-control-sm" id="batchEditCountry" placeholder="留空不修改">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">审核状态</label>
+                        <select class="form-select form-select-sm" id="batchEditAuditStatus">
+                            <option value="">— 不修改 —</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="batchEditSaveBtn">应用到所选</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 创建账号弹窗（置于编辑任务弹窗之后，避免被遮挡） -->
+<div class="modal fade" id="quickUserModal" tabindex="-1" data-bs-backdrop="true">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">快速创建账号</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="quickUserForm">
+                    <div class="mb-2">
+                        <input type="text" class="form-control form-control-sm" id="quickUsername" placeholder="用户名 *" required>
+                    </div>
+                    <div class="mb-2">
+                        <input type="password" class="form-control form-control-sm" id="quickPassword" placeholder="密码 *" required>
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" class="form-control form-control-sm" id="quickMobile" placeholder="手机号（钉钉@用，可选）">
+                    </div>
+                    <button type="submit" class="btn btn-success btn-sm w-100">创建</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

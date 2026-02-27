@@ -1,0 +1,295 @@
+.app-body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(140deg, #eef2ff 0%, #fdf9ff 55%, #f0f4ff 100%);
+    min-height: 100vh;
+}
+
+.app-body.generate-view main.container {
+    margin-top: 24px;
+}
+
+.navbar {
+    box-shadow: 0 15px 30px rgba(13, 110, 253, 0.25);
+    border-radius: 0 0 24px 24px;
+}
+
+.hero-bar {
+    background: linear-gradient(120deg, rgba(13, 110, 253, 0.12), rgba(255, 255, 255, 0.9));
+    border-radius: 22px;
+    padding: 28px 34px;
+    box-shadow: 0 25px 40px rgba(15, 23, 42, 0.08);
+    margin-bottom: 24px;
+    position: relative;
+    overflow: hidden;
+}
+
+/* 页面2顶部右侧按钮区域置于装饰之上，确保可点击 */
+.hero-bar .d-flex.justify-content-between .text-end {
+    position: relative;
+    z-index: 2;
+}
+#heroBarActions {
+    position: relative;
+    z-index: 10;
+}
+
+.hero-bar::after {
+    content: "";
+    position: absolute;
+    right: -100px;
+    top: -60px;
+    width: 220px;
+    height: 220px;
+    background: radial-gradient(circle, rgba(13,110,253,0.25) 0%, transparent 60%);
+}
+
+.hero-bar h1 {
+    font-size: 1.9rem;
+    margin-bottom: 10px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.hero-bar p {
+    margin-bottom: 0;
+    color: #4c5568;
+}
+
+.workflow-steps {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.workflow-step {
+    flex: 1;
+    position: relative;
+    background: #fff;
+    border-radius: 14px;
+    padding: 14px 18px 18px;
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.06);
+    border: 1px solid rgba(13, 110, 253, 0.08);
+}
+
+.workflow-step .step-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    font-weight: 700;
+    color: #0d6efd;
+    background: rgba(13, 110, 253, 0.12);
+    margin-bottom: 10px;
+}
+
+.workflow-step .step-title {
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 6px;
+}
+
+.workflow-step .step-desc {
+    font-size: 0.9rem;
+    color: #6b7280;
+    margin: 0;
+}
+
+.workflow-step.active .step-label {
+    color: #fff;
+    background: linear-gradient(130deg, #0d6efd, #5a8dee);
+}
+
+.workflow-step.active {
+    border-color: rgba(13, 110, 253, 0.3);
+    box-shadow: 0 15px 30px rgba(13, 110, 253, 0.15);
+}
+
+.card {
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.09);
+    border: none;
+    border-radius: 20px;
+}
+
+.card h5 {
+    font-weight: 600;
+}
+
+.form-section-title {
+    font-weight: 600;
+    color: #0d6efd;
+}
+
+.stat-value {
+    font-size: 2.1rem;
+    font-weight: 700;
+    color: #0d6efd;
+}
+
+.placeholder-list .list-group-item {
+    border: none;
+    border-radius: 12px !important;
+    background: #f0f5ff;
+    margin-bottom: 10px;
+    box-shadow: inset 0 0 0 1px rgba(13, 110, 253, 0.08);
+}
+
+.placeholder-text {
+    font-weight: 600;
+    color: #14213d;
+}
+
+.table thead {
+    background: #eef2ff;
+    color: #1f2937;
+}
+
+.mini-stat {
+    border-radius: 16px;
+    padding: 20px;
+    background: linear-gradient(145deg, #ffffff, #eef2ff);
+    box-shadow: inset 0 0 0 1px rgba(13, 110, 253, 0.08);
+}
+
+.form-control,
+.form-select {
+    min-height: 46px;
+    border-radius: 12px;
+    border-color: rgba(15, 23, 42, 0.08);
+}
+
+form .row .form-control,
+form .row .form-select {
+    width: 100%;
+}
+
+.grid-equal {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+}
+
+.btn-primary,
+.btn-success {
+    border-radius: 999px;
+    padding: 10px 26px;
+    font-weight: 600;
+    box-shadow: 0 8px 18px rgba(13, 110, 253, 0.25);
+}
+
+/* 任务输入表格样式 */
+#taskInputTable .form-control,
+#taskInputTable .form-select {
+    min-height: 36px;
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+#taskInputTable td {
+    vertical-align: middle;
+    padding: 8px 6px;
+}
+
+#taskInputTable .input-group-sm > .btn {
+    padding: 4px 10px;
+}
+
+#taskInputTable .btn-create-user {
+    padding: 4px 10px;
+    font-weight: 700;
+}
+
+#taskInputTable .task-file-name {
+    font-size: 0.75rem;
+    display: block;
+    margin-top: 2px;
+}
+
+.btn-remove-row {
+    padding: 2px 8px;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+/* 账号管理卡片内表格 */
+#usersTableBody .btn-outline-danger {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+}
+
+/* 拖动排序样式 */
+tr[draggable="true"] {
+    cursor: move;
+}
+
+tr[draggable="true"]:hover {
+    background-color: rgba(13, 110, 253, 0.05);
+}
+
+tr[draggable="true"].dragging {
+    opacity: 0.4;
+    background-color: rgba(13, 110, 253, 0.1);
+}
+
+.seq-cell {
+    font-weight: 600;
+    color: #6b7280;
+    text-align: center;
+    width: 40px;
+}
+
+/* 筛选行样式 */
+.collapse.show + .table-responsive,
+.collapsing + .table-responsive {
+    margin-top: 8px;
+}
+
+/* 统计卡片中的状态分布 */
+.badge.bg-info.text-dark {
+    font-weight: 500;
+}
+
+/* 通知按钮样式 */
+.btn-notify-project,
+.btn-notify-author,
+.btn-notify-single {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+}
+
+/* 定时任务信息卡片 */
+#scheduleInfo > div {
+    min-width: 180px;
+}
+
+/* 任务列表表格：支持按表头排序、内容可复制 */
+.table-selectable td,
+.table-selectable th {
+    user-select: text;
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+}
+
+/* 快速创建账号弹窗置于编辑任务弹窗之上时不被遮挡 */
+#quickUserModal.modal.show {
+    z-index: 1065 !important;
+}
+
+.th-sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.th-sortable:hover {
+    background-color: rgba(13, 110, 253, 0.12);
+}
+
+.th-sortable .sort-indicator {
+    opacity: 0.5;
+    font-size: 0.75em;
+    margin-left: 2px;
+}
+
