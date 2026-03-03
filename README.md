@@ -480,6 +480,16 @@ python run_web.py
 
 若需让其他人通过域名或内网 IP 打开（如催办通知里的链接），请设置环境变量 **BASE_URL**，例如：`set BASE_URL=http://your-server.com` 或 `set BASE_URL=http://192.168.1.100:5000`。详见 `docs/DINGTALK.md`。
 
+**（可选）页面1、页面3 访问密码**：在项目根目录的 **`config.json`** 中增加键 `PAGE13_ACCESS_PASSWORD`，值为访问密码字符串（**仅从 config.json 读取，不会读取 config.json.example**）。设置后，打开页面1或页面3前需先输入该密码。密码采用 nonce+hash 校验，不在网络中明文传输；输入时首尾空格会自动去除。示例：
+
+```json
+{
+  "PAGE13_ACCESS_PASSWORD": "你的密码"
+}
+```
+
+可将 `config.json.example` 复制为 `config.json` 后修改其中的 `PAGE13_ACCESS_PASSWORD`。注意不要将含真实密码的 `config.json` 提交到版本库（已加入 `.gitignore`）。
+
 ### 使用流程
 
 1. **上传模板**（页面1）

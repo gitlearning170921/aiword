@@ -393,6 +393,43 @@ def create_app() -> Flask:
     except ImportError:
         pass
     
+    # 从配置文件读取可选项（config.json 在项目根目录；若不存在则尝试 config.json.example）
+    def _config_file_value(key: str, default: str = "") -> str:
+        for name in ("config.json", "config.json.example"):
+            config_path = project_root / name
+            if not config_path.exists():
+                continue
+            try:
+                import json
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                val = data.get(key)
+                v = (str(val).replace("\ufeff", "").strip() if val is not None else "") or default
+                if name == "config.json" or v:
+                    return v
+            except Exception:
+                continue
+        return default
+
+    # 页面1/3 访问密码：仅从 config.json 读取，不读 config.json.example
+    page13_password = None
+    _config_path = project_root / "config.json"
+    if _config_path.exists():
+        try:
+            import json
+            with open(_config_path, "r", encoding="utf-8") as f:
+                _data = json.load(f)
+            _val = _data.get("PAGE13_ACCESS_PASSWORD")
+            if _val is not None:
+                _v = str(_val).replace("\ufeff", "").strip()
+                if _v:
+                    page13_password = _v
+        except Exception:
+            pass
+    if page13_password:
+        import logging
+        logging.getLogger(__name__).info("页面1/3 访问密码已从 config.json 加载")
+    
     uploads_dir = project_root / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     outputs_dir = project_root / "outputs"
@@ -416,6 +453,8 @@ def create_app() -> Flask:
         DINGTALK_SECRET=os.getenv("DINGTALK_SECRET", ""),
         SECRET_KEY=os.getenv("SECRET_KEY", "aiword-dev-secret-key-change-in-production"),
         BASE_URL=(os.getenv("BASE_URL", "") or "").strip(),
+        # 页面1、页面3 访问密码（可选）。在 config.json 中配置 PAGE13_ACCESS_PASSWORD，不在网络中明文传输。
+        PAGE13_ACCESS_PASSWORD=page13_password,
     )
     app.json.ensure_ascii = False
 

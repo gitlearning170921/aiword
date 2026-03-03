@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import secrets
+import hashlib
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -250,6 +252,27 @@ def login_required(f):
     return decorated_function
 
 
+def _page13_password_configured() -> bool:
+    """是否已配置页面1/3 访问密码（从 config.json 读取）"""
+    p = current_app.config.get("PAGE13_ACCESS_PASSWORD")
+    return bool(p and str(p).strip())
+
+
+def page13_access_required(f):
+    """页面1、页面3 及其相关 API 的访问密码校验。密码不在网络中传输，使用 nonce+hash 校验。"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not _page13_password_configured():
+            return f(*args, **kwargs)
+        if session.get("page13_authenticated"):
+            return f(*args, **kwargs)
+        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
+            return jsonify({"message": "需要输入访问密码", "needsPage13Auth": True}), 401
+        next_url = request.path or "/upload"
+        return render_template("page13_gate.html", next_url=next_url, gate_page=True)
+    return decorated_function
+
+
 # ---------- 页面路由 ----------
 
 @bp.route("/")
@@ -258,6 +281,7 @@ def index():
 
 
 @bp.route("/upload")
+@page13_access_required
 def upload_page():
     return render_template("upload.html")
 
@@ -274,6 +298,7 @@ def generate_page():
 
 
 @bp.route("/dashboard")
+@page13_access_required
 def dashboard_page():
     return render_template("dashboard.html")
 
@@ -323,9 +348,49 @@ def api_me():
     })
 
 
+@bp.get("/api/page13-auth-state")
+def api_page13_auth_state():
+    """获取页面1/3 是否需密码及本次验证用的 nonce（不校验身份，任何人可调）。"""
+    required = _page13_password_configured()
+    authenticated = bool(session.get("page13_authenticated"))
+    if not required:
+        return jsonify({"required": False, "authenticated": True})
+    if authenticated:
+        return jsonify({"required": True, "authenticated": True})
+    nonce = secrets.token_hex(16)
+    session["page13_nonce"] = nonce
+    return jsonify({"required": True, "authenticated": False, "nonce": nonce})
+
+
+@bp.post("/api/page13-auth")
+def api_page13_auth():
+    """提交 hash(nonce+password)，校验通过后设置 session，密码不明文传输。"""
+    if not _page13_password_configured():
+        return jsonify({"success": True, "message": "未配置访问密码"})
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+    client_hash = (data.get("hash") or "").strip()
+    if not client_hash:
+        return jsonify({"message": "缺少校验参数"}), 400
+    nonce = session.get("page13_nonce")
+    if not nonce:
+        return jsonify({"message": "请先获取验证码（刷新页面后重试）"}), 400
+    raw = current_app.config.get("PAGE13_ACCESS_PASSWORD")
+    password = (str(raw).replace("\ufeff", "").strip() if raw else "")
+    expected = hashlib.sha256((nonce + password).encode("utf-8")).hexdigest()
+    session.pop("page13_nonce", None)
+    if not secrets.compare_digest(expected, client_hash):
+        return jsonify({"message": "访问密码错误"}), 401
+    session["page13_authenticated"] = True
+    return jsonify({"success": True, "message": "验证成功"})
+
+
 # ---------- 用户管理 API（页面1管理账号） ----------
 
 @bp.get("/api/users")
+@page13_access_required
 def api_users_list():
     users = User.query.order_by(User.created_at.desc()).all()
     return jsonify({
@@ -343,6 +408,7 @@ def api_users_list():
 
 
 @bp.post("/api/users")
+@page13_access_required
 def api_users_create():
     data = request.get_json(force=True) or {}
     username = (data.get("username") or "").strip()
@@ -370,6 +436,7 @@ def api_users_create():
 
 
 @bp.patch("/api/users/<user_id>")
+@page13_access_required
 def api_users_update(user_id: str):
     """更新用户显示名称、手机号（钉钉 @ 用）"""
     user = User.query.get(user_id)
@@ -386,6 +453,7 @@ def api_users_update(user_id: str):
 
 
 @bp.delete("/api/users/<user_id>")
+@page13_access_required
 def api_users_delete(user_id: str):
     user = User.query.get(user_id)
     if not user:
@@ -398,6 +466,7 @@ def api_users_delete(user_id: str):
 # ---------- 配置项 API ----------
 
 @bp.get("/api/configs/task-types")
+@login_required
 def api_task_types():
     """获取任务类型配置列表"""
     items = TaskTypeConfig.query.filter_by(is_active=True).order_by(TaskTypeConfig.sort_order).all()
@@ -407,6 +476,7 @@ def api_task_types():
 
 
 @bp.post("/api/configs/task-types")
+@page13_access_required
 def api_task_types_create():
     """新增任务类型"""
     data = request.get_json(force=True) or {}
@@ -424,6 +494,7 @@ def api_task_types_create():
 
 
 @bp.delete("/api/configs/task-types/<item_id>")
+@page13_access_required
 def api_task_types_delete(item_id: str):
     """删除任务类型"""
     item = TaskTypeConfig.query.get(item_id)
@@ -435,6 +506,7 @@ def api_task_types_delete(item_id: str):
 
 
 @bp.get("/api/configs/completion-statuses")
+@login_required
 def api_completion_statuses():
     """获取完成状态配置列表"""
     items = CompletionStatusConfig.query.filter_by(is_active=True).order_by(CompletionStatusConfig.sort_order).all()
@@ -444,6 +516,7 @@ def api_completion_statuses():
 
 
 @bp.post("/api/configs/completion-statuses")
+@page13_access_required
 def api_completion_statuses_create():
     """新增完成状态"""
     data = request.get_json(force=True) or {}
@@ -461,6 +534,7 @@ def api_completion_statuses_create():
 
 
 @bp.delete("/api/configs/completion-statuses/<item_id>")
+@page13_access_required
 def api_completion_statuses_delete(item_id: str):
     """删除完成状态"""
     item = CompletionStatusConfig.query.get(item_id)
@@ -472,6 +546,7 @@ def api_completion_statuses_delete(item_id: str):
 
 
 @bp.get("/api/configs/audit-statuses")
+@login_required
 def api_audit_statuses():
     """获取审核状态配置列表（页面1使用）"""
     items = AuditStatusConfig.query.filter_by(is_active=True).order_by(AuditStatusConfig.sort_order).all()
@@ -481,6 +556,7 @@ def api_audit_statuses():
 
 
 @bp.post("/api/configs/audit-statuses")
+@page13_access_required
 def api_audit_statuses_create():
     """新增审核状态"""
     data = request.get_json(force=True) or {}
@@ -498,6 +574,7 @@ def api_audit_statuses_create():
 
 
 @bp.delete("/api/configs/audit-statuses/<item_id>")
+@page13_access_required
 def api_audit_statuses_delete(item_id: str):
     """删除审核状态"""
     item = AuditStatusConfig.query.get(item_id)
@@ -511,6 +588,7 @@ def api_audit_statuses_delete(item_id: str):
 # ---------- 上传与任务管理 API ----------
 
 @bp.post("/api/upload")
+@page13_access_required
 def api_upload():
     project_name = request.form.get("projectName", "").strip()
     file_name = request.form.get("fileName", "").strip()
@@ -708,6 +786,7 @@ def _send_task_notification(upload: UploadRecord, due_date_str: str):
 
 @bp.get("/api/template-options")
 @bp.get("/api/upload-options")
+@page13_access_required
 def api_template_options():
     records = UploadRecord.query.order_by(
         UploadRecord.project_name, UploadRecord.file_name, UploadRecord.author
@@ -717,6 +796,7 @@ def api_template_options():
 
 @bp.get("/api/templates/<upload_id>")
 @bp.get("/api/uploads/<upload_id>")
+@page13_access_required
 def api_template_detail(upload_id: str):
     upload = UploadRecord.query.get(upload_id)
     if not upload:
@@ -749,6 +829,7 @@ def api_template_detail(upload_id: str):
 
 
 @bp.get("/api/uploads")
+@page13_access_required
 def api_uploads_list():
     """获取所有上传记录列表"""
     records = UploadRecord.query.order_by(
@@ -787,6 +868,7 @@ def api_uploads_list():
 
 
 @bp.delete("/api/uploads/<upload_id>")
+@page13_access_required
 def api_upload_delete(upload_id: str):
     """删除任务记录"""
     upload = UploadRecord.query.get(upload_id)
@@ -805,6 +887,7 @@ def api_upload_delete(upload_id: str):
 
 
 @bp.patch("/api/uploads/<upload_id>")
+@page13_access_required
 def api_upload_update(upload_id: str):
     """更新任务记录（页面1编辑），仅更新可编辑字段，不涉及文件替换。"""
     upload = UploadRecord.query.get(upload_id)
@@ -1162,6 +1245,7 @@ def api_quick_complete():
 # ---------- 任务状态更新 API ----------
 
 @bp.patch("/api/uploads/<upload_id>/status")
+@page13_access_required
 def api_upload_status_update(upload_id: str):
     upload = UploadRecord.query.get(upload_id)
     if not upload:
@@ -1179,6 +1263,7 @@ def api_upload_status_update(upload_id: str):
 
 
 @bp.get("/api/summary")
+@page13_access_required
 def api_summary():
     return jsonify(_summary_payload())
 
@@ -1186,6 +1271,7 @@ def api_summary():
 # ---------- 通知文案配置 API ----------
 
 @bp.get("/api/configs/notify-templates")
+@page13_access_required
 def api_get_notify_templates():
     templates = NotifyTemplateConfig.query.order_by(NotifyTemplateConfig.template_key).all()
     return jsonify([
@@ -1201,6 +1287,7 @@ def api_get_notify_templates():
 
 
 @bp.put("/api/configs/notify-templates/<template_id>")
+@page13_access_required
 def api_update_notify_template(template_id: str):
     template = NotifyTemplateConfig.query.get(template_id)
     if not template:
@@ -1226,6 +1313,7 @@ def api_update_notify_template(template_id: str):
 # ---------- 排序更新 API ----------
 
 @bp.post("/api/uploads/reorder")
+@login_required
 def api_reorder_uploads():
     """更新任务排序"""
     data = request.get_json(force=True) or {}
@@ -1303,6 +1391,7 @@ def _send_notify_to_individuals(
 
 
 @bp.post("/api/notify/by-project")
+@page13_access_required
 def api_notify_by_project():
     """按项目推送钉钉通知"""
     data = request.get_json(force=True) or {}
@@ -1399,6 +1488,7 @@ def api_notify_by_project():
 
 
 @bp.post("/api/notify/by-author")
+@page13_access_required
 def api_notify_by_author():
     """按编写人员推送钉钉通知"""
     data = request.get_json(force=True) or {}
@@ -1493,6 +1583,7 @@ def api_notify_by_author():
 
 
 @bp.post("/api/notify/single-task")
+@page13_access_required
 def api_notify_single_task():
     """单条任务推送钉钉通知"""
     data = request.get_json(force=True) or {}
@@ -1585,6 +1676,7 @@ def api_notify_single_task():
 
 
 @bp.get("/api/notify/next-schedule")
+@page13_access_required
 def api_notify_next_schedule():
     """获取下一次自动通知时间（使用统计页配置的定时）"""
     from . import scheduler_service
@@ -1599,6 +1691,7 @@ def api_notify_next_schedule():
 
 
 @bp.get("/api/notify/schedule-config")
+@page13_access_required
 def api_get_schedule_config():
     """获取自动通知时间配置（统计页用）"""
     from .scheduler import _get_schedule_config_from_db
@@ -1611,6 +1704,7 @@ def api_get_schedule_config():
 
 
 @bp.put("/api/notify/schedule-config")
+@page13_access_required
 def api_put_schedule_config():
     """保存自动通知时间配置并立即生效"""
     data = request.get_json() or {}
@@ -1637,6 +1731,7 @@ def api_put_schedule_config():
 
 
 @bp.post("/api/notify/test-auto")
+@page13_access_required
 def api_notify_test_auto():
     """测试自动催办：按类型执行与定时任务完全相同的逻辑，仅时间提前到点击时。"""
     webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()

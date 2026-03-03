@@ -30,6 +30,11 @@ const App = {
                 throw new Error("需要登录");
             }
             
+            if (response.status === 401 && data && data.needsPage13Auth) {
+                window.location.href = window.location.pathname || "/upload";
+                throw new Error("需要访问密码");
+            }
+            
             if (response.status === 409 && data && data.needsConfirmation) {
                 const confirmReplace = window.confirm(data.message);
                 if (!confirmReplace) {
