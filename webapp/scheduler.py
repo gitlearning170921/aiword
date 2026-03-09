@@ -17,11 +17,13 @@ if TYPE_CHECKING:
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
     HAS_APSCHEDULER = True
 except ImportError:
     HAS_APSCHEDULER = False
     BackgroundScheduler = None
     CronTrigger = None
+    IntervalTrigger = None
 
 logger = logging.getLogger(__name__)
 scheduler: "BackgroundScheduler | None" = None
@@ -72,7 +74,7 @@ def _parse_schedule_time(value: str) -> dict:
 
 
 def _get_schedule_config_from_db():
-    """在 app 上下文中从数据库读取自动通知时间配置。返回 dict: weekly, overdue, project。"""
+    """在 app 上下文中从数据库读取自动通知时间配置。返回 dict: weekly, overdue, project, module_cascade_delay_minutes。"""
     from .models import AppConfig
     defaults = {
         "SCHEDULE_WEEKLY_REMINDER": "thu 16:00",
@@ -83,10 +85,18 @@ def _get_schedule_config_from_db():
     for key, default in defaults.items():
         row = AppConfig.query.filter_by(config_key=key).first()
         out[key] = (row.config_value.strip() if row and row.config_value else None) or default
+    delay_row = AppConfig.query.filter_by(config_key="MODULE_CASCADE_DELAY_MINUTES").first()
+    delay_minutes = 5
+    if delay_row and delay_row.config_value:
+        try:
+            delay_minutes = max(1, min(1440, int(str(delay_row.config_value).strip())))
+        except ValueError:
+            pass
     return {
         "weekly": out["SCHEDULE_WEEKLY_REMINDER"],
         "overdue": out["SCHEDULE_OVERDUE_REMINDER"],
         "project": out["SCHEDULE_PROJECT_STATS"],
+        "module_cascade_delay_minutes": delay_minutes,
     }
 
 
@@ -445,6 +455,180 @@ def _run_project_stats():
             logger.warning("自动催办(项目统计)：钉钉发送失败，请检查 Webhook/Secret 及网络")
 
 
+def _send_module_cascade_for_project(project_name: str, trigger_module: str, target_module: str, trigger_label: str):
+    """
+    对指定项目发送模块级联催办：仅针对该项目的 target_module 编写人员，每人一条，多人多文档按人汇总。
+    在 app 上下文中调用。
+    """
+    from . import dingtalk_service
+    from .models import UploadRecord
+
+    app = _app
+    if not app:
+        return
+    webhook, secret = _get_webhook_secret()
+    if not webhook:
+        return
+    base_url = (app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip().rstrip("/")
+    page2_path = _get_page2_path(app)
+    page2_url = f"{base_url}{page2_path}" if base_url else ""
+    pname = (project_name or "").strip()
+    if not pname:
+        return
+
+    def _group_key(u):
+        return (u.project_name or "", u.business_side or "", u.product or "")
+
+    def _task_block_md_for_cascade(key, uploads_in_group):
+        proj, bs, pr = key
+        header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        lines = [header]
+        for u in uploads_in_group:
+            links = u.get_template_links_list() or []
+            link = links[0] if links else None
+            due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
+            due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
+            file_label = u.file_name or "-"
+            if u.task_type:
+                file_label += f" ({u.task_type})"
+            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
+            if link:
+                line += f"  文档地址：[点击打开]({link})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    pending_in_project = UploadRecord.query.filter(
+        UploadRecord.project_name == pname,
+        UploadRecord.belonging_module == target_module,
+        UploadRecord.completion_status.is_(None),
+    ).all()
+    if not pending_in_project:
+        return
+    pending_by_author = {}
+    for u in pending_in_project:
+        name = (u.author or "").strip()
+        if name:
+            pending_by_author.setdefault(name, []).append(u)
+    for author_name in sorted(pending_by_author.keys()):
+        uploads = pending_by_author[author_name]
+        groups = {}
+        for u in uploads:
+            k = _group_key(u)
+            groups.setdefault(k, []).append(u)
+        task_list = "\n\n".join(
+            _task_block_md_for_cascade(k, grp) for k, grp in sorted(groups.items())
+        )
+        hint = f"当前{trigger_label}文档已完成，请抓紧编写您的文档；"
+        lines = [
+            "【个人任务催办】（模块级联）",
+            f"致：{author_name}",
+            hint,
+            "",
+            f"您有 {len(uploads)} 个任务待完成：",
+            "",
+            task_list,
+            "",
+            "请抓紧处理！",
+        ]
+        if page2_url:
+            lines.append("")
+            lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+        lines.append("")
+        lines.append("## **编写完成后请在页面2中标记完成状态。**")
+        content = "\n".join(lines)
+        at_mobiles = _resolve_mobiles_for_authors([author_name])
+        result = dingtalk_service.send_markdown_message(
+            "个人任务催办",
+            content,
+            at_mobiles=at_mobiles if at_mobiles else None,
+            at_names=[author_name],
+            webhook=webhook,
+            secret=secret,
+        )
+        if not result.get("success"):
+            logger.warning("自动催办(模块级联)：钉钉发送失败 project=%s author=%s", pname, author_name)
+
+
+def _run_module_cascade_manual(project_name: str | None = None):
+    """
+    手动模块级联催办：按项目检查，若某项目下产品模块全部完成则给该项目的开发人员发催办；
+    若某项目下开发模块全部完成则给该项目的测试人员发催办。不依赖延迟队列，立即发送。
+    project_name: 若指定则只处理该项目，否则处理全部项目。
+    """
+    app = _app
+    if not app:
+        return
+    with app.app_context():
+        from . import db
+        from .models import UploadRecord
+
+        webhook, secret = _get_webhook_secret()
+        if not webhook:
+            logger.warning("手动模块级联催办：未配置 DINGTALK_WEBHOOK，跳过")
+            return
+        if project_name and (project_name or "").strip():
+            project_names = [(project_name or "").strip()]
+        else:
+            projects = (
+                db.session.query(UploadRecord.project_name)
+                .filter(UploadRecord.project_name.isnot(None), UploadRecord.project_name != "")
+                .distinct()
+                .all()
+            )
+            project_names = [p[0] for p in projects if (p[0] or "").strip()]
+        sent_count = 0
+        for pname in project_names:
+            pname = (pname or "").strip()
+            if not pname:
+                continue
+            for trigger_module, target_module in (("产品", "开发"), ("开发", "测试")):
+                all_in_module = UploadRecord.query.filter(
+                    UploadRecord.project_name == pname,
+                    UploadRecord.belonging_module == trigger_module,
+                ).all()
+                if not all_in_module:
+                    continue
+                if any(getattr(u, "completion_status", None) is None for u in all_in_module):
+                    continue
+                _send_module_cascade_for_project(pname, trigger_module, target_module, trigger_module)
+                sent_count += 1
+        if sent_count:
+            logger.info("手动模块级联催办已发送 %d 个项目/模块", sent_count)
+
+
+def _run_process_module_cascade_pending():
+    """
+    每分钟执行：处理到期的模块级联催办待执行记录，按项目分开发送，发送后标记为已执行。
+    """
+    app = _app
+    if not app:
+        return
+    with app.app_context():
+        from .models import UploadRecord, ModuleCascadeReminder, AppConfig, now_local
+
+        webhook, secret = _get_webhook_secret()
+        if not webhook:
+            return
+        now = now_local()
+        pending = ModuleCascadeReminder.query.filter(
+            ModuleCascadeReminder.status == "pending",
+            ModuleCascadeReminder.run_at <= now,
+        ).order_by(ModuleCascadeReminder.run_at).all()
+        for rec in pending:
+            _send_module_cascade_for_project(
+                rec.project_name,
+                rec.trigger_module,
+                rec.target_module,
+                rec.trigger_module,
+            )
+            rec.status = "sent"
+            rec.sent_at = now
+        if pending:
+            from . import db
+            db.session.commit()
+            logger.info("模块级联催办已发送 %d 条（按项目）", len(pending))
+
+
 def init_scheduler(app: "Flask") -> None:
     """在应用上下文中注册定时任务，时间从数据库 AppConfig 读取。"""
     global scheduler, _app
@@ -481,9 +665,15 @@ def init_scheduler(app: "Flask") -> None:
         CronTrigger(**project),
         id="project_stats",
     )
+    if IntervalTrigger is not None:
+        scheduler.add_job(
+            _run_process_module_cascade_pending,
+            IntervalTrigger(minutes=1),
+            id="module_cascade_pending_processor",
+        )
     scheduler.start()
     logger.info(
-        "定时任务已注册：每周提醒 %s，逾期 %s，每两天统计 %s",
+        "定时任务已注册：每周提醒 %s，逾期 %s，每两天统计 %s，模块级联（按项目完成后延迟执行）",
         cfg["weekly"],
         cfg["overdue"],
         cfg["project"],
@@ -491,7 +681,7 @@ def init_scheduler(app: "Flask") -> None:
 
 
 def reschedule_jobs(app: "Flask") -> bool:
-    """根据数据库中的配置重新注册三个定时任务（保存配置后调用）。返回是否成功。"""
+    """根据数据库中的配置重新注册定时任务（保存配置后调用）。模块级联为按项目完成后延迟执行，不在此重配。"""
     global scheduler
     if not HAS_APSCHEDULER or scheduler is None:
         return False
@@ -514,5 +704,8 @@ def reschedule_jobs(app: "Flask") -> bool:
     scheduler.add_job(_run_thursday_reminder, CronTrigger(**weekly), id="thursday_reminder")
     scheduler.add_job(_run_overdue_reminder, CronTrigger(**overdue), id="overdue_reminder")
     scheduler.add_job(_run_project_stats, CronTrigger(**project), id="project_stats")
-    logger.info("定时任务已更新：每周 %s，逾期 %s，每两天 %s", cfg["weekly"], cfg["overdue"], cfg["project"])
+    logger.info(
+        "定时任务已更新：每周 %s，逾期 %s，每两天 %s",
+        cfg["weekly"], cfg["overdue"], cfg["project"],
+    )
     return True

@@ -113,6 +113,20 @@ class AppConfig(db.Model):
     )
 
 
+class ModuleCascadeReminder(db.Model):
+    """模块级联催办待执行/已执行记录：按项目，产品最后一份完成→N分钟后催办开发；开发最后一份完成→N分钟后催办测试。"""
+    __tablename__ = "module_cascade_reminders"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    trigger_module: Mapped[str] = mapped_column(db.String(32), nullable=False)  # 产品 | 开发
+    target_module: Mapped[str] = mapped_column(db.String(32), nullable=False)   # 开发 | 测试
+    run_at: Mapped[datetime] = mapped_column(db.DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(db.String(16), default="pending")  # pending | sent
+    sent_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
 class UploadRecord(db.Model):
     """
     上传记录：支持文件上传或多行文档链接。
@@ -133,6 +147,7 @@ class UploadRecord(db.Model):
     original_file_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     template_links: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    project_notes: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)  # 第一层 项目备注
     execution_notes: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     placeholders: Mapped[list] = mapped_column(db.JSON, default=list)
     assignee_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
@@ -140,6 +155,12 @@ class UploadRecord(db.Model):
     business_side: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     product: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     country: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    file_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    document_display_date: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
+    reviewer: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    approver: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    belonging_module: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)  # 所属模块：产品、开发、测试、全员
     task_status: Mapped[str] = mapped_column(db.String(32), default="pending")
     completion_status: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     audit_status: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)

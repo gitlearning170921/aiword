@@ -2,7 +2,7 @@ const App = {
     async request(url, options = {}) {
         let response;
         try {
-            response = await fetch(url, options);
+            response = await fetch(url, { credentials: "include", ...options });
         } catch (networkError) {
             throw new Error("网络错误，请检查网络连接");
         }
@@ -26,25 +26,35 @@ const App = {
             } catch (readError) {}
             
             if (response.status === 401 && data && data.needsLogin) {
-                window.location.href = "/login";
+                if (window.location.pathname !== "/login") {
+                    window.location.href = "/login";
+                }
                 throw new Error("需要登录");
             }
             
             if (response.status === 401 && data && data.needsPage13Auth) {
-                window.location.href = window.location.pathname || "/upload";
+                if (window.location.pathname !== "/login") {
+                    if (!window._page13Redirecting) {
+                        window._page13Redirecting = true;
+                        setTimeout(function() {
+                            window.location.href = window.location.pathname || "/upload";
+                        }, 50);
+                    }
+                }
                 throw new Error("需要访问密码");
             }
             
             if (response.status === 409 && data && data.needsConfirmation) {
+                if (options.body instanceof FormData) {
+                    const err = new Error(data.message || "存在重复记录，是否替换？");
+                    err.is409Replace = true;
+                    throw err;
+                }
                 const confirmReplace = window.confirm(data.message);
                 if (!confirmReplace) {
                     throw new Error("用户取消了替换操作");
                 }
                 const nextBody = (() => {
-                    if (options.body instanceof FormData) {
-                        options.body.set("replace", "true");
-                        return options.body;
-                    }
                     const payload = JSON.parse(options.body || "{}");
                     payload.replace = true;
                     return JSON.stringify(payload);
@@ -208,14 +218,94 @@ function isValidDocLink(value) {
     return true;
 }
 
-function createTaskRow() {
+function createProjectBlock() {
+    const block = document.createElement("div");
+    block.className = "project-block card border mb-3";
+    block.innerHTML = `
+        <div class="card-body">
+            <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
+            <div class="row g-2 mb-2">
+                <div class="col-md-2"><label class="form-label small">项目名称 *</label><input type="text" class="form-control form-control-sm project-name" placeholder="项目名称" required></div>
+                <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
+                <div class="col-md-2"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
+                <div class="col-md-2"><label class="form-label small">产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="产品"></div>
+                <div class="col-md-2"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
+                <div class="col-md-2"><label class="form-label small">备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="备注"></div>
+            </div>
+            <div class="mb-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm add-task-row-btn">+ 添加任务行</button>
+                <button type="button" class="btn btn-outline-danger btn-sm float-end remove-project-btn">删除项目</button>
+            </div>
+            <h6 class="card-subtitle text-muted mb-2 mt-3">第二层 · 文件/事项任务</h6>
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>文件名称 *</th>
+                            <th>任务类型</th>
+                            <th>所属模块</th>
+                            <th>文档链接/模板</th>
+                            <th>文件版本号</th>
+                            <th>编写人员 *</th>
+                            <th>截止日期</th>
+                            <th>下发任务备注</th>
+                            <th>文档体现日期</th>
+                            <th>审核人员</th>
+                            <th>批准人员</th>
+                            <th style="width:50px">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody class="project-task-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    const tbody = block.querySelector(".project-task-tbody");
+    block.querySelector(".add-task-row-btn").addEventListener("click", () => {
+        const newRow = createTaskRowUnderProject(block);
+        tbody.appendChild(newRow);
+        const rows = tbody.querySelectorAll("tr");
+        if (rows.length >= 2) {
+            const prevRow = rows[rows.length - 2];
+            const newRowEl = rows[rows.length - 1];
+            newRowEl.querySelector(".task-filename").value = prevRow.querySelector(".task-filename")?.value ?? "";
+            const prevTypeSelect = prevRow.querySelector(".task-type-cell select");
+            const newTypeSelect = newRowEl.querySelector(".task-type-cell select");
+            if (prevTypeSelect && newTypeSelect) newTypeSelect.value = prevTypeSelect.value || "";
+            const prevModuleSelect = prevRow.querySelector(".task-module-cell select");
+            const newModuleSelect = newRowEl.querySelector(".task-module-cell select");
+            if (prevModuleSelect && newModuleSelect) newModuleSelect.value = prevModuleSelect.value || "";
+            newRowEl.querySelector(".task-link").value = prevRow.querySelector(".task-link")?.value ?? "";
+            newRowEl.querySelector(".task-file-version").value = prevRow.querySelector(".task-file-version")?.value ?? "";
+            newRowEl.querySelector(".task-author").value = prevRow.querySelector(".task-author")?.value ?? "";
+            newRowEl.querySelector(".task-duedate").value = prevRow.querySelector(".task-duedate")?.value ?? "";
+            newRowEl.querySelector(".task-notes").value = prevRow.querySelector(".task-notes")?.value ?? "";
+            newRowEl.querySelector(".task-doc-display-date").value = prevRow.querySelector(".task-doc-display-date")?.value ?? "";
+            newRowEl.querySelector(".task-reviewer").value = prevRow.querySelector(".task-reviewer")?.value ?? "";
+            newRowEl.querySelector(".task-approver").value = prevRow.querySelector(".task-approver")?.value ?? "";
+        }
+    });
+    block.querySelector(".remove-project-btn").addEventListener("click", () => block.remove());
+    tbody.appendChild(createTaskRowUnderProject(block));
+    return block;
+}
+
+function createTaskRowUnderProject(projectBlock) {
     rowCounter++;
     const tr = document.createElement("tr");
     tr.dataset.rowId = rowCounter;
     tr.innerHTML = `
-        <td><input type="text" class="form-control form-control-sm task-project" placeholder="项目名称"></td>
         <td><input type="text" class="form-control form-control-sm task-filename" placeholder="文件名称"></td>
         <td class="task-type-cell"></td>
+        <td class="task-module-cell">
+            <select class="form-select form-select-sm task-module">
+                <option value="">—</option>
+                <option value="产品">产品</option>
+                <option value="开发">开发</option>
+                <option value="测试">测试</option>
+                <option value="全员">全员</option>
+            </select>
+        </td>
         <td>
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-link" placeholder="链接">
@@ -226,6 +316,7 @@ function createTaskRow() {
             </div>
             <small class="task-file-name text-muted d-none"></small>
         </td>
+        <td><input type="text" class="form-control form-control-sm task-file-version" placeholder="版本号"></td>
         <td>
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-author" placeholder="编写人员">
@@ -233,52 +324,42 @@ function createTaskRow() {
             </div>
         </td>
         <td><input type="date" class="form-control form-control-sm task-duedate"></td>
-        <td><input type="text" class="form-control form-control-sm task-business-side" placeholder="影响业务方"></td>
-        <td><input type="text" class="form-control form-control-sm task-product" placeholder="产品"></td>
-        <td><input type="text" class="form-control form-control-sm task-country" placeholder="国家"></td>
         <td><input type="text" class="form-control form-control-sm task-notes" placeholder="下发任务备注"></td>
+        <td><input type="date" class="form-control form-control-sm task-doc-display-date" placeholder="文档体现日期"></td>
+        <td><input type="text" class="form-control form-control-sm task-reviewer" placeholder="审核人员"></td>
+        <td><input type="text" class="form-control form-control-sm task-approver" placeholder="批准人员"></td>
         <td><button type="button" class="btn btn-sm btn-outline-danger btn-remove-row">×</button></td>
     `;
-
     tr.querySelector(".task-type-cell").appendChild(createTaskTypeSelect());
-
     const fileInput = tr.querySelector(".task-file");
     const fileNameDisplay = tr.querySelector(".task-file-name");
     const linkInput = tr.querySelector(".task-link");
     const filenameInput = tr.querySelector(".task-filename");
-
     fileInput.addEventListener("change", () => {
         if (fileInput.files.length > 0) {
             fileNameDisplay.textContent = fileInput.files[0].name;
             fileNameDisplay.classList.remove("d-none");
             linkInput.value = "";
             linkInput.disabled = true;
-            if (!filenameInput.value) {
-                filenameInput.value = fileInput.files[0].name;
-            }
+            if (!filenameInput.value) filenameInput.value = fileInput.files[0].name;
         }
     });
-
     linkInput.addEventListener("input", () => {
-        if (linkInput.value.trim()) {
-            fileInput.value = "";
-            fileNameDisplay.classList.add("d-none");
-        }
+        if (linkInput.value.trim()) { fileInput.value = ""; fileNameDisplay.classList.add("d-none"); }
     });
-
     tr.querySelector(".btn-remove-row").addEventListener("click", () => tr.remove());
-
     tr.querySelector(".btn-create-user").addEventListener("click", () => {
         const authorInput = tr.querySelector(".task-author");
         const username = authorInput.value.trim();
-        if (username) {
-            document.getElementById("quickUsername").value = username;
-        }
+        if (username) document.getElementById("quickUsername").value = username;
         const modal = new bootstrap.Modal(document.getElementById("quickUserModal"));
         modal.show();
     });
-
     return tr;
+}
+
+function createTaskRow() {
+    return createTaskRowUnderProject(null);
 }
 
 function initDragSort(tbody, onReorder) {
@@ -327,107 +408,182 @@ function initDragSort(tbody, onReorder) {
 }
 
 async function initUploadPage() {
-    const taskInputBody = document.getElementById("taskInputBody");
-    const addRowBtn = document.getElementById("addRowBtn");
+    const projectBlocksContainer = document.getElementById("projectBlocksContainer");
+    const addProjectBtn = document.getElementById("addProjectBtn");
     const saveAllBtn = document.getElementById("saveAllBtn");
     const placeholderResult = document.getElementById("placeholderResult");
 
-    if (!taskInputBody) return;
+    if (!projectBlocksContainer) return;
 
     await loadTaskTypes();
-    taskInputBody.appendChild(createTaskRow());
+    projectBlocksContainer.appendChild(createProjectBlock());
 
-    addRowBtn?.addEventListener("click", () => {
-        const newRow = createTaskRow();
-        const existingRows = taskInputBody.querySelectorAll("tr");
-        if (existingRows.length > 0) {
-            const lastRow = existingRows[existingRows.length - 1];
-            const from = {
-                project: lastRow.querySelector(".task-project")?.value ?? "",
-                filename: lastRow.querySelector(".task-filename")?.value ?? "",
-                taskType: lastRow.querySelector(".task-type-cell select")?.value ?? "",
-                link: lastRow.querySelector(".task-link")?.value ?? "",
-                author: lastRow.querySelector(".task-author")?.value ?? "",
-                duedate: lastRow.querySelector(".task-duedate")?.value ?? "",
-                businessSide: lastRow.querySelector(".task-business-side")?.value ?? "",
-                product: lastRow.querySelector(".task-product")?.value ?? "",
-                country: lastRow.querySelector(".task-country")?.value ?? "",
-                notes: lastRow.querySelector(".task-notes")?.value ?? "",
-            };
-            newRow.querySelector(".task-project").value = from.project;
-            newRow.querySelector(".task-filename").value = from.filename;
-            const typeSelect = newRow.querySelector(".task-type-cell select");
-            if (typeSelect) typeSelect.value = from.taskType;
-            newRow.querySelector(".task-link").value = from.link;
-            newRow.querySelector(".task-author").value = from.author;
-            newRow.querySelector(".task-duedate").value = from.duedate;
-            newRow.querySelector(".task-business-side").value = from.businessSide;
-            newRow.querySelector(".task-product").value = from.product;
-            newRow.querySelector(".task-country").value = from.country;
-            newRow.querySelector(".task-notes").value = from.notes || "";
+    addProjectBtn?.addEventListener("click", () => {
+        projectBlocksContainer.appendChild(createProjectBlock());
+        const blocks = projectBlocksContainer.querySelectorAll(".project-block");
+        if (blocks.length >= 2) {
+            const prev = blocks[blocks.length - 2];
+            const curr = blocks[blocks.length - 1];
+            curr.querySelector(".project-name").value = prev.querySelector(".project-name")?.value ?? "";
+            curr.querySelector(".project-code").value = prev.querySelector(".project-code")?.value ?? "";
+            curr.querySelector(".project-business-side").value = prev.querySelector(".project-business-side")?.value ?? "";
+            curr.querySelector(".project-product").value = prev.querySelector(".project-product")?.value ?? "";
+            curr.querySelector(".project-country").value = prev.querySelector(".project-country")?.value ?? "";
+            curr.querySelector(".project-notes").value = prev.querySelector(".project-notes")?.value ?? "";
         }
-        taskInputBody.appendChild(newRow);
     });
 
     saveAllBtn?.addEventListener("click", async () => {
-        const rows = taskInputBody.querySelectorAll("tr");
+        const blocks = projectBlocksContainer.querySelectorAll(".project-block");
         let successCount = 0;
         let lastPlaceholders = [];
+        const btn = saveAllBtn;
+        const origText = btn?.textContent || "保存全部";
+        try {
+            if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+            App.notify("正在保存…", "info");
 
-        for (const row of rows) {
-            const projectName = row.querySelector(".task-project").value.trim();
-            const fileName = row.querySelector(".task-filename").value.trim();
-            const taskType = row.querySelector(".task-type").value.trim();
-            const link = row.querySelector(".task-link").value.trim();
-            const fileInput = row.querySelector(".task-file");
-            const author = row.querySelector(".task-author").value.trim();
-            const dueDate = row.querySelector(".task-duedate").value.trim();
-            const businessSide = row.querySelector(".task-business-side")?.value.trim() || "";
-            const product = row.querySelector(".task-product")?.value.trim() || "";
-            const country = row.querySelector(".task-country")?.value.trim() || "";
+            for (const block of blocks) {
+                const projectName = (block.querySelector(".project-name")?.value || "").trim();
+                const projectCode = (block.querySelector(".project-code")?.value || "").trim() || "";
+                const businessSide = (block.querySelector(".project-business-side")?.value || "").trim() || "";
+                const product = (block.querySelector(".project-product")?.value || "").trim() || "";
+                const country = (block.querySelector(".project-country")?.value || "").trim() || "";
+                const rows = block.querySelectorAll(".project-task-tbody tr");
 
-            if (!projectName || !fileName || !author) continue;
-            const notes = row.querySelector(".task-notes")?.value?.trim() || "";
+                for (const row of rows) {
+                    const fileName = (row.querySelector(".task-filename")?.value || "").trim();
+                    const taskTypeSelect = row.querySelector(".task-type-cell select");
+                    const taskType = taskTypeSelect ? (taskTypeSelect.value || "").trim() : "";
+                    const link = (row.querySelector(".task-link")?.value || "").trim();
+                    const fileInput = row.querySelector(".task-file");
+                    const author = (row.querySelector(".task-author")?.value || "").trim();
+                    const dueDate = (row.querySelector(".task-duedate")?.value || "").trim();
+                    const notes = (row.querySelector(".task-notes")?.value || "").trim() || "";
+                    const fileVersion = (row.querySelector(".task-file-version")?.value || "").trim() || "";
+                    const docDisplayDate = (row.querySelector(".task-doc-display-date")?.value || "").trim() || "";
+                    const reviewer = (row.querySelector(".task-reviewer")?.value || "").trim() || "";
+                    const approver = (row.querySelector(".task-approver")?.value || "").trim() || "";
+                    const moduleSelect = row.querySelector(".task-module-cell select");
+                    const belongingModule = moduleSelect ? (moduleSelect.value || "").trim() : "";
 
-            const formData = new FormData();
-            formData.append("projectName", projectName);
-            formData.append("fileName", fileName);
-            formData.append("taskType", taskType);
-            formData.append("author", author);
-            formData.append("assigneeName", author);
-            if (notes) formData.append("notes", notes);
-            if (dueDate) formData.append("dueDate", dueDate);
-            if (businessSide) formData.append("businessSide", businessSide);
-            if (product) formData.append("product", product);
-            if (country) formData.append("country", country);
-            if (link) {
-                formData.append("templateLinks", normalizeDocLink(link));
-            } else if (fileInput.files.length > 0) {
-                formData.append("file", fileInput.files[0]);
-            }
+                    if (!projectName || !fileName || !author) continue;
 
-            try {
-                const result = await App.request("/api/upload", {
-                    method: "POST",
-                    body: formData,
-                });
-                successCount++;
-                if (result.record && result.record.placeholders) {
-                    lastPlaceholders = result.record.placeholders;
+                    const formData = new FormData();
+                    formData.append("projectName", projectName);
+                    formData.append("fileName", fileName);
+                    formData.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
+                    formData.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
+                    if (taskType) formData.append("taskType", taskType);
+                    formData.append("author", author);
+                    formData.append("assigneeName", author);
+                    if (notes) formData.append("notes", notes);
+                    if (dueDate) formData.append("dueDate", dueDate);
+                    if (businessSide) formData.append("businessSide", businessSide);
+                    if (product) formData.append("product", product);
+                    if (country) formData.append("country", country);
+                    if (fileVersion) formData.append("fileVersion", fileVersion);
+                    if (docDisplayDate) formData.append("documentDisplayDate", docDisplayDate);
+                    if (reviewer) formData.append("reviewer", reviewer);
+                    if (approver) formData.append("approver", approver);
+                    if (belongingModule) formData.append("belongingModule", belongingModule);
+                    if (link) {
+                        formData.append("templateLinks", normalizeDocLink(link));
+                    } else if (fileInput && fileInput.files.length > 0) {
+                        formData.append("file", fileInput.files[0]);
+                    }
+
+                    try {
+                        const result = await App.request("/api/upload", {
+                            method: "POST",
+                            body: formData,
+                        });
+                        successCount++;
+                        if (result.record && result.record.placeholders) {
+                            lastPlaceholders = result.record.placeholders;
+                        }
+                    } catch (error) {
+                        const msg = error && error.message ? error.message : "";
+                        const is409Replace = error && error.is409Replace === true;
+                        if (is409Replace) {
+                            const replaceOk = window.confirm(msg || "存在重复记录，是否替换？");
+                            if (replaceOk) {
+                                const formDataReplace = new FormData();
+                                formDataReplace.append("projectName", projectName);
+                                formDataReplace.append("fileName", fileName);
+                                formDataReplace.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
+                                formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
+                                if (taskType) formDataReplace.append("taskType", taskType);
+                                formDataReplace.append("author", author);
+                                formDataReplace.append("assigneeName", author);
+                                if (notes) formDataReplace.append("notes", notes);
+                                if (dueDate) formDataReplace.append("dueDate", dueDate);
+                                if (businessSide) formDataReplace.append("businessSide", businessSide);
+                                if (product) formDataReplace.append("product", product);
+                                if (country) formDataReplace.append("country", country);
+                                if (fileVersion) formDataReplace.append("fileVersion", fileVersion);
+                                if (docDisplayDate) formDataReplace.append("documentDisplayDate", docDisplayDate);
+                                if (reviewer) formDataReplace.append("reviewer", reviewer);
+                                if (approver) formDataReplace.append("approver", approver);
+                                if (belongingModule) formDataReplace.append("belongingModule", belongingModule);
+                                formDataReplace.set("replace", "true");
+                                if (link) {
+                                    formDataReplace.append("templateLinks", normalizeDocLink(link));
+                                } else if (fileInput && fileInput.files.length > 0) {
+                                    formDataReplace.append("file", fileInput.files[0]);
+                                }
+                                try {
+                                    const resultReplace = await App.request("/api/upload", { method: "POST", body: formDataReplace });
+                                    successCount++;
+                                    if (resultReplace.record && resultReplace.record.placeholders) {
+                                        lastPlaceholders = resultReplace.record.placeholders;
+                                    }
+                                } catch (e2) {
+                                    App.notify(`保存失败 (${projectName}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
+                                }
+                            }
+                        } else {
+                            App.notify(`保存失败 (${projectName}-${fileName}): ${msg}`, "danger");
+                        }
+                    }
                 }
-            } catch (error) {
-                App.notify(`保存失败 (${projectName}-${fileName}): ${error.message}`, "danger");
             }
-        }
 
-        if (successCount > 0) {
-            App.notify(`成功保存 ${successCount} 条记录`);
-            taskInputBody.innerHTML = "";
-            taskInputBody.appendChild(createTaskRow());
-            loadRecordsList();
-            if (lastPlaceholders.length > 0) {
-                renderPlaceholderChips(placeholderResult, lastPlaceholders);
+            if (successCount > 0) {
+                App.notify(`成功保存 ${successCount} 条记录`);
+                projectBlocksContainer.innerHTML = "";
+                projectBlocksContainer.appendChild(createProjectBlock());
+                loadRecordsList();
+                if (lastPlaceholders.length > 0 && placeholderResult) {
+                    renderPlaceholderChips(placeholderResult, lastPlaceholders);
+                }
+            } else {
+                let hadAnyFilled = false;
+                let totalRows = 0;
+                blocks.forEach((b) => {
+                    const pn = (b.querySelector(".project-name")?.value || "").trim();
+                    const tbody = b.querySelector(".project-task-tbody");
+                    if (tbody) {
+                        tbody.querySelectorAll("tr").forEach((r) => {
+                            totalRows++;
+                            const fn = (r.querySelector(".task-filename")?.value || "").trim();
+                            const au = (r.querySelector(".task-author")?.value || "").trim();
+                            if (pn || fn || au) hadAnyFilled = true;
+                        });
+                    }
+                });
+                if (totalRows === 0) {
+                    App.notify("没有可保存的任务行，请先添加项目并填写任务。", "warning");
+                } else if (hadAnyFilled) {
+                    App.notify("未保存任何记录。请检查每条任务是否已填写：项目名称、文件名称、编写人员（均为必填）。若曾提示重复，请选“确定”以替换。", "warning");
+                } else {
+                    App.notify("请至少填写一条任务：项目名称、文件名称、编写人员为必填项。", "info");
+                }
             }
+        } catch (err) {
+            App.notify("保存过程出错: " + (err && err.message ? err.message : String(err)), "danger");
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = origText; }
         }
     });
 
@@ -491,8 +647,12 @@ function initRecordsTableSort() {
 async function openEditRecordModal(r) {
     document.getElementById("editRecordId").value = r.id;
     document.getElementById("editRecordProject").value = r.projectName || "";
+    const projectCodeEl = document.getElementById("editRecordProjectCode");
+    if (projectCodeEl) projectCodeEl.value = r.projectCode || "";
     document.getElementById("editRecordFile").value = r.fileName || "";
     document.getElementById("editRecordTaskType").value = r.taskType || "";
+    const editRecordBelongingModuleEl = document.getElementById("editRecordBelongingModule");
+    if (editRecordBelongingModuleEl) editRecordBelongingModuleEl.value = r.belongingModule || "";
     document.getElementById("editRecordAuthor").value = r.author || "";
     document.getElementById("editRecordDueDate").value = r.dueDate || "";
     document.getElementById("editRecordAssignee").value = r.assigneeName || r.author || "";
@@ -501,6 +661,16 @@ async function openEditRecordModal(r) {
     document.getElementById("editRecordCountry").value = r.country || "";
     document.getElementById("editRecordTemplateLinks").value = r.templateLinks || "";
     document.getElementById("editRecordNotes").value = r.notes || "";
+    const projectNotesEl = document.getElementById("editRecordProjectNotes");
+    if (projectNotesEl) projectNotesEl.value = r.projectNotes || "";
+    const fileVersionEl = document.getElementById("editRecordFileVersion");
+    if (fileVersionEl) fileVersionEl.value = r.fileVersion || "";
+    const docDisplayDateEl = document.getElementById("editRecordDocDisplayDate");
+    if (docDisplayDateEl) docDisplayDateEl.value = r.documentDisplayDate || "";
+    const reviewerEl = document.getElementById("editRecordReviewer");
+    if (reviewerEl) reviewerEl.value = r.reviewer || "";
+    const approverEl = document.getElementById("editRecordApprover");
+    if (approverEl) approverEl.value = r.approver || "";
     const statusEl = document.getElementById("editRecordAuditStatus");
     if (statusEl) {
         await loadAuditStatuses();
@@ -600,7 +770,19 @@ function initEditRecordModal() {
             country: document.getElementById("editRecordCountry").value.trim() || null,
             templateLinks: document.getElementById("editRecordTemplateLinks").value.trim() || null,
             notes: document.getElementById("editRecordNotes").value.trim() || null,
+            belongingModule: document.getElementById("editRecordBelongingModule")?.value?.trim() || null,
+            projectNotes: document.getElementById("editRecordProjectNotes")?.value?.trim() || null,
         };
+        const projectCodeEl = document.getElementById("editRecordProjectCode");
+        if (projectCodeEl) payload.projectCode = projectCodeEl.value.trim() || null;
+        const fileVersionEl = document.getElementById("editRecordFileVersion");
+        if (fileVersionEl) payload.fileVersion = fileVersionEl.value.trim() || null;
+        const docDisplayDateEl = document.getElementById("editRecordDocDisplayDate");
+        if (docDisplayDateEl) payload.documentDisplayDate = docDisplayDateEl.value || null;
+        const reviewerEl = document.getElementById("editRecordReviewer");
+        if (reviewerEl) payload.reviewer = reviewerEl.value.trim() || null;
+        const approverEl = document.getElementById("editRecordApprover");
+        if (approverEl) payload.approver = approverEl.value.trim() || null;
         const auditStatusEl = document.getElementById("editRecordAuditStatus");
         if (auditStatusEl) {
             const v = auditStatusEl.value.trim();
@@ -681,6 +863,12 @@ function initBatchEditRecords() {
         const businessSideVal = first ? (first.businessSide || "").trim() : "";
         const productVal = first ? (first.product || "").trim() : "";
         const countryVal = first ? (first.country || "").trim() : "";
+        const projectNotesVal = first ? (first.projectNotes || "").trim() : "";
+        const fileVersionVal = first ? (first.fileVersion || "").trim() : "";
+        const documentDisplayDateVal = first ? (first.documentDisplayDate || "").trim() : "";
+        const reviewerVal = first ? (first.reviewer || "").trim() : "";
+        const approverVal = first ? (first.approver || "").trim() : "";
+        const belongingModuleVal = first ? (first.belongingModule || "").trim() : "";
         const auditVal = first ? (first.auditStatus || "").trim() : "";
         const sameTaskType = taskTypeVal !== "" && records.every((r) => ((r.taskType || "").trim()) === taskTypeVal);
         const sameAuthor = authorVal !== "" && records.every((r) => ((r.author || "").trim()) === authorVal);
@@ -689,6 +877,12 @@ function initBatchEditRecords() {
         const sameBusinessSide = businessSideVal !== "" && records.every((r) => ((r.businessSide || "").trim()) === businessSideVal);
         const sameProduct = productVal !== "" && records.every((r) => ((r.product || "").trim()) === productVal);
         const sameCountry = countryVal !== "" && records.every((r) => ((r.country || "").trim()) === countryVal);
+        const sameProjectNotes = projectNotesVal !== "" && records.every((r) => ((r.projectNotes || "").trim()) === projectNotesVal);
+        const sameFileVersion = fileVersionVal !== "" && records.every((r) => ((r.fileVersion || "").trim()) === fileVersionVal);
+        const sameBelongingModule = belongingModuleVal !== "" && records.every((r) => ((r.belongingModule || "").trim()) === belongingModuleVal);
+        const sameDocumentDisplayDate = documentDisplayDateVal !== "" && records.every((r) => ((r.documentDisplayDate || "").trim()) === documentDisplayDateVal);
+        const sameReviewer = reviewerVal !== "" && records.every((r) => ((r.reviewer || "").trim()) === reviewerVal);
+        const sameApprover = approverVal !== "" && records.every((r) => ((r.approver || "").trim()) === approverVal);
         const sameAudit = records.every((r) => ((r.auditStatus || "").trim()) === auditVal);
         const sel = document.getElementById("batchEditAuditStatus");
         if (sel) {
@@ -709,6 +903,18 @@ function initBatchEditRecords() {
         document.getElementById("batchEditBusinessSide").value = sameBusinessSide ? businessSideVal : "";
         document.getElementById("batchEditProduct").value = sameProduct ? productVal : "";
         document.getElementById("batchEditCountry").value = sameCountry ? countryVal : "";
+        const batchEditProjectNotesEl = document.getElementById("batchEditProjectNotes");
+        if (batchEditProjectNotesEl) batchEditProjectNotesEl.value = sameProjectNotes ? projectNotesVal : "";
+        const batchEditFileVersionEl = document.getElementById("batchEditFileVersion");
+        if (batchEditFileVersionEl) batchEditFileVersionEl.value = sameFileVersion ? fileVersionVal : "";
+        const batchEditBelongingModuleEl = document.getElementById("batchEditBelongingModule");
+        if (batchEditBelongingModuleEl) batchEditBelongingModuleEl.value = sameBelongingModule ? belongingModuleVal : "";
+        const batchEditDocumentDisplayDateEl = document.getElementById("batchEditDocumentDisplayDate");
+        if (batchEditDocumentDisplayDateEl) batchEditDocumentDisplayDateEl.value = sameDocumentDisplayDate ? documentDisplayDateVal : "";
+        const batchEditReviewerEl = document.getElementById("batchEditReviewer");
+        if (batchEditReviewerEl) batchEditReviewerEl.value = sameReviewer ? reviewerVal : "";
+        const batchEditApproverEl = document.getElementById("batchEditApprover");
+        if (batchEditApproverEl) batchEditApproverEl.value = sameApprover ? approverVal : "";
         if (batchEditSaveBtn) batchEditSaveBtn.textContent = `应用到所选 (${ids.length}条)`;
         if (batchEditModal) {
             batchEditModal.dataset.batchEditIds = ids.join(",");
@@ -728,16 +934,28 @@ function initBatchEditRecords() {
         const businessSide = (document.getElementById("batchEditBusinessSide")?.value || "").trim();
         const product = (document.getElementById("batchEditProduct")?.value || "").trim();
         const country = (document.getElementById("batchEditCountry")?.value || "").trim();
+        const projectNotes = (document.getElementById("batchEditProjectNotes")?.value || "").trim();
+        const fileVersion = (document.getElementById("batchEditFileVersion")?.value || "").trim();
+        const belongingModule = (document.getElementById("batchEditBelongingModule")?.value || "").trim();
+        const documentDisplayDate = (document.getElementById("batchEditDocumentDisplayDate")?.value || "").trim();
+        const reviewer = (document.getElementById("batchEditReviewer")?.value || "").trim();
+        const approver = (document.getElementById("batchEditApprover")?.value || "").trim();
         const auditEl = document.getElementById("batchEditAuditStatus");
         const auditStatus = auditEl?.value?.trim() ?? "";
         const payload = {};
         if (taskType !== "") payload.taskType = taskType;
+        if (belongingModule !== "") payload.belongingModule = belongingModule;
         if (author !== "") payload.author = author;
         if (assignee !== "") payload.assigneeName = assignee;
         if (dueDate !== "") payload.dueDate = dueDate;
         if (businessSide !== "") payload.businessSide = businessSide;
         if (product !== "") payload.product = product;
         if (country !== "") payload.country = country;
+        if (projectNotes !== "") payload.projectNotes = projectNotes;
+        if (fileVersion !== "") payload.fileVersion = fileVersion;
+        if (documentDisplayDate !== "") payload.documentDisplayDate = documentDisplayDate;
+        if (reviewer !== "") payload.reviewer = reviewer;
+        if (approver !== "") payload.approver = approver;
         if (auditStatus !== "") payload.auditStatus = auditStatus;
         if (Object.keys(payload).length === 0) {
             App.notify("请至少填写一项要修改的内容", "warning");
@@ -854,20 +1072,32 @@ function renderRecordsTable(records) {
                 ? '<span class="badge bg-success">完成</span>'
                 : '<span class="badge bg-warning text-dark">待办</span>');
         const auditStatusText = (r.auditStatus != null && r.auditStatus !== "") ? r.auditStatus : "-";
+        const projectCode = (r.projectCode != null && r.projectCode !== "") ? r.projectCode : "-";
+        const fileVersion = (r.fileVersion != null && r.fileVersion !== "") ? r.fileVersion : "-";
+        const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
+        const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
+        const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         tr.innerHTML = `
             <td><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
             <td>${r.projectName}</td>
+            <td>${projectCode}</td>
             <td>${r.fileName}</td>
             <td>${r.taskType || "-"}</td>
+            <td>${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceHtml}</td>
+            <td>${fileVersion}</td>
             <td>${r.author}</td>
             <td>${dueDateHtml}</td>
+            <td>${documentDisplayDate}</td>
             <td>${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
             <td>${(r.product != null && r.product !== "") ? r.product : "-"}</td>
             <td>${(r.country != null && r.country !== "") ? r.country : "-"}</td>
             <td>${statusBadge}</td>
             <td>${auditStatusText}</td>
+            <td>${reviewer}</td>
+            <td>${approver}</td>
+            <td class="text-truncate" style="max-width:100px" title="${(r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : ""}">${(r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : "-"}</td>
             <td class="text-truncate" style="max-width:100px" title="${(r.notes != null && r.notes !== "") ? r.notes : ""}">${(r.notes != null && r.notes !== "") ? r.notes : "-"}</td>
             <td class="text-truncate" style="max-width:100px" title="${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : ""}">${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : "-"}</td>
             <td>
@@ -906,7 +1136,7 @@ function renderRecordsTable(records) {
             header1.dataset.groupKey = key1;
             header1.dataset.groupLevel = "1";
             header1.dataset.groupIndex = String(groupIndexL1++);
-            header1.innerHTML = `<td colspan="16" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
+            header1.innerHTML = `<td colspan="23" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
             header1.style.cursor = "pointer";
             tbody.appendChild(header1);
             authorMap.forEach((arr, authorName) => {
@@ -917,7 +1147,7 @@ function renderRecordsTable(records) {
                 header2.dataset.groupKey = key2;
                 header2.dataset.groupLevel = "2";
                 header2.dataset.groupIndex = String(groupIndexL2);
-                header2.innerHTML = `<td colspan="16" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
+                header2.innerHTML = `<td colspan="23" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
                 header2.style.cursor = "pointer";
                 tbody.appendChild(header2);
                 const rowHidden = collapsed1 || collapsed2;
@@ -975,7 +1205,7 @@ function renderRecordsTable(records) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="16" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="23" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             tbody.appendChild(headerTr);
             arr.forEach((r) => {
@@ -1491,22 +1721,35 @@ function renderMyTasksTable(records) {
         const linkCellHtml = r.hasLinks && firstLink
             ? `<a href="${firstLink}" target="_blank" class="text-primary small">打开</a>`
             : `<input type="text" class="form-control form-control-sm task-link-input" placeholder="填入链接" data-id="${r.id}" value="">`;
+        const projectNotesDisplay = (r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : "-";
         const notesDisplay = (r.notes != null && r.notes !== "") ? r.notes : "-";
         const dueDateStyle = getDueDateStyle(r.dueDate);
         const dueDateHtml = dueDateStyle.class
             ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>`
             : (r.dueDate || "-");
+        const projectCode = (r.projectCode != null && r.projectCode !== "") ? r.projectCode : "-";
+        const fileVersion = (r.fileVersion != null && r.fileVersion !== "") ? r.fileVersion : "-";
+        const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
+        const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
+        const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         tr.innerHTML = `
             <td class="seq-cell">${idx + 1}</td>
             <td>${r.projectName}</td>
+            <td>${projectCode}</td>
             <td>${r.fileName}</td>
             <td>${r.taskType || "-"}</td>
+            <td>${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceTd}</td>
+            <td>${fileVersion}</td>
             <td class="task-link-cell">${linkCellHtml}</td>
             <td>${dueDateHtml}</td>
+            <td>${documentDisplayDate}</td>
             <td>${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
             <td>${(r.product != null && r.product !== "") ? r.product : "-"}</td>
             <td>${(r.country != null && r.country !== "") ? r.country : "-"}</td>
+            <td>${reviewer}</td>
+            <td>${approver}</td>
+            <td class="text-truncate" style="max-width:80px" title="${projectNotesDisplay !== "-" ? r.projectNotes : ""}">${projectNotesDisplay}</td>
             <td class="text-truncate" style="max-width:80px" title="${notesDisplay !== "-" ? r.notes : ""}">${notesDisplay}</td>
             <td><input type="text" class="form-control form-control-sm execution-notes-input" placeholder="执行备注" data-id="${r.id}" value="${(r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes).replace(/"/g, "&quot;") : ""}"></td>
             <td class="completion-status-cell"></td>
@@ -1597,7 +1840,7 @@ function renderMyTasksTable(records) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="14" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="21" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             myTasksBody.appendChild(headerTr);
             arr.forEach((r) => { addOneRow(r, globalIdx++, key, gidx, collapsed); });
@@ -1723,10 +1966,13 @@ function initDashboardPage() {
                 const w = document.getElementById("scheduleWeekly");
                 const o = document.getElementById("scheduleOverdue");
                 const p = document.getElementById("scheduleProject");
+                const mcDelay = document.getElementById("scheduleModuleCascadeDelay");
                 if (w) w.value = configResult.weekly || "";
                 if (o) o.value = configResult.overdue || "";
                 if (p) p.value = configResult.project || "";
+                if (mcDelay) mcDelay.value = configResult.moduleCascadeDelayMinutes != null ? configResult.moduleCascadeDelayMinutes : 5;
             }
+            loadModuleCascadeStatus();
             if (scheduleInfo) {
                 scheduleInfo.innerHTML = "";
                 
@@ -1760,11 +2006,13 @@ function initDashboardPage() {
         const weekly = (document.getElementById("scheduleWeekly")?.value || "").trim() || "thu 16:00";
         const overdue = (document.getElementById("scheduleOverdue")?.value || "").trim() || "15:00";
         const project = (document.getElementById("scheduleProject")?.value || "").trim() || "mon,wed,fri 9:30";
+        const delayEl = document.getElementById("scheduleModuleCascadeDelay");
+        const moduleCascadeDelayMinutes = delayEl ? Math.max(1, Math.min(1440, parseInt(delayEl.value, 10) || 5)) : 5;
         try {
             await App.request("/api/notify/schedule-config", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ weekly, overdue, project }),
+                body: JSON.stringify({ weekly, overdue, project, moduleCascadeDelayMinutes }),
             });
             App.notify("已保存，定时任务已更新", "success");
             loadSchedule();
@@ -1791,6 +2039,45 @@ function initDashboardPage() {
     document.getElementById("testAutoNotifyThu")?.addEventListener("click", () => testAutoNotify("thursday"));
     document.getElementById("testAutoNotifyOverdue")?.addEventListener("click", () => testAutoNotify("overdue"));
     document.getElementById("testAutoNotifyProject")?.addEventListener("click", () => testAutoNotify("project_stats"));
+    const loadModuleCascadeStatus = async () => {
+        const container = document.getElementById("moduleCascadeStatusContainer");
+        if (!container) return;
+        try {
+            const res = await App.request("/api/notify/module-cascade-status");
+            const delay = res.delayMinutes != null ? res.delayMinutes : 5;
+            const pending = res.pending || [];
+            const recentSent = res.recentSent || [];
+            let html = `<div class="small mb-2">延迟 <strong>${delay}</strong> 分钟</div>`;
+            html += '<div class="mb-2"><span class="fw-bold small">待执行</span>';
+            if (pending.length === 0) {
+                html += '<span class="text-muted small ms-2">暂无</span>';
+            } else {
+                html += '<ul class="list-unstyled small mb-0 mt-1">';
+                pending.forEach(p => {
+                    html += `<li>${(p.projectName || "-").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}：${p.triggerModule || ""}→${p.targetModule || ""}，计划 ${p.runAt || "-"}</li>`;
+                });
+                html += '</ul>';
+            }
+            html += '</div><div><span class="fw-bold small">已执行（最近）</span>';
+            if (recentSent.length === 0) {
+                html += '<span class="text-muted small ms-2">暂无</span>';
+            } else {
+                html += '<ul class="list-unstyled small mb-0 mt-1">';
+                recentSent.forEach(s => {
+                    html += `<li>${(s.projectName || "-").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}：${s.triggerModule || ""}→${s.targetModule || ""}，${s.sentAt || "-"}</li>`;
+                });
+                html += '</ul>';
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="small text-danger">加载失败</div>';
+        }
+    };
+    document.getElementById("testAutoNotifyModuleCascade")?.addEventListener("click", async () => {
+        await testAutoNotify("module_cascade");
+        loadModuleCascadeStatus();
+    });
 
     const loadSummary = async () => {
         try {
@@ -1896,6 +2183,7 @@ function initDashboardPage() {
         projectAuthorBody.innerHTML = "";
         rows.forEach((row, idx) => {
             const tr = document.createElement("tr");
+            const projectName = (row.projectName != null && row.projectName !== "") ? row.projectName : "";
             tr.innerHTML = `
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
@@ -1903,8 +2191,33 @@ function initDashboardPage() {
                 <td class="text-danger">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-warning btn-module-cascade" data-project="${(projectName || "").replace(/"/g, "&quot;")}" title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">
+                        模块级联催办
+                    </button>
+                </td>
             `;
             projectAuthorBody.appendChild(tr);
+        });
+        projectAuthorBody.querySelectorAll(".btn-module-cascade").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const projectName = btn.dataset.project || "";
+                if (!projectName) return;
+                if (!confirm(`确定要对「${projectName}」执行模块级联催办吗？\n（产品全部完成→催办开发；开发全部完成→催办测试）`)) return;
+                try {
+                    const result = await App.request("/api/notify/module-cascade-manual", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ projectName }),
+                    });
+                    const ok = result && result.success === true;
+                    App.notify(result?.message || (ok ? "已发送" : "发送失败"), ok ? "success" : "danger");
+                    loadModuleCascadeStatus && loadModuleCascadeStatus();
+                } catch (e) {
+                    const data = e.data || {};
+                    App.notify(data.message || e.message || "请求失败", "danger");
+                }
+            });
         });
     };
     
@@ -1930,17 +2243,28 @@ function initDashboardPage() {
             const statusHtml = row.completionStatus ? `<span class="badge bg-success">${row.completionStatus}</span>` : '<span class="badge bg-secondary">未完成</span>';
             const dueDateStyle = getDueDateStyle(row.dueDate);
             const dueDateHtml = dueDateStyle.class ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>` : (dueDateStyle.text || "-");
+            const projectCode = (row.projectCode != null && row.projectCode !== "") ? row.projectCode : "-";
+            const fileVersion = (row.fileVersion != null && row.fileVersion !== "") ? row.fileVersion : "-";
+            const documentDisplayDate = (row.documentDisplayDate != null && row.documentDisplayDate !== "") ? row.documentDisplayDate : "-";
+            const reviewer = (row.reviewer != null && row.reviewer !== "") ? row.reviewer : "-";
+            const approver = (row.approver != null && row.approver !== "") ? row.approver : "-";
             tr.innerHTML = `
                 <td class="seq-cell">${row.seq}</td>
                 <td>${row.projectName}</td>
+                <td>${projectCode}</td>
                 <td>${row.fileName}</td>
                 <td>${row.taskType || "-"}</td>
+                <td>${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
                 <td>${row.author}</td>
                 <td>${statusHtml}</td>
                 <td>${dueDateHtml}</td>
+                <td>${documentDisplayDate}</td>
                 <td>${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
                 <td>${(row.product != null && row.product !== "") ? row.product : "-"}</td>
                 <td>${(row.country != null && row.country !== "") ? row.country : "-"}</td>
+                <td>${reviewer}</td>
+                <td>${approver}</td>
+                <td class="text-truncate" style="max-width:100px" title="${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : ""}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
                 <td class="text-truncate" style="max-width:100px" title="${(row.notes != null && row.notes !== "") ? row.notes : ""}">${(row.notes != null && row.notes !== "") ? row.notes : "-"}</td>
                 <td class="text-truncate" style="max-width:100px" title="${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : ""}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
                 <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
@@ -1950,7 +2274,7 @@ function initDashboardPage() {
             `;
             tableBody.appendChild(tr);
         };
-        
+
         if (groupBy === "none") {
             lastRenderedDetailRows.forEach((row) => addDetailRow(row));
         } else if (groupBy === "project_author") {
@@ -1974,7 +2298,7 @@ function initDashboardPage() {
                 header1.dataset.groupKey = key1;
                 header1.dataset.groupLevel = "1";
                 header1.dataset.groupIndex = String(groupIndexL1++);
-                header1.innerHTML = "<td colspan=\"14\" style=\"cursor:pointer\"><span class=\"group-toggle\">" + (collapsed1 ? "▶" : "▼") + "</span> 项目：" + (projectName || "（空）") + " (" + totalProject + "条)</td>";
+                header1.innerHTML = "<td colspan=\"20\" style=\"cursor:pointer\"><span class=\"group-toggle\">" + (collapsed1 ? "▶" : "▼") + "</span> 项目：" + (projectName || "（空）") + " (" + totalProject + "条)</td>";
                 header1.style.cursor = "pointer";
                 tableBody.appendChild(header1);
                 authorMap.forEach((arr, authorName) => {
@@ -1985,7 +2309,7 @@ function initDashboardPage() {
                     header2.dataset.groupKey = key2;
                     header2.dataset.groupLevel = "2";
                     header2.dataset.groupIndex = String(groupIndexL2);
-                    header2.innerHTML = "<td colspan=\"14\" style=\"cursor:pointer\" class=\"ps-4\"><span class=\"group-toggle\">" + (collapsed2 ? "▶" : "▼") + "</span> 编写人：" + (authorName || "（空）") + " (" + arr.length + "条)</td>";
+                    header2.innerHTML = "<td colspan=\"20\" style=\"cursor:pointer\" class=\"ps-4\"><span class=\"group-toggle\">" + (collapsed2 ? "▶" : "▼") + "</span> 编写人：" + (authorName || "（空）") + " (" + arr.length + "条)</td>";
                     header2.style.cursor = "pointer";
                     tableBody.appendChild(header2);
                     const rowHidden = collapsed1 || collapsed2;
@@ -2035,7 +2359,7 @@ function initDashboardPage() {
                 headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
                 headerTr.dataset.groupKey = key;
                 headerTr.dataset.groupIndex = String(gidx);
-                headerTr.innerHTML = `<td colspan="14" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+                headerTr.innerHTML = `<td colspan="20" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
                 headerTr.style.cursor = "pointer";
                 tableBody.appendChild(headerTr);
                 arr.forEach((row) => addDetailRow(row, key, gidx, collapsed));
@@ -2215,6 +2539,9 @@ function renderFilteredStats(tbody, rows, type) {
             const auditCount = row.auditRejectCount != null ? row.auditRejectCount : 0;
             const auditCellClass = auditCount > 2 ? "text-danger" : "";
             actionHtml = `<td class="${auditCellClass}">${auditCount}</td><td><button class="btn btn-sm btn-outline-warning btn-notify-author" data-author="${row.label}" ${row.pending === 0 ? 'disabled' : ''}>催办</button></td>`;
+        } else if (type === "projectAuthor") {
+            const pn = (row.projectName != null && row.projectName !== "") ? String(row.projectName).replace(/"/g, "&quot;") : "";
+            actionHtml = `<td><button class="btn btn-sm btn-outline-warning btn-module-cascade" data-project="${pn}" title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">模块级联催办</button></td>`;
         }
         
         tr.innerHTML = `
@@ -2265,6 +2592,26 @@ function renderFilteredStats(tbody, rows, type) {
                 }
             });
         });
+    } else if (type === "projectAuthor") {
+        tbody.querySelectorAll(".btn-module-cascade").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const projectName = btn.dataset.project || "";
+                if (!projectName) return;
+                if (!confirm(`确定要对「${projectName}」执行模块级联催办吗？\n（产品全部完成→催办开发；开发全部完成→催办测试）`)) return;
+                try {
+                    const result = await App.request("/api/notify/module-cascade-manual", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ projectName }),
+                    });
+                    const ok = result && result.success === true;
+                    App.notify(result?.message || (ok ? "已发送" : "发送失败"), ok ? "success" : "danger");
+                } catch (e) {
+                    const data = e.data || {};
+                    App.notify(data.message || e.message || "请求失败", "danger");
+                }
+            });
+        });
     }
 }
 
@@ -2296,12 +2643,14 @@ function renderFilteredDetailTable(rows) {
             <td>${row.projectName}</td>
             <td>${row.fileName}</td>
             <td>${row.taskType || "-"}</td>
+            <td>${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
             <td>${row.author}</td>
             <td>${statusHtml}</td>
             <td>${dueDateHtml}</td>
             <td>${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
             <td>${(row.product != null && row.product !== "") ? row.product : "-"}</td>
             <td>${(row.country != null && row.country !== "") ? row.country : "-"}</td>
+            <td class="text-truncate" style="max-width:100px" title="${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : ""}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
             <td class="text-truncate" style="max-width:100px" title="${(row.notes != null && row.notes !== "") ? row.notes : ""}">${(row.notes != null && row.notes !== "") ? row.notes : "-"}</td>
             <td class="text-truncate" style="max-width:100px" title="${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : ""}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
             <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
@@ -2349,7 +2698,7 @@ function initNotifyTemplateModal() {
                     <label class="form-label fw-bold">${t.name}</label>
                     <small class="text-muted d-block mb-2">模板KEY: ${t.key}</small>
                     <textarea class="form-control template-content" data-id="${t.id}" rows="4">${t.content}</textarea>
-                    <small class="text-muted mt-1 d-block">可用变量: {project_name}, {file_name}, {task_type}, {due_date}, {author}, {pending_count}, {assignees}, {task_list}, {task_list_with_links}, {doc_link}, {business_side}, {product}, {country}</small>
+                    <small class="text-muted mt-1 d-block">可用变量: {project_name}, {project_code}, {project_notes}, {file_name}, {task_type}, {due_date}, {author}, {pending_count}, {assignees}, {task_list}, {task_list_with_links}, {doc_link}, {business_side}, {product}, {country}, {file_version}, {document_display_date}, {reviewer}, {approver}</small>
                 `;
                 notifyTemplateList.appendChild(div);
             });
@@ -2378,7 +2727,11 @@ function initNotifyTemplateModal() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-    await loadCompletionStatuses();
+    try {
+        await loadCompletionStatuses();
+    } catch (e) {
+        if (window.location.pathname !== "/login") throw e;
+    }
     initUploadPage();
     initLoginPage();
     initGeneratePage();

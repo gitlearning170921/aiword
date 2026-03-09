@@ -292,6 +292,48 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN execution_notes TEXT",
     )
     ensure_column(
+        "upload_records",
+        "project_code",
+        "ALTER TABLE upload_records ADD COLUMN project_code TEXT",
+        "ALTER TABLE upload_records ADD COLUMN project_code VARCHAR(64)",
+    )
+    ensure_column(
+        "upload_records",
+        "file_version",
+        "ALTER TABLE upload_records ADD COLUMN file_version TEXT",
+        "ALTER TABLE upload_records ADD COLUMN file_version VARCHAR(64)",
+    )
+    ensure_column(
+        "upload_records",
+        "document_display_date",
+        "ALTER TABLE upload_records ADD COLUMN document_display_date DATE",
+        "ALTER TABLE upload_records ADD COLUMN document_display_date DATE",
+    )
+    ensure_column(
+        "upload_records",
+        "reviewer",
+        "ALTER TABLE upload_records ADD COLUMN reviewer TEXT",
+        "ALTER TABLE upload_records ADD COLUMN reviewer VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
+        "approver",
+        "ALTER TABLE upload_records ADD COLUMN approver TEXT",
+        "ALTER TABLE upload_records ADD COLUMN approver VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
+        "project_notes",
+        "ALTER TABLE upload_records ADD COLUMN project_notes TEXT",
+        "ALTER TABLE upload_records ADD COLUMN project_notes TEXT",
+    )
+    ensure_column(
+        "upload_records",
+        "belonging_module",
+        "ALTER TABLE upload_records ADD COLUMN belonging_module TEXT",
+        "ALTER TABLE upload_records ADD COLUMN belonging_module VARCHAR(32)",
+    )
+    ensure_column(
         "users",
         "mobile",
         "ALTER TABLE users ADD COLUMN mobile TEXT",
@@ -340,7 +382,7 @@ def init_default_configs():
         ("author_reminder", "按人员催办通知",
          "【个人任务催办】\n致：{author}\n您有 {pending_count} 个任务待完成：\n{task_list}\n\n请抓紧处理！"),
         ("single_task_reminder", "单条任务催办通知",
-         "【任务催办】\n致：{author}\n\n- **{title}**\n - 截止日期：{due_date}\n - 影响业务方：{business_side}\n - 产品：{product}\n - 国家：{country}\n - 文档地址：{doc_link_md}\n\n请抓紧处理！"),
+         "【任务催办】\n致：{author}\n\n- **{title}**\n - 截止日期：{due_date}\n - 影响业务方：{business_side}\n - 产品：{product}\n - 国家：{country}\n - 项目编号：{project_code}\n - 项目备注：{project_notes}\n - 文件版本号：{file_version}\n - 文档体现日期：{document_display_date}\n - 审核人员：{reviewer}\n - 批准人员：{approver}\n - 文档地址：{doc_link_md}\n\n请抓紧处理！"),
     ]
     
     for name, order in default_task_types:
@@ -378,7 +420,11 @@ def init_default_configs():
         existing = AppConfig.query.filter_by(config_key=config_key).first()
         if not existing:
             db.session.add(AppConfig(config_key=config_key, config_value=default_value))
-    
+
+    existing_delay = AppConfig.query.filter_by(config_key="MODULE_CASCADE_DELAY_MINUTES").first()
+    if not existing_delay:
+        db.session.add(AppConfig(config_key="MODULE_CASCADE_DELAY_MINUTES", config_value="5"))
+
     db.session.commit()
 
 
@@ -453,6 +499,9 @@ def create_app() -> Flask:
         DINGTALK_SECRET=os.getenv("DINGTALK_SECRET", ""),
         SECRET_KEY=os.getenv("SECRET_KEY", "aiword-dev-secret-key-change-in-production"),
         BASE_URL=(os.getenv("BASE_URL", "") or "").strip(),
+        # Session cookie：Lax 便于同站请求带 cookie，避免页面1/3 验证后接口 401
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_HTTPONLY=True,
         # 页面1、页面3 访问密码（可选）。在 config.json 中配置 PAGE13_ACCESS_PASSWORD，不在网络中明文传输。
         PAGE13_ACCESS_PASSWORD=page13_password,
     )

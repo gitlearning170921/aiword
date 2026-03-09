@@ -24,8 +24,9 @@ from werkzeug.utils import secure_filename
 from . import db
 from .doc_service import extract_placeholders, generate_document, download_template_from_url
 from .models import (
-    GenerateRecord, GenerationSummary, UploadRecord, User, 
-    TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig, now_local
+    GenerateRecord, GenerationSummary, UploadRecord, User,
+    TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
+    ModuleCascadeReminder, now_local,
 )
 from . import dingtalk_service
 
@@ -180,17 +181,18 @@ def _summary_payload():
             stats["byStatus"][status] = stats["byStatus"].get(status, 0) + 1
             stats["auditRejectCount"] = stats.get("auditRejectCount", 0) + (getattr(u, "audit_reject_count", None) or 0)
 
-    def _format_with_status(bucket: dict[str, dict[str, Any]], label_join: str = ""):
+    def _format_with_status(bucket: dict[str, dict[str, Any]], label_join: str = "", include_project_author_keys: bool = False):
         formatted = []
         for key, stats in bucket.items():
             label = key
             if label_join and "__" in key:
-                label = label_join.join(key.split("__"))
+                parts = key.split("__")
+                label = label_join.join(parts)
             by_status_list = [
-                {"status": s, "count": c} 
+                {"status": s, "count": c}
                 for s, c in sorted(stats["byStatus"].items(), key=lambda x: (x[0] != "未完成", -x[1]))
             ]
-            formatted.append({
+            item = {
                 "label": label,
                 "completed": stats["completed"],
                 "pending": stats["pending"],
@@ -199,7 +201,12 @@ def _summary_payload():
                 "byStatus": by_status_list,
                 "pendingAuthors": list(stats["pendingAuthors"]),
                 "auditRejectCount": stats.get("auditRejectCount", 0),
-            })
+            }
+            if include_project_author_keys and "__" in key:
+                p, a = key.split("__", 1)
+                item["projectName"] = p
+                item["author"] = a
+            formatted.append(item)
         return formatted
 
     detail_rows = [
@@ -217,9 +224,16 @@ def _summary_payload():
             "businessSide": u.business_side,
             "product": u.product,
             "country": u.country,
+            "projectCode": getattr(u, "project_code", None),
+            "fileVersion": getattr(u, "file_version", None),
+            "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(u, "document_display_date", None)),
+            "reviewer": getattr(u, "reviewer", None),
+            "approver": getattr(u, "approver", None),
+            "belongingModule": getattr(u, "belonging_module", None),
             "docLink": (u.get_template_links_list() or [None])[0] or None,
             "createdAt": u.created_at.isoformat() if u.created_at else None,
             "notes": u.notes,
+            "projectNotes": getattr(u, "project_notes", None),
             "executionNotes": u.execution_notes,
         }
         for idx, u in enumerate(uploads)
@@ -234,7 +248,7 @@ def _summary_payload():
         },
         "byProject": _format_with_status(by_project),
         "byAuthor": _format_with_status(by_author),
-        "byProjectAuthor": _format_with_status(by_project_author, label_join=" / "),
+        "byProjectAuthor": _format_with_status(by_project_author, label_join=" / ", include_project_author_keys=True),
         "detail": detail_rows,
     }
 
@@ -249,6 +263,23 @@ def login_required(f):
                 return jsonify({"message": "请先登录", "needsLogin": True}), 401
             return redirect(url_for("pages.login_page"))
         return f(*args, **kwargs)
+    return decorated_function
+
+
+def _page13_or_login_required(f):
+    """登录 或 已通过页面1/3 访问密码 任一即可（供页面1 未登录时也能加载配置、页面2 仅登录即可）。"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not _page13_password_configured():
+            return f(*args, **kwargs)
+        if session.get("user_id"):
+            return f(*args, **kwargs)
+        if session.get("page13_authenticated"):
+            return f(*args, **kwargs)
+        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
+            return jsonify({"message": "需要输入访问密码", "needsPage13Auth": True}), 401
+        next_url = request.path or "/upload"
+        return render_template("page13_gate.html", next_url=next_url, gate_page=True)
     return decorated_function
 
 
@@ -274,6 +305,12 @@ def page13_access_required(f):
 
 
 # ---------- 页面路由 ----------
+
+@bp.route("/favicon.ico")
+def favicon():
+    """避免浏览器请求 favicon 时 404，返回空响应。"""
+    return "", 204
+
 
 @bp.route("/")
 def index():
@@ -466,7 +503,7 @@ def api_users_delete(user_id: str):
 # ---------- 配置项 API ----------
 
 @bp.get("/api/configs/task-types")
-@login_required
+@_page13_or_login_required
 def api_task_types():
     """获取任务类型配置列表"""
     items = TaskTypeConfig.query.filter_by(is_active=True).order_by(TaskTypeConfig.sort_order).all()
@@ -506,7 +543,7 @@ def api_task_types_delete(item_id: str):
 
 
 @bp.get("/api/configs/completion-statuses")
-@login_required
+@_page13_or_login_required
 def api_completion_statuses():
     """获取完成状态配置列表"""
     items = CompletionStatusConfig.query.filter_by(is_active=True).order_by(CompletionStatusConfig.sort_order).all()
@@ -546,7 +583,7 @@ def api_completion_statuses_delete(item_id: str):
 
 
 @bp.get("/api/configs/audit-statuses")
-@login_required
+@_page13_or_login_required
 def api_audit_statuses():
     """获取审核状态配置列表（页面1使用）"""
     items = AuditStatusConfig.query.filter_by(is_active=True).order_by(AuditStatusConfig.sort_order).all()
@@ -591,10 +628,12 @@ def api_audit_statuses_delete(item_id: str):
 @page13_access_required
 def api_upload():
     project_name = request.form.get("projectName", "").strip()
+    project_code = request.form.get("projectCode", "").strip() or None
     file_name = request.form.get("fileName", "").strip()
     task_type = request.form.get("taskType", "").strip() or None
     author = request.form.get("author", "").strip()
     notes = request.form.get("notes", "").strip() or None
+    project_notes = request.form.get("projectNotes", "").strip() or None
     replace = request.form.get("replace") == "true"
     file = request.files.get("file")
     template_links = request.form.get("templateLinks", "").strip() or None
@@ -605,6 +644,11 @@ def api_upload():
     business_side = request.form.get("businessSide", "").strip() or None
     product = request.form.get("product", "").strip() or None
     country = request.form.get("country", "").strip() or None
+    file_version = request.form.get("fileVersion", "").strip() or None
+    document_display_date_str = request.form.get("documentDisplayDate", "").strip() or None
+    reviewer = request.form.get("reviewer", "").strip() or None
+    approver = request.form.get("approver", "").strip() or None
+    belonging_module = request.form.get("belongingModule", "").strip() or None
 
     if not project_name or not file_name or not author:
         return (
@@ -663,6 +707,12 @@ def api_upload():
             due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
         except ValueError:
             return jsonify({"message": "截止日期格式应为 YYYY-MM-DD"}), 400
+    document_display_date = None
+    if document_display_date_str:
+        try:
+            document_display_date = datetime.strptime(document_display_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            document_display_date = None
 
     if existing and replace:
         if existing.storage_path:
@@ -677,6 +727,7 @@ def api_upload():
         existing.author = author
         existing.task_type = task_type
         existing.notes = notes
+        existing.project_notes = project_notes
         existing.project_name = project_name
         existing.file_name = file_name
         existing.placeholders = placeholders
@@ -688,6 +739,13 @@ def api_upload():
         existing.business_side = business_side
         existing.product = product
         existing.country = country
+        existing.project_code = project_code
+        existing.file_version = file_version
+        existing.document_display_date = document_display_date
+        existing.reviewer = reviewer
+        existing.approver = approver
+        existing.project_notes = project_notes
+        existing.belonging_module = belonging_module
         summary = _prepare_summary(existing)
         summary.project_name = project_name
         summary.file_name = file_name
@@ -721,6 +779,7 @@ def api_upload():
 
     upload = UploadRecord(
         project_name=project_name,
+        project_code=project_code,
         file_name=file_name,
         task_type=task_type,
         author=author,
@@ -729,12 +788,18 @@ def api_upload():
         original_file_name=original_file_name,
         template_links=template_links,
         notes=notes,
+        project_notes=project_notes,
         placeholders=placeholders,
         assignee_name=assignee_name,
         due_date=due_date,
         business_side=business_side,
         product=product,
         country=country,
+        file_version=file_version,
+        document_display_date=document_display_date,
+        reviewer=reviewer,
+        approver=approver,
+        belonging_module=belonging_module,
     )
     db.session.add(upload)
     summary = _prepare_summary(upload)
@@ -858,8 +923,15 @@ def api_uploads_list():
                 "businessSide": r.business_side,
                 "product": r.product,
                 "country": r.country,
+                "projectCode": getattr(r, "project_code", None),
+                "fileVersion": getattr(r, "file_version", None),
+                "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
+                "reviewer": getattr(r, "reviewer", None),
+                "approver": getattr(r, "approver", None),
+                "belongingModule": getattr(r, "belonging_module", None),
                 "createdAt": r.created_at.isoformat() if r.created_at else None,
                 "notes": r.notes,
+                "projectNotes": getattr(r, "project_notes", None),
                 "executionNotes": getattr(r, "execution_notes", None),
             }
             for idx, r in enumerate(records)
@@ -907,7 +979,16 @@ def api_upload_update(upload_id: str):
     assignee_name = (data.get("assigneeName") or "").strip() or None
     completion_status = (data.get("completionStatus") or "").strip() or None
     audit_status = (data.get("auditStatus") or "").strip() or None
-    
+    project_code = (data.get("projectCode") or "").strip() or None
+    file_version = (data.get("fileVersion") or "").strip() or None
+    document_display_date_str = (data.get("documentDisplayDate") or "").strip() or None
+    reviewer = (data.get("reviewer") or "").strip() or None
+    approver = (data.get("approver") or "").strip() or None
+    project_notes = (data.get("projectNotes") or "").strip() or None
+    has_project_notes = "projectNotes" in data
+    belonging_module = (data.get("belongingModule") or "").strip() or None
+    has_belonging_module = "belongingModule" in data
+
     if project_name is not None:
         upload.project_name = project_name
     if file_name is not None:
@@ -934,6 +1015,26 @@ def api_upload_update(upload_id: str):
         val = data.get("notes")
         s = (val if isinstance(val, str) else "").strip()
         upload.notes = s or None
+    if has_project_notes:
+        upload.project_notes = project_notes
+    if project_code is not None:
+        upload.project_code = project_code
+    if file_version is not None:
+        upload.file_version = file_version
+    if document_display_date_str is not None:
+        if not document_display_date_str:
+            upload.document_display_date = None
+        else:
+            try:
+                upload.document_display_date = datetime.strptime(document_display_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+    if reviewer is not None:
+        upload.reviewer = reviewer
+    if approver is not None:
+        upload.approver = approver
+    if has_belonging_module:
+        upload.belonging_module = belonging_module
     if audit_status is not None:
         upload.audit_status = audit_status or None
         if audit_status == "审核不通过待修改":
@@ -971,7 +1072,9 @@ def api_upload_update(upload_id: str):
         upload.summary.author = upload.author
         db.session.add(upload.summary)
     db.session.commit()
-    
+    if upload.completion_status and (upload.belonging_module or "").strip() in ("产品", "开发"):
+        _maybe_enqueue_module_cascade(upload.project_name or "", (upload.belonging_module or "").strip())
+
     return jsonify({
         "message": "已更新",
         "record": {
@@ -1028,8 +1131,15 @@ def api_my_tasks():
                 "businessSide": r.business_side,
                 "product": r.product,
                 "country": r.country,
+                "projectCode": getattr(r, "project_code", None),
+                "fileVersion": getattr(r, "file_version", None),
+                "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
+                "reviewer": getattr(r, "reviewer", None),
+                "approver": getattr(r, "approver", None),
+                "belongingModule": getattr(r, "belonging_module", None),
                 "createdAt": r.created_at.isoformat() if r.created_at else None,
                 "notes": r.notes,
+                "projectNotes": getattr(r, "project_notes", None),
                 "executionNotes": getattr(r, "execution_notes", None),
             }
             for idx, r in enumerate(records)
@@ -1082,7 +1192,9 @@ def api_update_completion_status(upload_id: str):
     
     db.session.add(upload)
     db.session.commit()
-    
+    if upload.completion_status and (upload.belonging_module or "").strip() in ("产品", "开发"):
+        _maybe_enqueue_module_cascade(upload.project_name or "", (upload.belonging_module or "").strip())
+
     return jsonify({
         "message": "已更新完成状态",
         "uploadId": upload_id,
@@ -1375,6 +1487,48 @@ def _get_base_url() -> str:
     return ""
 
 
+def _maybe_enqueue_module_cascade(project_name: str, trigger_module: str) -> None:
+    """
+    当某项目下所属模块为 trigger_module（产品或开发）的最后一份文档被标记为完成后，入队一条延迟发送的模块级联催办。
+    产品→开发；开发→测试。同一项目同一触发模块只保留一条待执行，新入队会覆盖旧待执行。
+    """
+    if not project_name or (trigger_module or "").strip() not in ("产品", "开发"):
+        return
+    pname = (project_name or "").strip()
+    tmod = (trigger_module or "").strip()
+    target_module = "开发" if tmod == "产品" else "测试"
+    all_in_module = UploadRecord.query.filter(
+        UploadRecord.project_name == pname,
+        UploadRecord.belonging_module == tmod,
+    ).all()
+    if not all_in_module:
+        return
+    if any(getattr(u, "completion_status", None) is None for u in all_in_module):
+        return
+    row = AppConfig.query.filter_by(config_key="MODULE_CASCADE_DELAY_MINUTES").first()
+    delay_minutes = 5
+    if row and row.config_value:
+        try:
+            delay_minutes = max(1, min(1440, int(str(row.config_value).strip())))
+        except ValueError:
+            pass
+    from datetime import timedelta
+    run_at = now_local() + timedelta(minutes=delay_minutes)
+    ModuleCascadeReminder.query.filter(
+        ModuleCascadeReminder.project_name == pname,
+        ModuleCascadeReminder.trigger_module == tmod,
+        ModuleCascadeReminder.status == "pending",
+    ).delete()
+    db.session.add(ModuleCascadeReminder(
+        project_name=pname,
+        trigger_module=tmod,
+        target_module=target_module,
+        run_at=run_at,
+        status="pending",
+    ))
+    db.session.commit()
+
+
 def _send_notify_to_individuals(
     title: str,
     message_markdown: str,
@@ -1427,7 +1581,8 @@ def api_notify_by_project():
     def _task_block_md(key, uploads_in_group):
         proj, bs, pr = key
         lines = []
-        header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
+        header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
         lines.append(header)
         for u in uploads_in_group:
             links = u.get_template_links_list() or []
@@ -1437,7 +1592,11 @@ def api_notify_by_project():
             file_label = u.file_name or "-"
             if u.task_type:
                 file_label += f" ({u.task_type})"
-            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
+            fv = getattr(u, "file_version", None) or "-"
+            ddd = (u.document_display_date.strftime("%Y-%m-%d") if u.document_display_date else "-") if getattr(u, "document_display_date", None) else "-"
+            rev = getattr(u, "reviewer", None) or "-"
+            appr = getattr(u, "approver", None) or "-"
+            line = f" - 文件名称：{file_label}  文件版本号：{fv}  截止日期：{due_red}  文档体现日期：{ddd}  审核：{rev}  批准：{appr}"
             if link:
                 line += f"  文档地址：[点击打开]({link})"
             lines.append(line)
@@ -1472,13 +1631,6 @@ def api_notify_by_project():
         secret=secret,
     )
     ok = result is not None and result.get("success") is True
-    if ok:
-        _send_notify_to_individuals(
-            "项目任务催办",
-            message_plain,
-            at_mobiles=at_mobiles,
-            at_names=assignees,
-        )
     if ok:
         return jsonify({"success": True, "message": "通知发送成功", "atNames": list(assignees)}), 200
     err = result.get("error", "未知错误") if result else "未知错误"
@@ -1522,7 +1674,8 @@ def api_notify_by_author():
     def _task_block_md(key, uploads_in_group):
         proj, bs, pr = key
         lines = []
-        header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
+        header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
         lines.append(header)
         for u in uploads_in_group:
             links = u.get_template_links_list() or []
@@ -1532,7 +1685,11 @@ def api_notify_by_author():
             file_label = u.file_name or "-"
             if u.task_type:
                 file_label += f" ({u.task_type})"
-            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
+            fv = getattr(u, "file_version", None) or "-"
+            ddd = (u.document_display_date.strftime("%Y-%m-%d") if u.document_display_date else "-") if getattr(u, "document_display_date", None) else "-"
+            rev = getattr(u, "reviewer", None) or "-"
+            appr = getattr(u, "approver", None) or "-"
+            line = f" - 文件名称：{file_label}  文件版本号：{fv}  截止日期：{due_red}  文档体现日期：{ddd}  审核：{rev}  批准：{appr}"
             if link:
                 line += f"  文档地址：[点击打开]({link})"
             lines.append(line)
@@ -1572,8 +1729,6 @@ def api_notify_by_author():
         secret=secret,
     )
     ok = result is not None and result.get("success") is True
-    if ok:
-        _send_notify_to_individuals("个人任务催办", message, at_mobiles=at_mobiles, at_names=[author])
     if ok:
         return jsonify({"success": True, "message": "通知发送成功", "atNames": [str(author)]}), 200
     err = result.get("error", "未知错误") if result else "未知错误"
@@ -1615,9 +1770,15 @@ def api_notify_single_task():
     business_side = upload.business_side or "-"
     product = upload.product or "-"
     country = upload.country or "-"
+    project_code = getattr(upload, "project_code", None) or "-"
+    file_version = getattr(upload, "file_version", None) or "-"
+    doc_display_date = (upload.document_display_date.strftime("%Y-%m-%d") if upload.document_display_date else "-") if getattr(upload, "document_display_date", None) else "-"
+    reviewer = getattr(upload, "reviewer", None) or "-"
+    approver = getattr(upload, "approver", None) or "-"
+    project_notes = getattr(upload, "project_notes", None) or "-"
     title = f"{upload.project_name}/{upload.file_name}" + (f" ({upload.task_type})" if upload.task_type else "")
     doc_link_md = f"[点击打开]({doc_link})" if doc_link else "（无链接）"
-    
+
     template = _get_notify_template("single_task_reminder")
     if not template:
         template = (
@@ -1630,11 +1791,11 @@ def api_notify_single_task():
             " - 文档地址：{doc_link_md}\n\n"
             "请抓紧处理！"
         )
-    
+
     base_url = _get_base_url()
     page2_path = url_for("pages.generate_page", _external=False)
     page2_url = f"{base_url}{page2_path}" if base_url else url_for("pages.generate_page", _external=True)
-    
+
     message_plain = template.format(
         author=upload.author,
         project_name=upload.project_name,
@@ -1645,6 +1806,12 @@ def api_notify_single_task():
         business_side=business_side,
         product=product,
         country=country,
+        project_code=project_code,
+        project_notes=project_notes,
+        file_version=file_version,
+        document_display_date=doc_display_date,
+        reviewer=reviewer,
+        approver=approver,
         doc_link_md=doc_link_md,
         doc_link=doc_link_md,
         page2_url=page2_url,
@@ -1665,8 +1832,6 @@ def api_notify_single_task():
         secret=secret,
     )
     ok = result is not None and result.get("success") is True
-    if ok:
-        _send_notify_to_individuals("任务催办", message_plain, at_mobiles=at_mobiles, at_names=[upload.author])
     if ok:
         return jsonify({"success": True, "message": "通知发送成功", "atNames": [str(upload.author)]}), 200
     err = result.get("error", "未知错误") if result else "未知错误"
@@ -1696,10 +1861,18 @@ def api_get_schedule_config():
     """获取自动通知时间配置（统计页用）"""
     from .scheduler import _get_schedule_config_from_db
     cfg = _get_schedule_config_from_db()
+    row = AppConfig.query.filter_by(config_key="MODULE_CASCADE_DELAY_MINUTES").first()
+    delay_minutes = 5
+    if row and row.config_value:
+        try:
+            delay_minutes = max(1, min(1440, int(str(row.config_value).strip())))
+        except ValueError:
+            pass
     return jsonify({
         "weekly": cfg["weekly"],
         "overdue": cfg["overdue"],
         "project": cfg["project"],
+        "moduleCascadeDelayMinutes": delay_minutes,
     })
 
 
@@ -1711,10 +1884,17 @@ def api_put_schedule_config():
     weekly = (data.get("weekly") or "").strip() or "thu 16:00"
     overdue = (data.get("overdue") or "").strip() or "15:00"
     project = (data.get("project") or "").strip() or "mon,wed,fri 9:30"
+    delay_minutes = 5
+    if "moduleCascadeDelayMinutes" in data:
+        try:
+            delay_minutes = max(1, min(1440, int(data.get("moduleCascadeDelayMinutes", 5))))
+        except (TypeError, ValueError):
+            pass
     for key, value in [
         ("SCHEDULE_WEEKLY_REMINDER", weekly),
         ("SCHEDULE_OVERDUE_REMINDER", overdue),
         ("SCHEDULE_PROJECT_STATS", project),
+        ("MODULE_CASCADE_DELAY_MINUTES", str(delay_minutes)),
     ]:
         row = AppConfig.query.filter_by(config_key=key).first()
         if row:
@@ -1728,6 +1908,66 @@ def api_put_schedule_config():
     except Exception:
         pass
     return jsonify({"success": True, "message": "已保存并已更新定时任务"})
+
+
+@bp.get("/api/notify/module-cascade-status")
+@page13_access_required
+def api_module_cascade_status():
+    """模块级联催办状态：可配置延迟分钟数、待执行列表、最近已执行列表。"""
+    row = AppConfig.query.filter_by(config_key="MODULE_CASCADE_DELAY_MINUTES").first()
+    delay_minutes = 5
+    if row and row.config_value:
+        try:
+            delay_minutes = max(1, min(1440, int(str(row.config_value).strip())))
+        except ValueError:
+            pass
+    pending = ModuleCascadeReminder.query.filter_by(status="pending").order_by(ModuleCascadeReminder.run_at).all()
+    recent_sent = (
+        ModuleCascadeReminder.query.filter_by(status="sent")
+        .order_by(ModuleCascadeReminder.sent_at.desc())
+        .limit(20)
+        .all()
+    )
+    return jsonify({
+        "delayMinutes": delay_minutes,
+        "pending": [
+            {
+                "projectName": r.project_name,
+                "triggerModule": r.trigger_module,
+                "targetModule": r.target_module,
+                "runAt": r.run_at.strftime("%Y-%m-%d %H:%M") if r.run_at else None,
+            }
+            for r in pending
+        ],
+        "recentSent": [
+            {
+                "projectName": r.project_name,
+                "triggerModule": r.trigger_module,
+                "targetModule": r.target_module,
+                "sentAt": r.sent_at.strftime("%Y-%m-%d %H:%M") if r.sent_at else None,
+            }
+            for r in recent_sent
+        ],
+    })
+
+
+@bp.post("/api/notify/module-cascade-manual")
+@page13_access_required
+def api_notify_module_cascade_manual():
+    """手动模块级联催办：按项目检查，产品全部完成→催办开发；开发全部完成→催办测试。body 可传 projectName 仅处理该项目。"""
+    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
+    if not webhook:
+        return jsonify({"success": False, "message": "未配置 DINGTALK_WEBHOOK"}), 400
+    data = request.get_json(silent=True) or {}
+    project_name = (data.get("projectName") or "").strip() or None
+    try:
+        from .scheduler import _run_module_cascade_manual
+        _run_module_cascade_manual(project_name=project_name)
+        if project_name:
+            return jsonify({"success": True, "message": f"已执行「{project_name}」的模块级联催办"})
+        return jsonify({"success": True, "message": "已执行模块级联催办（按项目：产品→开发、开发→测试）"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @bp.post("/api/notify/test-auto")
@@ -1793,6 +2033,15 @@ def api_notify_test_auto():
             "success": True,
             "webhook_configured": True,
             "message": "已按定时任务逻辑发送（每两天项目完成情况统计）",
+            "type": test_type,
+        })
+    if test_type == "module_cascade":
+        from .scheduler import _run_process_module_cascade_pending
+        _run_process_module_cascade_pending()
+        return jsonify({
+            "success": True,
+            "webhook_configured": True,
+            "message": "已处理到期的模块级联催办（按项目：产品完成→催办开发；开发完成→催办测试）",
             "type": test_type,
         })
 

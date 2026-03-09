@@ -54,12 +54,18 @@ def get_next_run_times(schedule_config: dict | None = None) -> dict:
       "weekly": "thu 16:00",
       "overdue": "15:00",
       "project": "mon,wed,fri 9:30",
+      "moduleCascade": "mon,wed,fri 10:00",
     }。未传或缺少键时使用默认值。
     """
     cfg = schedule_config or {}
     weekly_str = (cfg.get("weekly") or "").strip() or "thu 16:00"
     overdue_str = (cfg.get("overdue") or "").strip() or "15:00"
     project_str = (cfg.get("project") or "").strip() or "mon,wed,fri 9:30"
+    try:
+        delay_m = int(cfg.get("moduleCascadeDelayMinutes") or cfg.get("module_cascade_delay_minutes") or 5)
+        delay_m = max(1, min(1440, delay_m))
+    except (TypeError, ValueError):
+        delay_m = 5
 
     now = datetime.now(CN_TZ).replace(tzinfo=None)
 
@@ -138,5 +144,10 @@ def get_next_run_times(schedule_config: dict | None = None) -> dict:
             "description": "每两天项目完成情况统计",
             "nextTime": project_stats.strftime("%Y-%m-%d %H:%M"),
             "cron": cron_project,
+        },
+        "moduleCascadeReminder": {
+            "description": "模块级联催办（按项目：产品/开发最后一份完成后延迟发送）",
+            "nextTime": f"项目完成后 {delay_m} 分钟执行，见下方状态",
+            "cron": f"延迟 {delay_m} 分钟",
         },
     }
