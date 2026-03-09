@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import csv
+import io
 import os
 import secrets
 import hashlib
-from datetime import datetime
+from datetime import date, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
@@ -12,6 +14,7 @@ from typing import Any, Optional
 from flask import (
     Blueprint,
     current_app,
+    make_response,
     jsonify,
     redirect,
     render_template,
@@ -847,6 +850,343 @@ def _send_task_notification(upload: UploadRecord, due_date_str: str):
         upload.dingtalk_notified_at = now_local()
         db.session.add(upload)
         db.session.commit()
+
+
+# 待办导入：表头与任务字段映射（支持另一工具导出 CSV/Excel）
+_IMPORT_HEADER_MAP = {
+    "项目名称": "project_name",
+    "项目编号": "project_code",
+    "影响业务方": "business_side",
+    "产品": "product",
+    "国家": "country",
+    "项目备注": "project_notes",
+    "文件名称": "fileName",
+    "任务类型": "task_type",
+    "文档链接": "template_links",
+    "文件版本号": "file_version",
+    "编写人员": "author",
+    "负责人": "assignee_name",
+    "截止日期": "due_date",
+    "下发任务备注": "notes",
+    "文档体现日期": "document_display_date",
+    "审核人员": "reviewer",
+    "批准人员": "approver",
+    "所属模块": "belonging_module",
+    "projectName": "project_name",
+    "projectCode": "project_code",
+    "businessSide": "business_side",
+    "product": "product",
+    "country": "country",
+    "projectNotes": "project_notes",
+    "fileName": "fileName",
+    "taskType": "task_type",
+    "templateLinks": "template_links",
+    "fileVersion": "file_version",
+    "author": "author",
+    "assigneeName": "assignee_name",
+    "dueDate": "due_date",
+    "notes": "notes",
+    "documentDisplayDate": "document_display_date",
+    "reviewer": "reviewer",
+    "approver": "approver",
+    "belongingModule": "belonging_module",
+}
+
+
+def _parse_import_file(file_storage) -> tuple[list[dict], str]:
+    """解析上传的 CSV 或 Excel，返回 (rows, error)。rows 每项为字段名->值的字典。"""
+    if not file_storage or not file_storage.filename:
+        return [], "请选择文件"
+    fn = (file_storage.filename or "").lower()
+    file_storage.stream.seek(0)
+    raw_bytes = file_storage.stream.read()
+    if fn.endswith(".csv"):
+        raw = raw_bytes.decode("utf-8-sig", errors="replace") if isinstance(raw_bytes, bytes) else raw_bytes
+        return _parse_import_csv(raw)
+    if fn.endswith(".xlsx") or fn.endswith(".xls"):
+        return _parse_import_excel(raw_bytes, fn)
+    return [], "仅支持 .csv 或 .xlsx 文件"
+
+
+def _parse_import_csv(raw: str) -> tuple[list[dict], str]:
+    reader = csv.reader(io.StringIO(raw))
+    rows = list(reader)
+    if not rows:
+        return [], "文件为空"
+    headers = [h.strip() for h in rows[0]]
+    out = []
+    for i, row in enumerate(rows[1:], start=2):
+        if not row or all(not (c or "").strip() for c in row):
+            continue
+        d = {}
+        for j, h in enumerate(headers):
+            if j < len(row):
+                val = (row[j] or "").strip()
+                key = _IMPORT_HEADER_MAP.get(h) or _IMPORT_HEADER_MAP.get(h.strip())
+                if key:
+                    d[key] = val
+        out.append(d)
+    return out, ""
+
+
+def _parse_import_excel(raw: bytes, filename: str) -> tuple[list[dict], str]:
+    try:
+        import openpyxl
+    except ImportError:
+        return [], "请安装 openpyxl 以支持 Excel 导入：pip install openpyxl"
+    if not isinstance(raw, bytes):
+        raw = raw.encode("utf-8") if isinstance(raw, str) else b""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        ws = wb.active
+        if not ws:
+            return [], "Excel 无有效工作表"
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    except Exception as e:
+        return [], f"Excel 解析失败：{e}"
+    if not rows:
+        return [], "文件为空"
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    out = []
+    for row in rows[1:]:
+        if not row or all(v is None or (str(v).strip() == "") for v in row):
+            continue
+        d = {}
+        for j, h in enumerate(headers):
+            if j < len(row):
+                val = row[j]
+                val = (str(val).strip() if val is not None else "") or ""
+                key = _IMPORT_HEADER_MAP.get(h) or _IMPORT_HEADER_MAP.get(h.strip())
+                if key:
+                    d[key] = val
+        out.append(d)
+    return out, ""
+
+
+def _parse_import_date(s: str) -> Optional[date]:
+    if not s or not (s or "").strip():
+        return None
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+# 导入模板表头（中文，与 _IMPORT_HEADER_MAP 对应，用于生成可下载模板）
+_IMPORT_TEMPLATE_HEADERS = [
+    "项目名称", "项目编号", "影响业务方", "产品", "国家", "项目备注",
+    "文件名称", "任务类型", "文档链接", "文件版本号", "编写人员", "负责人",
+    "截止日期", "下发任务备注", "文档体现日期", "审核人员", "批准人员", "所属模块",
+]
+
+
+def _format_date_for_import(obj) -> str:
+    """安全格式化为 YYYY-MM-DD，避免非 date/datetime 导致异常。"""
+    if obj is None:
+        return ""
+    if hasattr(obj, "strftime"):
+        try:
+            return obj.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return ""
+    return str(obj)[:10] if obj else ""
+
+
+def _record_to_import_row(r: UploadRecord) -> list:
+    return [
+        (r.project_name or ""),
+        (r.project_code or ""),
+        (r.business_side or ""),
+        (r.product or ""),
+        (r.country or ""),
+        (r.project_notes or ""),
+        (r.file_name or ""),
+        (r.task_type or ""),
+        (r.template_links or "").replace("\n", " ").strip(),
+        str(getattr(r, "file_version", None) or ""),
+        (r.author or ""),
+        (r.assignee_name or r.author or ""),
+        _format_date_for_import(r.due_date),
+        (r.notes or ""),
+        _format_date_for_import(getattr(r, "document_display_date", None)),
+        str(getattr(r, "reviewer", None) or ""),
+        str(getattr(r, "approver", None) or ""),
+        str(getattr(r, "belonging_module", None) or ""),
+    ]
+
+
+def _build_import_template_csv(include_sample: bool, project_name: Optional[str] = None) -> str:
+    """生成导入用 CSV。include_sample=True 时填充数据行；project_name 指定时填充该项目下所有任务，否则一行示例或占位。"""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_IMPORT_TEMPLATE_HEADERS)
+    if include_sample:
+        if project_name and (project_name or "").strip():
+            records = (
+                UploadRecord.query.filter(UploadRecord.project_name == project_name.strip())
+                .order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc())
+                .all()
+            )
+            for r in records:
+                writer.writerow(_record_to_import_row(r))
+        else:
+            sample = UploadRecord.query.order_by(UploadRecord.created_at.desc()).first()
+            if sample:
+                writer.writerow(_record_to_import_row(sample))
+            else:
+                writer.writerow([
+                    "示例项目", "PRJ001", "示例业务方", "示例产品", "中国", "项目备注示例",
+                    "示例文件名称", "初稿待编写", "https://example.com/doc.docx", "V1.0", "张三", "张三",
+                    datetime.now().strftime("%Y-%m-%d"), "下发备注", datetime.now().strftime("%Y-%m-%d"), "审核人", "批准人", "开发",
+                ])
+    return buf.getvalue()
+
+
+@bp.get("/api/uploads/project-names")
+@page13_access_required
+def api_uploads_project_names():
+    """返回已有项目名称列表，用于示例模板选择项目。"""
+    names = (
+        db.session.query(UploadRecord.project_name)
+        .filter(UploadRecord.project_name.isnot(None), UploadRecord.project_name != "")
+        .distinct()
+        .order_by(UploadRecord.project_name)
+        .all()
+    )
+    return jsonify({"projectNames": [n[0] for n in names if (n[0] or "").strip()]})
+
+
+@bp.get("/api/uploads/import-template")
+@page13_access_required
+def api_uploads_import_template():
+    """下载导入模板：type=empty 仅表头；type=with_sample 可带 project_name 填充该项目下所有任务。"""
+    try:
+        template_type = (request.args.get("type") or "empty").strip().lower()
+        include_sample = template_type in ("with_sample", "sample", "1", "true")
+        project_name = (request.args.get("project_name") or "").strip() or None
+        content = _build_import_template_csv(include_sample=include_sample, project_name=project_name)
+        if include_sample and project_name:
+            safe_name = "".join(c for c in project_name[:20] if c.isalnum() or c in " _-")
+            filename = f"待办导入模板_{safe_name}.csv"
+        else:
+            filename = "待办导入模板_含示例.csv" if include_sample else "待办导入模板_空.csv"
+        body = content.encode("utf-8-sig")
+        resp = make_response(body)
+        resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+    except Exception as e:
+        return jsonify({"success": False, "message": f"生成模板失败：{e}"}), 500
+
+
+@bp.post("/api/uploads/import")
+@page13_access_required
+def api_uploads_import():
+    """导入另一工具审核后导出的待办任务点（CSV 或 Excel，首行为表头）。"""
+    file_storage = request.files.get("file")
+    rows, parse_err = _parse_import_file(file_storage)
+    if parse_err:
+        return jsonify({"success": False, "message": parse_err}), 400
+    if not rows:
+        return jsonify({"success": True, "created": 0, "updated": 0, "skipped": 0, "errors": [], "message": "无有效数据行"})
+
+    created = 0
+    updated = 0
+    skipped = 0
+    errors = []
+
+    for idx, d in enumerate(rows):
+        row_no = idx + 2
+        project_name = (d.get("project_name") or "").strip()
+        file_name = (d.get("fileName") or "").strip()
+        author = (d.get("author") or "").strip()
+        if not project_name or not file_name or not author:
+            skipped += 1
+            errors.append({"row": row_no, "message": "缺少项目名称、文件名称或编写人员，已跳过"})
+            continue
+
+        task_type = (d.get("task_type") or "").strip() or None
+        template_links = (d.get("template_links") or "").strip() or None
+        if template_links:
+            template_links = _normalize_template_links(template_links) or None
+        due_date = _parse_import_date(d.get("due_date") or "")
+        document_display_date = _parse_import_date(d.get("document_display_date") or "")
+
+        existing = UploadRecord.query.filter_by(
+            project_name=project_name,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+        ).first()
+
+        try:
+            if existing:
+                existing.project_code = (d.get("project_code") or "").strip() or None
+                existing.business_side = (d.get("business_side") or "").strip() or None
+                existing.product = (d.get("product") or "").strip() or None
+                existing.country = (d.get("country") or "").strip() or None
+                existing.project_notes = (d.get("project_notes") or "").strip() or None
+                existing.notes = (d.get("notes") or "").strip() or None
+                existing.assignee_name = (d.get("assignee_name") or "").strip() or None
+                existing.due_date = due_date
+                existing.file_version = (d.get("file_version") or "").strip() or None
+                existing.document_display_date = document_display_date
+                existing.reviewer = (d.get("reviewer") or "").strip() or None
+                existing.approver = (d.get("approver") or "").strip() or None
+                existing.belonging_module = (d.get("belonging_module") or "").strip() or None
+                existing.task_status = "pending"
+                existing.completion_status = None
+                db.session.add(existing)
+                updated += 1
+            else:
+                upload = UploadRecord(
+                    project_name=project_name,
+                    project_code=(d.get("project_code") or "").strip() or None,
+                    file_name=file_name,
+                    task_type=task_type,
+                    author=author,
+                    template_links=template_links,
+                    notes=(d.get("notes") or "").strip() or None,
+                    project_notes=(d.get("project_notes") or "").strip() or None,
+                    assignee_name=(d.get("assignee_name") or "").strip() or None,
+                    due_date=due_date,
+                    business_side=(d.get("business_side") or "").strip() or None,
+                    product=(d.get("product") or "").strip() or None,
+                    country=(d.get("country") or "").strip() or None,
+                    file_version=(d.get("file_version") or "").strip() or None,
+                    document_display_date=document_display_date,
+                    reviewer=(d.get("reviewer") or "").strip() or None,
+                    approver=(d.get("approver") or "").strip() or None,
+                    belonging_module=(d.get("belonging_module") or "").strip() or None,
+                )
+                db.session.add(upload)
+                summary = _prepare_summary(upload)
+                db.session.add(summary)
+                created += 1
+        except Exception as e:
+            errors.append({"row": row_no, "message": str(e)})
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"保存失败：{e}"}), 500
+
+    msg = f"导入完成：新增 {created} 条，更新 {updated} 条，跳过 {skipped} 条"
+    if errors:
+        msg += f"，{len(errors)} 条有误"
+    return jsonify({
+        "success": True,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors[:50],
+        "message": msg,
+    })
 
 
 @bp.get("/api/template-options")

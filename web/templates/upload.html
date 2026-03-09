@@ -11,14 +11,41 @@
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h5 class="card-title mb-0">任务录入（两级）</h5>
             <div>
-                <button type="button" class="btn btn-outline-primary btn-sm" id="addProjectBtn">+ 添加项目</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="downloadTemplateEmptyBtn">下载空模板</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="downloadTemplateSampleBtn">下载示例模板</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="importTasksBtn" title="支持 CSV / Excel，首行为表头">导入待办</button>
+                <input type="file" id="importTasksFile" accept=".csv,.xlsx" class="d-none">
+                <button type="button" class="btn btn-outline-primary btn-sm ms-2" id="addProjectBtn">+ 添加项目</button>
                 <button type="button" class="btn btn-success btn-sm ms-2" id="saveAllBtn">保存全部</button>
             </div>
         </div>
-        <p class="text-muted small mb-3">第一层：项目信息；第二层：该项目下的文件/事项任务。重复校验基于：项目名称 + 文件名称 + 任务类型 + 编写人。</p>
+        <p class="text-muted small mb-3">第一层：项目信息；第二层：该项目下的文件/事项任务。重复校验基于：项目名称 + 文件名称 + 任务类型 + 编写人。可先下载「空模板」或「示例模板」填写后导入，或导入另一工具导出的待办（CSV/Excel，表头需含：项目名称、文件名称、编写人员等）。</p>
 
         <div id="projectBlocksContainer">
             <!-- 项目块由 JS 动态插入 -->
+        </div>
+
+        <!-- 示例模板：选择项目 -->
+        <div class="modal fade" id="importTemplateSampleModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h6 class="modal-title">下载示例模板</h6>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="text-muted small mb-2">选择已有项目后，模板将填充该项目下所有任务；不选则使用系统示例一行。</p>
+                        <label class="form-label small">选择项目</label>
+                        <select class="form-select form-select-sm" id="importTemplateProjectSelect">
+                            <option value="">（使用系统示例）</option>
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="importTemplateSampleConfirmBtn">下载</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="mt-3">

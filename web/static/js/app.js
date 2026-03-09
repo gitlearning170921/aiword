@@ -433,6 +433,108 @@ async function initUploadPage() {
         }
     });
 
+    const _CSV_HEADERS = [
+        "项目名称","项目编号","影响业务方","产品","国家","项目备注",
+        "文件名称","任务类型","文档链接","文件版本号","编写人员","负责人",
+        "截止日期","下发任务备注","文档体现日期","审核人员","批准人员","所属模块",
+    ];
+    function _csvEscape(v) {
+        var s = (v == null ? "" : String(v));
+        if (s.indexOf(",") !== -1 || s.indexOf('"') !== -1 || s.indexOf("\n") !== -1) {
+            return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+    }
+    function _recordToCsvRow(r) {
+        return [
+            r.projectName, r.projectCode, r.businessSide, r.product, r.country, r.projectNotes,
+            r.fileName, r.taskType, r.templateLinks, r.fileVersion, r.author, r.assigneeName || r.author,
+            r.dueDate, r.notes, r.documentDisplayDate, r.reviewer, r.approver, r.belongingModule,
+        ].map(_csvEscape).join(",");
+    }
+    function _downloadCsvString(csvContent, filename) {
+        var BOM = "\uFEFF";
+        var blob = new Blob([BOM + csvContent], { type: "text/csv;charset=utf-8;" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+            if (a.parentNode) document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 300);
+    }
+
+    document.getElementById("downloadTemplateEmptyBtn")?.addEventListener("click", function () {
+        var csv = _CSV_HEADERS.map(_csvEscape).join(",") + "\n";
+        _downloadCsvString(csv, "待办导入模板_空.csv");
+        App.notify("已下载空模板", "success");
+    });
+
+    const sampleModal = document.getElementById("importTemplateSampleModal");
+    const sampleSelect = document.getElementById("importTemplateProjectSelect");
+    const sampleConfirmBtn = document.getElementById("importTemplateSampleConfirmBtn");
+    document.getElementById("downloadTemplateSampleBtn")?.addEventListener("click", function () {
+        var names = [];
+        var seen = {};
+        (allRecordsCache || []).forEach(function (r) {
+            var n = (r.projectName || "").trim();
+            if (n && !seen[n]) { seen[n] = true; names.push(n); }
+        });
+        names.sort();
+        if (sampleSelect) {
+            sampleSelect.innerHTML = '<option value="">（使用系统示例）</option>';
+            names.forEach(function (n) {
+                var opt = document.createElement("option");
+                opt.value = n;
+                opt.textContent = n;
+                sampleSelect.appendChild(opt);
+            });
+        }
+        var modal = sampleModal ? new bootstrap.Modal(sampleModal) : null;
+        modal?.show();
+    });
+    sampleConfirmBtn?.addEventListener("click", function () {
+        var projectName = (sampleSelect?.value || "").trim();
+        var rows = [_CSV_HEADERS.map(_csvEscape).join(",")];
+        var records = allRecordsCache || [];
+        if (projectName) {
+            records = records.filter(function (r) { return (r.projectName || "").trim() === projectName; });
+        }
+        if (records.length > 0) {
+            records.forEach(function (r) { rows.push(_recordToCsvRow(r)); });
+        }
+        rows.push("");
+        var filename = projectName ? ("待办导入模板_" + projectName.substring(0, 20) + ".csv") : "待办导入模板_含示例.csv";
+        _downloadCsvString(rows.join("\n"), filename);
+        var modal = sampleModal ? bootstrap.Modal.getInstance(sampleModal) : null;
+        modal?.hide();
+        App.notify("已下载示例模板", "success");
+    });
+
+    const importTasksBtn = document.getElementById("importTasksBtn");
+    const importTasksFile = document.getElementById("importTasksFile");
+    importTasksBtn?.addEventListener("click", () => importTasksFile?.click());
+    importTasksFile?.addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file) return;
+        const fd = new FormData();
+        fd.append("file", file);
+        try {
+            const result = await App.request("/api/uploads/import", { method: "POST", body: fd });
+            const msg = result?.message || (result?.success ? "导入完成" : "导入失败");
+            App.notify(msg, result?.success ? "success" : "danger");
+            if (result?.success && typeof loadRecordsList === "function") loadRecordsList();
+        } catch (err) {
+            const data = err.data || {};
+            App.notify(data.message || err.message || "导入失败", "danger");
+        }
+    });
+
     saveAllBtn?.addEventListener("click", async () => {
         const blocks = projectBlocksContainer.querySelectorAll(".project-block");
         let successCount = 0;
