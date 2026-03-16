@@ -36,7 +36,7 @@ class User(db.Model):
     """用户账号，用于页面2登录。在页面1管理。"""
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     username: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(db.String(128), nullable=False)
     display_name: Mapped[Optional[str]] = mapped_column(db.String(128))
@@ -57,7 +57,7 @@ class TaskTypeConfig(db.Model):
     """任务类型配置表（页面1使用）"""
     __tablename__ = "task_type_configs"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -68,7 +68,7 @@ class CompletionStatusConfig(db.Model):
     """完成状态配置表（页面2使用）"""
     __tablename__ = "completion_status_configs"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -79,7 +79,7 @@ class AuditStatusConfig(db.Model):
     """审核状态配置表（页面1使用）"""
     __tablename__ = "audit_status_configs"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -90,7 +90,7 @@ class NotifyTemplateConfig(db.Model):
     """钉钉通知文案配置表"""
     __tablename__ = "notify_template_configs"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     template_key: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
     template_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     template_content: Mapped[str] = mapped_column(db.Text, nullable=False)
@@ -105,7 +105,7 @@ class AppConfig(db.Model):
     """应用配置表（key-value），如自动通知时间。"""
     __tablename__ = "app_configs"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     config_key: Mapped[str] = mapped_column(db.String(128), unique=True, nullable=False)
     config_value: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
@@ -117,7 +117,7 @@ class ModuleCascadeReminder(db.Model):
     """模块级联催办待执行/已执行记录：按项目，产品最后一份完成→N分钟后催办开发；开发最后一份完成→N分钟后催办测试。"""
     __tablename__ = "module_cascade_reminders"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     trigger_module: Mapped[str] = mapped_column(db.String(32), nullable=False)  # 产品 | 开发
     target_module: Mapped[str] = mapped_column(db.String(32), nullable=False)   # 开发 | 测试
@@ -137,7 +137,7 @@ class UploadRecord(db.Model):
         UniqueConstraint("project_name", "file_name", "task_type", "author", name="uq_project_file_type_author"),
     )
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     file_name: Mapped[str] = mapped_column(db.String(255), nullable=False)
     task_type: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
@@ -153,14 +153,18 @@ class UploadRecord(db.Model):
     assignee_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     due_date: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
     business_side: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
-    product: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    product: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 影响产品
     country: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    registered_product_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 注册产品名称
+    model: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 型号
+    registration_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)  # 注册版本号
     project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     file_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     document_display_date: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
     reviewer: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     approver: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     belonging_module: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)  # 所属模块：产品、开发、测试、全员
+    displayed_author: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 体现编写人员
     task_status: Mapped[str] = mapped_column(db.String(32), default="pending")
     completion_status: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     audit_status: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
@@ -194,7 +198,7 @@ class UploadRecord(db.Model):
 class GenerateRecord(db.Model):
     __tablename__ = "generate_records"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     upload_id: Mapped[str] = mapped_column(
         db.String(36), db.ForeignKey("upload_records.id"), nullable=False
     )
@@ -213,7 +217,7 @@ class GenerateRecord(db.Model):
 class GenerationSummary(db.Model):
     __tablename__ = "generation_summary"
 
-    id: Mapped[str] = mapped_column(primary_key=True, default=generate_uuid)
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     upload_id: Mapped[str] = mapped_column(
         db.String(36), db.ForeignKey("upload_records.id"), unique=True, nullable=False
     )

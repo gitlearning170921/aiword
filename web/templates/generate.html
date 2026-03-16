@@ -42,7 +42,7 @@
             </div>
         </div>
         <p class="text-muted small">以下为分配给您的任务，可以直接标记完成状态或展开填写占位符。支持拖动排序。</p>
-        <div class="mb-2">
+        <div class="d-flex align-items-center mb-2">
             <span class="me-2">分组：</span>
             <div class="btn-group btn-group-sm" role="group">
                 <input type="radio" class="btn-check" name="myTasksGroupBy" id="myTasksGroupByNone" value="none" checked>
@@ -50,32 +50,41 @@
                 <input type="radio" class="btn-check" name="myTasksGroupBy" id="myTasksGroupByProject" value="project">
                 <label class="btn btn-outline-secondary" for="myTasksGroupByProject">按项目</label>
             </div>
+            <div class="col-toggle-wrap ms-auto">
+                <p class="fw-bold small mb-1 col-toggle-tip">文档通用及签审批信息请打开列设置查看。</p>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="colToggleBtn2">列设置 ▾</button>
+                <div class="col-toggle-menu" id="colToggleMenu2"></div>
+            </div>
         </div>
-        <div class="table-responsive">
-            <table class="table table-bordered table-hover align-middle table-selectable" id="myTasksTable">
+        <div class="table-responsive" style="max-height: 420px; overflow: auto;">
+            <table class="table table-bordered table-hover align-middle table-selectable table-compact" id="myTasksTable" data-col-store-key="colVis_page2_v2">
                 <thead class="table-light">
                     <tr>
-                        <th style="width: 50px;">序号</th>
-                        <th class="th-sortable" data-sort-key="projectName" style="width: 120px;">项目名称 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="projectCode" style="width: 90px;">项目编号 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="fileName" style="width: 120px;">文件名称 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="taskType" style="width: 90px;">任务类型 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="belongingModule" style="width: 70px;">所属模块 <span class="sort-indicator"></span></th>
-                        <th style="width: 90px;">来源</th>
-                        <th class="th-sortable" data-sort-key="fileVersion" style="width: 80px;">文件版本号 <span class="sort-indicator"></span></th>
-                        <th style="width: 120px;">文档链接</th>
-                        <th class="th-sortable" data-sort-key="dueDate" style="width: 85px;">截止日期 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="documentDisplayDate" style="width: 95px;">文档体现日期 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="businessSide" style="width: 80px;">影响业务方 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="product" style="width: 70px;">产品 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="country" style="width: 60px;">国家 <span class="sort-indicator"></span></th>
-                        <th style="width: 70px;">审核人员</th>
-                        <th style="width: 70px;">批准人员</th>
-                        <th style="width: 80px;">项目备注</th>
-                        <th style="width: 80px;">下发任务备注</th>
-                        <th style="width: 90px;">执行任务备注</th>
-                        <th style="width: 120px;">完成状态</th>
-                        <th style="width: 100px;">操作</th>
+                        <th data-col="seq">序号</th>
+                        <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="taskType" data-col="taskType">任务类型 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="belongingModule" data-col="belongingModule">所属模块 <span class="sort-indicator"></span></th>
+                        <th data-col="source">来源</th>
+                        <th data-col="docLink">文档链接</th>
+                        <th class="th-sortable" data-sort-key="dueDate" data-col="dueDate">截止日期 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="businessSide" data-col="businessSide">影响业务方 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="product" data-col="product">影响产品 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="country" data-col="country">国家 <span class="sort-indicator"></span></th>
+                        <th data-col="notes">下发任务备注</th>
+                        <th data-col="executionNotes">执行任务备注</th>
+                        <th data-col="completionStatus">完成状态</th>
+                        <th class="th-sortable col-narrow" data-sort-key="projectCode" data-col="projectCode">项目编号 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="fileVersion" data-col="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="documentDisplayDate" data-col="docDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
+                        <th data-col="reviewer">审核人员</th>
+                        <th data-col="approver">批准人员</th>
+                        <th data-col="displayedAuthor">体现编写人员</th>
+                        <th data-col="projectNotes">项目备注</th>
+                        <th data-col="registeredProductName">注册产品名称</th>
+                        <th data-col="model">型号</th>
+                        <th data-col="registrationVersion">注册版本号</th>
+                        <th class="col-op" data-col="op">操作</th>
                     </tr>
                 </thead>
                 <tbody id="myTasksBody">

@@ -100,34 +100,47 @@
                 <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
             </div>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
+            <div class="btn-group ms-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle" id="selectByProjectBtn" data-bs-toggle="dropdown" aria-expanded="false">按项目选择</button>
+                <ul class="dropdown-menu dropdown-menu-end" id="selectByProjectMenu" aria-labelledby="selectByProjectBtn"></ul>
+            </div>
+            <div class="col-toggle-wrap ms-2">
+                <p class="fw-bold small mb-1 col-toggle-tip">文档通用及签审批信息请打开列设置查看。</p>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="colToggleBtn1">列设置 ▾</button>
+                <div class="col-toggle-menu" id="colToggleMenu1"></div>
+            </div>
         </div>
-        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
-            <table class="table table-bordered table-hover align-middle table-sm table-selectable" id="recordsTable">
+        <div class="table-responsive" style="max-height: 420px; overflow: auto;">
+            <table class="table table-bordered table-hover align-middle table-sm table-selectable table-compact" id="recordsTable" data-col-store-key="colVis_page1_v2">
                 <thead class="table-light sticky-top">
                     <tr>
-                        <th style="width:40px"><input type="checkbox" class="form-check-input" id="recordSelectAll" title="全选"></th>
-                        <th style="width:40px">序号</th>
-                        <th class="th-sortable" data-sort-key="projectName">项目名称 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="projectCode">项目编号 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="fileName">文件名称 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="taskType">任务类型 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="belongingModule">所属模块 <span class="sort-indicator"></span></th>
-                        <th>来源</th>
-                        <th class="th-sortable" data-sort-key="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="author">编写人员 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="dueDate">截止日期 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="documentDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="businessSide">影响业务方 <span class="sort-indicator"></span></th>
-                        <th class="th-sortable" data-sort-key="product">产品 <span class="sort-indicator"></span></th>
-                                <th class="th-sortable" data-sort-key="country">国家 <span class="sort-indicator"></span></th>
-                                <th class="th-sortable" data-sort-key="taskStatus">状态 <span class="sort-indicator"></span></th>
-                                <th>审核状态</th>
-                                <th>审核人员</th>
-                                <th>批准人员</th>
-                                <th>项目备注</th>
-                                <th>下发任务备注</th>
-                                <th>执行任务备注</th>
-                                <th>操作</th>
+                        <th style="width:50px"><input type="checkbox" class="form-check-input" id="recordSelectAll" title="全选"></th>
+                        <th style="width:35px" data-col="seq">序号</th>
+                        <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="taskType" data-col="taskType">任务类型 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="belongingModule" data-col="belongingModule">所属模块 <span class="sort-indicator"></span></th>
+                        <th data-col="source">来源</th>
+                        <th class="th-sortable" data-sort-key="author" data-col="author">编写人员 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="dueDate" data-col="dueDate">截止日期 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="businessSide" data-col="businessSide">影响业务方 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="product" data-col="product">影响产品 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="country" data-col="country">国家 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="taskStatus" data-col="taskStatus">状态 <span class="sort-indicator"></span></th>
+                        <th data-col="auditStatus">审核状态</th>
+                        <th data-col="notes">下发任务备注</th>
+                        <th data-col="executionNotes">执行任务备注</th>
+                        <th class="th-sortable col-narrow" data-sort-key="projectCode" data-col="projectCode">项目编号 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="fileVersion" data-col="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable" data-sort-key="documentDisplayDate" data-col="docDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
+                        <th data-col="reviewer">审核人员</th>
+                        <th data-col="approver">批准人员</th>
+                        <th data-col="displayedAuthor">体现编写人员</th>
+                        <th data-col="projectNotes">项目备注</th>
+                        <th data-col="registeredProductName">注册产品名称</th>
+                        <th data-col="model">型号</th>
+                        <th data-col="registrationVersion">注册版本号</th>
+                        <th class="col-op" data-col="op">操作</th>
                     </tr>
                 </thead>
                 <tbody id="recordsTableBody"></tbody>
@@ -247,16 +260,14 @@
                         <input type="text" class="form-control form-control-sm" id="editRecordProject" required>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small">项目编号</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordProjectCode" placeholder="可选">
-                    </div>
-                    <div class="col-md-6">
                         <label class="form-label small">文件名称 *</label>
                         <input type="text" class="form-control form-control-sm" id="editRecordFile" required>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">任务类型</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordTaskType" placeholder="可选">
+                        <select class="form-select form-select-sm" id="editRecordTaskType">
+                            <option value="">选择类型</option>
+                        </select>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">所属模块</label>
@@ -277,22 +288,6 @@
                         <input type="date" class="form-control form-control-sm" id="editRecordDueDate">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small">文件版本号</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordFileVersion" placeholder="可选">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">文档体现日期</label>
-                        <input type="date" class="form-control form-control-sm" id="editRecordDocDisplayDate">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">审核人员</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordReviewer" placeholder="可选">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">批准人员</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordApprover" placeholder="可选">
-                    </div>
-                    <div class="col-md-6">
                         <label class="form-label small">负责人（钉钉@）</label>
                         <div class="input-group input-group-sm">
                             <input type="text" class="form-control" id="editRecordAssignee" placeholder="可选，需与账号管理中姓名一致">
@@ -311,7 +306,7 @@
                         <input type="text" class="form-control form-control-sm" id="editRecordBusinessSide">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small">产品</label>
+                        <label class="form-label small">影响产品</label>
                         <input type="text" class="form-control form-control-sm" id="editRecordProduct">
                     </div>
                     <div class="col-md-6">
@@ -322,13 +317,59 @@
                         <label class="form-label small">文档链接（每行一个）</label>
                         <textarea class="form-control form-control-sm" id="editRecordTemplateLinks" rows="2" placeholder="可选，多行"></textarea>
                     </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">项目备注</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordProjectNotes" placeholder="第一层项目备注">
-                    </div>
-                    <div class="col-md-6">
+                    <div class="col-12">
                         <label class="form-label small">下发任务备注</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordNotes" placeholder="第二层下发任务备注">
+                        <div class="d-flex align-items-start gap-1">
+                            <textarea class="form-control form-control-sm" id="editRecordNotes" rows="2" placeholder="第二层下发任务备注，多个链接每行一个"></textarea>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="editNoteUploadPdfBtn" title="上传附件" style="white-space:nowrap">📎上传</button>
+                            <input type="file" id="editNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+                        </div>
+                        <div id="editNoteFilesList" class="small mt-1"></div>
+                    </div>
+                    <div class="col-12 mt-2 pt-2 border-top">
+                        <p class="text-muted small fw-bold mb-2">以下为文档通用及签审批信息</p>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label small">项目编号</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordProjectCode" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">文件版本号</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordFileVersion" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">文档体现日期</label>
+                                <input type="date" class="form-control form-control-sm" id="editRecordDocDisplayDate">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">审核人员</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordReviewer" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">批准人员</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordApprover" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">体现编写人员</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordDisplayedAuthor" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">项目备注</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordProjectNotes" placeholder="第一层项目备注">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">注册产品名称</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordRegisteredProductName" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">型号</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordModel" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">注册版本号</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordRegistrationVersion" placeholder="可选">
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -353,7 +394,9 @@
                 <div class="row g-2">
                     <div class="col-md-6">
                         <label class="form-label small">任务类型</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditTaskType" placeholder="留空不修改">
+                        <select class="form-select form-select-sm" id="batchEditTaskType">
+                            <option value="">— 不修改 —</option>
+                        </select>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">所属模块</label>
@@ -382,7 +425,7 @@
                         <input type="text" class="form-control form-control-sm" id="batchEditBusinessSide" placeholder="留空不修改">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small">产品</label>
+                        <label class="form-label small">影响产品</label>
                         <input type="text" class="form-control form-control-sm" id="batchEditProduct" placeholder="留空不修改">
                     </div>
                     <div class="col-md-6">
@@ -390,30 +433,64 @@
                         <input type="text" class="form-control form-control-sm" id="batchEditCountry" placeholder="留空不修改">
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small">项目备注</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditProjectNotes" placeholder="留空不修改">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">文件版本号</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditFileVersion" placeholder="留空不修改">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">文档体现日期</label>
-                        <input type="date" class="form-control form-control-sm" id="batchEditDocumentDisplayDate" placeholder="留空不修改">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">审核人员</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditReviewer" placeholder="留空不修改">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">批准人员</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditApprover" placeholder="留空不修改">
-                    </div>
-                    <div class="col-md-6">
                         <label class="form-label small">审核状态</label>
                         <select class="form-select form-select-sm" id="batchEditAuditStatus">
                             <option value="">— 不修改 —</option>
                         </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">下发任务备注</label>
+                        <div class="d-flex align-items-start gap-1">
+                            <textarea class="form-control form-control-sm" id="batchEditNotes" rows="2" placeholder="留空不修改，多个链接每行一个"></textarea>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="batchEditNoteUploadPdfBtn" title="上传附件" style="white-space:nowrap">📎上传</button>
+                            <input type="file" id="batchEditNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+                        </div>
+                        <div id="batchEditNoteFilesList" class="small mt-1"></div>
+                    </div>
+                    <div class="col-12 mt-2 pt-2 border-top">
+                        <p class="text-muted small fw-bold mb-2">以下为文档通用及签审批信息</p>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label small">项目编号</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditProjectCode" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">文件版本号</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditFileVersion" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">文档体现日期</label>
+                                <input type="date" class="form-control form-control-sm" id="batchEditDocumentDisplayDate" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">审核人员</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditReviewer" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">批准人员</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditApprover" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">体现编写人员</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditDisplayedAuthor" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">项目备注</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditProjectNotes" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">注册产品名称</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditRegisteredProductName" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">型号</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditModel" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">注册版本号</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditRegistrationVersion" placeholder="留空不修改">
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

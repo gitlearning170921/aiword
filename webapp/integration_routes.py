@@ -106,7 +106,7 @@ def download_document(task_id: str):
 @bp.post("/update-audit")
 @_check_integration_secret
 def update_audit():
-    """接收审核结果并更新任务的审核状态"""
+    """接收审核结果并更新任务的审核状态，将问题摘要写入下发任务备注"""
     data = request.get_json(force=True) or {}
     task_id = (data.get("taskId") or "").strip()
     audit_status = (data.get("auditStatus") or "").strip()
@@ -123,12 +123,11 @@ def update_audit():
         if audit_status == "审核不通过待修改":
             record.audit_reject_count = (getattr(record, "audit_reject_count", 0) or 0) + 1
 
-    integration_task_id = (data.get("integrationTaskId") or "").strip()
     review_summary = (data.get("reviewSummary") or "").strip()
     if review_summary:
-        existing_notes = record.execution_notes or ""
+        existing_notes = record.notes or ""
         separator = "\n---\n" if existing_notes else ""
-        record.execution_notes = f"{existing_notes}{separator}[AI审核] {review_summary}"
+        record.notes = f"{existing_notes}{separator}[AI审核] {review_summary}"
 
     db.session.commit()
     return jsonify({

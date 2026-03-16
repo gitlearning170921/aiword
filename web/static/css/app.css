@@ -145,6 +145,22 @@
     color: #1f2937;
 }
 
+/* 任务列表滚动时表头固定在上方 */
+.table-responsive {
+    overflow: auto;
+}
+.table-responsive .table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #eef2ff;
+    color: #1f2937;
+    box-shadow: 0 1px 0 0 rgba(0,0,0,.08);
+}
+.table-responsive .table thead.table-light th {
+    background: #f8f9fa;
+}
+
 .mini-stat {
     border-radius: 16px;
     padding: 20px;
@@ -291,5 +307,124 @@ tr[draggable="true"].dragging {
     opacity: 0.5;
     font-size: 0.75em;
     margin-left: 2px;
+}
+
+/* ===== 紧凑表格 ===== */
+.table-compact {
+    font-size: 0.8rem;
+}
+.table-compact th,
+.table-compact td {
+    padding: 4px 6px;
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* 任务列表：内容可选中复制，横向滚动可看全，悬停 title 展示全文 */
+.table-compact tbody td {
+    max-width: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.table-compact tbody td.col-op {
+    user-select: none;
+}
+.table-compact td[data-wrap] {
+    white-space: normal;
+    overflow: visible;
+    word-break: break-all;
+}
+.table-compact th.col-wide,
+.table-compact td.col-wide {
+    max-width: 200px;
+}
+.table-compact th.col-narrow,
+.table-compact td.col-narrow {
+    max-width: 80px;
+}
+.table-compact th.col-op,
+.table-compact td.col-op {
+    white-space: nowrap;
+    overflow: visible;
+    max-width: none;
+}
+.table-compact .form-control,
+.table-compact .form-select,
+.table-compact .input-group {
+    font-size: 0.78rem;
+    min-height: auto;
+    border-radius: 4px;
+}
+.table-compact .btn-sm,
+.table-compact .btn {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+}
+.table-compact .badge {
+    font-size: 0.72rem;
+}
+
+/* ===== 列显隐 ===== */
+.col-toggle-wrap {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+.col-toggle-wrap .col-toggle-tip {
+    margin: 0;
+    white-space: nowrap;
+}
+.col-toggle-menu {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 1050;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,.15);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.12);
+    padding: 8px 0;
+    min-width: 180px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+.col-toggle-menu.show { display: block; }
+.col-toggle-menu label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 14px;
+    margin: 0;
+    cursor: pointer;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    user-select: none;
+}
+.col-toggle-menu label:hover {
+    background: #f0f5ff;
+}
+
+/* 拖拽排序手柄：仅手柄可拖动，单元格内可选中复制 */
+.drag-handle {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    display: inline-block;
+    padding: 0 2px;
+    margin-right: 4px;
+    color: #6c757d;
+    font-size: 0.75rem;
+    vertical-align: middle;
+}
+.drag-handle:active {
+    cursor: grabbing;
+}
+.table-compact .col-drag {
+    white-space: nowrap;
+    min-width: 2.5rem;
+    max-width: none;
 }
 

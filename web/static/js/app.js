@@ -110,6 +110,39 @@ let completionStatusesCache = [];
 let auditStatusesCache = [];
 let allRecordsCache = [];
 let lastRenderedRecords = [];
+
+function _escTitle(s) {
+    if (s == null || s === undefined) return "";
+    return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function _renderNotesHtml(notes) {
+    if (notes == null || notes === "") return "-";
+    var lines = String(notes).split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+    if (!lines.length) return "-";
+    var urlRe = /^https?:\/\/\S+/i;
+    var localFileRe = /^\/api\/uploads\/note-files\//i;
+    var parts = [];
+    var fileCount = 0;
+    lines.forEach(function (ln) {
+        if (urlRe.test(ln) || localFileRe.test(ln)) {
+            fileCount++;
+            var label;
+            var nameMatch = ln.match(/([^/\\?#]+)$/);
+            var rawName = nameMatch ? nameMatch[1] : "";
+            if (/\.(pdf|doc|docx|xls|xlsx|png|jpg|jpeg)$/i.test(rawName)) {
+                var displayName = rawName.replace(/^\d{14,}_/, "");
+                label = displayName || "附件" + fileCount;
+            } else {
+                label = "链接" + fileCount;
+            }
+            parts.push('<a href="' + ln.replace(/"/g, "&quot;") + '" target="_blank" class="text-primary me-1" title="' + ln.replace(/"/g, "&quot;") + '">📎' + label + '</a>');
+        } else {
+            parts.push('<span>' + ln.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>');
+        }
+    });
+    return parts.join(" ");
+}
 let recordsSortKey = "";
 let recordsSortDir = "asc";
 let recordsGroupBy = "none";
@@ -225,16 +258,22 @@ function createProjectBlock() {
         <div class="card-body">
             <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
             <div class="row g-2 mb-2">
-                <div class="col-md-2"><label class="form-label small">项目名称 *</label><input type="text" class="form-control form-control-sm project-name" placeholder="项目名称" required></div>
-                <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
-                <div class="col-md-2"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
-                <div class="col-md-2"><label class="form-label small">产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="产品"></div>
-                <div class="col-md-2"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
-                <div class="col-md-2"><label class="form-label small">备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="备注"></div>
+                <div class="col-md-3"><label class="form-label small">项目名称 *</label><input type="text" class="form-control form-control-sm project-name" placeholder="项目名称" required></div>
+                <div class="col-md-3"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
+                <div class="col-md-3"><label class="form-label small">影响产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="影响产品"></div>
+                <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
             </div>
             <div class="mb-2">
                 <button type="button" class="btn btn-outline-secondary btn-sm add-task-row-btn">+ 添加任务行</button>
                 <button type="button" class="btn btn-outline-danger btn-sm float-end remove-project-btn">删除项目</button>
+            </div>
+            <p class="text-muted small fw-bold mb-2 mt-2">以下为文档通用及签审批信息</p>
+            <div class="row g-2 mb-2">
+                <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
+                <div class="col-md-2"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
+                <div class="col-md-2"><label class="form-label small">注册产品名称</label><input type="text" class="form-control form-control-sm project-registered-product-name" placeholder="注册产品名称"></div>
+                <div class="col-md-2"><label class="form-label small">型号</label><input type="text" class="form-control form-control-sm project-model" placeholder="型号"></div>
+                <div class="col-md-2"><label class="form-label small">注册版本号</label><input type="text" class="form-control form-control-sm project-registration-version" placeholder="注册版本号"></div>
             </div>
             <h6 class="card-subtitle text-muted mb-2 mt-3">第二层 · 文件/事项任务</h6>
             <div class="table-responsive">
@@ -245,14 +284,26 @@ function createProjectBlock() {
                             <th>任务类型</th>
                             <th>所属模块</th>
                             <th>文档链接/模板</th>
-                            <th>文件版本号</th>
                             <th>编写人员 *</th>
                             <th>截止日期</th>
                             <th>下发任务备注</th>
+                            <th colspan="5" class="text-center">以下为文档通用及签审批信息</th>
+                            <th style="width:50px">操作</th>
+                        </tr>
+                        <tr>
+                            <th></th>
+                            <th></th>
+                            <th></th>
+                            <th></th>
+                            <th></th>
+                            <th></th>
+                            <th></th>
+                            <th>文件版本号</th>
                             <th>文档体现日期</th>
                             <th>审核人员</th>
                             <th>批准人员</th>
-                            <th style="width:50px">操作</th>
+                            <th>体现编写人员</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody class="project-task-tbody"></tbody>
@@ -283,6 +334,7 @@ function createProjectBlock() {
             newRowEl.querySelector(".task-doc-display-date").value = prevRow.querySelector(".task-doc-display-date")?.value ?? "";
             newRowEl.querySelector(".task-reviewer").value = prevRow.querySelector(".task-reviewer")?.value ?? "";
             newRowEl.querySelector(".task-approver").value = prevRow.querySelector(".task-approver")?.value ?? "";
+            newRowEl.querySelector(".task-displayed-author").value = prevRow.querySelector(".task-displayed-author")?.value ?? "";
         }
     });
     block.querySelector(".remove-project-btn").addEventListener("click", () => block.remove());
@@ -316,7 +368,6 @@ function createTaskRowUnderProject(projectBlock) {
             </div>
             <small class="task-file-name text-muted d-none"></small>
         </td>
-        <td><input type="text" class="form-control form-control-sm task-file-version" placeholder="版本号"></td>
         <td>
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-author" placeholder="编写人员">
@@ -324,10 +375,19 @@ function createTaskRowUnderProject(projectBlock) {
             </div>
         </td>
         <td><input type="date" class="form-control form-control-sm task-duedate"></td>
-        <td><input type="text" class="form-control form-control-sm task-notes" placeholder="下发任务备注"></td>
+        <td>
+            <div class="input-group input-group-sm">
+                <input type="text" class="form-control task-notes" placeholder="下发任务备注">
+                <button type="button" class="btn btn-outline-secondary btn-upload-note-pdf" title="上传PDF附件">📎</button>
+                <input type="file" class="task-note-file d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+            </div>
+            <div class="task-note-files-list small mt-1"></div>
+        </td>
+        <td><input type="text" class="form-control form-control-sm task-file-version" placeholder="版本号"></td>
         <td><input type="date" class="form-control form-control-sm task-doc-display-date" placeholder="文档体现日期"></td>
         <td><input type="text" class="form-control form-control-sm task-reviewer" placeholder="审核人员"></td>
         <td><input type="text" class="form-control form-control-sm task-approver" placeholder="批准人员"></td>
+        <td><input type="text" class="form-control form-control-sm task-displayed-author" placeholder="体现编写人员"></td>
         <td><button type="button" class="btn btn-sm btn-outline-danger btn-remove-row">×</button></td>
     `;
     tr.querySelector(".task-type-cell").appendChild(createTaskTypeSelect());
@@ -347,6 +407,30 @@ function createTaskRowUnderProject(projectBlock) {
     linkInput.addEventListener("input", () => {
         if (linkInput.value.trim()) { fileInput.value = ""; fileNameDisplay.classList.add("d-none"); }
     });
+    const notePdfBtn = tr.querySelector(".btn-upload-note-pdf");
+    const noteFileInput = tr.querySelector(".task-note-file");
+    const noteFilesList = tr.querySelector(".task-note-files-list");
+    const notesInput = tr.querySelector(".task-notes");
+    notePdfBtn.addEventListener("click", () => noteFileInput.click());
+    noteFileInput.addEventListener("change", async () => {
+        const f = noteFileInput.files[0];
+        noteFileInput.value = "";
+        if (!f) return;
+        const fd = new FormData();
+        fd.append("file", f);
+        try {
+            const res = await App.request("/api/uploads/note-files", { method: "POST", body: fd });
+            const cur = (notesInput.value || "").trim();
+            const url = res.url;
+            notesInput.value = cur ? cur + "\n" + url : url;
+            const tag = document.createElement("span");
+            tag.className = "badge bg-secondary me-1";
+            tag.innerHTML = '<a href="' + url + '" target="_blank" class="text-white text-decoration-none">' + (res.fileName || f.name) + '</a>';
+            noteFilesList.appendChild(tag);
+        } catch (e) {
+            App.notify(e.message || "上传失败", "danger");
+        }
+    });
     tr.querySelector(".btn-remove-row").addEventListener("click", () => tr.remove());
     tr.querySelector(".btn-create-user").addEventListener("click", () => {
         const authorInput = tr.querySelector(".task-author");
@@ -364,26 +448,29 @@ function createTaskRow() {
 
 function initDragSort(tbody, onReorder) {
     let draggedRow = null;
-    
+
     tbody.addEventListener("dragstart", (e) => {
-        if (e.target.tagName === "TR" && !e.target.classList.contains("group-header-row")) {
-            draggedRow = e.target;
-            e.target.style.opacity = "0.4";
-        }
+        if (!e.target.closest(".drag-handle")) return;
+        const row = e.target.closest("tr");
+        if (!row || row.classList.contains("group-header-row") || !row.dataset.id) return;
+        draggedRow = row;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", "");
+        try { e.dataTransfer.setDragImage(row, 0, 0); } catch (err) {}
+        row.style.opacity = "0.4";
     });
-    
+
     tbody.addEventListener("dragend", (e) => {
-        if (e.target.tagName === "TR") {
-            e.target.style.opacity = "1";
-            draggedRow = null;
-        }
+        const row = e.target.closest("tr");
+        if (row) row.style.opacity = "1";
+        draggedRow = null;
     });
-    
+
     tbody.addEventListener("dragover", (e) => {
         e.preventDefault();
         const targetRow = e.target.closest("tr");
         if (targetRow && targetRow.classList.contains("group-header-row")) return;
-        if (targetRow && draggedRow && targetRow !== draggedRow) {
+        if (targetRow && draggedRow && targetRow !== draggedRow && targetRow.dataset.id) {
             const rect = targetRow.getBoundingClientRect();
             const midY = rect.top + rect.height / 2;
             if (e.clientY < midY) {
@@ -393,10 +480,10 @@ function initDragSort(tbody, onReorder) {
             }
         }
     });
-    
+
     tbody.addEventListener("drop", (e) => {
         e.preventDefault();
-        if (onReorder) {
+        if (onReorder && draggedRow) {
             const rows = Array.from(tbody.querySelectorAll("tr")).filter((tr) => tr.dataset.id);
             const orders = rows.map((row, idx) => ({
                 id: row.dataset.id,
@@ -434,9 +521,9 @@ async function initUploadPage() {
     });
 
     const _CSV_HEADERS = [
-        "项目名称","项目编号","影响业务方","产品","国家","项目备注",
+        "项目名称","项目编号","影响业务方","影响产品","国家","项目备注","注册产品名称","型号","注册版本号",
         "文件名称","任务类型","文档链接","文件版本号","编写人员","负责人",
-        "截止日期","下发任务备注","文档体现日期","审核人员","批准人员","所属模块",
+        "截止日期","下发任务备注","文档体现日期","审核人员","批准人员","所属模块","体现编写人员",
     ];
     function _csvEscape(v) {
         var s = (v == null ? "" : String(v));
@@ -448,8 +535,9 @@ async function initUploadPage() {
     function _recordToCsvRow(r) {
         return [
             r.projectName, r.projectCode, r.businessSide, r.product, r.country, r.projectNotes,
+            r.registeredProductName, r.model, r.registrationVersion,
             r.fileName, r.taskType, r.templateLinks, r.fileVersion, r.author, r.assigneeName || r.author,
-            r.dueDate, r.notes, r.documentDisplayDate, r.reviewer, r.approver, r.belongingModule,
+            r.dueDate, r.notes, r.documentDisplayDate, r.reviewer, r.approver, r.belongingModule, r.displayedAuthor,
         ].map(_csvEscape).join(",");
     }
     function _downloadCsvString(csvContent, filename) {
@@ -551,6 +639,9 @@ async function initUploadPage() {
                 const businessSide = (block.querySelector(".project-business-side")?.value || "").trim() || "";
                 const product = (block.querySelector(".project-product")?.value || "").trim() || "";
                 const country = (block.querySelector(".project-country")?.value || "").trim() || "";
+                const registeredProductName = (block.querySelector(".project-registered-product-name")?.value || "").trim() || "";
+                const model = (block.querySelector(".project-model")?.value || "").trim() || "";
+                const registrationVersion = (block.querySelector(".project-registration-version")?.value || "").trim() || "";
                 const rows = block.querySelectorAll(".project-task-tbody tr");
 
                 for (const row of rows) {
@@ -566,6 +657,7 @@ async function initUploadPage() {
                     const docDisplayDate = (row.querySelector(".task-doc-display-date")?.value || "").trim() || "";
                     const reviewer = (row.querySelector(".task-reviewer")?.value || "").trim() || "";
                     const approver = (row.querySelector(".task-approver")?.value || "").trim() || "";
+                    const displayedAuthor = (row.querySelector(".task-displayed-author")?.value || "").trim() || "";
                     const moduleSelect = row.querySelector(".task-module-cell select");
                     const belongingModule = moduleSelect ? (moduleSelect.value || "").trim() : "";
 
@@ -584,10 +676,14 @@ async function initUploadPage() {
                     if (businessSide) formData.append("businessSide", businessSide);
                     if (product) formData.append("product", product);
                     if (country) formData.append("country", country);
+                    if (registeredProductName) formData.append("registeredProductName", registeredProductName);
+                    if (model) formData.append("model", model);
+                    if (registrationVersion) formData.append("registrationVersion", registrationVersion);
                     if (fileVersion) formData.append("fileVersion", fileVersion);
                     if (docDisplayDate) formData.append("documentDisplayDate", docDisplayDate);
                     if (reviewer) formData.append("reviewer", reviewer);
                     if (approver) formData.append("approver", approver);
+                    if (displayedAuthor) formData.append("displayedAuthor", displayedAuthor);
                     if (belongingModule) formData.append("belongingModule", belongingModule);
                     if (link) {
                         formData.append("templateLinks", normalizeDocLink(link));
@@ -623,10 +719,14 @@ async function initUploadPage() {
                                 if (businessSide) formDataReplace.append("businessSide", businessSide);
                                 if (product) formDataReplace.append("product", product);
                                 if (country) formDataReplace.append("country", country);
+                                if (registeredProductName) formDataReplace.append("registeredProductName", registeredProductName);
+                                if (model) formDataReplace.append("model", model);
+                                if (registrationVersion) formDataReplace.append("registrationVersion", registrationVersion);
                                 if (fileVersion) formDataReplace.append("fileVersion", fileVersion);
                                 if (docDisplayDate) formDataReplace.append("documentDisplayDate", docDisplayDate);
                                 if (reviewer) formDataReplace.append("reviewer", reviewer);
                                 if (approver) formDataReplace.append("approver", approver);
+                                if (displayedAuthor) formDataReplace.append("displayedAuthor", displayedAuthor);
                                 if (belongingModule) formDataReplace.append("belongingModule", belongingModule);
                                 formDataReplace.set("replace", "true");
                                 if (link) {
@@ -752,7 +852,18 @@ async function openEditRecordModal(r) {
     const projectCodeEl = document.getElementById("editRecordProjectCode");
     if (projectCodeEl) projectCodeEl.value = r.projectCode || "";
     document.getElementById("editRecordFile").value = r.fileName || "";
-    document.getElementById("editRecordTaskType").value = r.taskType || "";
+    const taskTypeEl = document.getElementById("editRecordTaskType");
+    if (taskTypeEl) {
+        await loadTaskTypes();
+        taskTypeEl.innerHTML = '<option value="">选择类型</option>';
+        (taskTypesCache || []).forEach(t => {
+            const opt = document.createElement("option");
+            opt.value = t.name;
+            opt.textContent = t.name;
+            taskTypeEl.appendChild(opt);
+        });
+        taskTypeEl.value = r.taskType || "";
+    }
     const editRecordBelongingModuleEl = document.getElementById("editRecordBelongingModule");
     if (editRecordBelongingModuleEl) editRecordBelongingModuleEl.value = r.belongingModule || "";
     document.getElementById("editRecordAuthor").value = r.author || "";
@@ -761,8 +872,28 @@ async function openEditRecordModal(r) {
     document.getElementById("editRecordBusinessSide").value = r.businessSide || "";
     document.getElementById("editRecordProduct").value = r.product || "";
     document.getElementById("editRecordCountry").value = r.country || "";
+    const regProdEl = document.getElementById("editRecordRegisteredProductName");
+    if (regProdEl) regProdEl.value = r.registeredProductName || "";
+    const modelEl = document.getElementById("editRecordModel");
+    if (modelEl) modelEl.value = r.model || "";
+    const regVerEl = document.getElementById("editRecordRegistrationVersion");
+    if (regVerEl) regVerEl.value = r.registrationVersion || "";
     document.getElementById("editRecordTemplateLinks").value = r.templateLinks || "";
     document.getElementById("editRecordNotes").value = r.notes || "";
+    const editNoteFilesList = document.getElementById("editNoteFilesList");
+    if (editNoteFilesList) {
+        editNoteFilesList.innerHTML = "";
+        var noteLines = (r.notes || "").split("\n").filter(function (l) { return l.trim(); });
+        noteLines.forEach(function (ln) {
+            if (/^https?:\/\//i.test(ln.trim()) || /^\/api\/uploads\/note-files\//i.test(ln.trim())) {
+                var tag = document.createElement("span");
+                tag.className = "badge bg-secondary me-1 mb-1";
+                var name = ln.trim().match(/([^/\\?#]+)$/);
+                tag.innerHTML = '<a href="' + ln.trim() + '" target="_blank" class="text-white text-decoration-none">' + (name ? name[1] : "附件") + '</a>';
+                editNoteFilesList.appendChild(tag);
+            }
+        });
+    }
     const projectNotesEl = document.getElementById("editRecordProjectNotes");
     if (projectNotesEl) projectNotesEl.value = r.projectNotes || "";
     const fileVersionEl = document.getElementById("editRecordFileVersion");
@@ -773,6 +904,8 @@ async function openEditRecordModal(r) {
     if (reviewerEl) reviewerEl.value = r.reviewer || "";
     const approverEl = document.getElementById("editRecordApprover");
     if (approverEl) approverEl.value = r.approver || "";
+    const displayedAuthorEl = document.getElementById("editRecordDisplayedAuthor");
+    if (displayedAuthorEl) displayedAuthorEl.value = r.displayedAuthor || "";
     const statusEl = document.getElementById("editRecordAuditStatus");
     if (statusEl) {
         await loadAuditStatuses();
@@ -858,6 +991,35 @@ function initEditRecordModal() {
             }
         });
     }
+    const editNotePdfBtn = document.getElementById("editNoteUploadPdfBtn");
+    const editNoteFileInput = document.getElementById("editNoteFileInput");
+    if (editNotePdfBtn && editNoteFileInput) {
+        editNotePdfBtn.addEventListener("click", () => editNoteFileInput.click());
+        editNoteFileInput.addEventListener("change", async () => {
+            const f = editNoteFileInput.files[0];
+            editNoteFileInput.value = "";
+            if (!f) return;
+            const fd = new FormData();
+            fd.append("file", f);
+            try {
+                const res = await App.request("/api/uploads/note-files", { method: "POST", body: fd });
+                const notesEl = document.getElementById("editRecordNotes");
+                const cur = (notesEl.value || "").trim();
+                const url = res.url;
+                notesEl.value = cur ? cur + "\n" + url : url;
+                const listEl = document.getElementById("editNoteFilesList");
+                if (listEl) {
+                    const tag = document.createElement("span");
+                    tag.className = "badge bg-secondary me-1 mb-1";
+                    tag.innerHTML = '<a href="' + url + '" target="_blank" class="text-white text-decoration-none">' + (res.fileName || f.name) + '</a>';
+                    listEl.appendChild(tag);
+                }
+                App.notify("附件已上传", "success");
+            } catch (e) {
+                App.notify(e.message || "上传失败", "danger");
+            }
+        });
+    }
     saveBtn.addEventListener("click", async () => {
         const id = document.getElementById("editRecordId").value;
         const payload = {
@@ -870,6 +1032,9 @@ function initEditRecordModal() {
             businessSide: document.getElementById("editRecordBusinessSide").value.trim() || null,
             product: document.getElementById("editRecordProduct").value.trim() || null,
             country: document.getElementById("editRecordCountry").value.trim() || null,
+            registeredProductName: document.getElementById("editRecordRegisteredProductName")?.value?.trim() || null,
+            model: document.getElementById("editRecordModel")?.value?.trim() || null,
+            registrationVersion: document.getElementById("editRecordRegistrationVersion")?.value?.trim() || null,
             templateLinks: document.getElementById("editRecordTemplateLinks").value.trim() || null,
             notes: document.getElementById("editRecordNotes").value.trim() || null,
             belongingModule: document.getElementById("editRecordBelongingModule")?.value?.trim() || null,
@@ -885,6 +1050,8 @@ function initEditRecordModal() {
         if (reviewerEl) payload.reviewer = reviewerEl.value.trim() || null;
         const approverEl = document.getElementById("editRecordApprover");
         if (approverEl) payload.approver = approverEl.value.trim() || null;
+        const displayedAuthorSaveEl = document.getElementById("editRecordDisplayedAuthor");
+        if (displayedAuthorSaveEl) payload.displayedAuthor = displayedAuthorSaveEl.value.trim() || null;
         const auditStatusEl = document.getElementById("editRecordAuditStatus");
         if (auditStatusEl) {
             const v = auditStatusEl.value.trim();
@@ -919,6 +1086,36 @@ function initBatchEditRecords() {
     const batchEditSaveBtn = document.getElementById("batchEditSaveBtn");
     if (!table || !batchEditBtn) return;
 
+    const batchNotePdfBtn = document.getElementById("batchEditNoteUploadPdfBtn");
+    const batchNoteFileInput = document.getElementById("batchEditNoteFileInput");
+    if (batchNotePdfBtn && batchNoteFileInput) {
+        batchNotePdfBtn.addEventListener("click", () => batchNoteFileInput.click());
+        batchNoteFileInput.addEventListener("change", async () => {
+            const f = batchNoteFileInput.files[0];
+            batchNoteFileInput.value = "";
+            if (!f) return;
+            const fd = new FormData();
+            fd.append("file", f);
+            try {
+                const res = await App.request("/api/uploads/note-files", { method: "POST", body: fd });
+                const notesEl = document.getElementById("batchEditNotes");
+                const cur = (notesEl.value || "").trim();
+                const url = res.url;
+                notesEl.value = cur ? cur + "\n" + url : url;
+                const listEl = document.getElementById("batchEditNoteFilesList");
+                if (listEl) {
+                    const tag = document.createElement("span");
+                    tag.className = "badge bg-secondary me-1 mb-1";
+                    tag.innerHTML = '<a href="' + url + '" target="_blank" class="text-white text-decoration-none">' + (res.fileName || f.name) + '</a>';
+                    listEl.appendChild(tag);
+                }
+                App.notify("附件已上传", "success");
+            } catch (e) {
+                App.notify(e.message || "上传失败", "danger");
+            }
+        });
+    }
+
     selectAll?.addEventListener("change", () => {
         const tbody = document.getElementById("recordsTableBody");
         if (!tbody) return;
@@ -931,6 +1128,46 @@ function initBatchEditRecords() {
     table.addEventListener("change", (e) => {
         if (e.target.classList.contains("record-checkbox")) updateBatchEditButtonState();
     });
+
+    const selectByProjectBtn = document.getElementById("selectByProjectBtn");
+    const selectByProjectMenu = document.getElementById("selectByProjectMenu");
+    if (selectByProjectBtn && selectByProjectMenu) {
+        selectByProjectBtn.addEventListener("show.bs.dropdown", () => {
+            const projects = [...new Set((lastRenderedRecords || []).map((r) => (r.projectName != null && r.projectName !== "") ? String(r.projectName).trim() : ""))];
+            projects.sort((a, b) => (a || "").localeCompare(b || ""));
+            selectByProjectMenu.innerHTML = "";
+            if (projects.length === 0) {
+                const li = document.createElement("li");
+                li.innerHTML = '<span class="dropdown-item text-muted">暂无数据</span>';
+                selectByProjectMenu.appendChild(li);
+            } else {
+                projects.forEach((p) => {
+                    const li = document.createElement("li");
+                    const a = document.createElement("a");
+                    a.href = "#";
+                    a.className = "dropdown-item";
+                    a.textContent = p || "（空）";
+                    a.dataset.project = p ?? "";
+                    a.addEventListener("click", (e) => {
+                        e.preventDefault();
+                        const tbody = document.getElementById("recordsTableBody");
+                        if (!tbody) return;
+                        const val = a.dataset.project;
+                        tbody.querySelectorAll("tr[data-id]").forEach((tr) => {
+                            if ((tr.dataset.projectName || "") === (val || "")) {
+                                const cb = tr.querySelector(".record-checkbox");
+                                if (cb) cb.checked = true;
+                            }
+                        });
+                        updateBatchEditButtonState();
+                        bootstrap.Dropdown.getInstance(selectByProjectBtn)?.hide();
+                    });
+                    li.appendChild(a);
+                    selectByProjectMenu.appendChild(li);
+                });
+            }
+        });
+    }
 
     batchEditBtn.addEventListener("click", async () => {
         const tbody = document.getElementById("recordsTableBody");
@@ -958,6 +1195,8 @@ function initBatchEditRecords() {
             .map((id) => allRecordsCache.find((x) => String(x.id) === String(id)))
             .filter(Boolean);
         const first = records[0];
+        const projectCodeVal = first ? (first.projectCode || "").trim() : "";
+        const sameProjectCode = projectCodeVal !== "" && records.every((r) => ((r.projectCode || "").trim()) === projectCodeVal);
         const taskTypeVal = first ? (first.taskType || "").trim() : "";
         const authorVal = first ? (first.author || "").trim() : "";
         const assigneeVal = first ? (first.assigneeName || first.author || "").trim() : "";
@@ -998,13 +1237,38 @@ function initBatchEditRecords() {
             });
             sel.value = sameAudit ? auditVal : "";
         }
-        document.getElementById("batchEditTaskType").value = sameTaskType ? taskTypeVal : "";
+        const batchTaskTypeSel = document.getElementById("batchEditTaskType");
+        if (batchTaskTypeSel) {
+            await loadTaskTypes();
+            batchTaskTypeSel.innerHTML = '<option value="">— 不修改 —</option>';
+            (taskTypesCache || []).forEach((t) => {
+                const opt = document.createElement("option");
+                opt.value = t.name;
+                opt.textContent = t.name;
+                batchTaskTypeSel.appendChild(opt);
+            });
+            batchTaskTypeSel.value = sameTaskType ? taskTypeVal : "";
+        }
+        const batchEditProjectCodeEl = document.getElementById("batchEditProjectCode");
+        if (batchEditProjectCodeEl) batchEditProjectCodeEl.value = sameProjectCode ? projectCodeVal : "";
         document.getElementById("batchEditAuthor").value = sameAuthor ? authorVal : "";
         document.getElementById("batchEditAssignee").value = sameAssignee ? assigneeVal : "";
         document.getElementById("batchEditDueDate").value = sameDueDate ? dueDateVal : "";
         document.getElementById("batchEditBusinessSide").value = sameBusinessSide ? businessSideVal : "";
         document.getElementById("batchEditProduct").value = sameProduct ? productVal : "";
         document.getElementById("batchEditCountry").value = sameCountry ? countryVal : "";
+        const registeredProductNameVal = first ? (first.registeredProductName || "").trim() : "";
+        const sameRegProd = registeredProductNameVal !== "" && records.every((r) => ((r.registeredProductName || "").trim()) === registeredProductNameVal);
+        const batchEditRegProdEl = document.getElementById("batchEditRegisteredProductName");
+        if (batchEditRegProdEl) batchEditRegProdEl.value = sameRegProd ? registeredProductNameVal : "";
+        const modelVal = first ? (first.model || "").trim() : "";
+        const sameModel = modelVal !== "" && records.every((r) => ((r.model || "").trim()) === modelVal);
+        const batchEditModelEl = document.getElementById("batchEditModel");
+        if (batchEditModelEl) batchEditModelEl.value = sameModel ? modelVal : "";
+        const registrationVersionVal = first ? (first.registrationVersion || "").trim() : "";
+        const sameRegVer = registrationVersionVal !== "" && records.every((r) => ((r.registrationVersion || "").trim()) === registrationVersionVal);
+        const batchEditRegVerEl = document.getElementById("batchEditRegistrationVersion");
+        if (batchEditRegVerEl) batchEditRegVerEl.value = sameRegVer ? registrationVersionVal : "";
         const batchEditProjectNotesEl = document.getElementById("batchEditProjectNotes");
         if (batchEditProjectNotesEl) batchEditProjectNotesEl.value = sameProjectNotes ? projectNotesVal : "";
         const batchEditFileVersionEl = document.getElementById("batchEditFileVersion");
@@ -1017,6 +1281,16 @@ function initBatchEditRecords() {
         if (batchEditReviewerEl) batchEditReviewerEl.value = sameReviewer ? reviewerVal : "";
         const batchEditApproverEl = document.getElementById("batchEditApprover");
         if (batchEditApproverEl) batchEditApproverEl.value = sameApprover ? approverVal : "";
+        const notesVal = first ? (first.notes || "").trim() : "";
+        const sameNotes = notesVal !== "" && records.every((r) => ((r.notes || "").trim()) === notesVal);
+        const batchEditNotesEl = document.getElementById("batchEditNotes");
+        if (batchEditNotesEl) batchEditNotesEl.value = sameNotes ? notesVal : "";
+        const batchEditNoteFilesListEl = document.getElementById("batchEditNoteFilesList");
+        if (batchEditNoteFilesListEl) batchEditNoteFilesListEl.innerHTML = "";
+        const displayedAuthorVal = first ? (first.displayedAuthor || "").trim() : "";
+        const sameDisplayedAuthor = displayedAuthorVal !== "" && records.every((r) => ((r.displayedAuthor || "").trim()) === displayedAuthorVal);
+        const batchEditDisplayedAuthorEl = document.getElementById("batchEditDisplayedAuthor");
+        if (batchEditDisplayedAuthorEl) batchEditDisplayedAuthorEl.value = sameDisplayedAuthor ? displayedAuthorVal : "";
         if (batchEditSaveBtn) batchEditSaveBtn.textContent = `应用到所选 (${ids.length}条)`;
         if (batchEditModal) {
             batchEditModal.dataset.batchEditIds = ids.join(",");
@@ -1029,6 +1303,7 @@ function initBatchEditRecords() {
         const idsStr = batchEditModal?.dataset.batchEditIds;
         if (!idsStr) return;
         const ids = idsStr.split(",").filter(Boolean);
+        const projectCode = (document.getElementById("batchEditProjectCode")?.value || "").trim();
         const taskType = (document.getElementById("batchEditTaskType")?.value || "").trim();
         const author = (document.getElementById("batchEditAuthor")?.value || "").trim();
         const assignee = (document.getElementById("batchEditAssignee")?.value || "").trim();
@@ -1036,6 +1311,9 @@ function initBatchEditRecords() {
         const businessSide = (document.getElementById("batchEditBusinessSide")?.value || "").trim();
         const product = (document.getElementById("batchEditProduct")?.value || "").trim();
         const country = (document.getElementById("batchEditCountry")?.value || "").trim();
+        const registeredProductName = (document.getElementById("batchEditRegisteredProductName")?.value || "").trim();
+        const model = (document.getElementById("batchEditModel")?.value || "").trim();
+        const registrationVersion = (document.getElementById("batchEditRegistrationVersion")?.value || "").trim();
         const projectNotes = (document.getElementById("batchEditProjectNotes")?.value || "").trim();
         const fileVersion = (document.getElementById("batchEditFileVersion")?.value || "").trim();
         const belongingModule = (document.getElementById("batchEditBelongingModule")?.value || "").trim();
@@ -1044,7 +1322,10 @@ function initBatchEditRecords() {
         const approver = (document.getElementById("batchEditApprover")?.value || "").trim();
         const auditEl = document.getElementById("batchEditAuditStatus");
         const auditStatus = auditEl?.value?.trim() ?? "";
+        const notes = (document.getElementById("batchEditNotes")?.value || "").trim();
+        const displayedAuthor = (document.getElementById("batchEditDisplayedAuthor")?.value || "").trim();
         const payload = {};
+        if (projectCode !== "") payload.projectCode = projectCode;
         if (taskType !== "") payload.taskType = taskType;
         if (belongingModule !== "") payload.belongingModule = belongingModule;
         if (author !== "") payload.author = author;
@@ -1053,12 +1334,17 @@ function initBatchEditRecords() {
         if (businessSide !== "") payload.businessSide = businessSide;
         if (product !== "") payload.product = product;
         if (country !== "") payload.country = country;
+        if (registeredProductName !== "") payload.registeredProductName = registeredProductName;
+        if (model !== "") payload.model = model;
+        if (registrationVersion !== "") payload.registrationVersion = registrationVersion;
         if (projectNotes !== "") payload.projectNotes = projectNotes;
         if (fileVersion !== "") payload.fileVersion = fileVersion;
         if (documentDisplayDate !== "") payload.documentDisplayDate = documentDisplayDate;
         if (reviewer !== "") payload.reviewer = reviewer;
         if (approver !== "") payload.approver = approver;
         if (auditStatus !== "") payload.auditStatus = auditStatus;
+        if (notes !== "") payload.notes = notes;
+        if (displayedAuthor !== "") payload.displayedAuthor = displayedAuthor;
         if (Object.keys(payload).length === 0) {
             App.notify("请至少填写一项要修改的内容", "warning");
             return;
@@ -1153,8 +1439,8 @@ function renderRecordsTable(records) {
     
     const makeRow = (r, idx) => {
         const tr = document.createElement("tr");
-        tr.draggable = true;
         tr.dataset.id = r.id;
+        tr.dataset.projectName = (r.projectName != null && r.projectName !== "") ? String(r.projectName).trim() : "";
         let sourceHtml;
         if (r.hasFile) {
             sourceHtml = "文件";
@@ -1180,29 +1466,33 @@ function renderRecordsTable(records) {
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         tr.innerHTML = `
-            <td><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
+            <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
-            <td>${r.projectName}</td>
-            <td>${projectCode}</td>
-            <td>${r.fileName}</td>
-            <td>${r.taskType || "-"}</td>
-            <td>${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
+            <td title="${_escTitle(r.projectName)}">${r.projectName}</td>
+            <td title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
+            <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceHtml}</td>
-            <td>${fileVersion}</td>
-            <td>${r.author}</td>
+            <td title="${_escTitle(r.author)}">${r.author}</td>
             <td>${dueDateHtml}</td>
-            <td>${documentDisplayDate}</td>
-            <td>${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
-            <td>${(r.product != null && r.product !== "") ? r.product : "-"}</td>
-            <td>${(r.country != null && r.country !== "") ? r.country : "-"}</td>
+            <td title="${_escTitle(r.businessSide)}">${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
+            <td title="${_escTitle(r.product)}">${(r.product != null && r.product !== "") ? r.product : "-"}</td>
+            <td title="${_escTitle(r.country)}">${(r.country != null && r.country !== "") ? r.country : "-"}</td>
             <td>${statusBadge}</td>
-            <td>${auditStatusText}</td>
-            <td>${reviewer}</td>
-            <td>${approver}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : ""}">${(r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : "-"}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(r.notes != null && r.notes !== "") ? r.notes : ""}">${(r.notes != null && r.notes !== "") ? r.notes : "-"}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : ""}">${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : "-"}</td>
-            <td>
+            <td title="${_escTitle(r.auditStatus)}">${auditStatusText}</td>
+            <td data-wrap style="max-width:180px" title="${_escTitle(r.notes)}">${_renderNotesHtml(r.notes)}</td>
+            <td title="${_escTitle(r.executionNotes)}">${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : "-"}</td>
+            <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
+            <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
+            <td title="${_escTitle(r.documentDisplayDate)}">${documentDisplayDate}</td>
+            <td title="${_escTitle(r.reviewer)}">${reviewer}</td>
+            <td title="${_escTitle(r.approver)}">${approver}</td>
+            <td title="${_escTitle(r.displayedAuthor)}">${(r.displayedAuthor != null && r.displayedAuthor !== "") ? r.displayedAuthor : "-"}</td>
+            <td title="${_escTitle(r.projectNotes)}">${(r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : "-"}</td>
+            <td title="${_escTitle(r.registeredProductName)}">${(r.registeredProductName != null && r.registeredProductName !== "") ? r.registeredProductName : "-"}</td>
+            <td title="${_escTitle(r.model)}">${(r.model != null && r.model !== "") ? r.model : "-"}</td>
+            <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
+            <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
                 <button class="btn btn-sm btn-outline-danger btn-delete-task" data-id="${r.id}">删除</button>
             </td>
@@ -1238,7 +1528,7 @@ function renderRecordsTable(records) {
             header1.dataset.groupKey = key1;
             header1.dataset.groupLevel = "1";
             header1.dataset.groupIndex = String(groupIndexL1++);
-            header1.innerHTML = `<td colspan="23" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
+            header1.innerHTML = `<td colspan="27" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
             header1.style.cursor = "pointer";
             tbody.appendChild(header1);
             authorMap.forEach((arr, authorName) => {
@@ -1249,7 +1539,7 @@ function renderRecordsTable(records) {
                 header2.dataset.groupKey = key2;
                 header2.dataset.groupLevel = "2";
                 header2.dataset.groupIndex = String(groupIndexL2);
-                header2.innerHTML = `<td colspan="23" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
+                header2.innerHTML = `<td colspan="27" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
                 header2.style.cursor = "pointer";
                 tbody.appendChild(header2);
                 const rowHidden = collapsed1 || collapsed2;
@@ -1307,7 +1597,7 @@ function renderRecordsTable(records) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="23" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="27" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             tbody.appendChild(headerTr);
             arr.forEach((r) => {
@@ -1809,7 +2099,6 @@ function renderMyTasksTable(records) {
     
     const addOneRow = (r, idx, groupKey, groupIndex, collapsed) => {
         const tr = document.createElement("tr");
-        tr.draggable = true;
         tr.dataset.id = r.id;
         if (groupKey !== undefined) {
             tr.classList.add("group-data-row");
@@ -1835,27 +2124,31 @@ function renderMyTasksTable(records) {
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         tr.innerHTML = `
-            <td class="seq-cell">${idx + 1}</td>
-            <td>${r.projectName}</td>
-            <td>${projectCode}</td>
-            <td>${r.fileName}</td>
-            <td>${r.taskType || "-"}</td>
-            <td>${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
+            <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>
+            <td title="${_escTitle(r.projectName)}">${r.projectName}</td>
+            <td title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
+            <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceTd}</td>
-            <td>${fileVersion}</td>
             <td class="task-link-cell">${linkCellHtml}</td>
             <td>${dueDateHtml}</td>
-            <td>${documentDisplayDate}</td>
-            <td>${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
-            <td>${(r.product != null && r.product !== "") ? r.product : "-"}</td>
-            <td>${(r.country != null && r.country !== "") ? r.country : "-"}</td>
-            <td>${reviewer}</td>
-            <td>${approver}</td>
-            <td class="text-truncate" style="max-width:80px" title="${projectNotesDisplay !== "-" ? r.projectNotes : ""}">${projectNotesDisplay}</td>
-            <td class="text-truncate" style="max-width:80px" title="${notesDisplay !== "-" ? r.notes : ""}">${notesDisplay}</td>
+            <td title="${_escTitle(r.businessSide)}">${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
+            <td title="${_escTitle(r.product)}">${(r.product != null && r.product !== "") ? r.product : "-"}</td>
+            <td title="${_escTitle(r.country)}">${(r.country != null && r.country !== "") ? r.country : "-"}</td>
+            <td data-wrap style="max-width:180px" title="${_escTitle(r.notes)}">${_renderNotesHtml(r.notes)}</td>
             <td><input type="text" class="form-control form-control-sm execution-notes-input" placeholder="执行备注" data-id="${r.id}" value="${(r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes).replace(/"/g, "&quot;") : ""}"></td>
             <td class="completion-status-cell"></td>
-            <td>
+            <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
+            <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
+            <td title="${_escTitle(r.documentDisplayDate)}">${documentDisplayDate}</td>
+            <td title="${_escTitle(r.reviewer)}">${reviewer}</td>
+            <td title="${_escTitle(r.approver)}">${approver}</td>
+            <td title="${_escTitle(r.displayedAuthor)}">${(r.displayedAuthor != null && r.displayedAuthor !== "") ? r.displayedAuthor : "-"}</td>
+            <td title="${_escTitle(r.projectNotes)}">${projectNotesDisplay}</td>
+            <td title="${_escTitle(r.registeredProductName)}">${(r.registeredProductName != null && r.registeredProductName !== "") ? r.registeredProductName : "-"}</td>
+            <td title="${_escTitle(r.model)}">${(r.model != null && r.model !== "") ? r.model : "-"}</td>
+            <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
+            <td class="col-op">
                 ${r.hasFile || (r.placeholders && r.placeholders.length > 0)
                     ? `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders" data-id="${r.id}">填写</button>`
                     : ''}
@@ -1942,7 +2235,7 @@ function renderMyTasksTable(records) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="21" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             myTasksBody.appendChild(headerTr);
             arr.forEach((r) => { addOneRow(r, globalIdx++, key, gidx, collapsed); });
@@ -2208,7 +2501,7 @@ function initDashboardPage() {
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
                 <td class="text-success">${row.completed}</td>
-                <td class="text-danger">${row.pending}</td>
+                <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
                 <td>
@@ -2249,7 +2542,7 @@ function initDashboardPage() {
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
                 <td class="text-success">${row.completed}</td>
-                <td class="text-danger">${row.pending}</td>
+                <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
                 <td class="${auditCellClass}">${auditCount}</td>
@@ -2290,7 +2583,7 @@ function initDashboardPage() {
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
                 <td class="text-success">${row.completed}</td>
-                <td class="text-danger">${row.pending}</td>
+                <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
                 <td>
@@ -2330,7 +2623,6 @@ function initDashboardPage() {
         
         const addDetailRow = (row, groupKey, groupIndex, collapsed, twoLevelKeys) => {
             const tr = document.createElement("tr");
-            tr.draggable = true;
             tr.dataset.id = row.uploadId;
             if (groupKey !== undefined) {
                 tr.classList.add("group-data-row");
@@ -2351,26 +2643,31 @@ function initDashboardPage() {
             const reviewer = (row.reviewer != null && row.reviewer !== "") ? row.reviewer : "-";
             const approver = (row.approver != null && row.approver !== "") ? row.approver : "-";
             tr.innerHTML = `
-                <td class="seq-cell">${row.seq}</td>
-                <td>${row.projectName}</td>
-                <td>${projectCode}</td>
-                <td>${row.fileName}</td>
-                <td>${row.taskType || "-"}</td>
-                <td>${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
-                <td>${row.author}</td>
+                <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${row.seq}</td>
+                <td title="${_escTitle(row.projectName)}">${row.projectName}</td>
+                <td title="${_escTitle(row.fileName)}">${row.fileName}</td>
+                <td title="${_escTitle(row.taskType)}">${row.taskType || "-"}</td>
+                <td title="${_escTitle(row.belongingModule)}">${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
+                <td title="${_escTitle(row.author)}">${row.author}</td>
                 <td>${statusHtml}</td>
                 <td>${dueDateHtml}</td>
-                <td>${documentDisplayDate}</td>
-                <td>${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
-                <td>${(row.product != null && row.product !== "") ? row.product : "-"}</td>
-                <td>${(row.country != null && row.country !== "") ? row.country : "-"}</td>
-                <td>${reviewer}</td>
-                <td>${approver}</td>
-                <td class="text-truncate" style="max-width:100px" title="${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : ""}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
-                <td class="text-truncate" style="max-width:100px" title="${(row.notes != null && row.notes !== "") ? row.notes : ""}">${(row.notes != null && row.notes !== "") ? row.notes : "-"}</td>
-                <td class="text-truncate" style="max-width:100px" title="${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : ""}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
+                <td title="${_escTitle(row.businessSide)}">${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
+                <td title="${_escTitle(row.product)}">${(row.product != null && row.product !== "") ? row.product : "-"}</td>
+                <td title="${_escTitle(row.country)}">${(row.country != null && row.country !== "") ? row.country : "-"}</td>
+                <td data-wrap style="max-width:180px" title="${_escTitle(row.notes)}">${_renderNotesHtml(row.notes)}</td>
+                <td title="${_escTitle(row.executionNotes)}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
                 <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
-                <td>
+                <td title="${_escTitle(row.projectCode)}">${projectCode}</td>
+                <td title="${_escTitle(row.fileVersion)}">${fileVersion}</td>
+                <td title="${_escTitle(row.documentDisplayDate)}">${documentDisplayDate}</td>
+                <td title="${_escTitle(row.reviewer)}">${reviewer}</td>
+                <td title="${_escTitle(row.approver)}">${approver}</td>
+                <td title="${_escTitle(row.displayedAuthor)}">${(row.displayedAuthor != null && row.displayedAuthor !== "") ? row.displayedAuthor : "-"}</td>
+                <td title="${_escTitle(row.projectNotes)}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
+                <td title="${_escTitle(row.registeredProductName)}">${(row.registeredProductName != null && row.registeredProductName !== "") ? row.registeredProductName : "-"}</td>
+                <td title="${_escTitle(row.model)}">${(row.model != null && row.model !== "") ? row.model : "-"}</td>
+                <td title="${_escTitle(row.registrationVersion)}">${(row.registrationVersion != null && row.registrationVersion !== "") ? row.registrationVersion : "-"}</td>
+                <td class="col-op">
                     ${!row.isCompleted ? `<button class="btn btn-sm btn-outline-warning btn-notify-single" data-id="${row.uploadId}">催办</button>` : ''}
                 </td>
             `;
@@ -2400,7 +2697,7 @@ function initDashboardPage() {
                 header1.dataset.groupKey = key1;
                 header1.dataset.groupLevel = "1";
                 header1.dataset.groupIndex = String(groupIndexL1++);
-                header1.innerHTML = "<td colspan=\"20\" style=\"cursor:pointer\"><span class=\"group-toggle\">" + (collapsed1 ? "▶" : "▼") + "</span> 项目：" + (projectName || "（空）") + " (" + totalProject + "条)</td>";
+                header1.innerHTML = "<td colspan=\"24\" style=\"cursor:pointer\"><span class=\"group-toggle\">" + (collapsed1 ? "▶" : "▼") + "</span> 项目：" + (projectName || "（空）") + " (" + totalProject + "条)</td>";
                 header1.style.cursor = "pointer";
                 tableBody.appendChild(header1);
                 authorMap.forEach((arr, authorName) => {
@@ -2411,7 +2708,7 @@ function initDashboardPage() {
                     header2.dataset.groupKey = key2;
                     header2.dataset.groupLevel = "2";
                     header2.dataset.groupIndex = String(groupIndexL2);
-                    header2.innerHTML = "<td colspan=\"20\" style=\"cursor:pointer\" class=\"ps-4\"><span class=\"group-toggle\">" + (collapsed2 ? "▶" : "▼") + "</span> 编写人：" + (authorName || "（空）") + " (" + arr.length + "条)</td>";
+                    header2.innerHTML = "<td colspan=\"24\" style=\"cursor:pointer\" class=\"ps-4\"><span class=\"group-toggle\">" + (collapsed2 ? "▶" : "▼") + "</span> 编写人：" + (authorName || "（空）") + " (" + arr.length + "条)</td>";
                     header2.style.cursor = "pointer";
                     tableBody.appendChild(header2);
                     const rowHidden = collapsed1 || collapsed2;
@@ -2461,7 +2758,7 @@ function initDashboardPage() {
                 headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
                 headerTr.dataset.groupKey = key;
                 headerTr.dataset.groupIndex = String(gidx);
-                headerTr.innerHTML = `<td colspan="20" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+                headerTr.innerHTML = `<td colspan="24" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
                 headerTr.style.cursor = "pointer";
                 tableBody.appendChild(headerTr);
                 arr.forEach((row) => addDetailRow(row, key, gidx, collapsed));
@@ -2650,7 +2947,7 @@ function renderFilteredStats(tbody, rows, type) {
             <td>${idx + 1}</td>
             <td>${row.label}</td>
             <td class="text-success">${row.completed}</td>
-            <td class="text-danger">${row.pending}</td>
+            <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
             <td>${formatRate(row.rate)}</td>
             <td>${formatStatusBadges(row.byStatus)}</td>
             ${actionHtml}
@@ -2729,7 +3026,6 @@ function renderFilteredDetailTable(rows) {
     tableBody.innerHTML = "";
     lastRenderedDetailRows.forEach((row, idx) => {
         const tr = document.createElement("tr");
-        tr.draggable = true;
         tr.dataset.id = row.uploadId;
         
         const statusHtml = row.completionStatus 
@@ -2741,22 +3037,31 @@ function renderFilteredDetailTable(rows) {
             : (dueDateStyle.text || "-");
         
         tr.innerHTML = `
-            <td class="seq-cell">${idx + 1}</td>
-            <td>${row.projectName}</td>
-            <td>${row.fileName}</td>
-            <td>${row.taskType || "-"}</td>
-            <td>${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
-            <td>${row.author}</td>
+            <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>
+            <td title="${_escTitle(row.projectName)}">${row.projectName}</td>
+            <td title="${_escTitle(row.fileName)}">${row.fileName}</td>
+            <td title="${_escTitle(row.taskType)}">${row.taskType || "-"}</td>
+            <td title="${_escTitle(row.belongingModule)}">${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
+            <td title="${_escTitle(row.author)}">${row.author}</td>
             <td>${statusHtml}</td>
             <td>${dueDateHtml}</td>
-            <td>${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
-            <td>${(row.product != null && row.product !== "") ? row.product : "-"}</td>
-            <td>${(row.country != null && row.country !== "") ? row.country : "-"}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : ""}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(row.notes != null && row.notes !== "") ? row.notes : ""}">${(row.notes != null && row.notes !== "") ? row.notes : "-"}</td>
-            <td class="text-truncate" style="max-width:100px" title="${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : ""}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
+            <td title="${_escTitle(row.businessSide)}">${(row.businessSide != null && row.businessSide !== "") ? row.businessSide : "-"}</td>
+            <td title="${_escTitle(row.product)}">${(row.product != null && row.product !== "") ? row.product : "-"}</td>
+            <td title="${_escTitle(row.country)}">${(row.country != null && row.country !== "") ? row.country : "-"}</td>
+            <td data-wrap style="max-width:180px" title="${_escTitle(row.notes)}">${_renderNotesHtml(row.notes)}</td>
+            <td title="${_escTitle(row.executionNotes)}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
             <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
-            <td>
+            <td title="${_escTitle(row.projectCode)}">${(row.projectCode != null && row.projectCode !== "") ? row.projectCode : "-"}</td>
+            <td title="${_escTitle(row.fileVersion)}">${(row.fileVersion != null && row.fileVersion !== "") ? row.fileVersion : "-"}</td>
+            <td title="${_escTitle(row.documentDisplayDate)}">${(row.documentDisplayDate != null && row.documentDisplayDate !== "") ? row.documentDisplayDate : "-"}</td>
+            <td title="${_escTitle(row.reviewer)}">${(row.reviewer != null && row.reviewer !== "") ? row.reviewer : "-"}</td>
+            <td title="${_escTitle(row.approver)}">${(row.approver != null && row.approver !== "") ? row.approver : "-"}</td>
+            <td title="${_escTitle(row.displayedAuthor)}">${(row.displayedAuthor != null && row.displayedAuthor !== "") ? row.displayedAuthor : "-"}</td>
+            <td title="${_escTitle(row.projectNotes)}">${(row.projectNotes != null && row.projectNotes !== "") ? row.projectNotes : "-"}</td>
+            <td title="${_escTitle(row.registeredProductName)}">${(row.registeredProductName != null && row.registeredProductName !== "") ? row.registeredProductName : "-"}</td>
+            <td title="${_escTitle(row.model)}">${(row.model != null && row.model !== "") ? row.model : "-"}</td>
+            <td title="${_escTitle(row.registrationVersion)}">${(row.registrationVersion != null && row.registrationVersion !== "") ? row.registrationVersion : "-"}</td>
+            <td class="col-op">
                 ${!row.isCompleted ? `<button class="btn btn-sm btn-outline-warning btn-notify-single" data-id="${row.uploadId}">催办</button>` : ''}
             </td>
         `;
@@ -2828,6 +3133,131 @@ function initNotifyTemplateModal() {
     });
 }
 
+function initColumnToggle(btnId, menuId, tableId) {
+    const btn = document.getElementById(btnId);
+    const menu = document.getElementById(menuId);
+    const table = document.getElementById(tableId);
+    if (!btn || !menu || !table) return;
+    const storeKey = table.dataset.colStoreKey || ("colVis_" + tableId + "_v2");
+    const ths = table.querySelectorAll("thead tr th[data-col]");
+    if (!ths.length) return;
+
+    const colNames = {
+        seq: "序号", projectName: "项目名称", projectCode: "项目编号",
+        fileName: "文件名称", taskType: "任务类型", belongingModule: "所属模块",
+        source: "来源", fileVersion: "文件版本号", author: "编写人员",
+        dueDate: "截止日期", docDisplayDate: "文档体现日期", businessSide: "影响业务方",
+        product: "影响产品", country: "国家", taskStatus: "状态", auditStatus: "审核状态",
+        reviewer: "审核人员", approver: "批准人员", displayedAuthor: "体现编写人员",
+        projectNotes: "项目备注", notes: "下发任务备注", executionNotes: "执行任务备注",
+        registeredProductName: "注册产品名称", model: "型号", registrationVersion: "注册版本号",
+        op: "操作", docLink: "文档链接/地址", completionStatus: "完成状态",
+    };
+    const defaultHiddenCols = ["projectCode", "fileVersion", "docDisplayDate", "reviewer", "approver", "displayedAuthor", "projectNotes", "registeredProductName", "model", "registrationVersion"];
+    const defaultHidden = new Set(defaultHiddenCols);
+
+    function getDefaultVisible(col) {
+        return !defaultHidden.has(col);
+    }
+
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(storeKey)); } catch (e) { saved = null; }
+
+    const colList = [];
+    ths.forEach((th) => {
+        const col = th.dataset.col;
+        if (!col) return;
+        const colIndex = Array.from(th.parentNode.children).indexOf(th);
+        let visible;
+        if (saved && typeof saved[col] === "boolean") {
+            visible = saved[col];
+        } else {
+            visible = getDefaultVisible(col);
+        }
+        colList.push({ col, colIndex, visible });
+    });
+
+    function applyVisibility() {
+        const allRows = table.querySelectorAll("tr");
+        colList.forEach(({ col, colIndex, visible }) => {
+            allRows.forEach((tr) => {
+                const cell = tr.children[colIndex];
+                if (cell) cell.style.display = visible ? "" : "none";
+            });
+        });
+        const state = {};
+        colList.forEach(c => { state[c.col] = c.visible; });
+        try { localStorage.setItem(storeKey, JSON.stringify(state)); } catch (e) {}
+    }
+
+    function syncCheckboxes() {
+        const items = colList.filter(c => c.col !== "op");
+        const cbs = menu.querySelectorAll("input[type=checkbox]");
+        items.forEach((item, idx) => {
+            if (cbs[idx]) cbs[idx].checked = item.visible;
+        });
+    }
+
+    menu.innerHTML = "";
+    const btnRow = document.createElement("div");
+    btnRow.className = "d-flex gap-1 px-2 py-2 border-bottom";
+    const btnAll = document.createElement("button");
+    btnAll.type = "button";
+    btnAll.className = "btn btn-sm btn-outline-secondary";
+    btnAll.textContent = "全选";
+    btnAll.addEventListener("click", () => {
+        colList.forEach(c => { c.visible = true; });
+        syncCheckboxes();
+        applyVisibility();
+    });
+    const btnReset = document.createElement("button");
+    btnReset.type = "button";
+    btnReset.className = "btn btn-sm btn-outline-secondary";
+    btnReset.textContent = "恢复默认";
+    btnReset.addEventListener("click", () => {
+        try { localStorage.removeItem(storeKey); } catch (e) {}
+        colList.forEach(c => { c.visible = getDefaultVisible(c.col); });
+        syncCheckboxes();
+        applyVisibility();
+    });
+    btnRow.appendChild(btnAll);
+    btnRow.appendChild(btnReset);
+    menu.appendChild(btnRow);
+
+    colList.forEach((item) => {
+        if (item.col === "op") return;
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = item.visible;
+        cb.addEventListener("change", () => {
+            item.visible = cb.checked;
+            applyVisibility();
+        });
+        const span = document.createElement("span");
+        span.textContent = colNames[item.col] || item.col;
+        label.appendChild(cb);
+        label.appendChild(span);
+        menu.appendChild(label);
+    });
+
+    applyVisibility();
+
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        menu.classList.toggle("show");
+    });
+    document.addEventListener("click", (e) => {
+        if (!menu.contains(e.target) && e.target !== btn) {
+            menu.classList.remove("show");
+        }
+    });
+
+    const observer = new MutationObserver(() => applyVisibility());
+    const tbody = table.querySelector("tbody");
+    if (tbody) observer.observe(tbody, { childList: true });
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
     try {
         await loadCompletionStatuses();
@@ -2838,4 +3268,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     initLoginPage();
     initGeneratePage();
     initDashboardPage();
+
+    initColumnToggle("colToggleBtn1", "colToggleMenu1", "recordsTable");
+    initColumnToggle("colToggleBtn2", "colToggleMenu2", "myTasksTable");
+    initColumnToggle("colToggleBtn3", "colToggleMenu3", "detailTable");
 });

@@ -19,6 +19,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_from_directory,
     session,
     url_for,
 )
@@ -233,11 +234,15 @@ def _summary_payload():
             "reviewer": getattr(u, "reviewer", None),
             "approver": getattr(u, "approver", None),
             "belongingModule": getattr(u, "belonging_module", None),
+            "displayedAuthor": getattr(u, "displayed_author", None),
             "docLink": (u.get_template_links_list() or [None])[0] or None,
             "createdAt": u.created_at.isoformat() if u.created_at else None,
             "notes": u.notes,
             "projectNotes": getattr(u, "project_notes", None),
             "executionNotes": u.execution_notes,
+            "registeredProductName": getattr(u, "registered_product_name", None),
+            "model": getattr(u, "model", None),
+            "registrationVersion": getattr(u, "registration_version", None),
         }
         for idx, u in enumerate(uploads)
     ]
@@ -647,11 +652,15 @@ def api_upload():
     business_side = request.form.get("businessSide", "").strip() or None
     product = request.form.get("product", "").strip() or None
     country = request.form.get("country", "").strip() or None
+    registered_product_name = request.form.get("registeredProductName", "").strip() or None
+    model = request.form.get("model", "").strip() or None
+    registration_version = request.form.get("registrationVersion", "").strip() or None
     file_version = request.form.get("fileVersion", "").strip() or None
     document_display_date_str = request.form.get("documentDisplayDate", "").strip() or None
     reviewer = request.form.get("reviewer", "").strip() or None
     approver = request.form.get("approver", "").strip() or None
     belonging_module = request.form.get("belongingModule", "").strip() or None
+    displayed_author = request.form.get("displayedAuthor", "").strip() or None
 
     if not project_name or not file_name or not author:
         return (
@@ -749,6 +758,10 @@ def api_upload():
         existing.approver = approver
         existing.project_notes = project_notes
         existing.belonging_module = belonging_module
+        existing.displayed_author = displayed_author
+        existing.registered_product_name = registered_product_name
+        existing.model = model
+        existing.registration_version = registration_version
         summary = _prepare_summary(existing)
         summary.project_name = project_name
         summary.file_name = file_name
@@ -776,6 +789,9 @@ def api_upload():
                     "businessSide": existing.business_side,
                     "product": existing.product,
                     "country": existing.country,
+                    "registeredProductName": getattr(existing, "registered_product_name", None),
+                    "model": getattr(existing, "model", None),
+                    "registrationVersion": getattr(existing, "registration_version", None),
                 },
             }
         )
@@ -798,11 +814,15 @@ def api_upload():
         business_side=business_side,
         product=product,
         country=country,
+        registered_product_name=registered_product_name,
+        model=model,
+        registration_version=registration_version,
         file_version=file_version,
         document_display_date=document_display_date,
         reviewer=reviewer,
         approver=approver,
         belonging_module=belonging_module,
+        displayed_author=displayed_author,
     )
     db.session.add(upload)
     summary = _prepare_summary(upload)
@@ -826,6 +846,9 @@ def api_upload():
                 "businessSide": upload.business_side,
                 "product": upload.product,
                 "country": upload.country,
+                "registeredProductName": getattr(upload, "registered_product_name", None),
+                "model": getattr(upload, "model", None),
+                "registrationVersion": getattr(upload, "registration_version", None),
             },
         }
     )
@@ -858,8 +881,12 @@ _IMPORT_HEADER_MAP = {
     "项目编号": "project_code",
     "影响业务方": "business_side",
     "产品": "product",
+    "影响产品": "product",
     "国家": "country",
     "项目备注": "project_notes",
+    "注册产品名称": "registered_product_name",
+    "型号": "model",
+    "注册版本号": "registration_version",
     "文件名称": "fileName",
     "任务类型": "task_type",
     "文档链接": "template_links",
@@ -872,6 +899,7 @@ _IMPORT_HEADER_MAP = {
     "审核人员": "reviewer",
     "批准人员": "approver",
     "所属模块": "belonging_module",
+    "体现编写人员": "displayed_author",
     "projectName": "project_name",
     "projectCode": "project_code",
     "businessSide": "business_side",
@@ -890,6 +918,10 @@ _IMPORT_HEADER_MAP = {
     "reviewer": "reviewer",
     "approver": "approver",
     "belongingModule": "belonging_module",
+    "displayedAuthor": "displayed_author",
+    "registeredProductName": "registered_product_name",
+    "model": "model",
+    "registrationVersion": "registration_version",
 }
 
 
@@ -978,9 +1010,9 @@ def _parse_import_date(s: str) -> Optional[date]:
 
 # 导入模板表头（中文，与 _IMPORT_HEADER_MAP 对应，用于生成可下载模板）
 _IMPORT_TEMPLATE_HEADERS = [
-    "项目名称", "项目编号", "影响业务方", "产品", "国家", "项目备注",
+    "项目名称", "项目编号", "影响业务方", "影响产品", "国家", "项目备注", "注册产品名称", "型号", "注册版本号",
     "文件名称", "任务类型", "文档链接", "文件版本号", "编写人员", "负责人",
-    "截止日期", "下发任务备注", "文档体现日期", "审核人员", "批准人员", "所属模块",
+    "截止日期", "下发任务备注", "文档体现日期", "审核人员", "批准人员", "所属模块", "体现编写人员",
 ]
 
 
@@ -1004,6 +1036,9 @@ def _record_to_import_row(r: UploadRecord) -> list:
         (r.product or ""),
         (r.country or ""),
         (r.project_notes or ""),
+        str(getattr(r, "registered_product_name", None) or ""),
+        str(getattr(r, "model", None) or ""),
+        str(getattr(r, "registration_version", None) or ""),
         (r.file_name or ""),
         (r.task_type or ""),
         (r.template_links or "").replace("\n", " ").strip(),
@@ -1016,6 +1051,7 @@ def _record_to_import_row(r: UploadRecord) -> list:
         str(getattr(r, "reviewer", None) or ""),
         str(getattr(r, "approver", None) or ""),
         str(getattr(r, "belonging_module", None) or ""),
+        str(getattr(r, "displayed_author", None) or ""),
     ]
 
 
@@ -1083,6 +1119,31 @@ def api_uploads_import_template():
         return jsonify({"success": False, "message": f"生成模板失败：{e}"}), 500
 
 
+@bp.post("/api/uploads/note-files")
+@page13_access_required
+def api_upload_note_file():
+    """上传备注附件（PDF 等），返回可访问的下载 URL。"""
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"message": "请选择文件"}), 400
+    fn_lower = (file.filename or "").lower()
+    allowed = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg")
+    if not any(fn_lower.endswith(ext) for ext in allowed):
+        return jsonify({"message": f"仅支持以下格式：{', '.join(allowed)}"}), 400
+    notes_dir = Path(current_app.config["UPLOAD_FOLDER"]) / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    stored_name, _ = _save_file(file, notes_dir)
+    download_url = f"/api/uploads/note-files/{stored_name}"
+    return jsonify({"success": True, "url": download_url, "fileName": file.filename, "storedName": stored_name})
+
+
+@bp.get("/api/uploads/note-files/<path:filename>")
+def api_download_note_file(filename: str):
+    """下载备注附件文件。"""
+    notes_dir = Path(current_app.config["UPLOAD_FOLDER"]) / "notes"
+    return send_from_directory(str(notes_dir), filename, as_attachment=True)
+
+
 @bp.post("/api/uploads/import")
 @page13_access_required
 def api_uploads_import():
@@ -1123,6 +1184,9 @@ def api_uploads_import():
             author=author,
         ).first()
 
+        notes_raw = d.get("notes") or ""
+        notes_val = "\n".join(ln.strip() for ln in notes_raw.replace(";", "\n").replace("；", "\n").split("\n") if ln.strip()) or None
+
         try:
             if existing:
                 existing.project_code = (d.get("project_code") or "").strip() or None
@@ -1130,7 +1194,8 @@ def api_uploads_import():
                 existing.product = (d.get("product") or "").strip() or None
                 existing.country = (d.get("country") or "").strip() or None
                 existing.project_notes = (d.get("project_notes") or "").strip() or None
-                existing.notes = (d.get("notes") or "").strip() or None
+                existing.template_links = template_links
+                existing.notes = notes_val
                 existing.assignee_name = (d.get("assignee_name") or "").strip() or None
                 existing.due_date = due_date
                 existing.file_version = (d.get("file_version") or "").strip() or None
@@ -1138,6 +1203,10 @@ def api_uploads_import():
                 existing.reviewer = (d.get("reviewer") or "").strip() or None
                 existing.approver = (d.get("approver") or "").strip() or None
                 existing.belonging_module = (d.get("belonging_module") or "").strip() or None
+                existing.displayed_author = (d.get("displayed_author") or "").strip() or None
+                existing.registered_product_name = (d.get("registered_product_name") or "").strip() or None
+                existing.model = (d.get("model") or "").strip() or None
+                existing.registration_version = (d.get("registration_version") or "").strip() or None
                 existing.task_status = "pending"
                 existing.completion_status = None
                 db.session.add(existing)
@@ -1150,7 +1219,7 @@ def api_uploads_import():
                     task_type=task_type,
                     author=author,
                     template_links=template_links,
-                    notes=(d.get("notes") or "").strip() or None,
+                    notes=notes_val,
                     project_notes=(d.get("project_notes") or "").strip() or None,
                     assignee_name=(d.get("assignee_name") or "").strip() or None,
                     due_date=due_date,
@@ -1162,6 +1231,10 @@ def api_uploads_import():
                     reviewer=(d.get("reviewer") or "").strip() or None,
                     approver=(d.get("approver") or "").strip() or None,
                     belonging_module=(d.get("belonging_module") or "").strip() or None,
+                    displayed_author=(d.get("displayed_author") or "").strip() or None,
+                    registered_product_name=(d.get("registered_product_name") or "").strip() or None,
+                    model=(d.get("model") or "").strip() or None,
+                    registration_version=(d.get("registration_version") or "").strip() or None,
                 )
                 db.session.add(upload)
                 summary = _prepare_summary(upload)
@@ -1269,10 +1342,14 @@ def api_uploads_list():
                 "reviewer": getattr(r, "reviewer", None),
                 "approver": getattr(r, "approver", None),
                 "belongingModule": getattr(r, "belonging_module", None),
+                "displayedAuthor": getattr(r, "displayed_author", None),
                 "createdAt": r.created_at.isoformat() if r.created_at else None,
                 "notes": r.notes,
                 "projectNotes": getattr(r, "project_notes", None),
                 "executionNotes": getattr(r, "execution_notes", None),
+                "registeredProductName": getattr(r, "registered_product_name", None),
+                "model": getattr(r, "model", None),
+                "registrationVersion": getattr(r, "registration_version", None),
             }
             for idx, r in enumerate(records)
         ]
@@ -1328,6 +1405,14 @@ def api_upload_update(upload_id: str):
     has_project_notes = "projectNotes" in data
     belonging_module = (data.get("belongingModule") or "").strip() or None
     has_belonging_module = "belongingModule" in data
+    displayed_author = (data.get("displayedAuthor") or "").strip() or None
+    has_displayed_author = "displayedAuthor" in data
+    registered_product_name = (data.get("registeredProductName") or "").strip() or None
+    has_registered_product_name = "registeredProductName" in data
+    model = (data.get("model") or "").strip() or None
+    has_model = "model" in data
+    registration_version = (data.get("registrationVersion") or "").strip() or None
+    has_registration_version = "registrationVersion" in data
 
     if project_name is not None:
         upload.project_name = project_name
@@ -1375,10 +1460,21 @@ def api_upload_update(upload_id: str):
         upload.approver = approver
     if has_belonging_module:
         upload.belonging_module = belonging_module
+    if has_displayed_author:
+        upload.displayed_author = displayed_author
+    if has_registered_product_name:
+        upload.registered_product_name = registered_product_name
+    if has_model:
+        upload.model = model
+    if has_registration_version:
+        upload.registration_version = registration_version
     if audit_status is not None:
         upload.audit_status = audit_status or None
         if audit_status == "审核不通过待修改":
             upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
+            upload.completion_status = None
+            upload.task_status = "pending"
+            upload.quick_completed = False
     if completion_status is not None:
         upload.completion_status = completion_status or None
         if upload.completion_status:
@@ -1412,8 +1508,7 @@ def api_upload_update(upload_id: str):
         upload.summary.author = upload.author
         db.session.add(upload.summary)
     db.session.commit()
-    if upload.completion_status and (upload.belonging_module or "").strip() in ("产品", "开发"):
-        _maybe_enqueue_module_cascade(upload.project_name or "", (upload.belonging_module or "").strip())
+    # 页面1编辑不触发模块级联催办，仅在页面2标记完成时触发（见 api_update_completion_status）
 
     return jsonify({
         "message": "已更新",
@@ -1477,10 +1572,14 @@ def api_my_tasks():
                 "reviewer": getattr(r, "reviewer", None),
                 "approver": getattr(r, "approver", None),
                 "belongingModule": getattr(r, "belonging_module", None),
+                "displayedAuthor": getattr(r, "displayed_author", None),
                 "createdAt": r.created_at.isoformat() if r.created_at else None,
                 "notes": r.notes,
                 "projectNotes": getattr(r, "project_notes", None),
                 "executionNotes": getattr(r, "execution_notes", None),
+                "registeredProductName": getattr(r, "registered_product_name", None),
+                "model": getattr(r, "model", None),
+                "registrationVersion": getattr(r, "registration_version", None),
             }
             for idx, r in enumerate(records)
         ]

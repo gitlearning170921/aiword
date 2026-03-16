@@ -334,6 +334,30 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN belonging_module VARCHAR(32)",
     )
     ensure_column(
+        "upload_records",
+        "displayed_author",
+        "ALTER TABLE upload_records ADD COLUMN displayed_author TEXT",
+        "ALTER TABLE upload_records ADD COLUMN displayed_author VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
+        "registered_product_name",
+        "ALTER TABLE upload_records ADD COLUMN registered_product_name TEXT",
+        "ALTER TABLE upload_records ADD COLUMN registered_product_name VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
+        "model",
+        "ALTER TABLE upload_records ADD COLUMN model TEXT",
+        "ALTER TABLE upload_records ADD COLUMN model VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
+        "registration_version",
+        "ALTER TABLE upload_records ADD COLUMN registration_version TEXT",
+        "ALTER TABLE upload_records ADD COLUMN registration_version VARCHAR(64)",
+    )
+    ensure_column(
         "users",
         "mobile",
         "ALTER TABLE users ADD COLUMN mobile TEXT",
@@ -487,10 +511,39 @@ def create_app() -> Flask:
         static_folder=str(project_root / "web" / "static"),
     )
 
-    default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")
+    # 已注释 SQLite 入口，避免搞混当前连接的数据库。当前仅使用 MySQL。
+    # default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")
+    default_db_uri = "mysql+pymysql://root:mysql170921@10.26.1.221:13306/aiword?charset=utf8mb4"
+    db_uri = os.getenv("DATABASE_URL", default_db_uri)
+
+    if db_uri.startswith("mysql"):
+        try:
+            from sqlalchemy import create_engine, text as _text
+            _parts = db_uri.rsplit("/", 1)
+            _db_name = _parts[1].split("?")[0] if len(_parts) > 1 else "aiword"
+            _server_uri = _parts[0] + "/"
+            _tmp_eng = create_engine(_server_uri)
+            with _tmp_eng.connect() as _conn:
+                _conn.execute(_text(f"CREATE DATABASE IF NOT EXISTS `{_db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"))
+                _conn.commit()
+            _tmp_eng.dispose()
+        except Exception as _e:
+            import logging
+            logging.getLogger(__name__).warning("自动创建MySQL数据库失败: %s", _e)
+
+    # 网络断开后恢复：缩短连接回收时间，连接前 ping，连接错误时清空连接池便于下次重连
+    _engine_opts = {
+        "pool_recycle": 300,
+        "pool_pre_ping": True,
+    }
+    if db_uri.startswith("mysql"):
+        _sep = "&" if "?" in db_uri else "?"
+        db_uri = db_uri + _sep + "connect_timeout=10"
+
     app.config.update(
-        SQLALCHEMY_DATABASE_URI=os.getenv("DATABASE_URL", default_db_uri),
+        SQLALCHEMY_DATABASE_URI=db_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SQLALCHEMY_ENGINE_OPTIONS=_engine_opts,
         UPLOAD_FOLDER=str(uploads_dir),
         OUTPUT_FOLDER=str(outputs_dir),
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # 25 MB safety cap
@@ -512,11 +565,37 @@ def create_app() -> Flask:
 
     db.init_app(app)
 
+    # 数据库连接断开后（如网络恢复前拿到的连接已失效）：清空连接池，下次请求自动重连，无需重启服务
+    from sqlalchemy.exc import OperationalError, InterfaceError
+    from sqlalchemy.engine import Engine
+
+    @app.errorhandler(OperationalError)
+    @app.errorhandler(InterfaceError)
+    def _handle_db_connection_error(exc):
+        try:
+            engine = db.engine
+            if isinstance(engine, Engine):
+                engine.dispose()
+        except Exception:
+            pass
+        from flask import request
+        if request.path.startswith("/api/"):
+            return {"message": "数据库连接中断，请刷新页面重试"}, 503
+        try:
+            from flask import render_template
+            return render_template("error.html", message="数据库连接中断，请刷新页面重试"), 503
+        except Exception:
+            return "<h1>数据库连接中断</h1><p>请刷新页面重试。</p>", 503
+
     with app.app_context():
         ensure_schema(app)
         from .routes import register_blueprint
 
         register_blueprint(app)
+
+        from .integration_routes import bp as integration_bp
+        app.register_blueprint(integration_bp)
+
         db.create_all()
         init_default_configs()
 
