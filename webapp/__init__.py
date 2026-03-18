@@ -597,7 +597,12 @@ def create_app() -> Flask:
         db.create_all()
         init_default_configs()
         from .app_settings import ensure_environment_variables_migrated_to_db, apply_system_settings_to_flask
-        ensure_environment_variables_migrated_to_db(project_root, startup_database_uri=db_uri)
+        ensure_environment_variables_migrated_to_db(
+            project_root, startup_database_uri=db_uri, flask_app=app
+        )
+        from .app_settings import sync_authoritative_sources_into_db
+
+        sync_authoritative_sources_into_db(project_root, app)
         apply_system_settings_to_flask(app, project_root)
         from .migrate_binary_assets import migrate_binary_assets_to_db
 

@@ -2463,12 +2463,22 @@ def api_put_schedule_config():
 @bp.get("/api/system-settings")
 @page13_access_required
 def api_get_system_settings():
-    """系统配置（原环境变量），敏感项已脱敏。"""
-    from .app_settings import SYSTEM_CONFIG_KEYS, system_settings_for_api_get
+    """系统配置：默认带出当前生效值（已通过页面1/3 校验；数据库 URI 脱敏）。"""
+    from .app_settings import (
+        SYSTEM_CONFIG_KEYS,
+        persist_config_json_into_empty_db_keys,
+        sync_authoritative_sources_into_db,
+        system_settings_for_api_get,
+    )
 
     app = current_app._get_current_object()
+    project_root = Path(app.root_path).resolve().parent
+    sync_authoritative_sources_into_db(project_root, app)
+    persist_config_json_into_empty_db_keys(project_root, app)
     keys_meta = [{"key": k, "label": lbl, "sensitive": sens} for k, lbl, sens in SYSTEM_CONFIG_KEYS]
-    return jsonify({"settings": system_settings_for_api_get(app), "keys": keys_meta})
+    return jsonify(
+        {"settings": system_settings_for_api_get(app, project_root), "keys": keys_meta}
+    )
 
 
 @bp.put("/api/system-settings")

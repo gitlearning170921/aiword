@@ -2336,6 +2336,87 @@ let detailSortKey = "";
 let detailSortDir = "asc";
 
 function initDashboardPage() {
+    const loadSystemSettings = async () => {
+        const container = document.getElementById("systemSettingsForm");
+        if (!container) return;
+        try {
+            const res = await App.request("/api/system-settings");
+            const keys = res.keys || [];
+            const settings = res.settings || {};
+            if (!keys.length) {
+                container.innerHTML =
+                    '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项列表，请刷新页面。</div></div>';
+                return;
+            }
+            container.innerHTML = keys.map((k) => {
+                const raw = settings[k.key] != null ? String(settings[k.key]) : "";
+                const esc = (s) =>
+                    String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+                const showVal = esc(raw);
+                const isDb = k.key === "DATABASE_URL";
+                const unchanged = raw === "(不变)" || raw === "******";
+                const webhookLike = k.key === "DINGTALK_WEBHOOK";
+                const typ =
+                    k.sensitive && !unchanged && raw && !webhookLike
+                        ? "password"
+                        : "text";
+                let ph = "";
+                if (isDb) {
+                    ph = raw
+                        ? "当前已连接（脱敏）；修改请填写完整 URI"
+                        : "填写 MySQL/SQLite 连接串";
+                } else if (k.sensitive && !raw) {
+                    ph = "未配置";
+                }
+                return `<div class="col-md-6"><label class="form-label small mb-0">${k.label.replace(/</g, "&lt;")}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${esc(ph)}" autocomplete="off"></div>`;
+            }).join("");
+        } catch (e) {
+            console.error(e);
+            const escE = (s) =>
+                String(s)
+                    .replace(/&/g, "&amp;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/</g, "&lt;");
+            container.innerHTML = `<div class="col-12"><div class="alert alert-danger mb-0 small">系统配置加载失败：${escE(
+                (e && e.message) || String(e)
+            )}。若提示需要访问密码，请先完成页面验证后再试。</div></div>`;
+        }
+    };
+    document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
+        const container = document.getElementById("systemSettingsForm");
+        if (!container) return;
+        const payload = {};
+        container.querySelectorAll(".sys-cfg-input").forEach((inp) => {
+            const key = inp.getAttribute("data-key");
+            const sens = inp.getAttribute("data-sensitive") === "1";
+            const v = (inp.value || "").trim();
+            if (key === "DATABASE_URL") {
+                if (v && !v.includes("****")) payload[key] = v;
+                return;
+            }
+            if (sens) {
+                if (v && v !== "(不变)" && v !== "******") payload[key] = v;
+            } else {
+                payload[key] = v;
+            }
+        });
+        try {
+            await App.request("/api/system-settings", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            App.notify("系统配置已保存", "success");
+            loadSystemSettings();
+            if (typeof window.__dashboardReloadSchedule === "function") {
+                window.__dashboardReloadSchedule();
+            }
+        } catch (e) {
+            App.notify((e.data && e.data.message) || e.message || "保存失败", "danger");
+        }
+    });
+    loadSystemSettings();
+
     const overallRate = document.getElementById("overallRate");
     if (!overallRate) return;
 
@@ -2399,53 +2480,7 @@ function initDashboardPage() {
             console.error(e);
         }
     };
-
-    const loadSystemSettings = async () => {
-        const container = document.getElementById("systemSettingsForm");
-        if (!container) return;
-        try {
-            const res = await App.request("/api/system-settings");
-            const keys = res.keys || [];
-            const settings = res.settings || {};
-            container.innerHTML = keys.map((k) => {
-                const raw = settings[k.key] != null ? String(settings[k.key]) : "";
-                const showVal = k.sensitive && raw === "******" ? "" : raw.replace(/"/g, "&quot;");
-                const typ = k.sensitive ? "password" : "text";
-                const ph = k.sensitive ? (raw === "******" ? "已配置，留空不改" : "") : "";
-                return `<div class="col-md-6"><label class="form-label small mb-0">${k.label.replace(/</g, "&lt;")}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${ph}" autocomplete="off"></div>`;
-            }).join("");
-        } catch (e) {
-            console.error(e);
-        }
-    };
-    document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
-        const container = document.getElementById("systemSettingsForm");
-        if (!container) return;
-        const payload = {};
-        container.querySelectorAll(".sys-cfg-input").forEach((inp) => {
-            const key = inp.getAttribute("data-key");
-            const sens = inp.getAttribute("data-sensitive") === "1";
-            const v = (inp.value || "").trim();
-            if (sens) {
-                if (v) payload[key] = v;
-            } else {
-                payload[key] = v;
-            }
-        });
-        try {
-            await App.request("/api/system-settings", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            App.notify("系统配置已保存", "success");
-            loadSystemSettings();
-            loadSchedule();
-        } catch (e) {
-            App.notify((e.data && e.data.message) || e.message || "保存失败", "danger");
-        }
-    });
-    loadSystemSettings();
+    window.__dashboardReloadSchedule = loadSchedule;
 
     document.getElementById("saveScheduleConfigBtn")?.addEventListener("click", async () => {
         const weekly = (document.getElementById("scheduleWeekly")?.value || "").trim() || "thu 16:00";

@@ -762,11 +762,11 @@ def init_scheduler(app: "Flask") -> None:
         id="project_stats",
     )
     if IntervalTrigger is not None:
-    scheduler.add_job(
-        _run_process_module_cascade_pending,
-        IntervalTrigger(minutes=1),
-        id="module_cascade_pending_processor",
-    )
+        scheduler.add_job(
+            _run_process_module_cascade_pending,
+            IntervalTrigger(minutes=1),
+            id="module_cascade_pending_processor",
+        )
     scheduler.start()
     global _shutdown_registered
     if not _shutdown_registered:
