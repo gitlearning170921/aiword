@@ -72,6 +72,12 @@
                 <div id="scheduleInfo" class="d-flex flex-wrap gap-3 mt-3">
                     <!-- 动态生成 -->
                 </div>
+                <div class="mt-4 pt-3 border-top">
+                    <h6 class="small fw-bold mb-2">系统配置（原环境变量，存入数据库）</h6>
+                    <p class="small text-muted mb-2">钉钉、对外域名、Session 密钥、页面1/3 密码等均在此维护。<strong>首次启动时</strong>会自动把环境变量（及 <code>.env</code>）里已设置的项写入本库；之后以页面配置为准。敏感项显示为空表示已有值：不修改请留空。修改数据库连接后需<strong>重启服务</strong>。</p>
+                    <div id="systemSettingsForm" class="row g-2"></div>
+                    <button type="button" class="btn btn-sm btn-primary mt-2" id="saveSystemSettingsBtn">保存系统配置</button>
+                </div>
             </div>
         </div>
     </div>

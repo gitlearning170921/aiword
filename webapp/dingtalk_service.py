@@ -327,6 +327,16 @@ def send_work_notification_to_mobiles(
     agent_id: Optional[str] = None,
 ) -> dict:
     """通过钉钉工作通知 API 发到个人。需配置 DINGTALK_APP_KEY、DINGTALK_APP_SECRET、DINGTALK_AGENT_ID。"""
+    if not app_key or not app_secret or not agent_id:
+        try:
+            from flask import has_app_context
+            if has_app_context():
+                from .app_settings import get_setting
+                app_key = app_key or get_setting("DINGTALK_APP_KEY")
+                app_secret = app_secret or get_setting("DINGTALK_APP_SECRET")
+                agent_id = agent_id or get_setting("DINGTALK_AGENT_ID")
+        except Exception:
+            pass
     app_key = (app_key or os.environ.get("DINGTALK_APP_KEY") or "").strip()
     app_secret = (app_secret or os.environ.get("DINGTALK_APP_SECRET") or "").strip()
     agent_id = (agent_id or os.environ.get("DINGTALK_AGENT_ID") or "").strip()

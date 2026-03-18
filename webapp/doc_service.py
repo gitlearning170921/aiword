@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import io
 import re
 from datetime import datetime
 from pathlib import Path
@@ -63,13 +64,9 @@ def _replace_placeholders_in_table(table, mapping: Dict[str, str]):
                 _replace_placeholders_in_paragraph(paragraph, mapping)
 
 
-def extract_placeholders(template_path: str) -> List[str]:
-    """从模板文件中提取占位符列表。"""
-    template_path = Path(template_path)
-    if not template_path.exists():
-        raise FileNotFoundError(f"模板文件不存在: {template_path}")
-
-    doc = Document(str(template_path))
+def extract_placeholders_from_bytes(content: bytes) -> List[str]:
+    """从内存中的 .docx 字节解析占位符（与磁盘模板逻辑一致）。"""
+    doc = Document(io.BytesIO(content))
     placeholders: List[str] = []
     seen = set()
     pattern = re.compile(r"\{\{\s*([^{}\n\r]+?)\s*\}\}")
@@ -129,23 +126,46 @@ def extract_placeholders(template_path: str) -> List[str]:
     return placeholders
 
 
-def generate_document(template_path: str, output_dir: str, data: Dict[str, str], output_name: str | None = None) -> str:
-    """根据模板与数据生成 Word 文档，返回生成文件路径。"""
+def extract_placeholders(template_path: str) -> List[str]:
+    """从模板文件中提取占位符列表。"""
     template_path = Path(template_path)
     if not template_path.exists():
         raise FileNotFoundError(f"模板文件不存在: {template_path}")
+    return extract_placeholders_from_bytes(template_path.read_bytes())
+
+
+def generate_document(
+    output_dir: str,
+    data: Dict[str, str],
+    output_name: str | None = None,
+    template_path: str | None = None,
+    template_bytes: bytes | None = None,
+    template_stem: str = "document",
+) -> str:
+    """根据模板与数据生成 Word 文档，返回生成文件路径。template_path 与 template_bytes 二选一。"""
+    if template_bytes is not None:
+        doc = Document(io.BytesIO(template_bytes))
+    elif template_path:
+        p = Path(template_path)
+        if not p.exists():
+            raise FileNotFoundError(f"模板文件不存在: {p}")
+        doc = Document(str(p))
+    else:
+        raise ValueError("必须提供 template_path 或 template_bytes")
 
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
+    stem = template_stem
+    if template_path and not template_bytes:
+        stem = Path(template_path).stem
+
     if not output_name:
-        output_name = f"{template_path.stem}_{datetime.now().strftime('%Y%m%d%H%M%S')}.docx"
+        output_name = f"{stem}_{datetime.now().strftime('%Y%m%d%H%M%S')}.docx"
     if not output_name.lower().endswith(".docx"):
         output_name += ".docx"
 
     output_path = output_dir_path / output_name
-
-    doc = Document(str(template_path))
 
     for paragraph in doc.paragraphs:
         _replace_placeholders_in_paragraph(paragraph, data)

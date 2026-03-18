@@ -8,6 +8,8 @@ import os
 from functools import wraps
 from pathlib import Path
 
+import io
+
 from flask import Blueprint, current_app, jsonify, request, send_file
 
 from . import db
@@ -20,7 +22,8 @@ def _check_integration_secret(f):
     """集成 API 鉴权：通过共享密钥验证调用方身份"""
     @wraps(f)
     def wrapper(*args, **kwargs):
-        secret = current_app.config.get("INTEGRATION_SECRET") or os.getenv("INTEGRATION_SECRET", "")
+        from .app_settings import get_setting
+        secret = get_setting("INTEGRATION_SECRET", default=str(current_app.config.get("INTEGRATION_SECRET") or ""))
         if secret:
             provided = request.headers.get("X-Integration-Secret", "")
             if provided != secret:
@@ -76,6 +79,13 @@ def download_document(task_id: str):
     if not record:
         return jsonify({"message": "任务不存在"}), 404
 
+    if record.template_file_blob:
+        return send_file(
+            io.BytesIO(record.template_file_blob),
+            as_attachment=True,
+            download_name=record.original_file_name or "document.docx",
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
     if record.storage_path and Path(record.storage_path).exists():
         return send_file(
             record.storage_path,
@@ -219,7 +229,7 @@ def _task_to_dict(r: UploadRecord, idx: int = 0) -> dict:
         "fileName": r.file_name,
         "taskType": r.task_type,
         "author": r.author,
-        "hasFile": bool(r.storage_path),
+        "hasFile": bool(r.template_file_blob or r.storage_path),
         "hasLinks": bool(r.template_links),
         "templateLinks": r.template_links,
         "linksCount": len(r.get_template_links_list()),

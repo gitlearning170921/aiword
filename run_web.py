@@ -10,5 +10,6 @@ if __name__ == '__main__':
     print("按 Ctrl+C 停止服务器\n")
     print("=" * 50)
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # use_reloader=False：后台运行时避免 reloader 杀子进程导致“daemon threads + stderr”崩溃；需热重载可前台运行 python run_web.py
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
 

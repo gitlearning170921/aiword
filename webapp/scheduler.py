@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import re
@@ -28,6 +29,22 @@ except ImportError:
 logger = logging.getLogger(__name__)
 scheduler: "BackgroundScheduler | None" = None
 _app: "Flask | None" = None
+_shutdown_registered = False
+
+
+def shutdown_scheduler() -> None:
+    """进程退出前关闭调度器，避免后台线程在解释器关闭时访问 stderr 导致 Fatal Python error。"""
+    global scheduler, _shutdown_registered
+    if scheduler is None:
+        return
+    try:
+        scheduler.shutdown(wait=True)
+        logger.info("定时任务调度器已关闭")
+    except Exception as e:
+        logger.warning("关闭调度器时异常: %s", e)
+    finally:
+        scheduler = None
+        _shutdown_registered = False
 
 
 def _get_page2_path(app: "Flask") -> str:
@@ -101,21 +118,20 @@ def _get_schedule_config_from_db():
 
 
 def _get_webhook_secret():
-    """从 current_app（在 app_context 内）或 _app 或环境变量获取钉钉 webhook 与 secret。"""
-    app = None
-    try:
-        from flask import current_app
-        app = current_app._get_current_object()
-    except RuntimeError:
-        app = _app
-    if app:
-        w = app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK")
-        s = app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET")
-        webhook = (str(w).strip() if w else "") or ""
-        secret = (str(s).strip() if s else "") or None
-        return webhook, secret
-    webhook = (os.environ.get("DINGTALK_WEBHOOK") or "").strip()
-    secret = (os.environ.get("DINGTALK_SECRET") or "").strip() or None
+    """从数据库 app_configs（经 get_setting）读取钉钉 webhook 与 secret。"""
+    app = _app
+    if not app:
+        try:
+            from flask import current_app
+            app = current_app._get_current_object()
+        except RuntimeError:
+            return "", None
+    from .app_settings import get_setting_for_scheduler
+
+    w = get_setting_for_scheduler("DINGTALK_WEBHOOK", default="", app=app)
+    s = get_setting_for_scheduler("DINGTALK_SECRET", default="", app=app)
+    webhook = (str(w).strip() if w else "") or ""
+    secret = (str(s).strip() if s else "") or None
     return webhook, secret
 
 
@@ -233,7 +249,8 @@ def _run_thursday_reminder():
             if total_count == 0:
                 return
 
-            base_url = (app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip().rstrip("/")
+            from .app_settings import get_setting_for_scheduler
+            base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
             page2_path = _get_page2_path(app)
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
@@ -345,7 +362,8 @@ def _run_overdue_reminder():
             if not tasks:
                 return {"no_tasks": True, "sent": 0, "failed": 0, "last_error": None}
 
-            base_url = (app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip().rstrip("/")
+            from .app_settings import get_setting_for_scheduler
+            base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
             page2_path = _get_page2_path(app)
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
@@ -441,7 +459,8 @@ def _run_project_stats():
                 logger.warning("自动催办(项目统计)：未配置 DINGTALK_WEBHOOK，跳过发送")
                 return
 
-            base_url = (app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip().rstrip("/")
+            from .app_settings import get_setting_for_scheduler
+            base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
             page2_path = _get_page2_path(app)
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
@@ -535,7 +554,8 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
     webhook, secret = _get_webhook_secret()
     if not webhook:
         return
-    base_url = (app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip().rstrip("/")
+    from .app_settings import get_setting_for_scheduler
+    base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
     page2_path = _get_page2_path(app)
     page2_url = f"{base_url}{page2_path}" if base_url else ""
     pname = (project_name or "").strip()
@@ -742,12 +762,16 @@ def init_scheduler(app: "Flask") -> None:
         id="project_stats",
     )
     if IntervalTrigger is not None:
-        scheduler.add_job(
-            _run_process_module_cascade_pending,
-            IntervalTrigger(minutes=1),
-            id="module_cascade_pending_processor",
-        )
+    scheduler.add_job(
+        _run_process_module_cascade_pending,
+        IntervalTrigger(minutes=1),
+        id="module_cascade_pending_processor",
+    )
     scheduler.start()
+    global _shutdown_registered
+    if not _shutdown_registered:
+        atexit.register(shutdown_scheduler)
+        _shutdown_registered = True
     logger.info(
         "定时任务已注册：每周提醒 %s，逾期 %s，每两天统计 %s，模块级联（按项目完成后延迟执行）",
         cfg["weekly"],

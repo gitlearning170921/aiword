@@ -10,8 +10,12 @@ try:
 except Exception:  # pragma: no cover
     CN_TZ = timezone(timedelta(hours=8))
 
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import LargeBinary, UniqueConstraint
+from sqlalchemy.dialects.mysql import MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+# MySQL 默认 BLOB 仅 64KB，模板/生成文件用 MEDIUMBLOB；SQLite 仍用 BLOB
+_BinaryMedium = LargeBinary().with_variant(MEDIUMBLOB(), "mysql")
 
 from . import db
 
@@ -144,6 +148,7 @@ class UploadRecord(db.Model):
     author: Mapped[str] = mapped_column(db.String(128), nullable=False)
     stored_file_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     storage_path: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    template_file_blob: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
     original_file_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     template_links: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
@@ -191,8 +196,22 @@ class UploadRecord(db.Model):
         return [line.strip() for line in self.template_links.strip().split("\n") if line.strip()]
 
     def has_template(self) -> bool:
-        """是否有可用的模板（文件或链接）"""
-        return bool(self.storage_path) or bool(self.template_links)
+        """是否有可用的模板（库内文件、本机路径或链接）"""
+        if self.template_file_blob:
+            return True
+        from pathlib import Path
+        if self.storage_path and Path(self.storage_path).exists():
+            return True
+        return bool(self.template_links)
+
+    def has_stored_template_file(self) -> bool:
+        """是否有已保存的模板文件（数据库或本机）"""
+        if self.template_file_blob:
+            return True
+        if self.storage_path:
+            from pathlib import Path
+            return Path(self.storage_path).exists()
+        return False
 
 
 class GenerateRecord(db.Model):
@@ -208,6 +227,7 @@ class GenerateRecord(db.Model):
     placeholder_payload: Mapped[Optional[dict]] = mapped_column(db.JSON)
     output_file_name: Mapped[Optional[str]] = mapped_column(db.String(255))
     output_path: Mapped[Optional[str]] = mapped_column(db.String(512))
+    output_file_blob: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     completed_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
 
@@ -234,5 +254,15 @@ class GenerationSummary(db.Model):
 
     upload: Mapped[UploadRecord] = relationship(back_populates="summary")
 
+
+class NoteAttachmentFile(db.Model):
+    """备注附件：存数据库，迁机只需带库。"""
+    __tablename__ = "note_attachment_files"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    stored_name: Mapped[str] = mapped_column(db.String(255), unique=True, nullable=False)
+    file_blob: Mapped[bytes] = mapped_column(_BinaryMedium, nullable=False)
+    original_name: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 

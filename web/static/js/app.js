@@ -2315,6 +2315,9 @@ function openPlaceholderModal(record, placeholderModal) {
                 }),
             });
             App.notify(result.message || "文档生成成功");
+            if (result.downloadUrl) {
+                window.open(result.downloadUrl, "_blank");
+            }
             bootstrap.Modal.getInstance(placeholderModal)?.hide();
             if (window.loadMyTasks) window.loadMyTasks();
         } catch (error) {
@@ -2376,7 +2379,7 @@ function initDashboardPage() {
                 statusDiv.className = `p-2 border rounded ${configured ? 'bg-success-subtle border-success' : 'bg-warning-subtle border-warning'}`;
                 statusDiv.innerHTML = `
                     <div class="fw-bold small">${configured ? '✓ 钉钉已配置' : '⚠ 钉钉未配置'}</div>
-                    <div class="text-muted small">${configured ? '可正常发送通知' : '请设置环境变量 DINGTALK_WEBHOOK'}</div>
+                    <div class="text-muted small">${configured ? '可正常发送通知' : '请在下方「系统配置」填写钉钉 Webhook'}</div>
                 `;
                 scheduleInfo.appendChild(statusDiv);
                 
@@ -2396,6 +2399,53 @@ function initDashboardPage() {
             console.error(e);
         }
     };
+
+    const loadSystemSettings = async () => {
+        const container = document.getElementById("systemSettingsForm");
+        if (!container) return;
+        try {
+            const res = await App.request("/api/system-settings");
+            const keys = res.keys || [];
+            const settings = res.settings || {};
+            container.innerHTML = keys.map((k) => {
+                const raw = settings[k.key] != null ? String(settings[k.key]) : "";
+                const showVal = k.sensitive && raw === "******" ? "" : raw.replace(/"/g, "&quot;");
+                const typ = k.sensitive ? "password" : "text";
+                const ph = k.sensitive ? (raw === "******" ? "已配置，留空不改" : "") : "";
+                return `<div class="col-md-6"><label class="form-label small mb-0">${k.label.replace(/</g, "&lt;")}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${ph}" autocomplete="off"></div>`;
+            }).join("");
+        } catch (e) {
+            console.error(e);
+        }
+    };
+    document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
+        const container = document.getElementById("systemSettingsForm");
+        if (!container) return;
+        const payload = {};
+        container.querySelectorAll(".sys-cfg-input").forEach((inp) => {
+            const key = inp.getAttribute("data-key");
+            const sens = inp.getAttribute("data-sensitive") === "1";
+            const v = (inp.value || "").trim();
+            if (sens) {
+                if (v) payload[key] = v;
+            } else {
+                payload[key] = v;
+            }
+        });
+        try {
+            await App.request("/api/system-settings", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            App.notify("系统配置已保存", "success");
+            loadSystemSettings();
+            loadSchedule();
+        } catch (e) {
+            App.notify((e.data && e.data.message) || e.message || "保存失败", "danger");
+        }
+    });
+    loadSystemSettings();
 
     document.getElementById("saveScheduleConfigBtn")?.addEventListener("click", async () => {
         const weekly = (document.getElementById("scheduleWeekly")?.value || "").trim() || "thu 16:00";

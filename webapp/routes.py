@@ -19,6 +19,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     send_from_directory,
     session,
     url_for,
@@ -26,15 +27,31 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 from . import db
-from .doc_service import extract_placeholders, generate_document, download_template_from_url
+from .doc_service import (
+    download_template_from_url,
+    extract_placeholders,
+    extract_placeholders_from_bytes,
+    generate_document,
+)
 from .models import (
-    GenerateRecord, GenerationSummary, UploadRecord, User,
+    GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
     ModuleCascadeReminder, now_local,
 )
 from . import dingtalk_service
 
 bp = Blueprint("pages", __name__)
+
+
+def _dingtalk_webhook_str() -> str:
+    from .app_settings import get_setting
+    return (get_setting("DINGTALK_WEBHOOK") or "").strip()
+
+
+def _dingtalk_secret_opt() -> Optional[str]:
+    from .app_settings import get_setting
+    s = (get_setting("DINGTALK_SECRET") or "").strip()
+    return s or None
 
 
 # ---------- 辅助函数 ----------
@@ -97,7 +114,13 @@ def _prepare_summary(upload: UploadRecord) -> GenerationSummary:
 
 
 def _get_template_path_for_upload(upload: UploadRecord, link_index: int = 0) -> str:
-    """返回上传记录对应的模板本地路径：文件则用 storage_path，链接则下载到 uploads/。"""
+    """返回上传记录对应的模板本地路径：库内模板先落盘，否则 storage_path，链接则下载到 uploads/。"""
+    if upload.template_file_blob:
+        uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+        mat = uploads_dir / f"_dbtpl_{upload.id}.docx"
+        if not mat.exists() or mat.stat().st_size != len(upload.template_file_blob):
+            mat.write_bytes(upload.template_file_blob)
+        return str(mat)
     if upload.storage_path and Path(upload.storage_path).exists():
         return upload.storage_path
     links = upload.get_template_links_list()
@@ -292,8 +315,8 @@ def _page13_or_login_required(f):
 
 
 def _page13_password_configured() -> bool:
-    """是否已配置页面1/3 访问密码（从 config.json 读取）"""
-    p = current_app.config.get("PAGE13_ACCESS_PASSWORD")
+    from .app_settings import get_setting
+    p = get_setting("PAGE13_ACCESS_PASSWORD", default=str(current_app.config.get("PAGE13_ACCESS_PASSWORD") or ""))
     return bool(p and str(p).strip())
 
 
@@ -422,7 +445,8 @@ def api_page13_auth():
     nonce = session.get("page13_nonce")
     if not nonce:
         return jsonify({"message": "请先获取验证码（刷新页面后重试）"}), 400
-    raw = current_app.config.get("PAGE13_ACCESS_PASSWORD")
+    from .app_settings import get_setting
+    raw = get_setting("PAGE13_ACCESS_PASSWORD", default=str(current_app.config.get("PAGE13_ACCESS_PASSWORD") or ""))
     password = (str(raw).replace("\ufeff", "").strip() if raw else "")
     expected = hashlib.sha256((nonce + password).encode("utf-8")).hexdigest()
     session.pop("page13_nonce", None)
@@ -689,15 +713,19 @@ def api_upload():
     storage_path = None
     original_file_name = None
     placeholders = []
+    template_file_blob = None
 
     if file and file.filename:
         stored_file_name, storage_path = _save_file(file, uploads_dir)
         original_file_name = file.filename
         try:
             placeholders = extract_placeholders(storage_path)
+            template_file_blob = Path(storage_path).read_bytes()
         except Exception as exc:
             Path(storage_path).unlink(missing_ok=True)
             return jsonify({"message": f"解析模板失败：{exc}"}), 400
+        Path(storage_path).unlink(missing_ok=True)
+        storage_path = None
     elif template_links:
         links = [line.strip() for line in template_links.split("\n") if line.strip()]
         if links:
@@ -727,14 +755,22 @@ def api_upload():
             document_display_date = None
 
     if existing and replace:
+        (uploads_dir / f"_dbtpl_{existing.id}.docx").unlink(missing_ok=True)
         if existing.storage_path:
             previous_path = Path(existing.storage_path)
             if previous_path.exists():
                 previous_path.unlink()
 
-        existing.stored_file_name = stored_file_name
-        existing.storage_path = storage_path
-        existing.original_file_name = original_file_name
+        if file and file.filename:
+            existing.template_file_blob = template_file_blob
+            existing.stored_file_name = stored_file_name
+            existing.storage_path = None
+            existing.original_file_name = original_file_name
+        else:
+            existing.stored_file_name = stored_file_name or existing.stored_file_name
+            existing.storage_path = storage_path if storage_path else existing.storage_path
+            existing.original_file_name = original_file_name or existing.original_file_name
+
         existing.template_links = template_links
         existing.author = author
         existing.task_type = task_type
@@ -804,6 +840,7 @@ def api_upload():
         author=author,
         stored_file_name=stored_file_name,
         storage_path=storage_path,
+        template_file_blob=template_file_blob,
         original_file_name=original_file_name,
         template_links=template_links,
         notes=notes,
@@ -858,9 +895,13 @@ def _send_task_notification(upload: UploadRecord, due_date_str: str):
     """如果设置了负责人，发送钉钉通知"""
     if not upload.assignee_name:
         return
-    webhook = current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK")
-    secret = current_app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET")
-    template_source = "已上传文件" if upload.storage_path else f"链接({len(upload.get_template_links_list())}个)"
+    webhook = _dingtalk_webhook_str() or None
+    secret = _dingtalk_secret_opt()
+    template_source = (
+        "已上传文件"
+        if (upload.template_file_blob or upload.storage_path)
+        else f"链接({len(upload.get_template_links_list())}个)"
+    )
     sent = dingtalk_service.notify_task_assigned(
         upload.assignee_name,
         f"{upload.project_name} - {upload.file_name}",
@@ -1008,11 +1049,11 @@ def _parse_import_date(s: str) -> Optional[date]:
     return None
 
 
-# 导入模板表头（中文，与 _IMPORT_HEADER_MAP 对应，用于生成可下载模板）
+# 导入模板表头（与任务录入/列表一致：先项目与文档通用信息，再文件任务与签审批信息）
 _IMPORT_TEMPLATE_HEADERS = [
     "项目名称", "项目编号", "影响业务方", "影响产品", "国家", "项目备注", "注册产品名称", "型号", "注册版本号",
-    "文件名称", "任务类型", "文档链接", "文件版本号", "编写人员", "负责人",
-    "截止日期", "下发任务备注", "文档体现日期", "审核人员", "批准人员", "所属模块", "体现编写人员",
+    "文件名称", "任务类型", "所属模块", "文档链接", "文件版本号", "文档体现日期", "审核人员", "批准人员", "体现编写人员",
+    "编写人员", "负责人", "截止日期", "下发任务备注",
 ]
 
 
@@ -1029,6 +1070,7 @@ def _format_date_for_import(obj) -> str:
 
 
 def _record_to_import_row(r: UploadRecord) -> list:
+    """与 _IMPORT_TEMPLATE_HEADERS 列顺序一致"""
     return [
         (r.project_name or ""),
         (r.project_code or ""),
@@ -1041,17 +1083,17 @@ def _record_to_import_row(r: UploadRecord) -> list:
         str(getattr(r, "registration_version", None) or ""),
         (r.file_name or ""),
         (r.task_type or ""),
+        str(getattr(r, "belonging_module", None) or ""),
         (r.template_links or "").replace("\n", " ").strip(),
         str(getattr(r, "file_version", None) or ""),
+        _format_date_for_import(getattr(r, "document_display_date", None)),
+        str(getattr(r, "reviewer", None) or ""),
+        str(getattr(r, "approver", None) or ""),
+        str(getattr(r, "displayed_author", None) or ""),
         (r.author or ""),
         (r.assignee_name or r.author or ""),
         _format_date_for_import(r.due_date),
         (r.notes or ""),
-        _format_date_for_import(getattr(r, "document_display_date", None)),
-        str(getattr(r, "reviewer", None) or ""),
-        str(getattr(r, "approver", None) or ""),
-        str(getattr(r, "belonging_module", None) or ""),
-        str(getattr(r, "displayed_author", None) or ""),
     ]
 
 
@@ -1075,9 +1117,10 @@ def _build_import_template_csv(include_sample: bool, project_name: Optional[str]
                 writer.writerow(_record_to_import_row(sample))
             else:
                 writer.writerow([
-                    "示例项目", "PRJ001", "示例业务方", "示例产品", "中国", "项目备注示例",
-                    "示例文件名称", "初稿待编写", "https://example.com/doc.docx", "V1.0", "张三", "张三",
-                    datetime.now().strftime("%Y-%m-%d"), "下发备注", datetime.now().strftime("%Y-%m-%d"), "审核人", "批准人", "开发",
+                    "示例项目", "PRJ001", "示例业务方", "示例产品", "中国", "项目备注示例", "注册产品示例", "型号示例", "V1.0",
+                    "示例文件", "初稿待编写", "开发", "https://example.com/doc.docx", "V1.0",
+                    datetime.now().strftime("%Y-%m-%d"), "审核人", "批准人", "体现编写人",
+                    "张三", "张三", datetime.now().strftime("%Y-%m-%d"), "下发任务备注示例",
                 ])
     return buf.getvalue()
 
@@ -1122,7 +1165,7 @@ def api_uploads_import_template():
 @bp.post("/api/uploads/note-files")
 @page13_access_required
 def api_upload_note_file():
-    """上传备注附件（PDF 等），返回可访问的下载 URL。"""
+    """上传备注附件（PDF 等），存入数据库，返回可访问的下载 URL。"""
     file = request.files.get("file")
     if not file or not file.filename:
         return jsonify({"message": "请选择文件"}), 400
@@ -1130,16 +1173,32 @@ def api_upload_note_file():
     allowed = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg")
     if not any(fn_lower.endswith(ext) for ext in allowed):
         return jsonify({"message": f"仅支持以下格式：{', '.join(allowed)}"}), 400
-    notes_dir = Path(current_app.config["UPLOAD_FOLDER"]) / "notes"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-    stored_name, _ = _save_file(file, notes_dir)
+    raw = file.read()
+    if len(raw) > current_app.config.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024):
+        return jsonify({"message": "文件过大"}), 400
+    stored_name = f"{now_local().strftime('%Y%m%d%H%M%S%f')}_{secure_filename(file.filename)}"
+    db.session.add(
+        NoteAttachmentFile(
+            stored_name=stored_name,
+            file_blob=raw,
+            original_name=file.filename,
+        )
+    )
+    db.session.commit()
     download_url = f"/api/uploads/note-files/{stored_name}"
     return jsonify({"success": True, "url": download_url, "fileName": file.filename, "storedName": stored_name})
 
 
 @bp.get("/api/uploads/note-files/<path:filename>")
 def api_download_note_file(filename: str):
-    """下载备注附件文件。"""
+    """下载备注附件（优先数据库，其次遗留磁盘文件）。"""
+    row = NoteAttachmentFile.query.filter_by(stored_name=filename).first()
+    if row:
+        return send_file(
+            io.BytesIO(row.file_blob),
+            as_attachment=True,
+            download_name=row.original_name or filename,
+        )
     notes_dir = Path(current_app.config["UPLOAD_FOLDER"]) / "notes"
     return send_from_directory(str(notes_dir), filename, as_attachment=True)
 
@@ -1280,10 +1339,15 @@ def api_template_detail(upload_id: str):
     if not upload:
         return jsonify({"message": "未找到模板记录"}), 404
     placeholders = upload.placeholders or []
-    if not placeholders and (upload.storage_path or upload.template_links):
+    if not placeholders and (
+        upload.template_file_blob or upload.storage_path or upload.template_links
+    ):
         try:
-            template_path = _get_template_path_for_upload(upload)
-            placeholders = extract_placeholders(template_path)
+            if upload.template_file_blob:
+                placeholders = extract_placeholders_from_bytes(upload.template_file_blob)
+            else:
+                template_path = _get_template_path_for_upload(upload)
+                placeholders = extract_placeholders(template_path)
             upload.placeholders = placeholders
             db.session.add(upload)
             db.session.commit()
@@ -1322,7 +1386,7 @@ def api_uploads_list():
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
-                "hasFile": bool(r.storage_path),
+                "hasFile": bool(r.template_file_blob or r.storage_path),
                 "hasLinks": bool(r.template_links),
                 "templateLinks": r.template_links,
                 "linksCount": len(r.get_template_links_list()),
@@ -1364,12 +1428,14 @@ def api_upload_delete(upload_id: str):
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
     
+    uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    (uploads_dir / f"_dbtpl_{upload_id}.docx").unlink(missing_ok=True)
     if upload.storage_path:
         try:
             Path(upload.storage_path).unlink(missing_ok=True)
         except Exception:
             pass
-    
+
     db.session.delete(upload)
     db.session.commit()
     return jsonify({"message": "已删除"})
@@ -1552,7 +1618,7 @@ def api_my_tasks():
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
-                "hasFile": bool(r.storage_path),
+                "hasFile": bool(r.template_file_blob or r.storage_path),
                 "hasLinks": bool(r.template_links),
                 "templateLinks": r.template_links,
                 "linksCount": len(r.get_template_links_list()),
@@ -1662,15 +1728,23 @@ def api_generate():
     if not upload:
         return jsonify({"message": "未找到对应的模板记录"}), 404
 
+    template_bytes = None
+    template_path = None
     try:
-        template_path = _get_template_path_for_upload(upload, link_index)
+        if upload.template_file_blob:
+            template_bytes = upload.template_file_blob
+        else:
+            template_path = _get_template_path_for_upload(upload, link_index)
     except Exception as e:
         return jsonify({"message": str(e)}), 400
 
     required_placeholders = upload.placeholders or []
     if not required_placeholders:
         try:
-            required_placeholders = extract_placeholders(template_path)
+            if template_bytes is not None:
+                required_placeholders = extract_placeholders_from_bytes(template_bytes)
+            else:
+                required_placeholders = extract_placeholders(template_path or "")
             upload.placeholders = required_placeholders
             db.session.add(upload)
             db.session.commit()
@@ -1696,15 +1770,25 @@ def api_generate():
         )
 
     outputs_dir = Path(current_app.config["OUTPUT_FOLDER"])
+    stem = Path(upload.file_name).stem if upload.file_name else "document"
     try:
         output_path = generate_document(
-            template_path=template_path,
             output_dir=str(outputs_dir),
             data=placeholder_values,
             output_name=output_name,
+            template_path=template_path,
+            template_bytes=template_bytes,
+            template_stem=stem,
         )
     except Exception as exc:
         return jsonify({"message": f"生成文档失败：{exc}"}), 500
+
+    out_p = Path(output_path)
+    try:
+        output_blob = out_p.read_bytes()
+    except Exception as exc:
+        return jsonify({"message": f"读取生成文件失败：{exc}"}), 500
+    out_p.unlink(missing_ok=True)
 
     if existing_record and replace:
         previous_path = existing_record.output_path
@@ -1715,8 +1799,9 @@ def api_generate():
         record.status = "completed"
         record.success = True
         record.completed_at = now_local()
-        record.output_file_name = Path(output_path).name
-        record.output_path = output_path
+        record.output_file_name = out_p.name
+        record.output_path = None
+        record.output_file_blob = output_blob
         record.triggered_by = triggered_by
     else:
         record = GenerateRecord(
@@ -1726,8 +1811,9 @@ def api_generate():
             success=True,
             completed_at=now_local(),
             placeholder_payload=placeholder_values,
-            output_file_name=Path(output_path).name,
-            output_path=output_path,
+            output_file_name=out_p.name,
+            output_path=None,
+            output_file_blob=output_blob,
         )
     db.session.add(record)
 
@@ -1747,8 +1833,32 @@ def api_generate():
             "message": "文档生成成功。",
             "recordId": record.id,
             "uploadId": upload_id,
-            "outputPath": output_path,
+            "downloadUrl": url_for("pages.api_download_generated", record_id=record.id),
         }
+    )
+
+
+@bp.get("/api/generate-records/<record_id>/download")
+@login_required
+def api_download_generated(record_id: str):
+    """下载已生成 Word（内容存于数据库）。"""
+    record = GenerateRecord.query.get(record_id)
+    if not record or not record.upload:
+        return jsonify({"message": "记录不存在"}), 404
+    username = session.get("username")
+    if record.upload.author != username:
+        return jsonify({"message": "无权下载"}), 403
+    blob = record.output_file_blob
+    if not blob and record.output_path and Path(record.output_path).is_file():
+        blob = Path(record.output_path).read_bytes()
+    if not blob:
+        return jsonify({"message": "生成文件不可用"}), 404
+    name = record.output_file_name or "generated.docx"
+    return send_file(
+        io.BytesIO(blob),
+        as_attachment=True,
+        download_name=name,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 
@@ -1918,7 +2028,8 @@ def _resolve_mobiles_for_authors(author_names: list) -> list:
 
 def _get_base_url() -> str:
     """获取对外访问的基础 URL（域名），用于催办等通知中的链接。优先使用配置的 BASE_URL，否则用当前请求的 host。"""
-    base = (current_app.config.get("BASE_URL") or os.environ.get("BASE_URL") or "").strip()
+    from .app_settings import get_setting
+    base = (get_setting("BASE_URL") or "").strip()
     if base:
         return base.rstrip("/")
     if request and request.host_url:
@@ -1993,11 +2104,11 @@ def api_notify_by_project():
     if not project_name:
         return jsonify({"message": "请提供项目名称"}), 400
     
-    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
-    secret = (current_app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET") or "").strip() or None
+    webhook = _dingtalk_webhook_str()
+    secret = _dingtalk_secret_opt()
     
     if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在环境变量中设置 DINGTALK_WEBHOOK"}), 400
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
     
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.project_name == project_name,
@@ -2088,11 +2199,11 @@ def api_notify_by_author():
     if not author:
         return jsonify({"message": "请提供编写人员"}), 400
     
-    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
-    secret = (current_app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET") or "").strip() or None
+    webhook = _dingtalk_webhook_str()
+    secret = _dingtalk_secret_opt()
     
     if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在环境变量中设置 DINGTALK_WEBHOOK"}), 400
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
     
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.author == author,
@@ -2186,11 +2297,11 @@ def api_notify_single_task():
     if not upload_id:
         return jsonify({"message": "请提供任务ID"}), 400
     
-    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
-    secret = (current_app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET") or "").strip() or None
+    webhook = _dingtalk_webhook_str()
+    secret = _dingtalk_secret_opt()
     
     if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在环境变量中设置 DINGTALK_WEBHOOK"}), 400
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
     
     upload = UploadRecord.query.get(upload_id)
     if not upload:
@@ -2288,7 +2399,7 @@ def api_notify_next_schedule():
     cfg = _get_schedule_config_from_db()
     next_times = scheduler_service.get_next_run_times(cfg)
     
-    webhook = current_app.config.get("DINGTALK_WEBHOOK", "")
+    webhook = _dingtalk_webhook_str()
     next_times["dingtalkConfigured"] = bool(webhook)
     
     return jsonify(next_times)
@@ -2349,6 +2460,30 @@ def api_put_schedule_config():
     return jsonify({"success": True, "message": "已保存并已更新定时任务"})
 
 
+@bp.get("/api/system-settings")
+@page13_access_required
+def api_get_system_settings():
+    """系统配置（原环境变量），敏感项已脱敏。"""
+    from .app_settings import SYSTEM_CONFIG_KEYS, system_settings_for_api_get
+
+    app = current_app._get_current_object()
+    keys_meta = [{"key": k, "label": lbl, "sensitive": sens} for k, lbl, sens in SYSTEM_CONFIG_KEYS]
+    return jsonify({"settings": system_settings_for_api_get(app), "keys": keys_meta})
+
+
+@bp.put("/api/system-settings")
+@page13_access_required
+def api_put_system_settings():
+    """保存系统配置并刷新当前进程 app.config（数据库连接 URI 需重启后生效）。"""
+    body = request.get_json(force=True) or {}
+    project_root = Path(current_app.root_path).resolve().parent
+    from .app_settings import apply_system_settings_to_flask, save_system_settings
+
+    save_system_settings({str(k): ("" if v is None else str(v)) for k, v in body.items()}, project_root)
+    apply_system_settings_to_flask(current_app._get_current_object(), project_root)
+    return jsonify({"success": True, "message": "已保存。若修改了数据库连接 URI，请重启服务后生效。"})
+
+
 @bp.get("/api/notify/module-cascade-status")
 @page13_access_required
 def api_module_cascade_status():
@@ -2394,9 +2529,9 @@ def api_module_cascade_status():
 @page13_access_required
 def api_notify_module_cascade_manual():
     """手动模块级联催办：按项目检查，产品全部完成→催办开发；开发全部完成→催办测试。body 可传 projectName 仅处理该项目。"""
-    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
+    webhook = _dingtalk_webhook_str()
     if not webhook:
-        return jsonify({"success": False, "message": "未配置 DINGTALK_WEBHOOK"}), 400
+        return jsonify({"success": False, "message": "未配置钉钉 Webhook，请在页面3「系统配置」填写"}), 400
     data = request.get_json(silent=True) or {}
     project_name = (data.get("projectName") or "").strip() or None
     try:
@@ -2413,12 +2548,12 @@ def api_notify_module_cascade_manual():
 @page13_access_required
 def api_notify_test_auto():
     """测试自动催办：按类型执行与定时任务完全相同的逻辑，仅时间提前到点击时。"""
-    webhook = (current_app.config.get("DINGTALK_WEBHOOK") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
+    webhook = _dingtalk_webhook_str()
     if not webhook:
         return jsonify({
             "success": False,
             "webhook_configured": False,
-            "message": "未配置 DINGTALK_WEBHOOK，请在 .env 或环境变量中设置",
+            "message": "未配置钉钉 Webhook，请在页面3「系统配置」填写",
         }), 400
 
     payload = request.get_json(silent=True) or {}
@@ -2485,7 +2620,7 @@ def api_notify_test_auto():
         })
 
     from . import dingtalk_service
-    secret = (current_app.config.get("DINGTALK_SECRET") or os.environ.get("DINGTALK_SECRET") or "").strip() or None
+    secret = _dingtalk_secret_opt()
     content = "【自动催办测试】通道正常。定时任务将按配置时间发送每周任务完成提醒、逾期前一日催告、每两天项目完成情况统计。"
     result = dingtalk_service.send_text_message(content, webhook=webhook, secret=secret)
     ok = result.get("success") is True

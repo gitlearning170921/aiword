@@ -375,6 +375,18 @@ def ensure_schema(app: Flask):
         "ALTER TABLE generate_records ADD COLUMN output_path TEXT",
         "ALTER TABLE generate_records ADD COLUMN output_path VARCHAR(512)",
     )
+    ensure_column(
+        "upload_records",
+        "template_file_blob",
+        "ALTER TABLE upload_records ADD COLUMN template_file_blob BLOB",
+        "ALTER TABLE upload_records ADD COLUMN template_file_blob MEDIUMBLOB",
+    )
+    ensure_column(
+        "generate_records",
+        "output_file_blob",
+        "ALTER TABLE generate_records ADD COLUMN output_file_blob BLOB",
+        "ALTER TABLE generate_records ADD COLUMN output_file_blob MEDIUMBLOB",
+    )
 
 
 def init_default_configs():
@@ -449,6 +461,11 @@ def init_default_configs():
     if not existing_delay:
         db.session.add(AppConfig(config_key="MODULE_CASCADE_DELAY_MINUTES", config_value="5"))
 
+    from .app_settings import SYSTEM_CONFIG_KEYS
+    for sk, _, _ in SYSTEM_CONFIG_KEYS:
+        if not AppConfig.query.filter_by(config_key=sk).first():
+            db.session.add(AppConfig(config_key=sk, config_value=""))
+
     db.session.commit()
 
 
@@ -481,25 +498,6 @@ def create_app() -> Flask:
                 continue
         return default
 
-    # 页面1/3 访问密码：仅从 config.json 读取，不读 config.json.example
-    page13_password = None
-    _config_path = project_root / "config.json"
-    if _config_path.exists():
-        try:
-            import json
-            with open(_config_path, "r", encoding="utf-8") as f:
-                _data = json.load(f)
-            _val = _data.get("PAGE13_ACCESS_PASSWORD")
-            if _val is not None:
-                _v = str(_val).replace("\ufeff", "").strip()
-                if _v:
-                    page13_password = _v
-        except Exception:
-            pass
-    if page13_password:
-        import logging
-        logging.getLogger(__name__).info("页面1/3 访问密码已从 config.json 加载")
-    
     uploads_dir = project_root / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     outputs_dir = project_root / "outputs"
@@ -514,7 +512,8 @@ def create_app() -> Flask:
     # 已注释 SQLite 入口，避免搞混当前连接的数据库。当前仅使用 MySQL。
     # default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")
     default_db_uri = "mysql+pymysql://root:mysql170921@10.26.1.221:13306/aiword?charset=utf8mb4"
-    db_uri = os.getenv("DATABASE_URL", default_db_uri)
+    from .app_settings import resolve_database_uri
+    db_uri = resolve_database_uri(project_root, os.getenv("DATABASE_URL", default_db_uri))
 
     if db_uri.startswith("mysql"):
         try:
@@ -548,15 +547,14 @@ def create_app() -> Flask:
         OUTPUT_FOLDER=str(outputs_dir),
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # 25 MB safety cap
         JSON_SORT_KEYS=False,
-        DINGTALK_WEBHOOK=os.getenv("DINGTALK_WEBHOOK", ""),
-        DINGTALK_SECRET=os.getenv("DINGTALK_SECRET", ""),
-        SECRET_KEY=os.getenv("SECRET_KEY", "aiword-dev-secret-key-change-in-production"),
-        BASE_URL=(os.getenv("BASE_URL", "") or "").strip(),
-        # Session cookie：Lax 便于同站请求带 cookie，避免页面1/3 验证后接口 401
+        DINGTALK_WEBHOOK="",
+        DINGTALK_SECRET="",
+        SECRET_KEY="aiword-dev-secret-key-change-in-production",
+        BASE_URL="",
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_HTTPONLY=True,
-        # 页面1、页面3 访问密码（可选）。在 config.json 中配置 PAGE13_ACCESS_PASSWORD，不在网络中明文传输。
-        PAGE13_ACCESS_PASSWORD=page13_password,
+        PAGE13_ACCESS_PASSWORD=None,
+        INTEGRATION_SECRET="",
     )
     app.json.ensure_ascii = False
 
@@ -598,6 +596,15 @@ def create_app() -> Flask:
 
         db.create_all()
         init_default_configs()
+        from .app_settings import ensure_environment_variables_migrated_to_db, apply_system_settings_to_flask
+        ensure_environment_variables_migrated_to_db(project_root, startup_database_uri=db_uri)
+        apply_system_settings_to_flask(app, project_root)
+        from .migrate_binary_assets import migrate_binary_assets_to_db
+
+        migrate_binary_assets_to_db(app)
+        from .startup_local_env import run_startup_local_maintenance
+
+        run_startup_local_maintenance(app, project_root)
 
     try:
         from .scheduler import init_scheduler
