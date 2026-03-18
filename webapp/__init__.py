@@ -3,6 +3,7 @@ from pathlib import Path
 
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
+from jinja2 import ChoiceLoader, FileSystemLoader
 from sqlalchemy import inspect, text
 
 db = SQLAlchemy()
@@ -503,11 +504,27 @@ def create_app() -> Flask:
     outputs_dir = project_root / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
+    _web_templates = project_root / "web" / "templates"
+    _pkg_templates = Path(__file__).resolve().parent / "templates"
+    _template_paths: list[str] = []
+    if _web_templates.is_dir():
+        _template_paths.append(str(_web_templates))
+    if _pkg_templates.is_dir():
+        _template_paths.append(str(_pkg_templates))
+    if not _template_paths:
+        raise RuntimeError(
+            "未找到模板目录：需要存在 web/templates 或 webapp/templates。"
+            "请完整部署项目（含 web 目录），或更新代码使 webapp/templates 随包发布。"
+        )
     app = Flask(
         __name__,
-        template_folder=str(project_root / "web" / "templates"),
+        template_folder=_template_paths[0],
         static_folder=str(project_root / "web" / "static"),
     )
+    if len(_template_paths) > 1:
+        app.jinja_loader = ChoiceLoader(
+            [FileSystemLoader(p) for p in _template_paths]
+        )
 
     # 已注释 SQLite 入口，避免搞混当前连接的数据库。当前仅使用 MySQL。
     # default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")

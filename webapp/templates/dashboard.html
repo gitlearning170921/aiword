@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}页面3 - 统计{% endblock %}
+{% block content %}
+<div class="hero-bar">
+    <h1>页面3 · 统计面板</h1>
+    <p>实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+</div>
+
+<div class="row g-4 mb-4">
+    <div class="col-md-3">
+        <div class="card text-center h-100">
+            <div class="card-body">
+                <p class="text-muted mb-1">整体完成率</p>
+                <div id="overallRate" class="stat-value">0%</div>
+                <small id="overallNumbers" class="text-muted">0 / 0</small>
+                <p class="small text-muted mt-2 mb-0">（已完成 / 总数）</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-9">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="form-section-title mb-0">下一次自动通知时间</h6>
+                    <div>
+                        <span class="me-1">测试自动催办：</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="refreshScheduleBtn">刷新</button>
+                    </div>
+                </div>
+                <p class="small text-muted mb-0">若钉钉群未收到测试消息，请检查机器人是否设置了关键词且消息内容包含该关键词。</p>
+                <div class="mt-3 p-2 border rounded bg-light">
+                    <h6 class="small fw-bold mb-2">自动通知时间配置</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">每周任务完成提醒</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00" title="星期 时间，如 thu 16:00">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-0">逾期前一日催告</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00" title="每天执行时间">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">每两天项目统计</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30" title="多日 时间">
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-sm btn-primary w-100" id="saveScheduleConfigBtn">保存</button>
+                        </div>
+                        <div class="col-md-2 mt-2">
+                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
+                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5" title="产品/开发最后一份文档完成后多少分钟发送催办">
+                        </div>
+                        <div class="col-md-2 mt-2 d-flex align-items-end">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="立即处理到期的模块级联催办">测试发送</button>
+                        </div>
+                    </div>
+                    <p class="small text-muted mb-0 mt-1">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30（英文缩写）。模块级联：按项目，产品最后一份完成→N分钟后催办开发；开发最后一份完成→N分钟后催办测试。</p>
+                </div>
+                <div class="card mb-3">
+                    <div class="card-body py-2">
+                        <h6 class="mb-2">模块级联催办状态</h6>
+                        <p class="small text-muted mb-2">待执行：已入队、到点将发送；已执行：最近发送记录。</p>
+                        <div id="moduleCascadeStatusContainer">
+                            <div class="small text-muted">加载中…</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="scheduleInfo" class="d-flex flex-wrap gap-3 mt-3">
+                    <!-- 动态生成 -->
+                </div>
+                <div class="mt-4 pt-3 border-top">
+                    <h6 class="small fw-bold mb-2">系统配置（原环境变量，存入数据库）</h6>
+                    <p class="small text-muted mb-2">钉钉、对外域名、Session 密钥、页面1/3 密码等均在此维护。<strong>首次启动时</strong>会自动把环境变量（及 <code>.env</code>）里已设置的项写入本库；之后以页面配置为准。敏感项显示为空表示已有值：不修改请留空。修改数据库连接后需<strong>重启服务</strong>。</p>
+                    <div id="systemSettingsForm" class="row g-2"></div>
+                    <button type="button" class="btn btn-sm btn-primary mt-2" id="saveSystemSettingsBtn">保存系统配置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="form-section-title mb-0">按项目统计（含完成状态分布）</h6>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="projectFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <input type="text" class="form-control form-control-sm" id="filterProject" placeholder="项目名称搜索...">
+                </div>
+            </div>
+        </div>
+        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+            <table class="table table-sm table-striped table-hover align-middle mb-0">
+                <thead class="table-light sticky-top">
+                <tr>
+                    <th style="width:40px">序号</th>
+                    <th>项目</th>
+                    <th>完成</th>
+                    <th>未完成</th>
+                    <th>完成率</th>
+                    <th>状态分布</th>
+                    <th style="width:120px">操作</th>
+                </tr>
+                </thead>
+                <tbody id="projectStatsBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="form-section-title mb-0">按编写人员统计（含完成状态分布）</h6>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#authorFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="authorFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <input type="text" class="form-control form-control-sm" id="filterAuthor" placeholder="编写人员搜索...">
+                </div>
+            </div>
+        </div>
+        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+            <table class="table table-sm table-striped table-hover align-middle mb-0">
+                <thead class="table-light sticky-top">
+                <tr>
+                    <th style="width:40px">序号</th>
+                    <th>编写人员</th>
+                    <th>完成</th>
+                    <th>未完成</th>
+                    <th>完成率</th>
+                    <th>状态分布</th>
+                    <th>审核不通过待修改次数</th>
+                    <th style="width:120px">操作</th>
+                </tr>
+                </thead>
+                <tbody id="authorStatsBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="form-section-title mb-0">按项目+编写人员统计</h6>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectAuthorFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="projectAuthorFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-4">
+                    <input type="text" class="form-control form-control-sm" id="filterProjectAuthor" placeholder="搜索...">
+                </div>
+            </div>
+        </div>
+        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+            <table class="table table-sm table-striped table-hover align-middle mb-0">
+                <thead class="table-light sticky-top">
+                <tr>
+                    <th style="width:40px">序号</th>
+                    <th>项目 / 编写人员</th>
+                    <th>完成</th>
+                    <th>未完成</th>
+                    <th>完成率</th>
+                    <th>状态分布</th>
+                    <th style="width:120px">操作</th>
+                </tr>
+                </thead>
+                <tbody id="projectAuthorStatsBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="card-title mb-0">任务明细总览</h5>
+            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#detailFilterRow">
+                筛选
+            </button>
+        </div>
+        <div id="detailFilterRow" class="collapse mb-2">
+            <div class="row g-2">
+                <div class="col-md-2">
+                    <input type="text" class="form-control form-control-sm" id="filterDetailProject" placeholder="项目名称">
+                </div>
+                <div class="col-md-2">
+                    <input type="text" class="form-control form-control-sm" id="filterDetailFile" placeholder="文件名称">
+                </div>
+                <div class="col-md-2">
+                    <input type="text" class="form-control form-control-sm" id="filterDetailAuthor" placeholder="编写人员">
+                </div>
+                <div class="col-md-2">
+                    <select class="form-select form-select-sm" id="filterDetailStatus">
+                        <option value="">全部状态</option>
+                        <option value="未完成">未完成</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <p class="text-muted small">列出所有任务，完成状态为空表示未完成，有状态值表示已完成。支持拖动排序。</p>
+        <div class="d-flex align-items-center mb-2">
+            <span class="me-2">分组：</span>
+            <div class="btn-group btn-group-sm" role="group">
+                <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByNone" value="none" checked>
+                <label class="btn btn-outline-secondary" for="detailGroupByNone">不分组</label>
+                <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByProject" value="project">
+                <label class="btn btn-outline-secondary" for="detailGroupByProject">按项目</label>
+                <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByAuthor" value="author">
+                <label class="btn btn-outline-secondary" for="detailGroupByAuthor">按编写人</label>
+                <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByProjectAuthor" value="project_author">
+                <label class="btn btn-outline-secondary" for="detailGroupByProjectAuthor">按项目+编写人</label>
+            </div>
+            <div class="col-toggle-wrap ms-auto">
+                <p class="fw-bold small mb-1 col-toggle-tip">文档通用及签审批信息请打开列设置查看。</p>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="colToggleBtn3">列设置 ▾</button>
+                <div class="col-toggle-menu" id="colToggleMenu3"></div>
+            </div>
+        </div>
+        <div class="table-responsive" style="max-height: 400px; overflow: auto;">
+            <table class="table table-bordered table-hover align-middle mb-0 table-selectable table-compact" id="detailTable" data-col-store-key="colVis_page3_v2">
+                <thead class="table-light sticky-top">
+                <tr>
+                    <th data-col="seq">序号</th>
+                    <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="taskType" data-col="taskType">任务类型 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-narrow" data-sort-key="belongingModule" data-col="belongingModule">所属模块 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="author" data-col="author">编写人员 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="completionStatus" data-col="completionStatus">完成状态 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="dueDate" data-col="dueDate">截止日期 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="businessSide" data-col="businessSide">影响业务方 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-narrow" data-sort-key="product" data-col="product">影响产品 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-narrow" data-sort-key="country" data-col="country">国家 <span class="sort-indicator"></span></th>
+                    <th data-col="notes">下发任务备注</th>
+                    <th data-col="executionNotes">执行任务备注</th>
+                    <th data-col="docLink">文档地址</th>
+                    <th class="th-sortable col-narrow" data-sort-key="projectCode" data-col="projectCode">项目编号 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-narrow" data-sort-key="fileVersion" data-col="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable" data-sort-key="documentDisplayDate" data-col="docDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
+                    <th data-col="reviewer">审核人员</th>
+                    <th data-col="approver">批准人员</th>
+                    <th data-col="displayedAuthor">体现编写人员</th>
+                    <th data-col="projectNotes">项目备注</th>
+                    <th data-col="registeredProductName">注册产品名称</th>
+                    <th data-col="model">型号</th>
+                    <th data-col="registrationVersion">注册版本号</th>
+                    <th class="col-op" data-col="op">操作</th>
+                </tr>
+                </thead>
+                <tbody id="detailTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="notifyTemplateModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">通知文案配置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="notifyTemplateList">
+                    <!-- 动态生成 -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" id="saveNotifyTemplatesBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1050;">
+    <button type="button" class="btn btn-secondary" data-bs-toggle="modal" data-bs-target="#notifyTemplateModal">
+        通知文案配置
+    </button>
+</div>
+{% endblock %}

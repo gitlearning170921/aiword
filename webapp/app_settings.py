@@ -494,14 +494,26 @@ def ensure_environment_variables_migrated_to_db(
 
 def apply_system_settings_to_flask(app: "Flask", project_root: Path) -> None:
     """将数据库中的配置同步到 app.config（启动时及保存后调用）。"""
+    import logging
+
+    _log = logging.getLogger(__name__)
     for key, _, _ in SYSTEM_CONFIG_KEYS:
         if key == "DATABASE_URL":
             continue
         v = get_setting(key, default="", app=app)
         if key in ("UPLOAD_FOLDER", "OUTPUT_FOLDER"):
             if v:
-                app.config[key] = v
-                Path(v).mkdir(parents=True, exist_ok=True)
+                try:
+                    Path(v).mkdir(parents=True, exist_ok=True)
+                    app.config[key] = v
+                except OSError as e:
+                    # 迁机后库中仍为旧盘符路径（如无 D: 盘）会导致启动失败，保留 create_app 已设的默认目录
+                    _log.warning(
+                        "系统配置 %s=%r 无法创建或使用，已忽略并沿用项目默认目录: %s",
+                        key,
+                        v[:80] + ("…" if len(v) > 80 else ""),
+                        e,
+                    )
             continue
         if v:
             app.config[key] = v

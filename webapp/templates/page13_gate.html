@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}访问验证 - 页面1/页面3{% endblock %}
+{% block head_extra %}
+{# HTTP 非 localhost 时 crypto.subtle 不可用，用 CryptoJS 计算 SHA-256 与 Python 一致 #}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-5 col-lg-4">
+        <div class="card shadow-lg mt-5">
+            <div class="card-body p-5">
+                <div class="text-center mb-4">
+                    <h3 class="fw-bold text-primary">AI Word 工具</h3>
+                    <p class="text-muted">请输入访问密码以进入页面1或页面3</p>
+                </div>
+                <form id="page13AuthForm">
+                    <div class="mb-4">
+                        <label class="form-label">访问密码</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="page13Password" required autofocus autocomplete="current-password" placeholder="请输入密码">
+                            <button type="button" class="btn btn-outline-secondary" id="page13TogglePwd" title="显示/隐藏密码" aria-label="显示密码">
+                                <span id="page13PwdEyeIcon">显示</span>
+                            </button>
+                        </div>
+                        <div class="form-check mt-2">
+                            <input type="checkbox" class="form-check-input" id="page13ShowPwd">
+                            <label class="form-check-label text-muted small" for="page13ShowPwd">明文显示密码</label>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 py-2">验证并进入</button>
+                </form>
+                <p class="small text-muted mt-3 mb-0">密码由管理员在配置中设置，不在网络中明文传输。</p>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {
+    const form = document.getElementById("page13AuthForm");
+    const passwordInput = document.getElementById("page13Password");
+    const nextUrl = {{ next_url|tojson }};
+    const showPwdCheck = document.getElementById("page13ShowPwd");
+    const togglePwdBtn = document.getElementById("page13TogglePwd");
+    const eyeIcon = document.getElementById("page13PwdEyeIcon");
+
+    if (showPwdCheck) {
+        showPwdCheck.addEventListener("change", function() {
+            passwordInput.type = this.checked ? "text" : "password";
+            if (eyeIcon) eyeIcon.textContent = this.checked ? "隐藏" : "显示";
+        });
+    }
+    if (togglePwdBtn) {
+        togglePwdBtn.addEventListener("click", function() {
+            var isText = passwordInput.type === "text";
+            passwordInput.type = isText ? "password" : "text";
+            if (eyeIcon) eyeIcon.textContent = isText ? "显示" : "隐藏";
+            if (showPwdCheck) showPwdCheck.checked = !isText;
+        });
+    }
+    // 失焦时自动去除首尾空格
+    passwordInput.addEventListener("blur", function() {
+        var v = (this.value || "").trim();
+        if (v !== this.value) this.value = v;
+    });
+
+    // UTF-8 编码（TextEncoder 在 HTTP 下也可用）
+    function utf8Bytes(str) {
+        return new TextEncoder().encode(str);
+    }
+
+    // 纯 JS SHA-256 回退（当 crypto.subtle 不可用时，如 HTTP 非 localhost）
+    function sha256HexFallback(bytes) {
+        var K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+        var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+        var i, j, t, W = new Array(64), l = bytes.length * 8, buf = [];
+        for (i = 0; i < bytes.length; i++) buf.push(bytes[i]);
+        buf.push(0x80);
+        while ((buf.length % 64) !== 56) buf.push(0);
+        for (t = 0; t < 8; t++) buf.push((l >>> (56 - t * 8)) & 0xff);
+        for (j = 0; j < buf.length; j += 64) {
+            var a = H.slice(0);
+            for (i = 0; i < 16; i++) W[i] = (buf[j+i*4]<<24)|(buf[j+i*4+1]<<16)|(buf[j+i*4+2]<<8)|buf[j+i*4+3];
+            for (i = 16; i < 64; i++) {
+                var s0 = ((W[i-15]>>>7)|(W[i-15]<<25))^((W[i-15]>>>18)|(W[i-15]<<14))^(W[i-15]>>>3);
+                var s1 = ((W[i-2]>>>17)|(W[i-2]<<15))^((W[i-2]>>>19)|(W[i-2]<<13))^(W[i-2]>>>10);
+                W[i] = (W[i-16] + s0 + W[i-7] + s1) | 0;
+            }
+            for (i = 0; i < 64; i++) {
+                var S1 = ((a[0]>>>2)|(a[0]<<30))^((a[0]>>>13)|(a[0]<<19))^((a[0]>>>22)|(a[0]<<10));
+                var ch = (a[0]&a[1])^((~a[0])&a[2]);
+                var t1 = (a[7] + S1 + ch + K[i] + W[i]) | 0;
+                var S0 = ((a[4]>>>6)|(a[4]<<26))^((a[4]>>>11)|(a[4]<<21))^((a[4]>>>25)|(a[4]<<7));
+                var maj = (a[4]&a[5])^(a[4]&a[6])^(a[5]&a[6]);
+                var t2 = (S0 + maj) | 0;
+                a[7]=a[6]; a[6]=a[5]; a[5]=a[4]; a[4]=(a[3]+t1)|0; a[3]=a[2]; a[2]=a[1]; a[1]=a[0]; a[0]=(t1+t2)|0;
+            }
+            for (i = 0; i < 8; i++) H[i] = (H[i] + a[i]) | 0;
+        }
+        return H.map(function(h){ return ("00000000"+((h>>>0)>>>0).toString(16)).slice(-8); }).join("");
+    }
+
+    function sha256Hex(str) {
+        if (typeof crypto !== "undefined" && crypto.subtle && typeof crypto.subtle.digest === "function") {
+            var bytes = utf8Bytes(str);
+            return crypto.subtle.digest("SHA-256", bytes).then(function(buf) {
+                return Array.from(new Uint8Array(buf)).map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+            });
+        }
+        if (typeof CryptoJS !== "undefined" && CryptoJS.SHA256) {
+            return Promise.resolve(CryptoJS.SHA256(str).toString(CryptoJS.enc.Hex));
+        }
+        return Promise.resolve(sha256HexFallback(utf8Bytes(str)));
+    }
+
+    form.addEventListener("submit", async function(e) {
+        e.preventDefault();
+        const btn = form.querySelector('button[type="submit"]');
+        const origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "验证中…";
+        try {
+            const stateRes = await fetch("/api/page13-auth-state", { credentials: "same-origin" });
+            const state = await stateRes.json();
+            if (!state.required || state.authenticated) {
+                window.location.href = nextUrl || "/upload";
+                return;
+            }
+            const nonce = state.nonce;
+            if (!nonce) {
+                alert("请刷新页面后重试");
+                btn.disabled = false;
+                btn.textContent = origText;
+                return;
+            }
+            const password = (passwordInput.value || "").trim();
+            const hash = await sha256Hex(nonce + password);
+            const authRes = await fetch("/api/page13-auth", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ hash: hash }),
+                credentials: "same-origin"
+            });
+            const text = await authRes.text();
+            let data = {};
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch (parseErr) {
+                var msg = "服务器返回格式异常，请重试";
+                if (authRes.status) msg += "（状态码 " + authRes.status + "）";
+                if (text && text.length < 200) msg += "\n" + text; else if (text) msg += "\n" + text.substring(0, 150) + "...";
+                alert(msg);
+                btn.disabled = false;
+                btn.textContent = origText;
+                return;
+            }
+            if (authRes.ok && data.success) {
+                window.location.href = nextUrl || "/upload";
+                return;
+            }
+            alert(data.message || "验证失败");
+        } catch (err) {
+            alert("网络错误，请重试\n" + (err && err.message ? err.message : String(err)));
+        }
+        btn.disabled = false;
+        btn.textContent = origText;
+    });
+})();
+</script>
+{% endblock %}

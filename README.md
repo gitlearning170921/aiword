@@ -598,6 +598,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
 ## 常见问题
 
+### Q0: 另一台服务器报 `TemplateNotFound: upload.html`
+
+**原因**：应用会从 `项目根/web/templates` 与 `webapp/templates` 两处查找模板。若只拷贝了 `webapp` 而没带 `web` 目录，旧版本会找不到模板。
+
+**解决**：更新代码后仓库内已包含 **`webapp/templates`**（与 `web/templates` 同步），部署时至少带上 **`webapp/templates`**。页面样式与脚本仍依赖 **`web/static`**，建议整库部署或同时拷贝 `web/static`。
+
 ### Q1: 占位符识别失败
 
 **可能原因**：
