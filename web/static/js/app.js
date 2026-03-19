@@ -2382,6 +2382,54 @@ function initDashboardPage() {
             )}。若提示需要访问密码，请先完成页面验证后再试。</div></div>`;
         }
     };
+
+    // 系统配置弹窗：默认不展开，点击按钮后再拉取并渲染
+    const systemModal = document.getElementById("systemSettingsModal");
+    const openSystemSettingsBtn = document.getElementById("openSystemSettingsBtn");
+    const closeSystemSettingsBtn = document.getElementById("closeSystemSettingsBtn");
+    let systemSettingsLoaded = false;
+
+    const showSystemModal = () => {
+        if (!systemModal) return;
+        systemModal.classList.add("show");
+        systemModal.setAttribute("aria-hidden", "false");
+        document.body.style.overflow = "hidden";
+    };
+
+    const hideSystemModal = () => {
+        if (!systemModal) return;
+        systemModal.classList.remove("show");
+        systemModal.setAttribute("aria-hidden", "true");
+        document.body.style.overflow = "";
+    };
+
+    if (openSystemSettingsBtn && systemModal) {
+        openSystemSettingsBtn.addEventListener("click", async () => {
+            showSystemModal();
+            if (!systemSettingsLoaded) {
+                try {
+                    await loadSystemSettings();
+                    systemSettingsLoaded = true;
+                } catch (_) {
+                    // ignore；loadSystemSettings 内部已做提示
+                }
+            }
+        });
+        closeSystemSettingsBtn?.addEventListener("click", hideSystemModal);
+        systemModal?.addEventListener("click", (e) => {
+            if (e.target && e.target.getAttribute && e.target.getAttribute("data-close") === "1") {
+                hideSystemModal();
+            }
+        });
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") hideSystemModal();
+        });
+    } else {
+        // 兼容：若页面尚未包含弹窗 DOM，则回退到原先“默认加载”
+        loadSystemSettings();
+        systemSettingsLoaded = true;
+    }
+
     document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
         const container = document.getElementById("systemSettingsForm");
         if (!container) return;
@@ -2407,7 +2455,7 @@ function initDashboardPage() {
                 body: JSON.stringify(payload),
             });
             App.notify("系统配置已保存", "success");
-            loadSystemSettings();
+            await loadSystemSettings();
             if (typeof window.__dashboardReloadSchedule === "function") {
                 window.__dashboardReloadSchedule();
             }
@@ -2415,7 +2463,7 @@ function initDashboardPage() {
             App.notify((e.data && e.data.message) || e.message || "保存失败", "danger");
         }
     });
-    loadSystemSettings();
+    // 默认不加载：等用户点击打开弹窗后拉取
 
     const overallRate = document.getElementById("overallRate");
     if (!overallRate) return;
@@ -2460,7 +2508,7 @@ function initDashboardPage() {
                 statusDiv.className = `p-2 border rounded ${configured ? 'bg-success-subtle border-success' : 'bg-warning-subtle border-warning'}`;
                 statusDiv.innerHTML = `
                     <div class="fw-bold small">${configured ? '✓ 钉钉已配置' : '⚠ 钉钉未配置'}</div>
-                    <div class="text-muted small">${configured ? '可正常发送通知' : '请在下方「系统配置」填写钉钉 Webhook'}</div>
+                    <div class="text-muted small">${configured ? '可正常发送通知' : '请在弹窗「系统配置」填写钉钉 Webhook'}</div>
                 `;
                 scheduleInfo.appendChild(statusDiv);
                 
@@ -2527,6 +2575,8 @@ function initDashboardPage() {
             const delay = res.delayMinutes != null ? res.delayMinutes : 5;
             const pending = res.pending || [];
             const recentSent = res.recentSent || [];
+            // “已执行”最多展示最近 3 条，避免记录数量过多影响页面阅读
+            const recentSentDisplay = recentSent.slice(0, 3);
             let html = `<div class="small mb-2">延迟 <strong>${delay}</strong> 分钟</div>`;
             html += '<div class="mb-2"><span class="fw-bold small">待执行</span>';
             if (pending.length === 0) {
@@ -2539,11 +2589,11 @@ function initDashboardPage() {
                 html += '</ul>';
             }
             html += '</div><div><span class="fw-bold small">已执行（最近）</span>';
-            if (recentSent.length === 0) {
+            if (recentSentDisplay.length === 0) {
                 html += '<span class="text-muted small ms-2">暂无</span>';
             } else {
                 html += '<ul class="list-unstyled small mb-0 mt-1">';
-                recentSent.forEach(s => {
+                recentSentDisplay.forEach(s => {
                     html += `<li>${(s.projectName || "-").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}：${s.triggerModule || ""}→${s.targetModule || ""}，${s.sentAt || "-"}</li>`;
                 });
                 html += '</ul>';
