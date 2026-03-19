@@ -575,6 +575,21 @@ def create_app() -> Flask:
     )
     app.json.ensure_ascii = False
 
+    def _static_assets_version() -> int:
+        """用于模板里给 app.js/app.css 加查询参数，避免多机/浏览器强缓存导致“拉代码了但页面不变”。"""
+        v = 0
+        for rel in ("js/app.js", "css/app.css"):
+            p = project_root / "web" / "static" / rel
+            try:
+                v = max(v, int(p.stat().st_mtime))
+            except OSError:
+                pass
+        return v
+
+    @app.context_processor
+    def _inject_static_version():
+        return {"static_version": _static_assets_version()}
+
     data_dir = project_root / "data"
     data_dir.mkdir(exist_ok=True)
 

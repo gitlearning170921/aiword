@@ -19,7 +19,7 @@
           integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
           crossorigin="anonymous"
           onerror="window.__bootstrapCssFallback && window.__bootstrapCssFallback()">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=static_version) }}">
     {% block head_extra %}{% endblock %}
 </head>
 <body class="app-body {% if request.endpoint == 'pages.generate_page' %}generate-view{% endif %}">
@@ -64,7 +64,7 @@
         integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
         crossorigin="anonymous"></script>
 {% if not gate_page %}
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
 {% endif %}
 {% block body_extra %}{% endblock %}
 </body>
