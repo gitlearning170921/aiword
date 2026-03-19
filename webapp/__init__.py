@@ -560,6 +560,8 @@ def create_app() -> Flask:
         SQLALCHEMY_DATABASE_URI=db_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS=_engine_opts,
+        # 主前端脚本/样式：避免浏览器长期缓存 + 304 一直沿用旧 app.js（内网部署常见）
+        SEND_FILE_MAX_AGE=0,
         UPLOAD_FOLDER=str(uploads_dir),
         OUTPUT_FOLDER=str(outputs_dir),
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # 25 MB safety cap
@@ -578,7 +580,12 @@ def create_app() -> Flask:
     def _static_assets_version() -> int:
         """用于模板里给 app.js/app.css 加查询参数，避免多机/浏览器强缓存导致“拉代码了但页面不变”。"""
         v = 0
-        for rel in ("js/app.js", "css/app.css"):
+        for rel in (
+            "js/app.js",
+            "css/app.css",
+            "vendor/bootstrap-5.3.3/bootstrap.min.css",
+            "vendor/bootstrap-5.3.3/bootstrap.bundle.min.js",
+        ):
             p = project_root / "web" / "static" / rel
             try:
                 v = max(v, int(p.stat().st_mtime))
@@ -589,6 +596,20 @@ def create_app() -> Flask:
     @app.context_processor
     def _inject_static_version():
         return {"static_version": _static_assets_version()}
+
+    @app.after_request
+    def _no_store_for_app_js_css(response):
+        from flask import request
+
+        p = (request.path or "").replace("\\", "/")
+        if p.endswith("/static/js/app.js") or p.endswith("/static/css/app.css") or (
+            "/static/vendor/bootstrap-5.3.3/" in p
+            and (p.endswith("bootstrap.min.css") or p.endswith("bootstrap.bundle.min.js"))
+        ):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
     data_dir = project_root / "data"
     data_dir.mkdir(exist_ok=True)

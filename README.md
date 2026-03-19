@@ -604,6 +604,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
 **解决**：更新代码后仓库内已包含 **`webapp/templates`**（与 `web/templates` 同步），部署时至少带上 **`webapp/templates`**。页面样式与脚本仍依赖 **`web/static`**，建议整库部署或同时拷贝 `web/static`。
 
+### Q0.1: 强制刷新后页面样式全没了 / 控制台报 CDN 超时
+
+**原因**：此前 Bootstrap 从公网 CDN 加载，内网或网络不稳定时刷新会加载失败；`app.css` 单独存在时布局仍会乱。
+
+**解决**：Bootstrap **已改为随仓库提供的本地文件**：`web/static/vendor/bootstrap-5.3.3/`（`bootstrap.min.css` 与 `bootstrap.bundle.min.js`）。部署时请**务必带上整个 `web/static` 目录**（含 `vendor`），不要只拷 `js/app.js`。
+
 ### Q1: 占位符识别失败
 
 **可能原因**：
