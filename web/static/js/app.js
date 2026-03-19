@@ -2393,6 +2393,14 @@ function initDashboardPage() {
         if (!systemModal) return;
         systemModal.classList.add("show");
         systemModal.setAttribute("aria-hidden", "false");
+        // 兼容：同时设置内联样式，确保弹窗一定可见
+        systemModal.style.display = "block";
+        systemModal.style.position = "fixed";
+        systemModal.style.left = "0";
+        systemModal.style.top = "0";
+        systemModal.style.right = "0";
+        systemModal.style.bottom = "0";
+        systemModal.style.zIndex = "2000";
         document.body.style.overflow = "hidden";
     };
 
@@ -2400,13 +2408,21 @@ function initDashboardPage() {
         if (!systemModal) return;
         systemModal.classList.remove("show");
         systemModal.setAttribute("aria-hidden", "true");
+        systemModal.style.display = "none";
+        systemModal.style.position = "";
+        systemModal.style.zIndex = "";
         document.body.style.overflow = "";
     };
 
-    if (openSystemSettingsBtn && systemModal) {
+    if (openSystemSettingsBtn) {
         openSystemSettingsBtn.addEventListener("click", async () => {
             showSystemModal();
             if (!systemSettingsLoaded) {
+                const container = document.getElementById("systemSettingsForm");
+                if (container) {
+                    container.innerHTML =
+                        '<div class="col-12"><div class="alert alert-info mb-0 small">加载中…</div></div>';
+                }
                 try {
                     await loadSystemSettings();
                     systemSettingsLoaded = true;
@@ -2415,17 +2431,19 @@ function initDashboardPage() {
                 }
             }
         });
-        closeSystemSettingsBtn?.addEventListener("click", hideSystemModal);
-        systemModal?.addEventListener("click", (e) => {
-            if (e.target && e.target.getAttribute && e.target.getAttribute("data-close") === "1") {
-                hideSystemModal();
-            }
-        });
-        window.addEventListener("keydown", (e) => {
-            if (e.key === "Escape") hideSystemModal();
-        });
+        if (systemModal) {
+            closeSystemSettingsBtn?.addEventListener("click", hideSystemModal);
+            systemModal.addEventListener("click", (e) => {
+                if (e.target && e.target.getAttribute && e.target.getAttribute("data-close") === "1") {
+                    hideSystemModal();
+                }
+            });
+            window.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") hideSystemModal();
+            });
+        }
     } else {
-        // 兼容：若页面尚未包含弹窗 DOM，则回退到原先“默认加载”
+        // 兼容：若页面尚未包含“打开按钮”，则回退到原先“默认加载”
         loadSystemSettings();
         systemSettingsLoaded = true;
     }
