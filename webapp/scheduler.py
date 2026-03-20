@@ -9,6 +9,8 @@ import atexit
 import logging
 import os
 import re
+import time
+from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -157,6 +159,28 @@ def _resolve_mobiles_for_authors(author_names: list) -> list:
     return mobiles
 
 
+def _dedupe_upload_records_for_notify(uploads: list) -> list:
+    """
+    催办文案内对任务列表去重，避免库中重复行或逻辑重复导致「同一条任务」在一条消息里出现两行。
+    维度：项目 + 文件名 + 任务类型 + 催办对象（负责人 assignee_name，否则编写人 author）。
+    """
+    seen = set()
+    out = []
+    for u in uploads:
+        person = (getattr(u, "assignee_name", None) or getattr(u, "author", None) or "").strip()
+        key = (
+            (u.project_name or "").strip(),
+            (u.file_name or "").strip(),
+            (u.task_type or "").strip(),
+            person,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
 def _task_block_md(key, uploads_in_group, project_name: str = None):
     """未完成列表块。若传入 project_name 则块标题只显示影响业务方、产品（与上方「项目：xxx」合并为一条，不重复项目名）。"""
     proj, bs, pr = key
@@ -216,14 +240,32 @@ def _try_acquire_send_lock(job_id: str, cooldown_seconds: int = 120) -> bool:
         return False
 
 
+# 多 Gunicorn worker 各起一份 APScheduler 时，同一时刻会各跑一次；成功发送后须在冷却期内保留锁文件，
+# 不能在 finally 里立刻删除，否则第二个 worker 会误判“未发送”再发一遍。
+_DEFAULT_CRON_SEND_COOLDOWN = 3600
+
+
+def _release_send_lock_after_job(lock_file: str, keep_lock: bool) -> None:
+    """keep_lock=True：写入时间戳，供 _try_acquire_send_lock 在冷却期内拦截其他进程；False：删除锁以便重试。"""
+    try:
+        if keep_lock:
+            with open(lock_file, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+        elif os.path.exists(lock_file):
+            os.unlink(lock_file)
+    except OSError:
+        pass
+
+
 def _run_thursday_reminder():
     """每周四 16:00 提醒：统计全部事项（不限于本周），按项目分组展示未完成列表，项目与影响业务方/产品合并为一条显示，并依次 @ 待办人员。"""
     app = _app
     if not app:
         return
-    if not _try_acquire_send_lock("thursday_reminder", cooldown_seconds=120):
+    if not _try_acquire_send_lock("thursday_reminder", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return
     lock_file = os.path.join(app.instance_path, "scheduler_locks", "thursday_reminder.lock")
+    actually_sent = False
     try:
         with app.app_context():
             from . import dingtalk_service
@@ -245,6 +287,7 @@ def _run_thursday_reminder():
                 UploadRecord.task_status == "pending",
                 UploadRecord.assignee_name.isnot(None),
             ).order_by(UploadRecord.due_date).all()
+            pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
 
             if total_count == 0:
                 return
@@ -324,14 +367,12 @@ def _run_thursday_reminder():
                 webhook=webhook,
                 secret=secret,
             )
-            if not (result and result.get("success")):
+            if result and result.get("success"):
+                actually_sent = True
+            else:
                 logger.warning("自动催办(周四提醒)：钉钉发送失败，请检查 Webhook/Secret 及网络")
     finally:
-        try:
-            if os.path.exists(lock_file):
-                os.unlink(lock_file)
-        except OSError:
-            pass
+        _release_send_lock_after_job(lock_file, actually_sent)
 
 
 def _run_overdue_reminder():
@@ -339,9 +380,10 @@ def _run_overdue_reminder():
     app = _app
     if not app:
         return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "未初始化应用"}
-    if not _try_acquire_send_lock("overdue_reminder", cooldown_seconds=120):
+    if not _try_acquire_send_lock("overdue_reminder", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "跳过(其他进程已发送)"}
     lock_file = os.path.join(app.instance_path, "scheduler_locks", "overdue_reminder.lock")
+    keep_lock = False
     try:
         with app.app_context():
             from . import dingtalk_service
@@ -358,6 +400,7 @@ def _run_overdue_reminder():
                 UploadRecord.task_status == "pending",
                 UploadRecord.assignee_name.isnot(None),
             ).order_by(UploadRecord.assignee_name, UploadRecord.due_date).all()
+            tasks = _dedupe_upload_records_for_notify(tasks)
 
             if not tasks:
                 return {"no_tasks": True, "sent": 0, "failed": 0, "last_error": None}
@@ -432,13 +475,10 @@ def _run_overdue_reminder():
                     failed += 1
                     last_error = result.get("error") or "未知错误"
                     logger.warning("自动催办(逾期前一日)：钉钉发送失败 assignee=%s error=%s", assignee_name, last_error)
+            keep_lock = sent > 0
             return {"no_tasks": False, "sent": sent, "failed": failed, "last_error": last_error}
     finally:
-        try:
-            if os.path.exists(lock_file):
-                os.unlink(lock_file)
-        except OSError:
-            pass
+        _release_send_lock_after_job(lock_file, keep_lock)
 
 
 def _run_project_stats():
@@ -446,9 +486,10 @@ def _run_project_stats():
     app = _app
     if not app:
         return
-    if not _try_acquire_send_lock("project_stats", cooldown_seconds=120):
+    if not _try_acquire_send_lock("project_stats", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return
     lock_file = os.path.join(app.instance_path, "scheduler_locks", "project_stats.lock")
+    actually_sent = False
     try:
         with app.app_context():
             from . import dingtalk_service
@@ -467,6 +508,7 @@ def _run_project_stats():
             pending_tasks = UploadRecord.query.filter(
                 UploadRecord.completion_status.is_(None),
             ).order_by(UploadRecord.due_date).all()
+            pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
 
             by_project = {}
             all_assignees = set()
@@ -530,14 +572,12 @@ def _run_project_stats():
                 webhook=webhook,
                 secret=secret,
             )
-            if not (result and result.get("success")):
+            if result and result.get("success"):
+                actually_sent = True
+            else:
                 logger.warning("自动催办(项目统计)：钉钉发送失败，请检查 Webhook/Secret 及网络")
     finally:
-        try:
-            if os.path.exists(lock_file):
-                os.unlink(lock_file)
-        except OSError:
-            pass
+        _release_send_lock_after_job(lock_file, actually_sent)
 
 
 def _send_module_cascade_for_project(project_name: str, trigger_module: str, target_module: str, trigger_label: str):
@@ -588,6 +628,7 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
         UploadRecord.belonging_module == target_module,
         UploadRecord.completion_status.is_(None),
     ).all()
+    pending_in_project = _dedupe_upload_records_for_notify(pending_in_project)
     if not pending_in_project:
         return
     pending_by_author = {}
@@ -689,9 +730,11 @@ def _run_process_module_cascade_pending():
     app = _app
     if not app:
         return
-    if not _try_acquire_send_lock("module_cascade_pending_processor", cooldown_seconds=55):
+    # 每分钟触发；冷却需大于「单轮处理」耗时，避免多 worker 同分钟各跑一轮导致重复钉钉
+    if not _try_acquire_send_lock("module_cascade_pending_processor", cooldown_seconds=120):
         return
     lock_file = os.path.join(app.instance_path, "scheduler_locks", "module_cascade_pending_processor.lock")
+    keep_lock = False
     try:
         with app.app_context():
             from .models import UploadRecord, ModuleCascadeReminder, AppConfig, now_local
@@ -704,25 +747,32 @@ def _run_process_module_cascade_pending():
                 ModuleCascadeReminder.status == "pending",
                 ModuleCascadeReminder.run_at <= now,
             ).order_by(ModuleCascadeReminder.run_at).all()
+            # 同一项目+触发模块若有多条 pending（并发入队等），只发送一次钉钉，避免重复催办
+            by_trip = defaultdict(list)
             for rec in pending:
+                by_trip[(rec.project_name, rec.trigger_module, rec.target_module)].append(rec)
+            for recs in by_trip.values():
+                head = recs[0]
                 _send_module_cascade_for_project(
-                    rec.project_name,
-                    rec.trigger_module,
-                    rec.target_module,
-                    rec.trigger_module,
+                    head.project_name,
+                    head.trigger_module,
+                    head.target_module,
+                    head.trigger_module,
                 )
-                rec.status = "sent"
-                rec.sent_at = now
+                for r in recs:
+                    r.status = "sent"
+                    r.sent_at = now
             if pending:
                 from . import db
                 db.session.commit()
-                logger.info("模块级联催办已发送 %d 条（按项目）", len(pending))
+                logger.info(
+                    "模块级联催办已处理 %d 条队列记录，合并为 %d 次发送",
+                    len(pending),
+                    len(by_trip),
+                )
+                keep_lock = True
     finally:
-        try:
-            if os.path.exists(lock_file):
-                os.unlink(lock_file)
-        except OSError:
-            pass
+        _release_send_lock_after_job(lock_file, keep_lock)
 
 
 def init_scheduler(app: "Flask") -> None:
@@ -750,22 +800,34 @@ def init_scheduler(app: "Flask") -> None:
         _run_thursday_reminder,
         CronTrigger(**weekly),
         id="thursday_reminder",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     scheduler.add_job(
         _run_overdue_reminder,
         CronTrigger(**overdue),
         id="overdue_reminder",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     scheduler.add_job(
         _run_project_stats,
         CronTrigger(**project),
         id="project_stats",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     if IntervalTrigger is not None:
         scheduler.add_job(
             _run_process_module_cascade_pending,
             IntervalTrigger(minutes=1),
             id="module_cascade_pending_processor",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
         )
     scheduler.start()
     global _shutdown_registered
@@ -801,9 +863,30 @@ def reschedule_jobs(app: "Flask") -> bool:
             scheduler.remove_job(jid)
         except Exception:
             pass
-    scheduler.add_job(_run_thursday_reminder, CronTrigger(**weekly), id="thursday_reminder")
-    scheduler.add_job(_run_overdue_reminder, CronTrigger(**overdue), id="overdue_reminder")
-    scheduler.add_job(_run_project_stats, CronTrigger(**project), id="project_stats")
+    scheduler.add_job(
+        _run_thursday_reminder,
+        CronTrigger(**weekly),
+        id="thursday_reminder",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _run_overdue_reminder,
+        CronTrigger(**overdue),
+        id="overdue_reminder",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _run_project_stats,
+        CronTrigger(**project),
+        id="project_stats",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
     logger.info(
         "定时任务已更新：每周 %s，逾期 %s，每两天 %s",
         cfg["weekly"], cfg["overdue"], cfg["project"],
