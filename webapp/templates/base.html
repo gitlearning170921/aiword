@@ -48,6 +48,10 @@
 </main>
 
 <script src="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.bundle.min.js', v=static_version) }}"></script>
+<script>
+    // 兼容反向代理/子路径部署（SCRIPT_NAME），用于前端拼接 API 路径
+    window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
+</script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
 {% endif %}

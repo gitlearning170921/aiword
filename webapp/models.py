@@ -117,11 +117,33 @@ class AppConfig(db.Model):
     )
 
 
+class Project(db.Model):
+    """项目元数据：优先级与状态（进行中/已结束）。"""
+    __tablename__ = "projects"
+
+    PRIORITY_LOW = 1
+    PRIORITY_MEDIUM = 2
+    PRIORITY_HIGH = 3
+
+    STATUS_ACTIVE = "active"  # 进行中
+    STATUS_ENDED = "ended"    # 已结束
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    # 注册国家/注册类别用于区分“同名不同项目”的唯一性
+    registered_country: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    registered_category: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    priority: Mapped[int] = mapped_column(db.Integer, default=PRIORITY_MEDIUM)
+    status: Mapped[str] = mapped_column(db.String(16), default=STATUS_ACTIVE)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
 class ModuleCascadeReminder(db.Model):
     """模块级联催办待执行/已执行记录：按项目，产品最后一份完成→N分钟后催办开发；开发最后一份完成→N分钟后催办测试。"""
     __tablename__ = "module_cascade_reminders"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     trigger_module: Mapped[str] = mapped_column(db.String(32), nullable=False)  # 产品 | 开发
     target_module: Mapped[str] = mapped_column(db.String(32), nullable=False)   # 开发 | 测试
@@ -142,6 +164,7 @@ class UploadRecord(db.Model):
     )
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     file_name: Mapped[str] = mapped_column(db.String(255), nullable=False)
     task_type: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
@@ -238,6 +261,7 @@ class GenerationSummary(db.Model):
     __tablename__ = "generation_summary"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     upload_id: Mapped[str] = mapped_column(
         db.String(36), db.ForeignKey("upload_records.id"), unique=True, nullable=False
     )

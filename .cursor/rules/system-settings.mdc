@@ -1,0 +1,11 @@
+---
+description: 可运营参数走页面3系统配置（AppConfig），避免随意新增业务用环境变量
+alwaysApply: true
+---
+
+# 系统配置（通用规则）
+
+- **业务可调、可在页面维护的参数**：写入 `webapp/app_settings.py` 的 `SYSTEM_CONFIG_KEYS`，经数据库 `AppConfig` 与页面 3「系统配置」读写；后台线程用 `get_setting_for_scheduler(key, app=app)`。
+- **不要随意新增「仅环境变量」的业务开关**：部署差异（多实例、路径、通知策略等）优先系统配置；环境变量保留给**部署平台强制注入**或**已有迁移路径**的项（如 `DATABASE_URL`、密钥类）。
+- **新增配置键时**：同步 `SYSTEM_CONFIG_KEYS`；若允许用户清空且与「非敏感空串不覆盖」逻辑冲突，在 `save_system_settings` 中为该键单独分支（参考 `SCHEDULER_INSTANCE_ID`）。
+- **定时任务 / 钉钉**：与多部署、去重相关的标识放在系统配置（如 `SCHEDULER_INSTANCE_ID`），不在代码里写死环境变量名作为首选来源。

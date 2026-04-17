@@ -1,5 +1,12 @@
 const App = {
     async request(url, options = {}) {
+        const root = (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
+        if (root && typeof url === "string") {
+            // 仅对站内绝对路径（/api/xxx）自动加前缀；避免影响 http(s):// 外链与相对路径
+            if (url.startsWith("/") && !url.startsWith(root + "/")) {
+                url = root + url;
+            }
+        }
         let response;
         try {
             response = await fetch(url, { credentials: "include", ...options });
@@ -26,18 +33,20 @@ const App = {
             } catch (readError) {}
             
             if (response.status === 401 && data && data.needsLogin) {
-                if (window.location.pathname !== "/login") {
-                    window.location.href = "/login";
+                const loginPath = (root || "") + "/login";
+                if (window.location.pathname !== loginPath) {
+                    window.location.href = loginPath;
                 }
                 throw new Error("需要登录");
             }
             
             if (response.status === 401 && data && data.needsPage13Auth) {
-                if (window.location.pathname !== "/login") {
+                const loginPath = (root || "") + "/login";
+                if (window.location.pathname !== loginPath) {
                     if (!window._page13Redirecting) {
                         window._page13Redirecting = true;
                         setTimeout(function() {
-                            window.location.href = window.location.pathname || "/upload";
+                            window.location.href = window.location.pathname || ((root || "") + "/upload");
                         }, 50);
                     }
                 }
@@ -251,6 +260,55 @@ function isValidDocLink(value) {
     return true;
 }
 
+let projectsMetaCache = []; // [{name, priority, status, ...}]
+
+function _getProjectOptions(activeOnly) {
+    const arr = Array.isArray(projectsMetaCache) ? projectsMetaCache : [];
+    return arr
+        .filter((p) => {
+            const st = (p && p.status) ? String(p.status).toLowerCase() : "active";
+            return activeOnly ? st !== "ended" : true;
+        })
+        .slice()
+        .sort((a, b) => {
+            const pa = Number.isFinite(Number(a.priority)) ? Number(a.priority) : 2;
+            const pb = Number.isFinite(Number(b.priority)) ? Number(b.priority) : 2;
+            if (pa !== pb) return pb - pa;
+            return String(a.name || "").localeCompare(String(b.name || ""), "zh");
+        });
+}
+
+function _populateProjectNameSelect(selectEl, selectedName) {
+    if (!selectEl) return;
+    const current = (selectedName != null ? String(selectedName) : String(selectEl.value || "")).trim();
+    const opts = _getProjectOptions(true);
+    selectEl.innerHTML = '<option value="">— 请选择项目 —</option>';
+    opts.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id || (p.projectKey || p.name);
+        const label = p.priorityLabel ? `【${p.priorityLabel}】${p.projectKey || p.name}` : (p.projectKey || p.name);
+        opt.textContent = label;
+        opt.dataset.registeredCountry = p.registeredCountry || "";
+        opt.dataset.registeredCategory = p.registeredCategory || "";
+        opt.dataset.baseName = p.name || "";
+        opt.dataset.projectKey = p.projectKey || p.name || "";
+        selectEl.appendChild(opt);
+    });
+    if (current) {
+        // 若当前项目不在列表（历史数据/尚未刷新），临时插入以避免丢值
+        const exists = Array.from(selectEl.options).some((o) => String(o.value) === current);
+        if (!exists) {
+            const opt = document.createElement("option");
+            opt.value = current;
+            opt.textContent = current;
+            opt.dataset.registeredCountry = "";
+            opt.dataset.registeredCategory = "";
+            selectEl.appendChild(opt);
+        }
+        selectEl.value = current;
+    }
+}
+
 function createProjectBlock() {
     const block = document.createElement("div");
     block.className = "project-block card border mb-3";
@@ -258,7 +316,7 @@ function createProjectBlock() {
         <div class="card-body">
             <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
             <div class="row g-2 mb-2">
-                <div class="col-md-3"><label class="form-label small">项目名称 *</label><input type="text" class="form-control form-control-sm project-name" placeholder="项目名称" required></div>
+                <div class="col-md-3"><label class="form-label small">项目名称 *</label><select class="form-select form-select-sm project-name" required></select></div>
                 <div class="col-md-3"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
                 <div class="col-md-3"><label class="form-label small">影响产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="影响产品"></div>
                 <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
@@ -312,6 +370,17 @@ function createProjectBlock() {
         </div>
     `;
     const tbody = block.querySelector(".project-task-tbody");
+
+    // 根据下拉选择自动填充“国家”，避免任务记录中的国家与项目元数据不一致
+    const projectSelectEl = block.querySelector(".project-name");
+    const countryInputEl = block.querySelector(".project-country");
+    projectSelectEl?.addEventListener("change", () => {
+        const opt = projectSelectEl.options[projectSelectEl.selectedIndex];
+        const v = opt?.dataset?.registeredCountry || "";
+        if (countryInputEl) countryInputEl.value = v;
+    });
+
+    _populateProjectNameSelect(block.querySelector(".project-name"));
     block.querySelector(".add-task-row-btn").addEventListener("click", () => {
         const newRow = createTaskRowUnderProject(block);
         tbody.appendChild(newRow);
@@ -499,11 +568,339 @@ async function initUploadPage() {
     const addProjectBtn = document.getElementById("addProjectBtn");
     const saveAllBtn = document.getElementById("saveAllBtn");
     const placeholderResult = document.getElementById("placeholderResult");
+    const showHistoryEl = document.getElementById("showHistoryProjectsPage1");
 
     if (!projectBlocksContainer) return;
 
+    // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
+    if (showHistoryEl) showHistoryEl.checked = false;
+
+    showHistoryEl?.addEventListener("change", () => {
+        loadRecordsList();
+    });
+
+    // bfcache 场景：回退/前进时也复位并重新加载（确保默认仍隐藏历史）
+    if (!window._page1HistoryToggleBound) {
+        window._page1HistoryToggleBound = true;
+        window.addEventListener("pageshow", () => {
+            const el = document.getElementById("showHistoryProjectsPage1");
+            if (el) el.checked = false;
+            if (typeof loadRecordsList === "function") loadRecordsList();
+        });
+    }
+
+    // 页面1：项目元数据管理（优先级/状态）
+    const projectsManageBody = document.getElementById("projectsManageBody");
+    const projectSelectAll = document.getElementById("projectSelectAll");
+    const batchEditProjectsBtn = document.getElementById("batchEditProjectsBtn");
+    const saveAllProjectsBtn = document.getElementById("saveAllProjectsBtn");
+    const filterProjectName = document.getElementById("filterProjectName");
+    const filterProjectStatus = document.getElementById("filterProjectStatus");
+    const clearProjectFilterBtn = document.getElementById("clearProjectFilterBtn");
+    const openNewProjectModalBtn = document.getElementById("openNewProjectModalBtn");
+    const newProjectModalEl = document.getElementById("newProjectModal");
+    const batchEditProjectsModalEl = document.getElementById("batchEditProjectsModal");
+
+    const updateBatchProjectsBtnState = () => {
+        if (!projectsManageBody || !batchEditProjectsBtn) return;
+        const checked = projectsManageBody.querySelectorAll(".project-row-checkbox:checked").length;
+        batchEditProjectsBtn.disabled = checked === 0;
+    };
+
+    const applyProjectsFilter = () => {
+        if (!projectsManageBody) return;
+        const nameKey = String(filterProjectName?.value || "").trim().toLowerCase();
+        const st = String(filterProjectStatus?.value || "").trim().toLowerCase();
+        projectsManageBody.querySelectorAll("tr[data-project-id]").forEach((tr) => {
+            const name = String(tr.dataset.projectName || "").toLowerCase();
+            const status = String(tr.dataset.projectStatus || "").toLowerCase();
+            const okName = !nameKey || name.includes(nameKey);
+            const okStatus = !st || status === st;
+            tr.classList.toggle("d-none", !(okName && okStatus));
+        });
+    };
+
+    const loadProjectsManage = async () => {
+        if (!projectsManageBody) return;
+        try {
+            const rows = await App.request("/api/projects");
+            projectsMetaCache = rows || [];
+            projectsManageBody.innerHTML = "";
+            (rows || []).forEach((p) => {
+                const tr = document.createElement("tr");
+                const esc = (s) =>
+                    String(s == null ? "" : s)
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;")
+                        .replace(/"/g, "&quot;");
+                const pr = Number.isFinite(Number(p.priority)) ? Number(p.priority) : 2;
+                const st = (p.status || "active");
+                tr.dataset.projectId = esc(p.id);
+                tr.dataset.projectName = String(p.name || "");
+                tr.dataset.projectStatus = String(p.status || "");
+                tr.innerHTML = `
+                    <td><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
+                    <td title="${esc(p.name)}">${esc(p.name)}</td>
+                    <td>
+                        <input type="text" class="form-control form-control-sm project-registered-country-input" value="${esc(p.registeredCountry || "")}" placeholder="—">
+                    </td>
+                    <td>
+                        <input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—">
+                    </td>
+                    <td>
+                        <select class="form-select form-select-sm project-priority-select" data-id="${esc(p.id)}">
+                            <option value="3" ${pr === 3 ? "selected" : ""}>高</option>
+                            <option value="2" ${pr === 2 ? "selected" : ""}>中</option>
+                            <option value="1" ${pr === 1 ? "selected" : ""}>低</option>
+                        </select>
+                    </td>
+                    <td>
+                        <select class="form-select form-select-sm project-status-select" data-id="${esc(p.id)}">
+                            <option value="active" ${st === "active" ? "selected" : ""}>进行中</option>
+                            <option value="ended" ${st === "ended" ? "selected" : ""}>已结束</option>
+                        </select>
+                    </td>
+                    <td class="small text-muted">${esc(p.updatedAt || "-")}</td>
+                    <td class="text-nowrap">
+                        <button type="button" class="btn btn-sm btn-outline-primary btn-save-project" data-id="${esc(p.id)}">保存</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger ms-1 btn-delete-project" data-id="${esc(p.id)}">删除</button>
+                    </td>
+                `;
+                projectsManageBody.appendChild(tr);
+            });
+            projectSelectAll && (projectSelectAll.checked = false);
+            projectsManageBody.querySelectorAll(".project-row-checkbox").forEach((cb) => {
+                cb.addEventListener("change", () => {
+                    updateBatchProjectsBtnState();
+                });
+            });
+            projectsManageBody.querySelectorAll(".btn-save-project").forEach((btn) => {
+                btn.addEventListener("click", async () => {
+                    const id = btn.dataset.id;
+                    const prEl = projectsManageBody.querySelector(`.project-priority-select[data-id="${id}"]`);
+                    const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
+                    const tr = projectsManageBody.querySelector(`.btn-save-project[data-id="${id}"]`)?.closest("tr");
+                    const rcInput = tr ? tr.querySelector(".project-registered-country-input") : null;
+                    const catInput = tr ? tr.querySelector(".project-registered-category-input") : null;
+                    try {
+                        await App.request(`/api/projects/${id}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                priority: prEl ? Number(prEl.value) : 2,
+                                status: stEl ? stEl.value : "active",
+                                registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
+                                registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                            }),
+                        });
+                        App.notify("项目已更新", "success");
+                        // 单个保存时不要刷新整张表/任务列表，避免把页面1录入块中已填内容冲掉。
+                        // 仅刷新“任务录入”的项目下拉选项（会保持当前已选值）。
+                        document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
+                    } catch (e) {
+                        App.notify(e.message || "保存失败", "danger");
+                    }
+                });
+            });
+            projectsManageBody.querySelectorAll(".btn-delete-project").forEach((btn) => {
+                btn.addEventListener("click", async () => {
+                    const id = btn.dataset.id;
+                    if (!id) return;
+                    try {
+                        const resBind = await App.request(`/api/projects/${id}/bindings`, { method: "GET" });
+                        const bound = resBind?.bound || {};
+                        const total = Number(bound.totalCount || 0);
+                        if (total > 0) {
+                            window.alert(
+                                `该项目已绑定记录共 ${total} 条（任务 ${bound.uploadCount || 0}、级联 ${bound.cascadeCount || 0}、生成 ${bound.generationCount || 0}），不允许删除。`
+                            );
+                            return;
+                        }
+                        const ok = window.confirm("确认删除该项目？");
+                        if (!ok) return;
+
+                        const res = await App.request(`/api/projects/${id}`, { method: "DELETE" });
+                        App.notify(res.message || "删除成功", "success");
+                        await loadProjectsManage();
+                        document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
+                    } catch (e) {
+                        // 兜底：若后端未更新 bindings 接口（404），直接尝试 DELETE，让后端 409 返回绑定数量
+                        if (e && e.message && String(e.message).includes("(404)")) {
+                            try {
+                                const ok = window.confirm("确认删除该项目？");
+                                if (!ok) return;
+                                const res = await App.request(`/api/projects/${id}`, { method: "DELETE" });
+                                App.notify(res.message || "删除成功", "success");
+                                await loadProjectsManage();
+                                document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
+                                return;
+                            } catch (e2) {
+                                const msg = (e2 && e2.message) ? String(e2.message) : "";
+                                const bound = e2 && e2.data && e2.data.bound ? e2.data.bound : null;
+                                if (String(msg).includes("(409)") && bound) {
+                                    window.alert(
+                                        `该项目已绑定记录共 ${bound.totalCount || 0} 条（任务 ${bound.uploadCount || 0}、级联 ${bound.cascadeCount || 0}、生成 ${bound.generationCount || 0}），不允许删除。`
+                                    );
+                                    return;
+                                }
+                                App.notify((e2 && e2.message) ? e2.message : "删除失败", "danger");
+                                return;
+                            }
+                        }
+                        App.notify(e && e.message ? e.message : "删除失败", "danger");
+                    }
+                });
+            });
+            // 同步刷新“任务录入”里的项目下拉（只展示进行中项目）
+            document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
+            updateBatchProjectsBtnState();
+            applyProjectsFilter();
+        } catch (e) {
+            projectsManageBody.innerHTML = '<tr><td colspan="6" class="text-danger small">加载失败</td></tr>';
+        }
+    };
+    document.getElementById("refreshProjectsBtn")?.addEventListener("click", loadProjectsManage);
+    openNewProjectModalBtn?.addEventListener("click", () => {
+        if (!newProjectModalEl) return;
+        new bootstrap.Modal(newProjectModalEl).show();
+    });
+    document.getElementById("createProjectBtn")?.addEventListener("click", async () => {
+        const nameEl = document.getElementById("newProjectName");
+        const prEl = document.getElementById("newProjectPriority");
+        const stEl = document.getElementById("newProjectStatus");
+        const rcEl = document.getElementById("newProjectRegisteredCountry");
+        const catEl = document.getElementById("newProjectRegisteredCategory");
+        const name = (nameEl?.value || "").trim();
+        if (!name) { App.notify("请输入项目名称", "warning"); return; }
+        try {
+            await App.request("/api/projects", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    name,
+                    priority: prEl ? Number(prEl.value) : 2,
+                    status: stEl ? stEl.value : "active",
+                    registeredCountry: rcEl ? (rcEl.value || "").trim() : null,
+                    registeredCategory: catEl ? (catEl.value || "").trim() : null,
+                }),
+            });
+            if (nameEl) nameEl.value = "";
+            bootstrap.Modal.getInstance(newProjectModalEl)?.hide();
+            App.notify("项目已创建", "success");
+            loadProjectsManage();
+            loadRecordsList();
+        } catch (e) {
+            App.notify(e.message || "创建失败", "danger");
+        }
+    });
+
+    projectSelectAll?.addEventListener("change", () => {
+        const checked = !!projectSelectAll.checked;
+        projectsManageBody?.querySelectorAll(".project-row-checkbox").forEach((cb) => { cb.checked = checked; });
+        updateBatchProjectsBtnState();
+    });
+
+    batchEditProjectsBtn?.addEventListener("click", () => {
+        if (!batchEditProjectsModalEl) return;
+        new bootstrap.Modal(batchEditProjectsModalEl).show();
+    });
+    document.getElementById("applyBatchEditProjectsBtn")?.addEventListener("click", () => {
+        if (!projectsManageBody) return;
+        const pr = String(document.getElementById("batchProjectPriority")?.value || "");
+        const st = String(document.getElementById("batchProjectStatus")?.value || "");
+        if (!pr && !st) { App.notify("请选择要批量修改的字段", "warning"); return; }
+        const ids = [];
+        projectsManageBody.querySelectorAll(".project-row-checkbox:checked").forEach((cb) => {
+            const id = cb.dataset.id;
+            if (id) ids.push(id);
+        });
+        if (!ids.length) { App.notify("请先勾选项目", "warning"); return; }
+        ids.forEach((id) => {
+            if (pr) {
+                const prEl = projectsManageBody.querySelector(`.project-priority-select[data-id="${id}"]`);
+                if (prEl) prEl.value = pr;
+            }
+            if (st) {
+                const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
+                if (stEl) stEl.value = st;
+                const tr = projectsManageBody.querySelector(`tr[data-project-id="${id}"]`);
+                if (tr) tr.dataset.projectStatus = st;
+            }
+        });
+        applyProjectsFilter();
+        bootstrap.Modal.getInstance(batchEditProjectsModalEl)?.hide();
+        App.notify("已应用批量修改（未保存）", "info");
+    });
+
+    saveAllProjectsBtn?.addEventListener("click", async () => {
+        if (!projectsManageBody) return;
+        const payload = [];
+        projectsManageBody.querySelectorAll("tr[data-project-id]").forEach((tr) => {
+            const id = tr.dataset.projectId;
+            const prEl = projectsManageBody.querySelector(`.project-priority-select[data-id="${id}"]`);
+            const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
+            const rcInput = tr.querySelector(".project-registered-country-input");
+            const catInput = tr.querySelector(".project-registered-category-input");
+            if (!id || !prEl || !stEl) return;
+            payload.push({
+                id,
+                priority: Number(prEl.value),
+                status: stEl.value,
+                registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
+                registeredCategory: catInput ? (catInput.value || "").trim() : null,
+            });
+        });
+        if (!payload.length) { App.notify("没有可保存的项目", "warning"); return; }
+        try {
+            const res = await App.request("/api/projects/batch", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ projects: payload }),
+            });
+            App.notify(res.message || "已保存", "success");
+            loadProjectsManage();
+            loadRecordsList();
+            if (window.loadMyTasks) window.loadMyTasks();
+            if (window.loadSummary) window.loadSummary();
+        } catch (e) {
+            // 兜底：若后端未接受 PUT（老版本/反向代理限制），改用 POST 重试
+            if (e && e.message && String(e.message).includes("(405)")) {
+                try {
+                    const res2 = await App.request("/api/projects/batch", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ projects: payload }),
+                    });
+                    App.notify(res2.message || "已保存", "success");
+                    loadProjectsManage();
+                    loadRecordsList();
+                    if (window.loadMyTasks) window.loadMyTasks();
+                    if (window.loadSummary) window.loadSummary();
+                    return;
+                } catch (e2) {
+                    App.notify(e2.message || "保存失败", "danger");
+                    return;
+                }
+            }
+            App.notify(e && e.message ? e.message : "保存失败", "danger");
+        }
+    });
+
+    [filterProjectName, filterProjectStatus].forEach((el) => {
+        el?.addEventListener("input", applyProjectsFilter);
+        el?.addEventListener("change", applyProjectsFilter);
+    });
+    clearProjectFilterBtn?.addEventListener("click", () => {
+        if (filterProjectName) filterProjectName.value = "";
+        if (filterProjectStatus) filterProjectStatus.value = "";
+        applyProjectsFilter();
+    });
+    loadProjectsManage();
+
     await loadTaskTypes();
     projectBlocksContainer.appendChild(createProjectBlock());
+    _populateProjectNameSelect(projectBlocksContainer.querySelector(".project-block .project-name"));
 
     addProjectBtn?.addEventListener("click", () => {
         projectBlocksContainer.appendChild(createProjectBlock());
@@ -511,7 +908,7 @@ async function initUploadPage() {
         if (blocks.length >= 2) {
             const prev = blocks[blocks.length - 2];
             const curr = blocks[blocks.length - 1];
-            curr.querySelector(".project-name").value = prev.querySelector(".project-name")?.value ?? "";
+            _populateProjectNameSelect(curr.querySelector(".project-name"), prev.querySelector(".project-name")?.value ?? "");
             curr.querySelector(".project-code").value = prev.querySelector(".project-code")?.value ?? "";
             curr.querySelector(".project-business-side").value = prev.querySelector(".project-business-side")?.value ?? "";
             curr.querySelector(".project-product").value = prev.querySelector(".project-product")?.value ?? "";
@@ -572,7 +969,7 @@ async function initUploadPage() {
             var n = (r.projectName || "").trim();
             if (n && !seen[n]) { seen[n] = true; names.push(n); }
         });
-        names.sort();
+        names.sort(function (a, b) { return String(a || "").localeCompare(String(b || ""), "zh"); });
         if (sampleSelect) {
             sampleSelect.innerHTML = '<option value="">（使用系统示例）</option>';
             names.forEach(function (n) {
@@ -634,7 +1031,9 @@ async function initUploadPage() {
             App.notify("正在保存…", "info");
 
             for (const block of blocks) {
-                const projectName = (block.querySelector(".project-name")?.value || "").trim();
+                const projectSelect = block.querySelector(".project-name");
+                const projectId = (projectSelect?.value || "").trim();
+                const projectKey = (projectSelect?.options?.[projectSelect.selectedIndex]?.dataset?.projectKey || "").trim();
                 const projectCode = (block.querySelector(".project-code")?.value || "").trim() || "";
                 const businessSide = (block.querySelector(".project-business-side")?.value || "").trim() || "";
                 const product = (block.querySelector(".project-product")?.value || "").trim() || "";
@@ -661,10 +1060,11 @@ async function initUploadPage() {
                     const moduleSelect = row.querySelector(".task-module-cell select");
                     const belongingModule = moduleSelect ? (moduleSelect.value || "").trim() : "";
 
-                    if (!projectName || !fileName || !author) continue;
+                    if (!projectId || !projectKey || !fileName || !author) continue;
 
                     const formData = new FormData();
-                    formData.append("projectName", projectName);
+                    formData.append("projectId", projectId);
+                    formData.append("projectName", projectKey);
                     formData.append("fileName", fileName);
                     formData.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
                     formData.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
@@ -707,7 +1107,8 @@ async function initUploadPage() {
                             const replaceOk = window.confirm(msg || "存在重复记录，是否替换？");
                             if (replaceOk) {
                                 const formDataReplace = new FormData();
-                                formDataReplace.append("projectName", projectName);
+                                formDataReplace.append("projectId", projectId);
+                                formDataReplace.append("projectName", projectKey);
                                 formDataReplace.append("fileName", fileName);
                                 formDataReplace.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
                                 formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
@@ -741,11 +1142,11 @@ async function initUploadPage() {
                                         lastPlaceholders = resultReplace.record.placeholders;
                                     }
                                 } catch (e2) {
-                                    App.notify(`保存失败 (${projectName}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
+                                    App.notify(`保存失败 (${projectKey}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
                                 }
                             }
                         } else {
-                            App.notify(`保存失败 (${projectName}-${fileName}): ${msg}`, "danger");
+                        App.notify(`保存失败 (${projectKey}-${fileName}): ${msg}`, "danger");
                         }
                     }
                 }
@@ -1376,6 +1777,11 @@ function sortRows(rows, key, dir) {
     return [...rows].sort((a, b) => {
         let va = a[key];
         let vb = b[key];
+        if (key === "projectPriority") {
+            va = Number.isFinite(Number(va)) ? Number(va) : 0;
+            vb = Number.isFinite(Number(vb)) ? Number(vb) : 0;
+            return asc ? (va - vb) : (vb - va);
+        }
         if (key === "dueDate" || key === "createdAt") {
             va = va || "";
             vb = vb || "";
@@ -1668,7 +2074,9 @@ function loadRecordsList() {
     const tbody = document.getElementById("recordsTableBody");
     if (!tbody) return;
 
-    App.request("/api/uploads")
+    const showHistory = !!document.getElementById("showHistoryProjectsPage1")?.checked;
+    const url = showHistory ? "/api/uploads?includeHistory=1" : "/api/uploads";
+    App.request(url)
         .then((res) => {
             allRecordsCache = res.records || [];
             renderRecordsTable(allRecordsCache);
@@ -1969,8 +2377,8 @@ function initLoginPage() {
 
 let myTasksCache = [];
 let lastRenderedMyTasks = [];
-let myTasksSortKey = "";
-let myTasksSortDir = "asc";
+let myTasksSortKey = "projectPriority";
+let myTasksSortDir = "desc";
 let myTasksCollapsedGroups = new Set();
 
 async function initGeneratePage() {
@@ -1979,8 +2387,12 @@ async function initGeneratePage() {
     const userInfo = document.getElementById("userInfo");
     const logoutBtn = document.getElementById("logoutBtn");
     const placeholderModal = document.getElementById("placeholderModal");
+    const showHistoryEl = document.getElementById("showHistoryProjects");
 
     if (!myTasksBody) return;
+
+    // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
+    if (showHistoryEl) showHistoryEl.checked = false;
 
     await loadCompletionStatuses();
     await loadTaskTypes();
@@ -1998,11 +2410,16 @@ async function initGeneratePage() {
 
     const loadMyTasks = async () => {
         try {
-            const res = await App.request("/api/my-tasks");
+            const showHistory = !!showHistoryEl?.checked;
+            const url = showHistory ? "/api/my-tasks?includeHistory=1" : "/api/my-tasks";
+            const res = await App.request(url);
             myTasksCache = res.records || [];
             
             if (myTasksCache.length === 0) {
                 noTasksAlert?.classList.remove("d-none");
+                // 清空旧渲染，避免取消“查看历史项目”后仍残留历史行
+                myTasksBody.innerHTML = "";
+                lastRenderedMyTasks = [];
                 return;
             }
             noTasksAlert?.classList.add("d-none");
@@ -2016,6 +2433,19 @@ async function initGeneratePage() {
     initMyTasksFilter();
     initMyTasksTableSort();
     loadMyTasks();
+
+    showHistoryEl?.addEventListener("change", () => {
+        loadMyTasks();
+    });
+
+    // bfcache 场景：回退/前进时也复位
+    if (!window._page2HistoryToggleBound) {
+        window._page2HistoryToggleBound = true;
+        window.addEventListener("pageshow", () => {
+            const el = document.getElementById("showHistoryProjects");
+            if (el) el.checked = false;
+        });
+    }
     
     document.querySelectorAll('input[name="myTasksGroupBy"]').forEach((radio) => {
         radio.addEventListener("change", () => {
@@ -2217,25 +2647,72 @@ function renderMyTasksTable(records) {
     myTasksBody.innerHTML = "";
     
     if (groupBy === "none") {
-        lastRenderedMyTasks.forEach((r, idx) => addOneRow(r, idx));
+        const active = [];
+        const ended = [];
+        lastRenderedMyTasks.forEach((r) => {
+            const st = (r.projectStatus || "").toLowerCase();
+            if (st === "ended") ended.push(r);
+            else active.push(r);
+        });
+        let idx = 0;
+        active.forEach((r) => addOneRow(r, idx++));
+        if (ended.length > 0) {
+            const sep = document.createElement("tr");
+            sep.className = "bg-light";
+            sep.innerHTML = `<td colspan="25"><strong>历史项目</strong>（已结束项目）</td>`;
+            myTasksBody.appendChild(sep);
+            ended.forEach((r) => addOneRow(r, idx++));
+        }
     } else {
         const keyFn = groupBy === "project" ? (r) => r.projectName : (r) => r.author;
         const label = groupBy === "project" ? "项目" : "编写人";
         const groupMap = new Map();
+        const groupMeta = new Map(); // key -> {priority, status}
         lastRenderedMyTasks.forEach((r) => {
             const k = keyFn(r) || "";
             if (!groupMap.has(k)) groupMap.set(k, []);
             groupMap.get(k).push(r);
+            if (groupBy === "project" && !groupMeta.has(k)) {
+                groupMeta.set(k, {
+                    priority: Number.isFinite(Number(r.projectPriority)) ? Number(r.projectPriority) : 0,
+                    status: (r.projectStatus || "").toLowerCase() || "active",
+                });
+            }
         });
+
+        const sortedKeys = [...groupMap.keys()].sort((a, b) => {
+            if (groupBy !== "project") return String(a || "").localeCompare(String(b || ""), "zh");
+            const ma = groupMeta.get(a) || { priority: 0, status: "active" };
+            const mb = groupMeta.get(b) || { priority: 0, status: "active" };
+            const sa = ma.status === "ended" ? 1 : 0;
+            const sb = mb.status === "ended" ? 1 : 0;
+            if (sa !== sb) return sa - sb; // active first
+            if (ma.priority !== mb.priority) return mb.priority - ma.priority; // high first
+            return String(a || "").localeCompare(String(b || ""), "zh");
+        });
+
+        const hasEnded = groupBy === "project" && sortedKeys.some((k) => (groupMeta.get(k)?.status || "") === "ended");
+
         let globalIdx = 0;
         let gidx = 0;
-        groupMap.forEach((arr, key) => {
+        let historyInserted = false;
+        sortedKeys.forEach((key) => {
+            const arr = groupMap.get(key) || [];
+            const st = (groupMeta.get(key)?.status || "").toLowerCase();
+            if (hasEnded && !historyInserted && st === "ended") {
+                historyInserted = true;
+                const sep = document.createElement("tr");
+                sep.className = "bg-light";
+                sep.innerHTML = `<td colspan="25"><strong>历史项目</strong>（已结束项目）</td>`;
+                myTasksBody.appendChild(sep);
+            }
             const collapsed = myTasksCollapsedGroups.has(key);
             const headerTr = document.createElement("tr");
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            const prLabel = groupBy === "project" ? (arr[0]?.projectPriorityLabel ? `【${arr[0].projectPriorityLabel}】` : "") : "";
+            headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${prLabel}${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             myTasksBody.appendChild(headerTr);
             arr.forEach((r) => { addOneRow(r, globalIdx++, key, gidx, collapsed); });

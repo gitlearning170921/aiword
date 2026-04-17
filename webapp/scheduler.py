@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import logging
 import os
-import re
+import threading
 import time
 from collections import defaultdict
 from datetime import timedelta
@@ -32,6 +33,34 @@ logger = logging.getLogger(__name__)
 scheduler: "BackgroundScheduler | None" = None
 _app: "Flask | None" = None
 _shutdown_registered = False
+_cron_mysql_lock_tls = threading.local()
+
+
+def _scheduler_instance_branch() -> str:
+    """
+    定时钉钉互斥/去重用的「部署分支」标识，来自页面3系统配置 SCHEDULER_INSTANCE_ID。
+    - 留空：与历史一致，共库时同 job 同分钟全库只发一条（多 worker / 多机 HA 去重）。
+    - 各套部署填不同值：共库时各套各发一条钉钉。
+    """
+    app = _app
+    if not app:
+        return ""
+    try:
+        from .app_settings import get_setting_for_scheduler
+
+        raw = (get_setting_for_scheduler("SCHEDULER_INSTANCE_ID", default="", app=app) or "").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _send_lock_file_basename(job_id: str) -> str:
+    """本地 scheduler_locks 文件名：有实例分支时与兄弟部署区分，避免同机同路径抢同一把文件锁。"""
+    br = _scheduler_instance_branch()
+    jid = (job_id or "").strip()
+    return f"{jid}_{br}" if br else jid
 
 
 def shutdown_scheduler() -> None:
@@ -137,6 +166,67 @@ def _get_webhook_secret():
     return webhook, secret
 
 
+def _project_meta_for_scheduler() -> tuple[dict[str, dict], set[str]]:
+    """读取项目优先级/状态，用于排序与过滤已结束项目。"""
+    from .models import Project, UploadRecord
+    from . import db
+
+    def _project_display_label_from_fields(name, registered_country, registered_category) -> str:
+        n = (name or "").strip()
+        c = (registered_country or "").strip()
+        cat = (registered_category or "").strip()
+        if not c and not cat:
+            return n
+        return f"{n}（{c or '—'} / {cat or '—'}）"
+
+    def _project_display_label(p: Project) -> str:
+        return _project_display_label_from_fields(
+            getattr(p, "name", None),
+            getattr(p, "registered_country", None),
+            getattr(p, "registered_category", None),
+        )
+
+    # 自动补齐：历史数据中出现过的项目（包括已结束）也要进入 projects 表，
+    # 否则在无人打开页面1前，定时通知/统计会把它当作“未知项目”而无法按状态过滤。
+    try:
+        names = (
+            db.session.query(UploadRecord.project_name)
+            .filter(UploadRecord.project_name.isnot(None), UploadRecord.project_name != "")
+            .distinct()
+            .all()
+        )
+        for (n,) in names:
+            n = (n or "").strip()
+            if not n:
+                continue
+            # projects.name 是基础项目名（可能没有注册字段），但 upload_records.project_name 可能是展示键(label)；
+            # 这里用“展示键匹配”补齐。
+            exists = False
+            for p in Project.query.all():
+                if _project_display_label(p) == n:
+                    exists = True
+                    break
+            if not exists:
+                db.session.add(Project(name=n, priority=Project.PRIORITY_MEDIUM, status=Project.STATUS_ACTIVE))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+    rows = Project.query.order_by(Project.name.asc()).all()
+    meta = {}
+    ended = set()
+    for r in rows:
+        label = _project_display_label(r)
+        if not label:
+            continue
+        pr = int(getattr(r, "priority", None) or Project.PRIORITY_MEDIUM)
+        st = (getattr(r, "status", None) or Project.STATUS_ACTIVE).strip().lower()
+        meta[label] = {"priority": pr, "status": st}
+        if st == Project.STATUS_ENDED:
+            ended.add(label)
+    return meta, ended
+
+
 def _resolve_mobiles_for_authors(author_names: list) -> list:
     """根据编写人员姓名解析钉钉 @ 用的手机号（从 User 表），与 routes 中逻辑一致。"""
     if not author_names:
@@ -219,7 +309,7 @@ def _try_acquire_send_lock(job_id: str, cooldown_seconds: int = 120) -> bool:
         os.makedirs(lock_dir, exist_ok=True)
     except OSError:
         return False
-    lock_file = os.path.join(lock_dir, f"{job_id}.lock")
+    lock_file = os.path.join(lock_dir, f"{_send_lock_file_basename(job_id)}.lock")
     now = _time.time()
     if os.path.exists(lock_file):
         try:
@@ -240,6 +330,146 @@ def _try_acquire_send_lock(job_id: str, cooldown_seconds: int = 120) -> bool:
         return False
 
 
+def _mysql_user_lock_name(job_id: str) -> str:
+    """MySQL GET_LOCK 名称（最大 64 字符）；含实例分支时多套共库部署互不阻塞。"""
+    br = _scheduler_instance_branch() or "0"
+    jid = (job_id or "").strip()
+    base = f"aiword_c:{br}:{jid}"
+    return base[:64]
+
+
+def _try_acquire_mysql_cron_serialize_lock(job_id: str) -> bool:
+    """
+    在 MySQL 上使用用户级锁串行化「同一类定时钉钉」发送。
+    解决：多台机器/多个部署目录导致 instance_path 不一致时，仅靠本地 .lock 文件无法互斥的问题。
+    非 MySQL 或执行失败时返回 True（不阻塞发送，仍依赖本地锁文件）。
+    """
+    app = _app
+    if not app:
+        return True
+    try:
+        with app.app_context():
+            from . import db
+
+            uri = (db.engine.url.drivername or "") if db.engine is not None else ""
+            if "mysql" not in uri:
+                return True
+            lock_name = _mysql_user_lock_name(job_id)
+            conn = db.engine.raw_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT GET_LOCK(%s, 0) AS ok", (lock_name,))
+                row = cur.fetchone()
+                ok = int(row[0]) if row and row[0] is not None else 0
+                cur.close()
+                if ok == 1:
+                    if not hasattr(_cron_mysql_lock_tls, "conns"):
+                        _cron_mysql_lock_tls.conns = {}
+                    _cron_mysql_lock_tls.conns[job_id] = conn
+                    return True
+                if ok == 0:
+                    logger.info("自动催办(%s)：MySQL GET_LOCK 未抢到，本次跳过，避免重复", job_id)
+                else:
+                    logger.warning("自动催办(%s)：MySQL GET_LOCK 异常返回值 %s，继续仅依赖本地锁", job_id, ok)
+                conn.close()
+                return False
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise
+    except Exception as e:
+        logger.warning("自动催办(%s)：MySQL GET_LOCK 失败，回退为仅本地锁: %s", job_id, e)
+        return True
+
+
+def _release_mysql_cron_serialize_lock(job_id: str) -> None:
+    app = _app
+    if not app:
+        return
+    try:
+        with app.app_context():
+            from . import db
+
+            uri = (db.engine.url.drivername or "") if db.engine is not None else ""
+            if "mysql" not in uri:
+                return
+            conns = getattr(_cron_mysql_lock_tls, "conns", None) or {}
+            conn = conns.pop(job_id, None)
+            if conn is None:
+                return
+            lock_name = _mysql_user_lock_name(job_id)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT RELEASE_LOCK(%s) AS freed", (lock_name,))
+                cur.close()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning("自动催办(%s)：MySQL RELEASE_LOCK 失败: %s", job_id, e)
+
+
+def _cron_send_dedupe_slot_key(job_id: str) -> str:
+    """
+    与定时触发同一分钟内的互斥：PRIMARY KEY 同槽位只容一条。
+    - 系统配置 SCHEDULER_INSTANCE_ID 留空：同 job 同分钟全库一条（多 worker / 多机 HA 去重）。
+    - 各部署配置不同实例标识：同 job 同分钟每部署一条（共库多服务各发一条）。
+    """
+    from .models import now_local
+
+    nl = now_local()
+    br = _scheduler_instance_branch() or "0"
+    return f"{job_id}:{br}:{nl.strftime('%Y-%m-%d_%H%M')}"
+
+
+def _try_claim_cron_send_dedupe(slot_key: str) -> bool:
+    """抢占发送槽；已被其他 worker/主机占用则返回 False。"""
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from . import db
+
+    is_sqlite = db.engine.dialect.name == "sqlite"
+    now_expr = "datetime('now')" if is_sqlite else "NOW()"
+    try:
+        db.session.execute(
+            text(f"INSERT INTO scheduler_dingtalk_dedupe (slot_key, created_at) VALUES (:k, {now_expr})"),
+            {"k": slot_key},
+        )
+        db.session.commit()
+        return True
+    except IntegrityError:
+        db.session.rollback()
+        return False
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.warning("定时钉钉去重表写入失败，继续发送（可能重复）: %s", e)
+        return True
+
+
+def _release_cron_send_dedupe_claim(slot_key: str) -> None:
+    """发送失败时释放槽，便于同分钟内重试。"""
+    from sqlalchemy import text
+
+    from . import db
+
+    try:
+        db.session.execute(text("DELETE FROM scheduler_dingtalk_dedupe WHERE slot_key = :k"), {"k": slot_key})
+        db.session.commit()
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
 # 多 Gunicorn worker 各起一份 APScheduler 时，同一时刻会各跑一次；成功发送后须在冷却期内保留锁文件，
 # 不能在 finally 里立刻删除，否则第二个 worker 会误判“未发送”再发一遍。
 _DEFAULT_CRON_SEND_COOLDOWN = 3600
@@ -257,16 +487,23 @@ def _release_send_lock_after_job(lock_file: str, keep_lock: bool) -> None:
         pass
 
 
-def _run_thursday_reminder():
+def _run_thursday_reminder(skip_dedupe: bool = False):
     """每周四 16:00 提醒：统计全部事项（不限于本周），按项目分组展示未完成列表，项目与影响业务方/产品合并为一条显示，并依次 @ 待办人员。"""
     app = _app
     if not app:
         return
     if not _try_acquire_send_lock("thursday_reminder", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return
-    lock_file = os.path.join(app.instance_path, "scheduler_locks", "thursday_reminder.lock")
+    lock_file = os.path.join(
+        app.instance_path, "scheduler_locks", f"{_send_lock_file_basename('thursday_reminder')}.lock"
+    )
+    mysql_lock_ok = False
     actually_sent = False
     try:
+        if not _try_acquire_mysql_cron_serialize_lock("thursday_reminder"):
+            _release_send_lock_after_job(lock_file, False)
+            return
+        mysql_lock_ok = True
         with app.app_context():
             from . import dingtalk_service
             from .models import UploadRecord
@@ -276,17 +513,20 @@ def _run_thursday_reminder():
                 logger.warning("自动催办(周四提醒)：未配置 DINGTALK_WEBHOOK，跳过发送")
                 return
 
-            total_count = UploadRecord.query.filter(
-                UploadRecord.assignee_name.isnot(None),
-            ).count()
-            completed_count = UploadRecord.query.filter(
-                UploadRecord.task_status == "completed",
-                UploadRecord.assignee_name.isnot(None),
-            ).count()
-            pending_tasks = UploadRecord.query.filter(
+            proj_meta, ended = _project_meta_for_scheduler()
+            q_all = UploadRecord.query.filter(UploadRecord.assignee_name.isnot(None))
+            if ended:
+                q_all = q_all.filter(~UploadRecord.project_name.in_(list(ended)))
+            total_count = q_all.count()
+            completed_count = q_all.filter(UploadRecord.task_status == "completed").count()
+
+            q_pending = UploadRecord.query.filter(
                 UploadRecord.task_status == "pending",
                 UploadRecord.assignee_name.isnot(None),
-            ).order_by(UploadRecord.due_date).all()
+            )
+            if ended:
+                q_pending = q_pending.filter(~UploadRecord.project_name.in_(list(ended)))
+            pending_tasks = q_pending.order_by(UploadRecord.due_date).all()
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
 
             if total_count == 0:
@@ -328,7 +568,11 @@ def _run_thursday_reminder():
                 lines.append("")
                 lines.append("请抓紧处理！")
             else:
-                for project_name in sorted(by_project.keys()):
+                def _proj_sort_key(pn: str):
+                    m = proj_meta.get(pn) or {}
+                    return (-int(m.get("priority") or 2), pn or "")
+
+                for project_name in sorted(by_project.keys(), key=_proj_sort_key):
                     uploads = by_project[project_name]
                     groups = {}
                     for u in uploads:
@@ -359,32 +603,53 @@ def _run_thursday_reminder():
             content = "\n".join(lines)
             at_names = sorted(all_assignees) if all_assignees else None
             at_mobiles = _resolve_mobiles_for_authors(list(all_assignees)) if all_assignees else None
-            result = dingtalk_service.send_markdown_message(
-                "每周任务完成提醒",
-                content,
-                at_mobiles=at_mobiles,
-                at_names=at_names,
-                webhook=webhook,
-                secret=secret,
-            )
-            if result and result.get("success"):
+            dedupe_key = None
+            if not skip_dedupe:
+                dedupe_key = _cron_send_dedupe_slot_key("thursday_reminder")
+                if not _try_claim_cron_send_dedupe(dedupe_key):
+                    logger.info("自动催办(周四提醒)：本分钟槽位已被占用，跳过重复发送")
+                    return
+            send_ok = False
+            try:
+                result = dingtalk_service.send_markdown_message(
+                    "每周任务完成提醒",
+                    content,
+                    at_mobiles=at_mobiles,
+                    at_names=at_names,
+                    webhook=webhook,
+                    secret=secret,
+                )
+                send_ok = bool(result and result.get("success"))
+            finally:
+                if dedupe_key and not send_ok:
+                    _release_cron_send_dedupe_claim(dedupe_key)
+            if send_ok:
                 actually_sent = True
             else:
                 logger.warning("自动催办(周四提醒)：钉钉发送失败，请检查 Webhook/Secret 及网络")
     finally:
         _release_send_lock_after_job(lock_file, actually_sent)
+        if mysql_lock_ok:
+            _release_mysql_cron_serialize_lock("thursday_reminder")
 
 
-def _run_overdue_reminder():
+def _run_overdue_reminder(skip_dedupe: bool = False):
     """每日 15:00 检查：截止日期为明天的任务，按负责人合并为一条消息发送。返回发送结果供测试接口展示。"""
     app = _app
     if not app:
         return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "未初始化应用"}
     if not _try_acquire_send_lock("overdue_reminder", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "跳过(其他进程已发送)"}
-    lock_file = os.path.join(app.instance_path, "scheduler_locks", "overdue_reminder.lock")
+    lock_file = os.path.join(
+        app.instance_path, "scheduler_locks", f"{_send_lock_file_basename('overdue_reminder')}.lock"
+    )
+    mysql_lock_ok = False
     keep_lock = False
     try:
+        if not _try_acquire_mysql_cron_serialize_lock("overdue_reminder"):
+            _release_send_lock_after_job(lock_file, False)
+            return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "跳过(其他实例已发送)"}
+        mysql_lock_ok = True
         with app.app_context():
             from . import dingtalk_service
             from .models import UploadRecord, now_local
@@ -395,15 +660,30 @@ def _run_overdue_reminder():
                 return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "未配置 DINGTALK_WEBHOOK"}
 
             tomorrow = (now_local().date() + timedelta(days=1))
-            tasks = UploadRecord.query.filter(
+            proj_meta, ended = _project_meta_for_scheduler()
+            q = UploadRecord.query.filter(
                 UploadRecord.due_date == tomorrow,
                 UploadRecord.task_status == "pending",
                 UploadRecord.assignee_name.isnot(None),
-            ).order_by(UploadRecord.assignee_name, UploadRecord.due_date).all()
+            )
+            if ended:
+                q = q.filter(~UploadRecord.project_name.in_(list(ended)))
+            tasks = q.order_by(UploadRecord.assignee_name, UploadRecord.due_date).all()
             tasks = _dedupe_upload_records_for_notify(tasks)
 
             if not tasks:
                 return {"no_tasks": True, "sent": 0, "failed": 0, "last_error": None}
+
+            dedupe_key = None
+            if not skip_dedupe:
+                dedupe_key = _cron_send_dedupe_slot_key("overdue_reminder")
+                if not _try_claim_cron_send_dedupe(dedupe_key):
+                    return {
+                        "no_tasks": False,
+                        "sent": 0,
+                        "failed": 0,
+                        "last_error": "跳过(本分钟已由其他实例发送)",
+                    }
 
             from .app_settings import get_setting_for_scheduler
             base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
@@ -422,75 +702,82 @@ def _run_overdue_reminder():
             sent = 0
             failed = 0
             last_error = None
-            for assignee_name, person_tasks in by_assignee.items():
-                if not person_tasks:
-                    continue
-                groups = {}
-                for u in person_tasks:
-                    k = (u.project_name or "", u.business_side or "", u.product or "")
-                    groups.setdefault(k, []).append(u)
-                task_list = "\n\n".join(_task_block_md(k, grp) for k, grp in sorted(groups.items()))
-                lines = [
-                    "【个人任务即将逾期提醒】",
-                    f"致：{assignee_name}",
-                    f"您有 {len(person_tasks)} 个任务将于明日截止：",
-                    "",
-                    task_list,
-                    "",
-                    "请抓紧处理！",
-                ]
-                if page2_url:
+            try:
+                for assignee_name, person_tasks in by_assignee.items():
+                    if not person_tasks:
+                        continue
+                    groups = {}
+                    for u in person_tasks:
+                        k = (u.project_name or "", u.business_side or "", u.product or "")
+                        groups.setdefault(k, []).append(u)
+                    def _grp_sort_key(item):
+                        k, _grp = item
+                        pn = k[0] if isinstance(k, tuple) and len(k) > 0 else ""
+                        pr = int((proj_meta.get(pn) or {}).get("priority") or 2)
+                        return (-pr, pn or "", k[1] or "", k[2] or "")
+                    task_list = "\n\n".join(_task_block_md(k, grp) for k, grp in sorted(groups.items(), key=_grp_sort_key))
+                    lines = [
+                        "【个人任务即将逾期提醒】",
+                        f"致：{assignee_name}",
+                        f"您有 {len(person_tasks)} 个任务将于明日截止：",
+                        "",
+                        task_list,
+                        "",
+                        "请抓紧处理！",
+                    ]
+                    if page2_url:
+                        lines.append("")
+                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                     lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
-                lines.append("")
-                lines.append("## **编写完成后请在页面2中标记完成状态。**")
-                content = "\n".join(lines)
-                # 打出逾期提醒完整文案，便于核对钉钉关键词与内容
-                title = "个人任务即将逾期提醒"
-                logger.info("逾期提醒-钉钉消息标题(关键词): %s", title)
-                logger.info("逾期提醒-完整文案:\n%s", content)
-                at_mobiles = _resolve_mobiles_for_authors([assignee_name])
-                result = dingtalk_service.send_markdown_message(
-                    title,
-                    content,
-                    at_mobiles=at_mobiles if at_mobiles else None,
-                    at_names=[assignee_name],
-                    webhook=webhook,
-                    secret=secret,
-                )
-                if not result.get("success"):
-                    text_content = content.replace("## **", "").replace("**", "")
-                    text_content = re.sub(r"\[点击打开\]\((https?://[^)]+)\)", r"\1", text_content)
-                    text_content = re.sub(r"<font[^>]*>([^<]*)</font>", r"\1", text_content)
-                    result = dingtalk_service.send_text_message(
-                        text_content,
+                    lines.append("## **编写完成后请在页面2中标记完成状态。**")
+                    content = "\n".join(lines)
+                    # 打出逾期提醒完整文案，便于核对钉钉关键词与内容
+                    title = "个人任务即将逾期提醒"
+                    logger.info("逾期提醒-钉钉消息标题(关键词): %s", title)
+                    logger.info("逾期提醒-完整文案:\n%s", content)
+                    at_mobiles = _resolve_mobiles_for_authors([assignee_name])
+                    result = dingtalk_service.send_markdown_message(
+                        title,
+                        content,
                         at_mobiles=at_mobiles if at_mobiles else None,
                         at_names=[assignee_name],
                         webhook=webhook,
                         secret=secret,
                     )
-                if result.get("success"):
-                    sent += 1
-                else:
-                    failed += 1
-                    last_error = result.get("error") or "未知错误"
-                    logger.warning("自动催办(逾期前一日)：钉钉发送失败 assignee=%s error=%s", assignee_name, last_error)
+                    if result.get("success"):
+                        sent += 1
+                    else:
+                        failed += 1
+                        last_error = result.get("error") or "未知错误"
+                        logger.warning("自动催办(逾期前一日)：钉钉发送失败 assignee=%s error=%s", assignee_name, last_error)
+            finally:
+                if dedupe_key and sent == 0:
+                    _release_cron_send_dedupe_claim(dedupe_key)
             keep_lock = sent > 0
             return {"no_tasks": False, "sent": sent, "failed": failed, "last_error": last_error}
     finally:
         _release_send_lock_after_job(lock_file, keep_lock)
+        if mysql_lock_ok:
+            _release_mysql_cron_serialize_lock("overdue_reminder")
 
 
-def _run_project_stats():
+def _run_project_stats(skip_dedupe: bool = False):
     """每两天 9:30：按项目统计每个人未完成任务项（不显示未完成列表），并依次 @ 待办人员。"""
     app = _app
     if not app:
         return
     if not _try_acquire_send_lock("project_stats", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
         return
-    lock_file = os.path.join(app.instance_path, "scheduler_locks", "project_stats.lock")
+    lock_file = os.path.join(
+        app.instance_path, "scheduler_locks", f"{_send_lock_file_basename('project_stats')}.lock"
+    )
+    mysql_lock_ok = False
     actually_sent = False
     try:
+        if not _try_acquire_mysql_cron_serialize_lock("project_stats"):
+            _release_send_lock_after_job(lock_file, False)
+            return
+        mysql_lock_ok = True
         with app.app_context():
             from . import dingtalk_service
             from .models import UploadRecord, now_local
@@ -505,9 +792,11 @@ def _run_project_stats():
             page2_path = _get_page2_path(app)
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
-            pending_tasks = UploadRecord.query.filter(
-                UploadRecord.completion_status.is_(None),
-            ).order_by(UploadRecord.due_date).all()
+            proj_meta, ended = _project_meta_for_scheduler()
+            q_pending = UploadRecord.query.filter(UploadRecord.completion_status.is_(None))
+            if ended:
+                q_pending = q_pending.filter(~UploadRecord.project_name.in_(list(ended)))
+            pending_tasks = q_pending.order_by(UploadRecord.due_date).all()
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
 
             by_project = {}
@@ -537,7 +826,11 @@ def _run_project_stats():
                     f"整体未完成任务数：{len(pending_tasks)} 项，涉及 {len(by_project)} 个项目。",
                     "",
                 ]
-                for project_name in sorted(by_project.keys()):
+                def _proj_sort_key(pn: str):
+                    m = proj_meta.get(pn) or {}
+                    return (-int(m.get("priority") or 2), pn or "")
+
+                for project_name in sorted(by_project.keys(), key=_proj_sort_key):
                     uploads = by_project[project_name]
                     by_person = {}
                     for u in uploads:
@@ -564,20 +857,34 @@ def _run_project_stats():
                 at_names = sorted(all_assignees) if all_assignees else None
                 at_mobiles = _resolve_mobiles_for_authors(list(all_assignees)) if all_assignees else None
             content = "\n".join(lines)
-            result = dingtalk_service.send_markdown_message(
-                "每两天项目完成情况统计",
-                content,
-                at_mobiles=at_mobiles,
-                at_names=at_names,
-                webhook=webhook,
-                secret=secret,
-            )
-            if result and result.get("success"):
+            dedupe_key = None
+            if not skip_dedupe:
+                dedupe_key = _cron_send_dedupe_slot_key("project_stats")
+                if not _try_claim_cron_send_dedupe(dedupe_key):
+                    logger.info("自动催办(项目统计)：本分钟槽位已被占用，跳过重复发送")
+                    return
+            send_ok = False
+            try:
+                result = dingtalk_service.send_markdown_message(
+                    "每两天项目完成情况统计",
+                    content,
+                    at_mobiles=at_mobiles,
+                    at_names=at_names,
+                    webhook=webhook,
+                    secret=secret,
+                )
+                send_ok = bool(result and result.get("success"))
+            finally:
+                if dedupe_key and not send_ok:
+                    _release_cron_send_dedupe_claim(dedupe_key)
+            if send_ok:
                 actually_sent = True
             else:
                 logger.warning("自动催办(项目统计)：钉钉发送失败，请检查 Webhook/Secret 及网络")
     finally:
         _release_send_lock_after_job(lock_file, actually_sent)
+        if mysql_lock_ok:
+            _release_mysql_cron_serialize_lock("project_stats")
 
 
 def _send_module_cascade_for_project(project_name: str, trigger_module: str, target_module: str, trigger_label: str):
@@ -600,6 +907,9 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
     page2_url = f"{base_url}{page2_path}" if base_url else ""
     pname = (project_name or "").strip()
     if not pname:
+        return
+    _meta, _ended = _project_meta_for_scheduler()
+    if pname in _ended:
         return
 
     def _group_key(u):
@@ -733,7 +1043,11 @@ def _run_process_module_cascade_pending():
     # 每分钟触发；冷却需大于「单轮处理」耗时，避免多 worker 同分钟各跑一轮导致重复钉钉
     if not _try_acquire_send_lock("module_cascade_pending_processor", cooldown_seconds=120):
         return
-    lock_file = os.path.join(app.instance_path, "scheduler_locks", "module_cascade_pending_processor.lock")
+    lock_file = os.path.join(
+        app.instance_path,
+        "scheduler_locks",
+        f"{_send_lock_file_basename('module_cascade_pending_processor')}.lock",
+    )
     keep_lock = False
     try:
         with app.app_context():
@@ -742,6 +1056,7 @@ def _run_process_module_cascade_pending():
             webhook, secret = _get_webhook_secret()
             if not webhook:
                 return
+            _meta, _ended = _project_meta_for_scheduler()
             now = now_local()
             pending = ModuleCascadeReminder.query.filter(
                 ModuleCascadeReminder.status == "pending",
@@ -753,12 +1068,16 @@ def _run_process_module_cascade_pending():
                 by_trip[(rec.project_name, rec.trigger_module, rec.target_module)].append(rec)
             for recs in by_trip.values():
                 head = recs[0]
-                _send_module_cascade_for_project(
-                    head.project_name,
-                    head.trigger_module,
-                    head.target_module,
-                    head.trigger_module,
-                )
+                if (head.project_name or "").strip() and (head.project_name or "").strip() in _ended:
+                    # 已结束项目：不再催办，但需要把队列标记为已处理，避免一直 pending
+                    pass
+                else:
+                    _send_module_cascade_for_project(
+                        head.project_name,
+                        head.trigger_module,
+                        head.target_module,
+                        head.trigger_module,
+                    )
                 for r in recs:
                     r.status = "sent"
                     r.sent_at = now

@@ -26,6 +26,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("INTEGRATION_SECRET", "开放接口校验密钥（INTEGRATION_SECRET）", True),
     ("UPLOAD_FOLDER", "上传文件目录（绝对路径，留空用默认 uploads）", False),
     ("OUTPUT_FOLDER", "文档生成输出目录（绝对路径，留空用默认 outputs）", False),
+    (
+        "SCHEDULER_INSTANCE_ID",
+        "定时任务实例标识（多套部署共库时填不同值则各发一条钉钉；单套部署留空）",
+        False,
+    ),
 ]
 
 SENSITIVE_KEYS = {k for k, _, sens in SYSTEM_CONFIG_KEYS if sens}
@@ -376,6 +381,11 @@ def save_system_settings(
         if key in SENSITIVE_KEYS and skip_unchanged_sensitive and (
             val == "***" or val == "(不变)" or val == "******"
         ):
+            continue
+        # 允许清空，便于从「多实例」恢复为默认全库去重
+        if key == "SCHEDULER_INSTANCE_ID":
+            _upsert_config(key, val)
+            written.append(key)
             continue
         if key not in SENSITIVE_KEYS and not val:
             row = AppConfig.query.filter_by(config_key=key).first()

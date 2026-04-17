@@ -36,7 +36,7 @@ from .doc_service import (
 from .models import (
     GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
-    ModuleCascadeReminder, now_local,
+    Project, ModuleCascadeReminder, now_local,
 )
 from . import dingtalk_service
 
@@ -62,6 +62,140 @@ def _save_file(file_storage, target_dir: Path) -> tuple[str, str]:
     file_path = target_dir / generated_name
     file_storage.save(file_path)
     return generated_name, str(file_path)
+
+
+def _project_priority_label(priority: int | None) -> str:
+    p = int(priority or Project.PRIORITY_MEDIUM)
+    if p >= Project.PRIORITY_HIGH:
+        return "高"
+    if p <= Project.PRIORITY_LOW:
+        return "低"
+    return "中"
+
+
+def _project_status_label(status: str | None) -> str:
+    s = (status or "").strip().lower()
+    return "已结束" if s == Project.STATUS_ENDED else "进行中"
+
+
+def _project_display_label_from_fields(
+    name: str | None,
+    registered_country: str | None,
+    registered_category: str | None,
+) -> str:
+    n = (name or "").strip()
+    c = (registered_country or "").strip()
+    cat = (registered_category or "").strip()
+    if not c and not cat:
+        return n
+    return f"{n}（{c or '—'} / {cat or '—'}）"
+
+
+def _project_display_label(p: Project) -> str:
+    return _project_display_label_from_fields(
+        p.name,
+        getattr(p, "registered_country", None),
+        getattr(p, "registered_category", None),
+    )
+
+
+def _filter_nullable_eq(q, col, value):
+    """value=None 用 IS NULL；否则用 =。避免 MySQL 生成 `IS 'xxx'` 导致 500。"""
+    return q.filter(col.is_(None)) if value is None else q.filter(col == value)
+
+
+def _backfill_project_ids() -> None:
+    """将历史 upload_records/module_cascade_reminders/generation_summary 的 project_id 回填（按展示键匹配）。"""
+    from .models import UploadRecord, ModuleCascadeReminder, GenerationSummary
+    rows = Project.query.order_by(Project.updated_at.asc(), Project.id.asc()).all()
+    # 同一展示键可能有重复项目：选择最早的作为“主项目ID”
+    key_to_pid: dict[str, str] = {}
+    for p in rows:
+        k = _project_display_label(p)
+        if k and k not in key_to_pid:
+            key_to_pid[k] = p.id
+
+    for k, pid in key_to_pid.items():
+        UploadRecord.query.filter(UploadRecord.project_id.is_(None), UploadRecord.project_name == k).update(
+            {"project_id": pid}
+        )
+        ModuleCascadeReminder.query.filter(ModuleCascadeReminder.project_id.is_(None), ModuleCascadeReminder.project_name == k).update(
+            {"project_id": pid}
+        )
+        try:
+            GenerationSummary.query.filter(GenerationSummary.project_id.is_(None), GenerationSummary.project_name == k).update(
+                {"project_id": pid}
+            )
+        except Exception:
+            pass
+    db.session.commit()
+
+
+def _ensure_project_row(project_name: str) -> Project | None:
+    # 兼容旧数据：project_name 可能是 base name，也可能是展示键(label)
+    label = (project_name or "").strip()
+    if not label:
+        return None
+
+    # 先按展示键匹配（支持未来：projectId 为空时，仍可“查到已有项目”）
+    for p in Project.query.all():
+        if _project_display_label(p) == label:
+            return p
+
+    row = Project(
+        name=label,
+        priority=Project.PRIORITY_MEDIUM,
+        status=Project.STATUS_ACTIVE,
+        registered_country=None,
+        registered_category=None,
+    )
+    db.session.add(row)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        # commit 失败时返回任意可用行（避免 None 造成后续空指针）
+        for p in Project.query.all():
+            if _project_display_label(p) == label:
+                return p
+        return None
+    return row
+
+
+def _project_meta_map(auto_create_from_uploads: bool = False) -> dict[str, dict[str, Any]]:
+    """
+    返回项目元信息映射：name -> {priority, status}。
+    若 auto_create_from_uploads=True，会把 upload_records 中出现但 projects 表不存在的项目补齐（默认中/进行中）。
+    """
+    if auto_create_from_uploads:
+        labels = (
+            db.session.query(UploadRecord.project_name)
+            .filter(UploadRecord.project_name.isnot(None), UploadRecord.project_name != "")
+            .distinct()
+            .all()
+        )
+        for (lab,) in labels:
+            _ensure_project_row(lab)
+
+    rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if not (r.name or "").strip():
+            continue
+        key = _project_display_label(r)
+        out[key] = {
+            "priority": int(r.priority or Project.PRIORITY_MEDIUM),
+            "status": r.status or Project.STATUS_ACTIVE,
+            "baseName": r.name,
+            "registeredCountry": getattr(r, "registered_country", None),
+            "registeredCategory": getattr(r, "registered_category", None),
+        }
+    return out
+
+
+def _ended_project_names() -> set[str]:
+    rows = Project.query.filter(Project.status == Project.STATUS_ENDED).all()
+    return {_project_display_label(r) for r in rows if (r.name or "").strip()}
 
 
 def _normalize_doc_link(line: str) -> str:
@@ -168,9 +302,12 @@ def _summary_payload():
     - completion_status 为空 => 未完成
     - 项目+人员统计融合各完成状态数量
     """
-    uploads = UploadRecord.query.order_by(
-        UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()
-    ).all()
+    proj_meta = _project_meta_map(auto_create_from_uploads=True)
+    ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
+    q = UploadRecord.query
+    if ended:
+        q = q.filter(~UploadRecord.project_name.in_(list(ended)))
+    uploads = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
     total_files = len(uploads)
     
     def _rate(done: int, total: int) -> float:
@@ -229,10 +366,19 @@ def _summary_payload():
                 "pendingAuthors": list(stats["pendingAuthors"]),
                 "auditRejectCount": stats.get("auditRejectCount", 0),
             }
+            if not include_project_author_keys:
+                # byProject / byAuthor
+                if bucket is by_project:
+                    m = proj_meta.get(key) or {}
+                    item["projectPriority"] = int(m.get("priority") or Project.PRIORITY_MEDIUM)
+                    item["projectStatus"] = (m.get("status") or Project.STATUS_ACTIVE)
             if include_project_author_keys and "__" in key:
                 p, a = key.split("__", 1)
                 item["projectName"] = p
                 item["author"] = a
+                m = proj_meta.get(p) or {}
+                item["projectPriority"] = int(m.get("priority") or Project.PRIORITY_MEDIUM)
+                item["projectStatus"] = (m.get("status") or Project.STATUS_ACTIVE)
             formatted.append(item)
         return formatted
 
@@ -277,9 +423,15 @@ def _summary_payload():
             "total": total_files,
             "rate": _rate(completed_files, total_files),
         },
-        "byProject": _format_with_status(by_project),
+        "byProject": sorted(
+            _format_with_status(by_project),
+            key=lambda x: (-int(x.get("projectPriority") or Project.PRIORITY_MEDIUM), str(x.get("label") or "")),
+        ),
         "byAuthor": _format_with_status(by_author),
-        "byProjectAuthor": _format_with_status(by_project_author, label_join=" / ", include_project_author_keys=True),
+        "byProjectAuthor": sorted(
+            _format_with_status(by_project_author, label_join=" / ", include_project_author_keys=True),
+            key=lambda x: (-int(x.get("projectPriority") or Project.PRIORITY_MEDIUM), str(x.get("label") or "")),
+        ),
         "detail": detail_rows,
     }
 
@@ -659,6 +811,7 @@ def api_audit_statuses_delete(item_id: str):
 @bp.post("/api/upload")
 @page13_access_required
 def api_upload():
+    project_id = (request.form.get("projectId") or "").strip() or None
     project_name = request.form.get("projectName", "").strip()
     project_code = request.form.get("projectCode", "").strip() or None
     file_name = request.form.get("fileName", "").strip()
@@ -692,6 +845,15 @@ def api_upload():
             400,
         )
     # 链接和文件均可为空保存，后续可在页面2补充链接
+
+    # 确保项目元数据存在（默认：中优先级/进行中）
+    if project_id:
+        p = Project.query.get(project_id)
+        if p:
+            project_name = _project_display_label(p)
+        else:
+            project_id = None
+    _ensure_project_row(project_name)
 
     existing = UploadRecord.query.filter_by(
         project_name=project_name, file_name=file_name, task_type=task_type, author=author
@@ -777,6 +939,7 @@ def api_upload():
         existing.notes = notes
         existing.project_notes = project_notes
         existing.project_name = project_name
+        existing.project_id = project_id
         existing.file_name = file_name
         existing.placeholders = placeholders
         existing.assignee_name = assignee_name
@@ -800,6 +963,7 @@ def api_upload():
         existing.registration_version = registration_version
         summary = _prepare_summary(existing)
         summary.project_name = project_name
+        summary.project_id = project_id
         summary.file_name = file_name
         summary.author = author
         summary.has_generated = False
@@ -833,6 +997,7 @@ def api_upload():
         )
 
     upload = UploadRecord(
+        project_id=project_id,
         project_name=project_name,
         project_code=project_code,
         file_name=file_name,
@@ -863,6 +1028,7 @@ def api_upload():
     )
     db.session.add(upload)
     summary = _prepare_summary(upload)
+    summary.project_id = project_id
     db.session.add(summary)
     db.session.commit()
 
@@ -1129,14 +1295,28 @@ def _build_import_template_csv(include_sample: bool, project_name: Optional[str]
 @page13_access_required
 def api_uploads_project_names():
     """返回已有项目名称列表，用于示例模板选择项目。"""
+    include_history = str(request.args.get("includeHistory") or "").strip() in ("1", "true", "True", "yes", "on")
+    proj_meta = _project_meta_map(auto_create_from_uploads=True)
+    ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
+
     names = (
         db.session.query(UploadRecord.project_name)
         .filter(UploadRecord.project_name.isnot(None), UploadRecord.project_name != "")
         .distinct()
-        .order_by(UploadRecord.project_name)
         .all()
     )
-    return jsonify({"projectNames": [n[0] for n in names if (n[0] or "").strip()]})
+    arr = [n[0] for n in names if (n[0] or "").strip()]
+    if (not include_history) and ended:
+        arr = [n for n in arr if n not in ended]
+
+    def _k(n: str):
+        m = proj_meta.get(n) or {}
+        st = (m.get("status") or Project.STATUS_ACTIVE).strip().lower()
+        pr = int(m.get("priority") or Project.PRIORITY_MEDIUM)
+        return (1 if st == Project.STATUS_ENDED else 0, -pr, n or "")
+
+    arr = sorted(set(arr), key=_k)
+    return jsonify({"projectNames": arr})
 
 
 @bp.get("/api/uploads/import-template")
@@ -1374,15 +1554,23 @@ def api_template_detail(upload_id: str):
 @page13_access_required
 def api_uploads_list():
     """获取所有上传记录列表"""
-    records = UploadRecord.query.order_by(
-        UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()
-    ).all()
+    include_history = str(request.args.get("includeHistory") or "").strip() in ("1", "true", "True", "yes", "on")
+    proj_meta = _project_meta_map(auto_create_from_uploads=True)
+    ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
+    q = UploadRecord.query
+    if (not include_history) and ended:
+        q = q.filter(~UploadRecord.project_name.in_(list(ended)))
+    records = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
     return jsonify({
         "records": [
             {
                 "seq": idx + 1,
                 "id": r.id,
                 "projectName": r.project_name,
+                "projectPriority": int((proj_meta.get(r.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
+                "projectPriorityLabel": _project_priority_label((proj_meta.get(r.project_name) or {}).get("priority")),
+                "projectStatus": ((proj_meta.get(r.project_name) or {}).get("status") or Project.STATUS_ACTIVE),
+                "projectStatusLabel": _project_status_label((proj_meta.get(r.project_name) or {}).get("status")),
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
@@ -1452,6 +1640,8 @@ def api_upload_update(upload_id: str):
     data = request.get_json(force=True) or {}
     
     project_name = (data.get("projectName") or "").strip() or None
+    if project_name:
+        _ensure_project_row(project_name)
     file_name = (data.get("fileName") or "").strip() or None
     task_type = (data.get("taskType") or "").strip() or None
     author = (data.get("author") or "").strip() or None
@@ -1599,15 +1789,22 @@ def api_my_tasks():
     """获取当前登录用户的任务列表（页面2使用）"""
     username = session.get("username")
     display_name = session.get("display_name")
-    
-    records = UploadRecord.query.filter(
+
+    include_history = str(request.args.get("includeHistory") or "").strip() in ("1", "true", "True", "yes", "on")
+    proj_meta = _project_meta_map(auto_create_from_uploads=True)
+    ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
+
+    q = UploadRecord.query.filter(
         db.or_(
             UploadRecord.assignee_name == username,
             UploadRecord.assignee_name == display_name,
             UploadRecord.author == username,
             UploadRecord.author == display_name,
         )
-    ).order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
+    )
+    if (not include_history) and ended:
+        q = q.filter(~UploadRecord.project_name.in_(list(ended)))
+    records = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
     
     return jsonify({
         "records": [
@@ -1615,6 +1812,10 @@ def api_my_tasks():
                 "seq": idx + 1,
                 "id": r.id,
                 "projectName": r.project_name,
+                "projectPriority": int((proj_meta.get(r.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
+                "projectPriorityLabel": _project_priority_label((proj_meta.get(r.project_name) or {}).get("priority")),
+                "projectStatus": ((proj_meta.get(r.project_name) or {}).get("status") or Project.STATUS_ACTIVE),
+                "projectStatusLabel": _project_status_label((proj_meta.get(r.project_name) or {}).get("status")),
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
@@ -1927,6 +2128,354 @@ def api_upload_status_update(upload_id: str):
 @page13_access_required
 def api_summary():
     return jsonify(_summary_payload())
+
+
+# ---------- 项目管理 API ----------
+
+@bp.get("/api/projects")
+@page13_access_required
+def api_projects_list():
+    """列出项目（从 upload_records 自动补齐缺失项）。"""
+    _project_meta_map(auto_create_from_uploads=True)
+    _backfill_project_ids()
+    rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
+    return jsonify(
+        [
+            {
+                "id": p.id,
+                "name": p.name,
+                "registeredCountry": getattr(p, "registered_country", None),
+                "registeredCategory": getattr(p, "registered_category", None),
+                "projectKey": _project_display_label(p),
+                "priority": int(p.priority or Project.PRIORITY_MEDIUM),
+                "priorityLabel": _project_priority_label(p.priority),
+                "status": p.status or Project.STATUS_ACTIVE,
+                "statusLabel": _project_status_label(p.status),
+                "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
+            }
+            for p in rows
+        ]
+    )
+
+
+@bp.post("/api/projects")
+@page13_access_required
+def api_projects_create_or_update():
+    """按（三字段）创建/更新项目优先级与状态。"""
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"message": "项目名称不能为空"}), 400
+    registered_country = (data.get("registeredCountry") or "").strip() or None
+    registered_category = (data.get("registeredCategory") or "").strip() or None
+    priority = data.get("priority")
+    status = (data.get("status") or "").strip().lower() or Project.STATUS_ACTIVE
+    if priority is None:
+        priority = Project.PRIORITY_MEDIUM
+    try:
+        priority = int(priority)
+    except Exception:
+        priority = Project.PRIORITY_MEDIUM
+    priority = max(Project.PRIORITY_LOW, min(Project.PRIORITY_HIGH, priority))
+    if status not in (Project.STATUS_ACTIVE, Project.STATUS_ENDED):
+        status = Project.STATUS_ACTIVE
+
+    q = Project.query.filter(Project.name == name)
+    q = _filter_nullable_eq(q, Project.registered_country, registered_country)
+    q = _filter_nullable_eq(q, Project.registered_category, registered_category)
+    row = q.first()
+    if not row:
+        row = Project(
+            name=name,
+            registered_country=registered_country,
+            registered_category=registered_category,
+            priority=priority,
+            status=status,
+        )
+    row.priority = priority
+    row.status = status
+    db.session.add(row)
+    db.session.commit()
+    return jsonify(
+        {
+            "message": "已保存",
+            "project": {
+                "id": row.id,
+                "name": row.name,
+                "registeredCountry": getattr(row, "registered_country", None),
+                "registeredCategory": getattr(row, "registered_category", None),
+                "projectKey": _project_display_label(row),
+                "priority": int(row.priority or Project.PRIORITY_MEDIUM),
+                "priorityLabel": _project_priority_label(row.priority),
+                "status": row.status,
+                "statusLabel": _project_status_label(row.status),
+                "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+            },
+        }
+    )
+
+
+@bp.patch("/api/projects/<project_id>")
+@page13_access_required
+def api_projects_patch(project_id: str):
+    row = Project.query.get(project_id)
+    if not row:
+        return jsonify({"message": "未找到该项目"}), 404
+    data = request.get_json(force=True) or {}
+
+    old_key = _project_display_label(row)
+    new_name = row.name
+    new_country = getattr(row, "registered_country", None)
+    new_category = getattr(row, "registered_category", None)
+
+    if "name" in data:
+        n = (data.get("name") or "").strip()
+        if n:
+            new_name = n
+    if "registeredCountry" in data:
+        new_country = (data.get("registeredCountry") or "").strip() or None
+    if "registeredCategory" in data:
+        new_category = (data.get("registeredCategory") or "").strip() or None
+
+    # 更新基础三字段时，检查是否与其它项目重复
+    q = Project.query.filter(Project.id != row.id).filter(Project.name == new_name)
+    q = _filter_nullable_eq(q, Project.registered_country, new_country)
+    q = _filter_nullable_eq(q, Project.registered_category, new_category)
+    other = q.first()
+    if other:
+        return (
+            jsonify(
+                {
+                    "message": "该项目（三字段）与已有项目重复，请先调整后再保存",
+                    "conflictProjectId": other.id,
+                }
+            ),
+            409,
+        )
+
+    if "priority" in data:
+        try:
+            p = int(data.get("priority"))
+            row.priority = max(Project.PRIORITY_LOW, min(Project.PRIORITY_HIGH, p))
+        except Exception:
+            pass
+    if "status" in data:
+        s = (data.get("status") or "").strip().lower()
+        if s in (Project.STATUS_ACTIVE, Project.STATUS_ENDED):
+            row.status = s
+
+    # 真正应用三字段
+    row.name = new_name
+    row.registered_country = new_country
+    row.registered_category = new_category
+
+    new_key = _project_display_label(row)
+    db.session.add(row)
+    db.session.commit()
+
+    # 若三字段变化导致展示键变化，要同步更新已存在的任务/模块级联/生成摘要
+    if old_key != new_key:
+        UploadRecord.query.filter_by(project_name=old_key).update(
+            {"project_name": new_key}
+        )
+        ModuleCascadeReminder.query.filter_by(project_name=old_key).update(
+            {"project_name": new_key}
+        )
+        # 生成摘要也用于展示/下载列表时的统计口径（尽量保持一致）
+        try:
+            GenerationSummary.query.filter_by(project_name=old_key).update(
+                {"project_name": new_key}
+            )
+        except Exception:
+            pass
+        db.session.commit()
+    return jsonify({"message": "已更新"})
+
+
+@bp.route("/api/projects/batch", methods=["PUT", "POST"])
+@page13_access_required
+def api_projects_batch_update():
+    """批量更新项目优先级/状态（用于页面1一键保存/批量编辑）。"""
+    data = request.get_json(force=True) or {}
+    items = data.get("projects") or []
+    if not isinstance(items, list) or not items:
+        return jsonify({"message": "projects 不能为空"}), 400
+
+    from .models import UploadRecord, ModuleCascadeReminder, GenerationSummary
+
+    # 防止“一键保存”把两个项目更新成同一（三字段）重复项目
+    request_ids = []
+    triples_to_ids: dict[tuple[str, Any, Any], list[str]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        pid = (it.get("id") or "").strip()
+        if not pid:
+            continue
+        request_ids.append(pid)
+
+    request_id_set = set(request_ids)
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        pid = (it.get("id") or "").strip()
+        if not pid:
+            continue
+        row = Project.query.get(pid)
+        if not row:
+            continue
+        target_country = (it.get("registeredCountry") or "").strip() or None
+        target_category = (it.get("registeredCategory") or "").strip() or None
+        triple = (row.name, target_country, target_category)
+        triples_to_ids.setdefault(triple, []).append(pid)
+    for triple, ids in triples_to_ids.items():
+        if len(set(ids)) > 1:
+            return (
+                jsonify(
+                    {
+                        "message": "批量保存失败：检测到（三字段）重复项目（已被请求批量设置为同一三字段组合）。请先避免重复或删除多余项目。",
+                        "dupProjectIds": list(set(ids)),
+                    }
+                ),
+                409,
+            )
+
+    # 若与数据库中非本次请求的其它项目重复，也拒绝
+    for triple, ids in triples_to_ids.items():
+        base_name, target_country, target_category = triple
+        q = Project.query.filter(Project.name == base_name)
+        q = _filter_nullable_eq(q, Project.registered_country, target_country)
+        q = _filter_nullable_eq(q, Project.registered_category, target_category)
+        q = q.filter(~Project.id.in_(list(request_id_set) or [""]))
+        other = q.first()
+        if other:
+            return (
+                jsonify(
+                    {
+                        "message": "批量保存失败：目标（三字段）与已有项目重复，请先调整后再保存",
+                        "conflictProjectId": other.id,
+                    }
+                ),
+                409,
+            )
+
+    updated = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        pid = (it.get("id") or "").strip()
+        if not pid:
+            continue
+        row = Project.query.get(pid)
+        if not row:
+            continue
+
+        old_key = _project_display_label(row)
+
+        if "priority" in it:
+            try:
+                p = int(it.get("priority"))
+                row.priority = max(Project.PRIORITY_LOW, min(Project.PRIORITY_HIGH, p))
+            except Exception:
+                pass
+        if "status" in it:
+            s = (it.get("status") or "").strip().lower()
+            if s in (Project.STATUS_ACTIVE, Project.STATUS_ENDED):
+                row.status = s
+
+        if "registeredCountry" in it:
+            row.registered_country = (it.get("registeredCountry") or "").strip() or None
+        if "registeredCategory" in it:
+            row.registered_category = (it.get("registeredCategory") or "").strip() or None
+
+        new_key = _project_display_label(row)
+        if old_key != new_key:
+            UploadRecord.query.filter_by(project_name=old_key).update(
+                {"project_name": new_key}
+            )
+            ModuleCascadeReminder.query.filter_by(project_name=old_key).update(
+                {"project_name": new_key}
+            )
+            try:
+                GenerationSummary.query.filter_by(project_name=old_key).update(
+                    {"project_name": new_key}
+                )
+            except Exception:
+                pass
+
+        db.session.add(row)
+        updated += 1
+
+    db.session.commit()
+    return jsonify({"message": f"已保存 {updated} 项", "updated": updated})
+
+
+@bp.delete("/api/projects/<project_id>")
+@page13_access_required
+def api_projects_delete(project_id: str):
+    """删除项目：仅当项目未绑定任务/级联记录时允许。"""
+    from .models import UploadRecord, ModuleCascadeReminder, GenerationSummary
+
+    row = Project.query.get(project_id)
+    if not row:
+        return jsonify({"message": "未找到该项目"}), 404
+
+    key = _project_display_label(row)
+
+    upload_count = UploadRecord.query.filter(UploadRecord.project_id == row.id).count()
+    cascade_count = ModuleCascadeReminder.query.filter(ModuleCascadeReminder.project_id == row.id).count()
+    generation_count = GenerationSummary.query.filter(GenerationSummary.project_id == row.id).count()
+
+    total = upload_count + cascade_count + generation_count
+    if total > 0:
+        return (
+            jsonify(
+                {
+                    "message": "无法删除：该项目已绑定任务/级联/生成记录，请先清理后再删除",
+                    "bound": {
+                        "uploadCount": upload_count,
+                        "cascadeCount": cascade_count,
+                        "generationCount": generation_count,
+                        "totalCount": total,
+                    },
+                }
+            ),
+            409,
+        )
+
+    db.session.delete(row)
+    db.session.commit()
+    return jsonify({"message": "项目已删除"})
+
+
+@bp.get("/api/projects/<project_id>/bindings")
+@page13_access_required
+def api_projects_bindings_count(project_id: str):
+    """获取项目绑定数量：用于删除前提示。"""
+    from .models import UploadRecord, ModuleCascadeReminder, GenerationSummary
+
+    row = Project.query.get(project_id)
+    if not row:
+        return jsonify({"message": "未找到该项目"}), 404
+
+    key = _project_display_label(row)
+    upload_count = UploadRecord.query.filter(UploadRecord.project_id == row.id).count()
+    cascade_count = ModuleCascadeReminder.query.filter(ModuleCascadeReminder.project_id == row.id).count()
+    generation_count = GenerationSummary.query.filter(GenerationSummary.project_id == row.id).count()
+    total = upload_count + cascade_count + generation_count
+
+    return jsonify(
+        {
+            "message": "ok",
+            "projectKey": key,
+            "bound": {
+                "uploadCount": upload_count,
+                "cascadeCount": cascade_count,
+                "generationCount": generation_count,
+                "totalCount": total,
+            },
+        }
+    )
 
 
 # ---------- 通知文案配置 API ----------
@@ -2571,7 +3120,7 @@ def api_notify_test_auto():
 
     if test_type == "thursday":
         from .scheduler import _run_thursday_reminder
-        _run_thursday_reminder()
+        _run_thursday_reminder(skip_dedupe=True)
         return jsonify({
             "success": True,
             "webhook_configured": True,
@@ -2580,7 +3129,7 @@ def api_notify_test_auto():
         })
     if test_type == "overdue":
         from .scheduler import _run_overdue_reminder
-        res = _run_overdue_reminder()
+        res = _run_overdue_reminder(skip_dedupe=True)
         if res is None:
             return jsonify({
                 "success": False,
@@ -2612,7 +3161,7 @@ def api_notify_test_auto():
         })
     if test_type == "project_stats":
         from .scheduler import _run_project_stats
-        _run_project_stats()
+        _run_project_stats(skip_dedupe=True)
         return jsonify({
             "success": True,
             "webhook_configured": True,

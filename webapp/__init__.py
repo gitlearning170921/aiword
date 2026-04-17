@@ -16,6 +16,32 @@ def ensure_schema(app: Flask):
     existing_tables = inspector.get_table_names()
     is_sqlite = engine.dialect.name == "sqlite"
 
+    # 定时钉钉跨进程/跨主机去重：同一 job 在同一分钟内只允许一条成功 INSERT
+    with engine.connect() as conn:
+        if is_sqlite:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS scheduler_dingtalk_dedupe (
+                        slot_key VARCHAR(192) NOT NULL PRIMARY KEY,
+                        created_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS scheduler_dingtalk_dedupe (
+                        slot_key VARCHAR(192) NOT NULL PRIMARY KEY,
+                        created_at DATETIME NOT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+            )
+        conn.commit()
+
     def ensure_column(table: str, column: str, ddl_sqlite: str, ddl_other: str):
         if table not in existing_tables:
             return
@@ -387,6 +413,40 @@ def ensure_schema(app: Flask):
         "output_file_blob",
         "ALTER TABLE generate_records ADD COLUMN output_file_blob BLOB",
         "ALTER TABLE generate_records ADD COLUMN output_file_blob MEDIUMBLOB",
+    )
+
+    # projects：注册国家/注册类别（用于三字段去重）
+    ensure_column(
+        "projects",
+        "registered_country",
+        ddl_sqlite="ALTER TABLE projects ADD COLUMN registered_country VARCHAR(128)",
+        ddl_other="ALTER TABLE projects ADD COLUMN registered_country VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "projects",
+        "registered_category",
+        ddl_sqlite="ALTER TABLE projects ADD COLUMN registered_category VARCHAR(128)",
+        ddl_other="ALTER TABLE projects ADD COLUMN registered_category VARCHAR(128) NULL",
+    )
+
+    # 绑定项目ID：用于删除/统计按ID精确匹配
+    ensure_column(
+        "upload_records",
+        "project_id",
+        ddl_sqlite="ALTER TABLE upload_records ADD COLUMN project_id VARCHAR(36)",
+        ddl_other="ALTER TABLE upload_records ADD COLUMN project_id VARCHAR(36) NULL",
+    )
+    ensure_column(
+        "module_cascade_reminders",
+        "project_id",
+        ddl_sqlite="ALTER TABLE module_cascade_reminders ADD COLUMN project_id VARCHAR(36)",
+        ddl_other="ALTER TABLE module_cascade_reminders ADD COLUMN project_id VARCHAR(36) NULL",
+    )
+    ensure_column(
+        "generation_summary",
+        "project_id",
+        ddl_sqlite="ALTER TABLE generation_summary ADD COLUMN project_id VARCHAR(36)",
+        ddl_other="ALTER TABLE generation_summary ADD COLUMN project_id VARCHAR(36) NULL",
     )
 
 
