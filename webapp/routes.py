@@ -78,6 +78,28 @@ def _project_status_label(status: str | None) -> str:
     return "已结束" if s == Project.STATUS_ENDED else "进行中"
 
 
+def _sort_upload_records_by_project_priority(
+    records: list[UploadRecord], proj_meta: dict[str, dict[str, Any]]
+) -> list[UploadRecord]:
+    """按项目优先级降序（数值越大越靠前），同优先级按 sort_order 升序、创建时间升序。"""
+
+    def _created_ts(r: UploadRecord) -> float:
+        ct = getattr(r, "created_at", None)
+        if not ct:
+            return 0.0
+        try:
+            return float(ct.timestamp())
+        except (OSError, OverflowError, ValueError):
+            return 0.0
+
+    def _key(r: UploadRecord) -> tuple:
+        pr = int((proj_meta.get(r.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM)
+        so = int(r.sort_order or 0)
+        return (-pr, so, _created_ts(r))
+
+    return sorted(records, key=_key)
+
+
 def _project_display_label_from_fields(
     name: str | None,
     registered_country: str | None,
@@ -307,7 +329,10 @@ def _summary_payload():
     q = UploadRecord.query
     if ended:
         q = q.filter(~UploadRecord.project_name.in_(list(ended)))
-    uploads = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
+    uploads = _sort_upload_records_by_project_priority(
+        q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
+        proj_meta,
+    )
     total_files = len(uploads)
     
     def _rate(done: int, total: int) -> float:
@@ -398,6 +423,7 @@ def _summary_payload():
             "product": u.product,
             "country": u.country,
             "projectCode": getattr(u, "project_code", None),
+            "projectPriority": int((proj_meta.get(u.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
             "fileVersion": getattr(u, "file_version", None),
             "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(u, "document_display_date", None)),
             "reviewer": getattr(u, "reviewer", None),
@@ -819,9 +845,14 @@ def api_upload():
     author = request.form.get("author", "").strip()
     notes = request.form.get("notes", "").strip() or None
     project_notes = request.form.get("projectNotes", "").strip() or None
-    replace = request.form.get("replace") == "true"
+    replace = str(request.form.get("replace", "")).strip().lower() in ("true", "1", "yes")
     file = request.files.get("file")
-    template_links = request.form.get("templateLinks", "").strip() or None
+    template_links_raw = request.form.get("templateLinks")
+    template_links = (
+        (template_links_raw or "").strip() or None
+        if template_links_raw is not None
+        else None
+    )
     if template_links:
         template_links = _normalize_template_links(template_links) or None
     assignee_name = request.form.get("assigneeName", "").strip() or None
@@ -917,6 +948,11 @@ def api_upload():
             document_display_date = None
 
     if existing and replace:
+        fm = request.form
+        # 批量保存第二次请求（replace=true）常为「只 append 非空字段」；未出现的键不得写成 None，否则会误清空库内已有数据。
+        def _sent(k: str) -> bool:
+            return k in fm
+
         (uploads_dir / f"_dbtpl_{existing.id}.docx").unlink(missing_ok=True)
         if existing.storage_path:
             previous_path = Path(existing.storage_path)
@@ -933,34 +969,53 @@ def api_upload():
             existing.storage_path = storage_path if storage_path else existing.storage_path
             existing.original_file_name = original_file_name or existing.original_file_name
 
-        existing.template_links = template_links
+        if _sent("templateLinks"):
+            existing.template_links = template_links
         existing.author = author
-        existing.task_type = task_type
-        existing.notes = notes
-        existing.project_notes = project_notes
+        if _sent("taskType"):
+            existing.task_type = task_type
+        if _sent("notes"):
+            existing.notes = notes
+        if _sent("projectNotes"):
+            existing.project_notes = project_notes
         existing.project_name = project_name
         existing.project_id = project_id
         existing.file_name = file_name
-        existing.placeholders = placeholders
-        existing.assignee_name = assignee_name
-        existing.due_date = due_date
+        if (file and file.filename) or placeholders:
+            existing.placeholders = placeholders
+        if _sent("assigneeName"):
+            existing.assignee_name = assignee_name
+        if _sent("dueDate"):
+            existing.due_date = due_date
         existing.task_status = "pending"
         existing.completion_status = None
         existing.quick_completed = False
-        existing.business_side = business_side
-        existing.product = product
-        existing.country = country
-        existing.project_code = project_code
-        existing.file_version = file_version
-        existing.document_display_date = document_display_date
-        existing.reviewer = reviewer
-        existing.approver = approver
-        existing.project_notes = project_notes
-        existing.belonging_module = belonging_module
-        existing.displayed_author = displayed_author
-        existing.registered_product_name = registered_product_name
-        existing.model = model
-        existing.registration_version = registration_version
+        if _sent("businessSide"):
+            existing.business_side = business_side
+        if _sent("product"):
+            existing.product = product
+        if _sent("country"):
+            existing.country = country
+        if _sent("projectCode"):
+            existing.project_code = project_code
+        if _sent("fileVersion"):
+            existing.file_version = file_version
+        if _sent("documentDisplayDate"):
+            existing.document_display_date = document_display_date
+        if _sent("reviewer"):
+            existing.reviewer = reviewer
+        if _sent("approver"):
+            existing.approver = approver
+        if _sent("belongingModule"):
+            existing.belonging_module = belonging_module
+        if _sent("displayedAuthor"):
+            existing.displayed_author = displayed_author
+        if _sent("registeredProductName"):
+            existing.registered_product_name = registered_product_name
+        if _sent("model"):
+            existing.model = model
+        if _sent("registrationVersion"):
+            existing.registration_version = registration_version
         summary = _prepare_summary(existing)
         summary.project_name = project_name
         summary.project_id = project_id
@@ -972,8 +1027,12 @@ def api_upload():
         db.session.add(existing)
         db.session.commit()
 
-        _send_task_notification(existing, due_date_str)
+        try:
+            _send_task_notification(existing, due_date_str)
+        except Exception as exc:
+            current_app.logger.warning("替换任务后发送钉钉通知失败（数据已保存）: %s", exc)
 
+        ph_out = existing.placeholders if isinstance(existing.placeholders, list) else (placeholders or [])
         return jsonify(
             {
                 "message": "已替换现有记录，状态已重置为待办。",
@@ -983,7 +1042,7 @@ def api_upload():
                     "fileName": existing.file_name,
                     "taskType": existing.task_type,
                     "author": existing.author,
-                    "placeholders": placeholders,
+                    "placeholders": ph_out,
                     "assigneeName": existing.assignee_name,
                     "dueDate": due_date_str,
                     "businessSide": existing.business_side,
@@ -1032,7 +1091,10 @@ def api_upload():
     db.session.add(summary)
     db.session.commit()
 
-    _send_task_notification(upload, due_date_str)
+    try:
+        _send_task_notification(upload, due_date_str)
+    except Exception as exc:
+        current_app.logger.warning("新建任务后发送钉钉通知失败（数据已保存）: %s", exc)
 
     return jsonify(
         {
@@ -1096,6 +1158,9 @@ _IMPORT_HEADER_MAP = {
     "注册版本号": "registration_version",
     "文件名称": "fileName",
     "任务类型": "task_type",
+    "类型": "task_type",
+    "任务类别": "task_type",
+    "task_type": "task_type",
     "文档链接": "template_links",
     "文件版本号": "file_version",
     "编写人员": "author",
@@ -1132,6 +1197,21 @@ _IMPORT_HEADER_MAP = {
 }
 
 
+def _decode_import_csv_bytes(raw_bytes: bytes) -> str:
+    """
+    Excel「另存为 CSV」在中文 Windows 上常为 GBK/GB18030；仅用 UTF-8 会导致乱码或列错位，
+    进而「文件名称」等列解析错误甚至整行被跳过。
+    """
+    if not raw_bytes:
+        return ""
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp936"):
+        try:
+            return raw_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
 def _parse_import_file(file_storage) -> tuple[list[dict], str]:
     """解析上传的 CSV 或 Excel，返回 (rows, error)。rows 每项为字段名->值的字典。"""
     if not file_storage or not file_storage.filename:
@@ -1140,7 +1220,10 @@ def _parse_import_file(file_storage) -> tuple[list[dict], str]:
     file_storage.stream.seek(0)
     raw_bytes = file_storage.stream.read()
     if fn.endswith(".csv"):
-        raw = raw_bytes.decode("utf-8-sig", errors="replace") if isinstance(raw_bytes, bytes) else raw_bytes
+        if isinstance(raw_bytes, bytes):
+            raw = _decode_import_csv_bytes(raw_bytes)
+        else:
+            raw = str(raw_bytes)
         return _parse_import_csv(raw)
     if fn.endswith(".xlsx") or fn.endswith(".xls"):
         return _parse_import_excel(raw_bytes, fn)
@@ -1560,7 +1643,10 @@ def api_uploads_list():
     q = UploadRecord.query
     if (not include_history) and ended:
         q = q.filter(~UploadRecord.project_name.in_(list(ended)))
-    records = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
+    records = _sort_upload_records_by_project_priority(
+        q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
+        proj_meta,
+    )
     return jsonify({
         "records": [
             {
@@ -1674,8 +1760,9 @@ def api_upload_update(upload_id: str):
         upload.project_name = project_name
     if file_name is not None:
         upload.file_name = file_name
-    if task_type is not None:
-        upload.task_type = task_type if task_type else None
+    if "taskType" in data:
+        raw_tt = data.get("taskType")
+        upload.task_type = (str(raw_tt).strip() if raw_tt is not None else "") or None
     if author is not None:
         if not author:
             return jsonify({"message": "编写人员不能为空"}), 400
@@ -1804,7 +1891,10 @@ def api_my_tasks():
     )
     if (not include_history) and ended:
         q = q.filter(~UploadRecord.project_name.in_(list(ended)))
-    records = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
+    records = _sort_upload_records_by_project_priority(
+        q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
+        proj_meta,
+    )
     
     return jsonify({
         "records": [

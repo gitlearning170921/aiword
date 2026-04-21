@@ -200,6 +200,20 @@ function createTaskTypeSelect() {
     return select;
 }
 
+/** 若下拉中不存在该 value，则追加 option，避免赋 .value 失败导致保存时 taskType 为空。 */
+function ensureSelectHasOption(select, value, labelNote) {
+    if (!select || value === undefined || value === null) return;
+    const v = String(value).trim();
+    if (!v) return;
+    const exists = Array.from(select.options).some((o) => o.value === v);
+    if (!exists) {
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = labelNote ? v + labelNote : v;
+        select.appendChild(opt);
+    }
+}
+
 function createCompletionStatusSelect(currentValue, uploadId) {
     const select = document.createElement("select");
     select.className = "form-select form-select-sm completion-status-select";
@@ -391,7 +405,11 @@ function createProjectBlock() {
             newRowEl.querySelector(".task-filename").value = prevRow.querySelector(".task-filename")?.value ?? "";
             const prevTypeSelect = prevRow.querySelector(".task-type-cell select");
             const newTypeSelect = newRowEl.querySelector(".task-type-cell select");
-            if (prevTypeSelect && newTypeSelect) newTypeSelect.value = prevTypeSelect.value || "";
+            if (prevTypeSelect && newTypeSelect) {
+                const pv = (prevTypeSelect.value || "").trim();
+                if (pv) ensureSelectHasOption(newTypeSelect, pv, "（沿用上行）");
+                newTypeSelect.value = pv;
+            }
             const prevModuleSelect = prevRow.querySelector(".task-module-cell select");
             const newModuleSelect = newRowEl.querySelector(".task-module-cell select");
             if (prevModuleSelect && newModuleSelect) newModuleSelect.value = prevModuleSelect.value || "";
@@ -1011,7 +1029,15 @@ async function initUploadPage() {
         fd.append("file", file);
         try {
             const result = await App.request("/api/uploads/import", { method: "POST", body: fd });
-            const msg = result?.message || (result?.success ? "导入完成" : "导入失败");
+            let msg = result?.message || (result?.success ? "导入完成" : "导入失败");
+            const errs = result?.errors;
+            if (Array.isArray(errs) && errs.length > 0) {
+                const preview = errs
+                    .slice(0, 3)
+                    .map((e) => `第${e.row}行：${e.message || ""}`)
+                    .join("；");
+                msg += ` 详情：${preview}${errs.length > 3 ? "…" : ""}`;
+            }
             App.notify(msg, result?.success ? "success" : "danger");
             if (result?.success && typeof loadRecordsList === "function") loadRecordsList();
         } catch (err) {
@@ -1023,6 +1049,8 @@ async function initUploadPage() {
     saveAllBtn?.addEventListener("click", async () => {
         const blocks = projectBlocksContainer.querySelectorAll(".project-block");
         let successCount = 0;
+        let skippedIncomplete = 0;
+        let plannedSaveCount = 0;
         let lastPlaceholders = [];
         const btn = saveAllBtn;
         const origText = btn?.textContent || "保存全部";
@@ -1042,7 +1070,7 @@ async function initUploadPage() {
                 const model = (block.querySelector(".project-model")?.value || "").trim() || "";
                 const registrationVersion = (block.querySelector(".project-registration-version")?.value || "").trim() || "";
                 const rows = block.querySelectorAll(".project-task-tbody tr");
-
+                const dupSeen = new Set();
                 for (const row of rows) {
                     const fileName = (row.querySelector(".task-filename")?.value || "").trim();
                     const taskTypeSelect = row.querySelector(".task-type-cell select");
@@ -1060,7 +1088,25 @@ async function initUploadPage() {
                     const moduleSelect = row.querySelector(".task-module-cell select");
                     const belongingModule = moduleSelect ? (moduleSelect.value || "").trim() : "";
 
-                    if (!projectId || !projectKey || !fileName || !author) continue;
+                    if (!projectId || !projectKey || !fileName || !author) {
+                        skippedIncomplete++;
+                        continue;
+                    }
+
+                    const dupKey = `${fileName}\t${taskType || ""}\t${author}`;
+                    if (dupSeen.has(dupKey)) {
+                        App.notify(
+                            `本项目中存在多行「文件名称 + 任务类型 + 编写人员」完全相同（${fileName}）。数据库只允许保留一条，请修改后再保存；若多行共用同一模板文件，请为每行填写不同的文件名称。`,
+                            "warning"
+                        );
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.textContent = origText;
+                        }
+                        return;
+                    }
+                    dupSeen.add(dupKey);
+                    plannedSaveCount++;
 
                     const formData = new FormData();
                     formData.append("projectId", projectId);
@@ -1104,7 +1150,10 @@ async function initUploadPage() {
                         const msg = error && error.message ? error.message : "";
                         const is409Replace = error && error.is409Replace === true;
                         if (is409Replace) {
-                            const replaceOk = window.confirm(msg || "存在重复记录，是否替换？");
+                            const replaceOk = window.confirm(
+                                (msg || "存在重复记录，是否替换？") +
+                                    "\n\n提示：选「确定」将用本行内容覆盖库里已有同一条（同项目+文件名称+任务类型+编写人员）；选「取消」则跳过本行，可继续保存其余行。"
+                            );
                             if (replaceOk) {
                                 const formDataReplace = new FormData();
                                 formDataReplace.append("projectId", projectId);
@@ -1144,6 +1193,8 @@ async function initUploadPage() {
                                 } catch (e2) {
                                     App.notify(`保存失败 (${projectKey}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
                                 }
+                            } else {
+                                App.notify(`已跳过：${fileName}（与已有记录重复，您选择了不替换）`, "info");
                             }
                         } else {
                         App.notify(`保存失败 (${projectKey}-${fileName}): ${msg}`, "danger");
@@ -1153,10 +1204,20 @@ async function initUploadPage() {
             }
 
             if (successCount > 0) {
-                App.notify(`成功保存 ${successCount} 条记录`);
-                projectBlocksContainer.innerHTML = "";
-                projectBlocksContainer.appendChild(createProjectBlock());
+                let msg = `成功保存 ${successCount} 条记录`;
+                if (skippedIncomplete > 0) {
+                    msg += `；另有 ${skippedIncomplete} 行因未选项目或缺少文件名称/编写人员已跳过（未写入数据库）`;
+                }
+                const allDone = plannedSaveCount > 0 && successCount >= plannedSaveCount;
+                if (!allDone && plannedSaveCount > successCount) {
+                    msg += `；另有 ${plannedSaveCount - successCount} 条未写入（例如重复记录点了「取消」）。录入表已保留，请改后再次点「保存全部」。`;
+                }
+                App.notify(msg, allDone ? "success" : "warning");
                 loadRecordsList();
+                if (allDone) {
+                    projectBlocksContainer.innerHTML = "";
+                    projectBlocksContainer.appendChild(createProjectBlock());
+                }
                 if (lastPlaceholders.length > 0 && placeholderResult) {
                     renderPlaceholderChips(placeholderResult, lastPlaceholders);
                 }
@@ -1178,7 +1239,12 @@ async function initUploadPage() {
                 if (totalRows === 0) {
                     App.notify("没有可保存的任务行，请先添加项目并填写任务。", "warning");
                 } else if (hadAnyFilled) {
-                    App.notify("未保存任何记录。请检查每条任务是否已填写：项目名称、文件名称、编写人员（均为必填）。若曾提示重复，请选“确定”以替换。", "warning");
+                    let w =
+                        "未保存任何记录。请检查每条任务是否已填写：项目名称、文件名称、编写人员（均为必填）。若曾提示重复，请选“确定”以替换。";
+                    if (skippedIncomplete > 0) {
+                        w += ` 另有 ${skippedIncomplete} 行因未选项目或缺少文件名称/编写人员已跳过（未写入数据库）。`;
+                    }
+                    App.notify(w, "warning");
                 } else {
                     App.notify("请至少填写一条任务：项目名称、文件名称、编写人员为必填项。", "info");
                 }
@@ -1263,6 +1329,11 @@ async function openEditRecordModal(r) {
             opt.textContent = t.name;
             taskTypeEl.appendChild(opt);
         });
+        ensureSelectHasOption(
+            taskTypeEl,
+            r.taskType || "",
+            "（当前记录中的类型；若已不在「任务类型」配置中，请补回配置以免保存丢失）"
+        );
         taskTypeEl.value = r.taskType || "";
     }
     const editRecordBelongingModuleEl = document.getElementById("editRecordBelongingModule");
@@ -1812,9 +1883,9 @@ function initRecordsFilter() {
         if (!tbody) return;
         
         const filtered = allRecordsCache.filter(r => {
-            if (projectVal && !r.projectName.toLowerCase().includes(projectVal)) return false;
-            if (fileVal && !r.fileName.toLowerCase().includes(fileVal)) return false;
-            if (authorVal && !r.author.toLowerCase().includes(authorVal)) return false;
+            if (projectVal && !(String(r.projectName || "").toLowerCase().includes(projectVal))) return false;
+            if (fileVal && !(String(r.fileName || "").toLowerCase().includes(fileVal))) return false;
+            if (authorVal && !(String(r.author || "").toLowerCase().includes(authorVal))) return false;
             if (statusVal === "pending" && (r.completionStatus || r.taskStatus === "completed")) return false;
             if (statusVal === "completed" && !r.completionStatus && r.taskStatus !== "completed") return false;
             return true;
@@ -2485,8 +2556,8 @@ function initMyTasksFilter() {
         const statusVal = filterStatus.value;
         
         const filtered = myTasksCache.filter(r => {
-            if (projectVal && !r.projectName.toLowerCase().includes(projectVal)) return false;
-            if (fileVal && !r.fileName.toLowerCase().includes(fileVal)) return false;
+            if (projectVal && !(String(r.projectName || "").toLowerCase().includes(projectVal))) return false;
+            if (fileVal && !(String(r.fileName || "").toLowerCase().includes(fileVal))) return false;
             if (typeVal && r.taskType !== typeVal) return false;
             if (statusVal === "未完成" && r.completionStatus) return false;
             if (statusVal && statusVal !== "未完成" && r.completionStatus !== statusVal) return false;
