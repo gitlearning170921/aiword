@@ -8,6 +8,148 @@
 
 <div class="card mb-4">
     <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="form-section-title mb-0">项目管理（优先级 / 状态）</h6>
+            <div class="d-flex gap-2 align-items-center">
+                <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
+                <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
+            </div>
+        </div>
+        <p class="small text-muted mb-2">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在页面1/2展示，页面3统计与自动通知也不计入。</p>
+        <div id="projectsFilterRow" class="collapse mb-2">
+            <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label small mb-0">项目名称搜索</label>
+                    <input type="text" class="form-control form-control-sm" id="filterProjectName" placeholder="输入关键字...">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-0">状态</label>
+                    <select class="form-select form-select-sm" id="filterProjectStatus">
+                        <option value="">全部</option>
+                        <option value="active">进行中</option>
+                        <option value="ended">已结束</option>
+                    </select>
+                </div>
+                <div class="col-md-5 text-end">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="clearProjectFilterBtn">清空</button>
+                </div>
+            </div>
+        </div>
+        <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
+            <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
+            <span class="small text-muted">勾选后可批量设置优先级/状态；修改后点“一键保存”统一提交。</span>
+        </div>
+        <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
+            <table class="table table-sm table-striped table-hover align-middle mb-0">
+                <thead class="table-light sticky-top">
+                <tr>
+                    <th style="width:38px"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
+                    <th>项目</th>
+                    <th style="width:170px">注册国家</th>
+                    <th style="width:170px">注册类别</th>
+                    <th style="width:120px">优先级</th>
+                    <th style="width:120px">状态</th>
+                    <th style="width:180px">更新时间</th>
+                    <th style="width:120px">操作</th>
+                </tr>
+                </thead>
+                <tbody id="projectsManageBody"></tbody>
+            </table>
+        </div>
+
+        <!-- 新增项目弹窗 -->
+        <div class="modal fade" id="newProjectModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h6 class="modal-title">新增项目</h6>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-2">
+                            <label class="form-label small mb-0">项目名称 *</label>
+                            <input type="text" class="form-control form-control-sm" id="newProjectName" placeholder="输入项目名称...">
+                        </div>
+                        <div class="row g-2 mb-1">
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">注册国家</label>
+                                <input type="text" class="form-control form-control-sm" id="newProjectRegisteredCountry" placeholder="如 中国 / 美国 等">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">注册类别</label>
+                                <input type="text" class="form-control form-control-sm" id="newProjectRegisteredCategory" placeholder="如 类别A / 类别B">
+                            </div>
+                        </div>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">优先级</label>
+                                <select class="form-select form-select-sm" id="newProjectPriority">
+                                    <option value="3">高</option>
+                                    <option value="2" selected>中</option>
+                                    <option value="1">低</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">状态</label>
+                                <select class="form-select form-select-sm" id="newProjectStatus">
+                                    <option value="active" selected>进行中</option>
+                                    <option value="ended">已结束</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="createProjectBtn">创建</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 批量编辑弹窗 -->
+        <div class="modal fade" id="batchEditProjectsModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h6 class="modal-title">批量编辑项目</h6>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">优先级</label>
+                                <select class="form-select form-select-sm" id="batchProjectPriority">
+                                    <option value="">— 不修改 —</option>
+                                    <option value="3">高</option>
+                                    <option value="2">中</option>
+                                    <option value="1">低</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">状态</label>
+                                <select class="form-select form-select-sm" id="batchProjectStatus">
+                                    <option value="">— 不修改 —</option>
+                                    <option value="active">进行中</option>
+                                    <option value="ended">已结束</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="small text-muted mb-0 mt-2">点击“应用”仅修改勾选行的下拉值，最后请点“一键保存”提交。</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="applyBatchEditProjectsBtn">应用</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h5 class="card-title mb-0">任务录入（两级）</h5>
             <div>
@@ -15,7 +157,7 @@
                 <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="downloadTemplateSampleBtn">下载示例模板</button>
                 <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="importTasksBtn" title="支持 CSV / Excel，首行为表头">导入待办</button>
                 <input type="file" id="importTasksFile" accept=".csv,.xlsx" class="d-none">
-                <button type="button" class="btn btn-outline-primary btn-sm ms-2" id="addProjectBtn">+ 添加项目</button>
+                <button type="button" class="btn btn-outline-primary btn-sm ms-2" id="addProjectBtn">+ 添加录入块</button>
                 <button type="button" class="btn btn-success btn-sm ms-2" id="saveAllBtn">保存全部</button>
             </div>
         </div>
@@ -77,12 +219,16 @@
                 <div class="col-md-3">
                     <input type="text" class="form-control form-control-sm" id="filterRecordAuthor" placeholder="编写人员">
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-3 d-flex align-items-center gap-3">
                     <select class="form-select form-select-sm" id="filterRecordStatus">
                         <option value="">全部状态</option>
                         <option value="pending">待办</option>
                         <option value="completed">已完成</option>
                     </select>
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="showHistoryProjectsPage1">
+                        <label class="form-check-label small" for="showHistoryProjectsPage1">查看历史项目</label>
+                    </div>
                 </div>
             </div>
         </div>
