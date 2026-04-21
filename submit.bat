@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
+cd /d "%~dp0"
 
 if "%~1"=="" (
     set "msg=update"
@@ -8,19 +9,38 @@ if "%~1"=="" (
     set "msg=%~1"
 )
 
-echo 正在提交代码...
-git add .
+echo ========================================
+echo  提交并推送（严格：无新提交则中止，不 push）^|  仓库: %CD%
+echo ========================================
+for /f %%i in ('git branch --show-current 2^>nul') do set "CUR_BRANCH=%%i"
+if defined CUR_BRANCH echo 当前分支: %CUR_BRANCH%
+echo 部署提醒: 须包含 web/static 与 web/templates，详见 DEPLOY_REQUIRED.txt
+echo.
+
+echo [1/3] 暂存变更 ^(git add -A^)...
+git add -A
+if errorlevel 1 (
+    echo git add 失败。
+    pause
+    exit /b 1
+)
+
+echo [2/3] 提交 ^(git commit^)...
 git commit -m "%msg%"
 if errorlevel 1 (
-    echo 提交失败或没有变更，请检查。
+    echo 提交失败或无变更可提交。若本地已有未推送提交，请改用 submit_push_retry.bat 或先解决后再推送。
     pause
     exit /b 1
 )
+
+echo [3/3] 推送 ^(git push^)...
 git push
 if errorlevel 1 (
-    echo 推送失败，请检查网络或远程仓库。
+    echo 推送失败，请检查网络、凭据或远程分支。
     pause
     exit /b 1
 )
-echo 提交并推送完成。
+
+echo.
+echo 完成: 已提交并推送。
 pause
