@@ -8,6 +8,7 @@ echo  仅推送 ^|  仓库: %CD%
 echo ========================================
 for /f %%i in ('git branch --show-current 2^>nul') do set "CUR_BRANCH=%%i"
 if defined CUR_BRANCH echo 当前分支: %CUR_BRANCH%
+echo 说明: 本脚本仅 push，不包含 git add。前端与模板请先用 submit.bat / submit_push_retry.bat 纳入提交。
 echo.
 
 git push
