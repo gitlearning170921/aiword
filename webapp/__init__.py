@@ -449,6 +449,26 @@ def ensure_schema(app: Flask):
         ddl_other="ALTER TABLE generation_summary ADD COLUMN project_id VARCHAR(36) NULL",
     )
 
+    # exam_bank_ingest_jobs：补充上游套题 ID（老库升级）
+    ensure_column(
+        "exam_bank_ingest_jobs",
+        "upstream_set_id",
+        ddl_sqlite="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN upstream_set_id VARCHAR(128)",
+        ddl_other="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN upstream_set_id VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "exam_center_assignments",
+        "difficulty",
+        ddl_sqlite="ALTER TABLE exam_center_assignments ADD COLUMN difficulty VARCHAR(16)",
+        ddl_other="ALTER TABLE exam_center_assignments ADD COLUMN difficulty VARCHAR(16) NULL",
+    )
+    ensure_column(
+        "exam_center_assignments",
+        "due_at",
+        ddl_sqlite="ALTER TABLE exam_center_assignments ADD COLUMN due_at DATETIME",
+        ddl_other="ALTER TABLE exam_center_assignments ADD COLUMN due_at DATETIME NULL",
+    )
+
 
 def init_default_configs():
     """初始化默认的配置项数据"""
@@ -642,6 +662,7 @@ def create_app() -> Flask:
         v = 0
         for rel in (
             "js/app.js",
+            "js/exam_center.js",
             "css/app.css",
             "vendor/bootstrap-5.3.3/bootstrap.min.css",
             "vendor/bootstrap-5.3.3/bootstrap.bundle.min.js",
@@ -662,9 +683,14 @@ def create_app() -> Flask:
         from flask import request
 
         p = (request.path or "").replace("\\", "/")
-        if p.endswith("/static/js/app.js") or p.endswith("/static/css/app.css") or (
+        if (
+            p.endswith("/static/js/app.js")
+            or p.endswith("/static/js/exam_center.js")
+            or p.endswith("/static/css/app.css")
+            or (
             "/static/vendor/bootstrap-5.3.3/" in p
             and (p.endswith("bootstrap.min.css") or p.endswith("bootstrap.bundle.min.js"))
+            )
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"

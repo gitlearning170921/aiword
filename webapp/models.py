@@ -290,3 +290,111 @@ class NoteAttachmentFile(db.Model):
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
+class ExamBankIngestJob(db.Model):
+    """考试训练中心：老师批量录入题库任务记录（aiword 本地记录 + 轮询结果快照）。"""
+    __tablename__ = "exam_bank_ingest_jobs"
+    __table_args__ = (
+        UniqueConstraint("upstream_job_id", name="uq_exam_bank_ingest_upstream_job_id"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    upstream_job_id: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    # 上游套题 ID：ingest-by-ai 可能在任务进行中就返回（不必等 done）
+    upstream_set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    target_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    review_mode: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")  # pending/running/done/failed/unknown
+    last_message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+
+    # 最近一次上游轮询返回的 data（用于排查与展示）
+    last_upstream_data: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    last_upstream_http_status: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    last_upstream_request_url: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    last_upstream_trace_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+
+    created_by: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # session username/display_name
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamSetReviewJob(db.Model):
+    """考试训练中心：老师 AI 复审套题任务（异步 job + 本地快照，轮询方式与录题一致）。"""
+    __tablename__ = "exam_set_review_jobs"
+    __table_args__ = (UniqueConstraint("upstream_job_id", name="uq_exam_set_review_upstream_job_id"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    upstream_job_id: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")
+    last_message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+
+    last_upstream_data: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    last_upstream_http_status: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    last_upstream_request_url: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    last_upstream_trace_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+
+    created_by: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamCenterActivity(db.Model):
+    """考试训练中心：练习/考试提交在 aiword 侧的本地记录（配合 aicheckword 上游业务数据）。"""
+    __tablename__ = "exam_center_activities"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    username: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+
+    mode: Mapped[str] = mapped_column(db.String(16), nullable=False)  # practice | exam
+    exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    assignment_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    assignment_label: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
+    attempt_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+
+    upstream_http_status: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    upstream_trace_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    result_summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class ExamCenterAssignment(db.Model):
+    """考试训练中心：老师下发的考试任务本地镜像（上游不可用时兜底展示）。"""
+    __tablename__ = "exam_center_assignments"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, unique=True, index=True)
+    set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True, index=True)
+    title: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
+    exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    difficulty: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    # 截止完成时间（本地镜像）：老师下发时填写，用于学生端展示与按时完成统计；可为空。
+    due_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamCenterActivityDetail(db.Model):
+    """练习/考试提交后明细快照，供老师端/统计端查看成绩与薄弱项。"""
+    __tablename__ = "exam_center_activity_details"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    activity_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True, unique=True)
+    mode: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    total_score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    correct_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    wrong_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    weakness: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    recommendation: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    upstream_payload: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+

@@ -10,7 +10,7 @@
     {% block head_extra %}{% endblock %}
 </head>
 <body class="app-body {% if request.endpoint == 'pages.generate_page' %}generate-view{% endif %}">
-{% if request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
+{% if not hide_main_nav and request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4 shadow-lg">
     <div class="container-fluid">
         <a class="navbar-brand fw-bold" href="{{ url_for('pages.upload_page') }}">AI Word 工具</a>
@@ -18,7 +18,7 @@
             <span class="navbar-toggler-icon"></span>
         </button>
         <div class="collapse navbar-collapse" id="navbarNav">
-            {% if request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
+            {% if not hide_main_nav and request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
             <ul class="navbar-nav me-auto gap-2">
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="{{ url_for('pages.upload_page') }}">页面1 · 上传</a>

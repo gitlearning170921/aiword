@@ -1,0 +1,36 @@
+---
+description: Exam center regression guardrails for Codex
+alwaysApply: false
+---
+
+# 考试中心回归防踩坑规则
+
+适用范围：`web/static/js/exam_center.js`、`webapp/routes.py`、`webapp/templates/exam_center.html` 及相关统计接口。
+
+## 1) 提交参数硬约束
+
+- 练习提交 `POST /api/exam-center/student/practice/submit`：
+  - `answers` 必须是 `list[{question_id, answer}]`，禁止 map 结构。
+  - `attempt_id/attemptId` 仅在有值时发送；空字符串必须移除。
+  - 代理层需兼容 body + query `attempt_id`。
+- 考试提交 `POST /api/exam-center/student/exams/submit`：
+  - `answers` 同样必须为 list。
+  - `attempt_id/attemptId` 必须带值。
+
+## 2) 状态文案一致性
+
+- UI 状态统一使用“已同步/同步”，避免“已发布”混用。
+- 状态判定必须严格枚举终态，禁止 `contains("publish")` 这种模糊匹配。
+
+## 3) 老师端入口约束
+
+- 顶部不重复放“复审/同步/下发”按钮，只保留套题列表行内和批量入口。
+- “下发考试任务”按钮顺序：位于“复审”之后。
+- 复审任务记录位置：套题列表下方。
+
+## 4) 每次改动后的必跑检查
+
+1. `python -m py_compile webapp/routes.py webapp/models.py webapp/app_settings.py`
+2. 运行 `python scripts/exam_center_smoke.py`
+3. 若 smoke fail，禁止宣称“已联调通过”。
+

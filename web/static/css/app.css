@@ -32,6 +32,13 @@
     position: relative;
     z-index: 10;
 }
+/* 其它页面 hero-bar 右侧按钮也应可点击（避免被 ::after 装饰层遮挡） */
+.hero-bar > a.btn,
+.hero-bar > .btn,
+.hero-bar a.btn {
+    position: relative;
+    z-index: 10;
+}
 
 .hero-bar::after {
     content: "";
@@ -138,6 +145,18 @@
 .placeholder-text {
     font-weight: 600;
     color: #14213d;
+}
+
+.exam-api-result {
+    min-height: 180px;
+    max-height: 420px;
+    overflow: auto;
+    padding: 14px;
+    border-radius: 12px;
+    background: #0b1020;
+    color: #e2e8f0;
+    font-size: 12px;
+    line-height: 1.45;
 }
 
 .table thead {

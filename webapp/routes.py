@@ -3,13 +3,23 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
+import re
 import secrets
 import hashlib
-from datetime import date, datetime
+import uuid
+import socket
+from datetime import date, datetime, time
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
+
+from sqlalchemy import or_
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote as _urlquote
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from flask import (
     Blueprint,
@@ -37,6 +47,11 @@ from .models import (
     GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
     Project, ModuleCascadeReminder, now_local,
+    ExamBankIngestJob,
+    ExamSetReviewJob,
+    ExamCenterActivity,
+    ExamCenterAssignment,
+    ExamCenterActivityDetail,
 )
 from . import dingtalk_service
 
@@ -52,6 +67,1523 @@ def _dingtalk_secret_opt() -> Optional[str]:
     from .app_settings import get_setting
     s = (get_setting("DINGTALK_SECRET") or "").strip()
     return s or None
+
+
+def _quiz_api_base_url() -> str:
+    from .app_settings import get_setting
+
+    raw = get_setting(
+        "QUIZ_API_BASE_URL",
+        default=str(current_app.config.get("QUIZ_API_BASE_URL") or ""),
+    )
+    return (raw or "").strip().rstrip("/")
+
+
+def _quiz_api_timeout_seconds() -> int:
+    from .app_settings import get_setting
+
+    raw = (
+        get_setting(
+            "QUIZ_API_TIMEOUT_SECONDS",
+            default=str(current_app.config.get("QUIZ_API_TIMEOUT_SECONDS") or "20"),
+        )
+        or "20"
+    ).strip()
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 20
+    if val < 3:
+        return 3
+    if val > 120:
+        return 120
+    return val
+
+
+def _stats_upstream_quick_timeout_seconds() -> int:
+    """带本地兜底（quiz/stats/*）的 GET：限制上游阻塞，默认最多 8s，仍可被较大 QUIZ_API_TIMEOUT_SECONDS 压低。"""
+    return max(3, min(8, _quiz_api_timeout_seconds()))
+
+
+def _quiz_attempt_answers_quick_timeout_seconds() -> int:
+    """quiz/attempts/*/answers：题目列表略大，允许略长于 stats 兜底，但仍限制整段阻塞。"""
+    return max(5, min(15, _quiz_api_timeout_seconds()))
+
+
+def _items_from_activity_detail_snapshot(det: ExamCenterActivityDetail | None) -> list[Any]:
+    """从提交时落库的 upstream_payload 尝试恢复题目行，供上游不可用时降级展示。"""
+    if not det or not det.upstream_payload or not isinstance(det.upstream_payload, dict):
+        return []
+    pl = det.upstream_payload
+    for key in ("items", "questions", "details", "attempt_items"):
+        v = pl.get(key)
+        if isinstance(v, list) and len(v) > 0:
+            return v
+    inner = pl.get("data") if isinstance(pl.get("data"), dict) else None
+    if isinstance(inner, dict):
+        for key in ("items", "questions", "details"):
+            v = inner.get(key)
+            if isinstance(v, list) and len(v) > 0:
+                return v
+    return []
+
+
+def _quiz_api_headers() -> dict[str, str]:
+    from .app_settings import get_setting
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    bearer = (get_setting("QUIZ_API_BEARER_TOKEN") or "").strip()
+    secret = (get_setting("QUIZ_API_SECRET") or "").strip()
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    if secret:
+        headers["X-Integration-Secret"] = secret
+    return headers
+
+
+def _quiz_api_call(
+    upstream_path: str,
+    method: str = "GET",
+    payload: Optional[dict[str, Any]] = None,
+    query: Optional[dict[str, Any]] = None,
+    timeout_seconds: Optional[int] = None,
+) -> tuple[int, dict[str, Any]]:
+    base_url = _quiz_api_base_url()
+    trace_id = uuid.uuid4().hex
+    req_method = (method or "GET").upper()
+    request_url = ""
+    if not base_url:
+        return 503, {
+            "code": "QUIZ_API_NOT_CONFIGURED",
+            "message": "未配置考试训练中心后端地址，请在页面3系统配置中设置 QUIZ_API_BASE_URL",
+            "data": None,
+            "trace_id": trace_id,
+            "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+        }
+
+    url = f"{base_url}/{upstream_path.lstrip('/')}"
+    if query:
+        q = {k: v for k, v in query.items() if v is not None and str(v).strip() != ""}
+        if q:
+            url = f"{url}?{urlencode(q)}"
+    request_url = url
+
+    body_bytes = None
+    if payload is not None and req_method in {"POST", "PUT", "PATCH", "DELETE"}:
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    req = Request(
+        url=url,
+        data=body_bytes,
+        headers=_quiz_api_headers(),
+        method=req_method,
+    )
+
+    try:
+        _timeout = _quiz_api_timeout_seconds() if timeout_seconds is None else int(timeout_seconds)
+        if _timeout < 1:
+            _timeout = 1
+        if _timeout > 120:
+            _timeout = 120
+        with urlopen(req, timeout=_timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {"raw": raw}
+            return 200, {
+                "code": 0,
+                "message": "ok",
+                "data": data,
+                "trace_id": trace_id,
+                "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+            }
+    except HTTPError as e:
+        raw = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+        try:
+            upstream = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            upstream = {"raw": raw}
+        msg = (
+            upstream.get("message")
+            or upstream.get("detail")
+            or f"考试训练中心请求失败（HTTP {e.code}）"
+        )
+        return e.code, {
+            "code": "QUIZ_API_UPSTREAM_ERROR",
+            "message": str(msg),
+            "data": upstream,
+            "trace_id": trace_id,
+            "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+        }
+    except URLError as e:
+        return 503, {
+            "code": "QUIZ_API_NETWORK_ERROR",
+            "message": f"无法连接考试训练中心后端：{e.reason}",
+            "data": None,
+            "trace_id": trace_id,
+            "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+        }
+    except socket.timeout:
+        return 504, {
+            "code": "QUIZ_API_TIMEOUT",
+            "message": (
+                "考试训练中心后端响应超时。"
+                "请检查 QUIZ_API_BASE_URL 是否正确、aicheckword 服务是否在运行，"
+                "或在系统配置中调大 QUIZ_API_TIMEOUT_SECONDS（如 60）。"
+            ),
+            "data": {"timeoutSeconds": _timeout},
+            "trace_id": trace_id,
+            "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+        }
+    except Exception as e:
+        return 500, {
+            "code": "QUIZ_API_UNKNOWN_ERROR",
+            "message": f"考试训练中心请求异常：{e}",
+            "data": None,
+            "trace_id": trace_id,
+            "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+        }
+
+
+def _quiz_try_paths(
+    paths: list[str],
+    *,
+    method: str,
+    payload: Optional[dict[str, Any]] = None,
+    query: Optional[dict[str, Any]] = None,
+) -> tuple[int, dict[str, Any], list[str]]:
+    """依次尝试多个上游路径（新旧路由不一致时兼容）。"""
+    tried: list[str] = []
+    last_status = 502
+    last_payload: dict[str, Any] = {
+        "code": "QUIZ_API_UNKNOWN_ERROR",
+        "message": "未尝试任何上游请求",
+        "data": None,
+        "trace_id": uuid.uuid4().hex,
+    }
+    for p in paths:
+        pp = (p or "").strip().lstrip("/")
+        if not pp:
+            continue
+        tried.append(pp)
+        st, pl = _quiz_api_call(pp, method=method, payload=payload, query=query)
+        last_status, last_payload = int(st), pl if isinstance(pl, dict) else {"data": pl}
+        if 200 <= last_status < 300:
+            return last_status, last_payload, tried
+        if last_status in (404, 405):
+            continue
+        return last_status, last_payload, tried
+    return last_status, last_payload, tried
+
+
+def _unwrap_quiz_api_success_data(pl: Any) -> Any:
+    """_quiz_api_call 成功时整包为 {code:0, data: 上游JSON}，取出上游根对象。"""
+    if not isinstance(pl, dict):
+        return {}
+    if pl.get("code") == 0 and "data" in pl:
+        return pl.get("data")
+    return pl
+
+
+def _exam_activity_upstream_root_ok(root: dict[str, Any]) -> bool:
+    """上游 JSON 根若含 code 字段，则仅当为成功码时视为业务成功。"""
+    if "code" not in root:
+        return True
+    return root.get("code") in (0, "0", None, "")
+
+
+def _json_sanitize_for_db(obj: Any, *, max_bytes: int = 4 * 1024 * 1024) -> dict[str, Any]:
+    """将嵌套结构转为可被 db.JSON/MySQL 稳定序列化的 plain dict（避免 Decimal 等类型导致 flush 静默失败）。"""
+    if not isinstance(obj, dict):
+        obj = {}
+    try:
+        raw = json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return {"aiword_upstream_payload_sanitize_error": True, "hint": "json.dumps_failed"}
+    if len(raw.encode("utf-8")) > max_bytes:
+        return {
+            "aiword_upstream_payload_truncated": True,
+            "max_bytes": max_bytes,
+            "preview": raw[:8192],
+        }
+    try:
+        out = json.loads(raw)
+        return out if isinstance(out, dict) else {"aiword_upstream_payload_wrap": True, "value": out}
+    except Exception:
+        return {"aiword_upstream_payload_sanitize_error": True, "hint": "json.loads_failed"}
+
+
+def _scan_grading_pending_failed(obj: Any, depth: int = 0) -> tuple[bool, bool]:
+    """在嵌套字典中查找 grading_status：pending → 阅卷中；failed → 阅卷失败。"""
+    if depth > 16 or obj is None:
+        return False, False
+    if isinstance(obj, list):
+        p = f = False
+        for x in obj:
+            if isinstance(x, (dict, list)):
+                cp, cf = _scan_grading_pending_failed(x, depth + 1)
+                p = p or cp
+                f = f or cf
+        return p, f
+    if not isinstance(obj, dict):
+        return False, False
+    g = str(obj.get("grading_status") or "").strip().casefold()
+    pend = g == "pending"
+    failed = g == "failed"
+    for _k, v in obj.items():
+        if isinstance(v, (dict, list)):
+            cp, cf = _scan_grading_pending_failed(v, depth + 1)
+            pend = pend or cp
+            failed = failed or cf
+        if pend and failed:
+            break
+    return pend, failed
+
+
+def _extract_result_metrics(root: Any) -> dict[str, Any]:
+    """尽量从上游结果中提取分数/对错/薄弱项建议（字段名兼容多形态）。"""
+    if not isinstance(root, dict):
+        return {}
+    inner = root.get("data") if isinstance(root.get("data"), dict) else {}
+
+    def _pick(*vals):
+        for v in vals:
+            if v is not None and str(v).strip() != "":
+                return v
+        return None
+
+    score = _pick(root.get("score"), root.get("total_score"), inner.get("score"), inner.get("total_score"))
+    total = _pick(root.get("max_score"), root.get("full_score"), inner.get("max_score"), inner.get("full_score"))
+    correct = _pick(root.get("correct_count"), root.get("correct"), inner.get("correct_count"), inner.get("correct"))
+    wrong = _pick(root.get("wrong_count"), root.get("wrong"), inner.get("wrong_count"), inner.get("wrong"))
+    weakness = _pick(root.get("weakness"), root.get("weak_points"), inner.get("weakness"), inner.get("weak_points"))
+    reco = _pick(
+        root.get("next_step"), root.get("recommendation"), root.get("suggestion"),
+        inner.get("next_step"), inner.get("recommendation"), inner.get("suggestion")
+    )
+    gp, gf = _scan_grading_pending_failed(root)
+    out: dict[str, Any] = {
+        "score": None,
+        "total_score": None,
+        "correct_count": None,
+        "wrong_count": None,
+        "grading_pending": gp,
+        "grading_failed": gf,
+    }
+    try:
+        out["score"] = float(score) if score is not None else None
+    except Exception:
+        out["score"] = None
+    try:
+        out["total_score"] = float(total) if total is not None else None
+    except Exception:
+        out["total_score"] = None
+    try:
+        out["correct_count"] = int(correct) if correct is not None else None
+    except Exception:
+        out["correct_count"] = None
+    try:
+        out["wrong_count"] = int(wrong) if wrong is not None else None
+    except Exception:
+        out["wrong_count"] = None
+    if gp:
+        out["score"] = None
+        out["total_score"] = None
+        out["correct_count"] = None
+        out["wrong_count"] = None
+    out["weakness"] = str(weakness)[:1000] if weakness is not None and str(weakness).strip() else None
+    out["recommendation"] = str(reco)[:1000] if reco is not None and str(reco).strip() else None
+    return out
+
+
+def _exam_pass_score() -> float:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("EXAM_PASS_SCORE") or "80").strip()
+    try:
+        v = float(raw)
+    except Exception:
+        v = 80.0
+    if v < 0:
+        v = 0.0
+    if v > 1000:
+        v = 1000.0
+    return v
+
+
+def _norm_answer_plain(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (dict, list)):
+        try:
+            return json.dumps(v, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(v)
+    return str(v).strip()
+
+
+def _exam_activity_history_result_text(mode: str, metrics: dict[str, Any], raw_msg: Any) -> str:
+    """列表「结果」列：用分数推导通过/不通过，避免出现英文 ok。"""
+    try:
+        if metrics.get("grading_pending"):
+            return "阅卷中"
+        if metrics.get("grading_failed"):
+            return "阅卷失败"
+        sc = metrics.get("score")
+        if sc is not None:
+            thr = float(_exam_pass_score())
+            fv = float(sc)
+            return "通过" if fv >= thr - 1e-9 else "不通过"
+    except Exception:
+        pass
+    s = str(raw_msg or "").strip()
+    low = s.casefold()
+    if not s or low in ("ok", "success"):
+        return "已提交"
+    return s[:500]
+
+
+def _first_nested_item_list(up: Any, depth: int = 6) -> list[dict[str, Any]]:
+    """从上游结果树中挑出首个「题目明细」数组（dict list）。"""
+    if depth <= 0 or not isinstance(up, dict):
+        return []
+    for key in ("items", "questions", "attempt_items", "details"):
+        raw = up.get(key)
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return [x for x in raw if isinstance(x, dict)]
+    inn = up.get("data") if isinstance(up.get("data"), dict) else None
+    if isinstance(inn, dict):
+        nested = _first_nested_item_list(inn, depth - 1)
+        if nested:
+            return nested
+    return []
+
+
+def _qid_from_any_row(it: dict[str, Any]) -> str:
+    return str(it.get("question_id") or it.get("questionId") or it.get("id") or "").strip()
+
+
+def _upstream_row_user_answer(base: dict[str, Any]) -> Any:
+    for k in (
+        "user_answer",
+        "selected_answer",
+        "userAnswer",
+        "student_answer",
+        "response",
+        "selected",
+        "response_text",
+    ):
+        if k in base and base.get(k) not in (None, ""):
+            return base.get(k)
+    return None
+
+
+def _standard_answer_any_row(it: dict[str, Any]) -> Any:
+    return (
+        it.get("correct_answer")
+        if it.get("correct_answer") is not None
+        else it.get("answer")
+        if it.get("answer") is not None
+        else (
+            it.get("standard_answer")
+            if it.get("standard_answer") is not None
+            else it.get("solution")
+        )
+    )
+
+
+def _merge_upstream_snapshot_with_submitted_answers(up_root: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    """
+    合并请求体中学生作答与题干快照（submission_questions_snapshot），写入顶层 items，
+    供详情弹窗降级为本地快照时仍能展示 student_answer（user_answer）。
+    """
+    out = dict(up_root or {})
+    raw_answers = body.get("answers") or []
+    ans_rows: list[dict[str, Any]] = []
+    if isinstance(raw_answers, dict):
+        ans_rows = [{"question_id": str(k), "answer": v} for k, v in raw_answers.items() if str(k).strip()]
+    elif isinstance(raw_answers, list):
+        ans_rows = [x for x in raw_answers if isinstance(x, dict)]
+    by_qid: dict[str, Any] = {}
+    for r in ans_rows:
+        q = str(r.get("question_id") or "").strip()
+        if not q:
+            continue
+        if r.get("answer") is not None:
+            by_qid[q] = r.get("answer")
+        elif r.get("user_answer") is not None:
+            by_qid[q] = r.get("user_answer")
+    stem_map: dict[str, str] = {}
+    snaps = body.get("submission_questions_snapshot") or body.get("questions_snapshot") or []
+    if isinstance(snaps, list):
+        for s in snaps:
+            if isinstance(s, dict):
+                qi = _qid_from_any_row(s)
+                if qi:
+                    stem_map[qi] = str(s.get("stem") or s.get("title") or "").strip()
+
+    upstream_items = _first_nested_item_list(out)
+
+    def _finalize_row(base: dict[str, Any], qid: str) -> dict[str, Any]:
+        row = dict(base)
+        ua_v = _upstream_row_user_answer(row)
+        if ua_v is None:
+            ua_v = by_qid.get(qid)
+        row["user_answer"] = ua_v
+        stem_f = stem_map.get(qid) or ""
+        if stem_f and not str(row.get("stem") or "").strip():
+            row["stem"] = stem_f
+        ca_v = row.get("correct_answer")
+        if ca_v is None:
+            ca_v = _standard_answer_any_row(row)
+            if ca_v is not None:
+                row.setdefault("answer", ca_v)
+
+        needs_compare = ua_v is not None and ca_v is not None
+        ic_any = row.get("is_correct")
+        if ic_any is None:
+            ic_any = row.get("isCorrect")
+        if ic_any in (0, 1, True, False):
+            row["is_correct"] = bool(ic_any)
+        elif needs_compare:
+            row["is_correct"] = _norm_answer_plain(ua_v) == _norm_answer_plain(ca_v)
+        else:
+            row["is_correct"] = None
+        return row
+
+    merged: list[dict[str, Any]] = []
+
+    if upstream_items:
+        by_up: dict[str, dict[str, Any]] = {}
+        ordered_ids: list[str] = []
+        for ix, x in enumerate(upstream_items):
+            qid = _qid_from_any_row(x) or ("uq-" + str(ix))
+            if qid not in by_up:
+                ordered_ids.append(qid)
+                by_up[qid] = dict(x)
+        for qid in by_qid:
+            if qid not in by_up:
+                ordered_ids.append(qid)
+
+        ids = ordered_ids if ordered_ids else sorted(by_qid.keys())
+
+        if not ids:
+            ids = [
+                (_qid_from_any_row(upstream_items[idx]) or ("uq-" + str(idx)))
+                for idx in range(len(upstream_items))
+            ]
+
+        seen: set[str] = set()
+
+        def _consume(qid: str) -> dict[str, Any]:
+            blk = dict(by_up[qid]) if qid in by_up else {"question_id": qid}
+            return _finalize_row(blk, qid)
+
+        for qid in ids:
+            qid_key = qid.strip()
+            if not qid_key or qid_key in seen:
+                continue
+            merged.append(_consume(qid_key))
+            seen.add(qid_key)
+
+    if not merged and by_qid:
+        for qid, ua in sorted(by_qid.items()):
+            merged.append(_finalize_row({"question_id": qid}, qid))
+
+    if merged:
+        out["items"] = merged
+        out["attempt_items"] = merged
+        out["attempt_snapshot_aiword_v1"] = True
+        if isinstance(out.get("data"), dict):
+            od = dict(out["data"])
+            od["items"] = merged
+            out["data"] = od
+
+    elif ans_rows:
+        mini = [
+            {
+                "question_id": str(a.get("question_id") or ""),
+                "stem": stem_map.get(str(a.get("question_id") or ""), ""),
+                "user_answer": a.get("answer"),
+                "answer": None,
+                "is_correct": None,
+            }
+            for a in ans_rows
+            if isinstance(a, dict)
+        ]
+        out["attempt_items"] = mini
+        out["items"] = mini
+        out["attempt_snapshot_aiword_v1"] = True
+
+    return out
+
+
+def _log_student_exam_center_activity(
+    *,
+    mode: str,
+    exam_track: str | None,
+    set_id: str | None,
+    assignment_id: str | None,
+    assignment_label: str | None,
+    attempt_id: str | None,
+    upstream_http_status: int,
+    upstream_trace_id: str | None,
+    result_summary: str | None,
+    upstream_result_payload: dict[str, Any] | None = None,
+) -> None:
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        try:
+            current_app.logger.warning("exam_center_activity_skip_no_uid_in_session mode=%s", mode)
+        except Exception:
+            pass
+        return
+    try:
+        # 优先使用当前会话身份，保证记录名与页面2当前登录用户一致
+        s_username = str(session.get("username") or "").strip()
+        s_display_name = str(session.get("display_name") or "").strip()
+        u = User.query.filter_by(id=uid).first()
+        username = s_username or (u.username if u else "")
+        display_name = s_display_name or ((u.display_name or u.username) if u else "")
+        row = ExamCenterActivity(
+            user_id=uid,
+            username=str(username) if username else None,
+            display_name=str(display_name) if display_name else None,
+            mode=str(mode or "").strip()[:16] or "unknown",
+            exam_track=(exam_track or "").strip() or None,
+            set_id=(set_id or "").strip() or None,
+            assignment_id=(assignment_id or "").strip() or None,
+            assignment_label=(assignment_label or "").strip() or None,
+            attempt_id=(attempt_id or "").strip() or None,
+            upstream_http_status=int(upstream_http_status),
+            upstream_trace_id=(upstream_trace_id or "").strip() or None,
+            result_summary=(result_summary or "").strip()[:500] or None,
+        )
+        db.session.add(row)
+        db.session.flush()
+
+        if upstream_result_payload and isinstance(upstream_result_payload, dict):
+            try:
+                safe_pl = _json_sanitize_for_db(upstream_result_payload)
+                m = _extract_result_metrics(safe_pl)
+                detail = ExamCenterActivityDetail(
+                    activity_id=row.id,
+                    mode=row.mode,
+                    score=m.get("score"),
+                    total_score=m.get("total_score"),
+                    correct_count=m.get("correct_count"),
+                    wrong_count=m.get("wrong_count"),
+                    weakness=m.get("weakness"),
+                    recommendation=m.get("recommendation"),
+                    upstream_payload=safe_pl,
+                )
+                # 明细写入失败不应拖垮主表 INSERT（原先整段 rollback 会变成「看起来像没落库」）
+                with db.session.begin_nested():
+                    db.session.add(detail)
+            except Exception as detail_exc:
+                try:
+                    current_app.logger.warning(
+                        "exam_center_activity_detail_skipped uid=%s mode=%s activity_id=%s: %s",
+                        uid,
+                        mode,
+                        row.id,
+                        detail_exc,
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        try:
+            current_app.logger.exception(
+                "exam_center_activity_persist_failed uid=%s mode=%s attempt_id=%s: %s",
+                uid,
+                mode,
+                (attempt_id or "").strip(),
+                exc,
+            )
+        except Exception:
+            pass
+
+
+def _extract_assignments_from_quiz_root(root: Any) -> list[dict[str, Any]]:
+    if not isinstance(root, dict):
+        return []
+    inner = root.get("data") if isinstance(root.get("data"), dict) else None
+    cands: list[Any] = [
+        root.get("assignments"),
+        root.get("items"),
+        inner.get("assignments") if inner else None,
+        inner.get("items") if inner else None,
+    ]
+    for c in cands:
+        if isinstance(c, list) and c:
+            return [x for x in c if isinstance(x, dict)]
+    for c in cands:
+        if isinstance(c, list):
+            return [x for x in c if isinstance(x, dict)]
+    return []
+
+
+_ASSIGNMENT_DUE_KEYS: tuple[str, ...] = (
+    "due_at",
+    "dueAt",
+    "due_date",
+    "dueDate",
+    "deadline",
+    "complete_before",
+    "completeBefore",
+)
+
+
+def _parse_assignment_due_from_request(req: dict[str, Any]) -> tuple[Optional[datetime], bool]:
+    """从老师下发请求解析截止完成时间。(due_at, 是否应更新镜像字段)；未出现任何 due 相关键则第二项为 False。"""
+    if not isinstance(req, dict):
+        return None, False
+    specified = False
+    raw: Any = None
+    for k in _ASSIGNMENT_DUE_KEYS:
+        if k not in req:
+            continue
+        specified = True
+        v = req.get(k)
+        if v is not None and str(v).strip() != "":
+            raw = v
+            break
+    if not specified:
+        return None, False
+    if raw is None:
+        return None, True
+    s = str(raw).strip()
+    if not s:
+        return None, True
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s) and "T" not in s and " " not in s:
+        try:
+            d0 = date.fromisoformat(s)
+            return datetime.combine(d0, time(23, 59, 59)), True
+        except ValueError:
+            return None, True
+    s_norm = s.replace("Z", "+00:00")
+    cand = s_norm.replace(" ", "T", 1)
+    try:
+        dt = datetime.fromisoformat(cand)
+        if dt.tzinfo:
+            dt = dt.replace(tzinfo=None)
+        return dt, True
+    except ValueError:
+        return None, True
+
+
+def _deadline_completion_from_exam_rows(
+    rows: list[Any], due_end: Optional[datetime]
+) -> dict[str, Any]:
+    """按 assignment 下每名用户首次 mode=exam 的 created_at 与截止时刻统计按时/逾期。"""
+    first: dict[str, datetime] = {}
+    for r in rows:
+        if str(getattr(r, "mode", None) or "").lower() != "exam":
+            continue
+        uid = str(getattr(r, "user_id", None) or "").strip()
+        ca = getattr(r, "created_at", None)
+        if not uid or not ca:
+            continue
+        prev = first.get(uid)
+        if prev is None or ca < prev:
+            first[uid] = ca
+    out: dict[str, Any] = {
+        "due_at": due_end.isoformat() if due_end else None,
+        "exam_students_submitted": len(first),
+        "on_time_count": None,
+        "late_count": None,
+    }
+    if not due_end:
+        out["note"] = "未配置截止时间，无法区分按时/逾期。"
+        return out
+    on_time = 0
+    late = 0
+    for _uid, ts in first.items():
+        if ts <= due_end:
+            on_time += 1
+        else:
+            late += 1
+    out["on_time_count"] = on_time
+    out["late_count"] = late
+    out["note"] = "按每名学生在任务下首次考试提交时间与截止时刻比对（本地 activity.created_at）。"
+    return out
+
+
+def _normalize_student_assignment_row(x: dict[str, Any]) -> dict[str, Any]:
+    aid = str(x.get("assignment_id") or x.get("id") or x.get("assignmentId") or "").strip()
+    title = str(x.get("title") or x.get("name") or x.get("label") or aid).strip() or aid
+    row: dict[str, Any] = {"id": aid, "name": title, "label": title}
+    diff = str(x.get("difficulty") or x.get("difficulty_level") or x.get("difficultyLevel") or "").strip().lower()
+    if diff in ("easy", "medium", "hard"):
+        row["difficulty"] = diff
+    for dk in ("due_at", "dueAt", "due_date", "dueDate"):
+        dv = x.get(dk)
+        if dv is not None and str(dv).strip():
+            row["due_at"] = str(dv).strip()
+            break
+    return row
+
+
+def _difficulty_from_quiz_get_set_payload(pl: dict[str, Any]) -> str:
+    """从 quiz/sets/{id} 网关响应中解析套题难度（与 aicheckword set_config.difficulty 一致）。"""
+    up = _unwrap_quiz_api_success_data(pl)
+    if not isinstance(up, dict):
+        return ""
+    root = up.get("data") if up.get("ok") is True and isinstance(up.get("data"), dict) else up
+    if not isinstance(root, dict):
+        return ""
+    cfg = root.get("set_config") or root.get("setConfig") or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:
+            cfg = {}
+    if not isinstance(cfg, dict):
+        return ""
+    d = str(cfg.get("difficulty") or "").strip().lower()
+    return d if d in ("easy", "medium", "hard") else ""
+
+
+def _extract_assignment_from_quiz_payload(payload: dict[str, Any]) -> tuple[str, str, str | None]:
+    """从 quiz/assignments 返回中提取 assignment_id/title/set_id。"""
+    root = _unwrap_quiz_api_success_data(payload)
+    if not isinstance(root, dict):
+        root = {}
+    inner = root.get("data") if isinstance(root.get("data"), dict) else {}
+    aid = str(
+        root.get("assignment_id")
+        or root.get("assignmentId")
+        or root.get("id")
+        or inner.get("assignment_id")
+        or inner.get("assignmentId")
+        or inner.get("id")
+        or ""
+    ).strip()
+    title = str(
+        root.get("title")
+        or root.get("name")
+        or root.get("label")
+        or inner.get("title")
+        or inner.get("name")
+        or inner.get("label")
+        or aid
+    ).strip() or aid
+    set_id = str(root.get("set_id") or root.get("setId") or inner.get("set_id") or inner.get("setId") or "").strip() or None
+    return aid, title, set_id
+
+
+def _expand_question_count_aliases(body: dict[str, Any]) -> dict[str, Any]:
+    """aicheckword 各版本字段名不一致时，把题量同步写入多种常见键名。"""
+    out = dict(body or {})
+    raw = (
+        out.get("question_count")
+        or out.get("questionCount")
+        or out.get("count")
+        or out.get("size")
+        or out.get("num_questions")
+        or out.get("numQuestions")
+        or out.get("n")
+        or out.get("target_count")
+        or out.get("targetCount")
+    )
+    try:
+        n = int(raw) if raw is not None and str(raw).strip() != "" else None
+    except (TypeError, ValueError):
+        n = None
+    if n is None:
+        return out
+    n = max(1, min(n, 500))
+    for key in (
+        "question_count",
+        "questionCount",
+        "count",
+        "size",
+        "num_questions",
+        "numQuestions",
+        "n",
+        "target_count",
+        "targetCount",
+    ):
+        out[key] = n
+    return out
+
+
+def _expand_exam_track_and_difficulty_aliases(body: dict[str, Any]) -> dict[str, Any]:
+    """体考类型、难度与页面设置对齐：写入多种常见键名，避免上游只认 camelCase 或其它字段。"""
+    out = dict(body or {})
+    track_raw = (
+        out.get("exam_track")
+        or out.get("examTrack")
+        or out.get("track")
+        or out.get("exam_type")
+        or out.get("examType")
+        or out.get("exam_track_code")
+        or ""
+    )
+    track = str(track_raw).strip() or "cn"
+    for key in (
+        "exam_track",
+        "examTrack",
+        "track",
+        "exam_type",
+        "examType",
+    ):
+        out[key] = track
+
+    diff_raw = (
+        out.get("difficulty")
+        or out.get("difficulty_level")
+        or out.get("difficultyLevel")
+        or out.get("level")
+        or out.get("diffLevel")
+    )
+    if diff_raw is None or str(diff_raw).strip() == "":
+        return out
+    diff = str(diff_raw).strip()
+    for key in ("difficulty", "difficulty_level", "difficultyLevel", "level", "diffLevel"):
+        out[key] = diff
+    return out
+
+
+_EXAM_TRACK_REQUIREMENT_PROFILES: dict[str, dict[str, Any]] = {
+    "cn": {
+        "title": "国内体考",
+        "scopes": ["GMP", "核查指南"],
+        "min_total_questions": 200,
+        "topic_groups": [
+            {"topic": "GMP", "keywords": ["gmp", "药品生产质量管理规范", "生产质量管理规范"]},
+            {"topic": "核查指南", "keywords": ["核查指南", "核查要点", "检查指南"]},
+        ],
+    },
+    "iso13485": {
+        "title": "13485体考",
+        "scopes": ["ISO13485", "MDR"],
+        "min_total_questions": 180,
+        "topic_groups": [
+            {"topic": "ISO13485", "keywords": ["iso13485", "iso 13485", "13485"]},
+            {"topic": "MDR", "keywords": ["mdr", "eu 2017/745", "2017/745"]},
+        ],
+    },
+    "mdsap": {
+        "title": "MDSAP体考",
+        "scopes": ["MDSAP", "5国法规"],
+        "min_total_questions": 220,
+        "topic_groups": [
+            {"topic": "MDSAP", "keywords": ["mdsap", "审计方法", "audit model"]},
+            {"topic": "美国法规", "keywords": ["fda", "21 cfr", "usa", "美国"]},
+            {"topic": "加拿大法规", "keywords": ["canada", "sor/98-282", "cmdr", "加拿大"]},
+            {"topic": "巴西法规", "keywords": ["anvisa", "brazil", "巴西"]},
+            {"topic": "日本法规", "keywords": ["pmda", "mhlw", "japan", "日本"]},
+            {"topic": "澳大利亚法规", "keywords": ["tga", "australia", "澳大利亚"]},
+        ],
+    },
+}
+_EXAM_BATCH_INGEST_SIZE = 50
+_EXAM_REQUIREMENT_BASELINE_KEY = "EXAM_BANK_REQUIREMENT_BASELINES_JSON"
+
+
+def _exam_track_policy_version_key(track: str) -> str:
+    return f"EXAM_TRACK_REG_POLICY_VERSION_{_normalize_exam_track(track).upper()}"
+
+
+def _get_exam_track_policy_version(track: str) -> str:
+    """人工配置法规版本（兜底/强制覆盖）。"""
+    row = AppConfig.query.filter_by(config_key=_exam_track_policy_version_key(track)).first()
+    return str(row.config_value if row and row.config_value is not None else "").strip()
+
+
+def _set_exam_track_policy_version(track: str, version_value: str) -> None:
+    key = _exam_track_policy_version_key(track)
+    row = AppConfig.query.filter_by(config_key=key).first()
+    v = str(version_value or "").strip()
+    if row:
+        row.config_value = v
+    else:
+        db.session.add(AppConfig(config_key=key, config_value=v))
+
+
+def _extract_policy_version_tokens_from_text(text: str) -> list[str]:
+    s = str(text or "")
+    if not s:
+        return []
+    pats = [
+        r"ISO\s*13485[:：]?\s*\d{4}",
+        r"(?:EU\s*)?20\d{2}\s*/\s*\d{3,4}",
+        r"MDSAP(?:\s*Audit\s*Model)?\s*(?:v|V)?\d+(?:\.\d+)?",
+        r"21\s*CFR(?:\s*Part)?\s*\d+",
+        r"SOR\s*/\s*\d{2,4}\s*-\s*\d+",
+        r"YY/T\s*\d{3,6}(?:\.\d+)?(?:-\d{4})?",
+        r"GB\s*/\s*T\s*\d{3,6}(?:\.\d+)?(?:-\d{4})?",
+        r"(?:GMP|核查指南|MDR|FDA|ANVISA|PMDA|TGA)[^,\n;，；]{0,18}(?:20\d{2}|v\d+(?:\.\d+)?)",
+    ]
+    out: list[str] = []
+    for p in pats:
+        try:
+            for m in re.findall(p, s, flags=re.IGNORECASE):
+                t = str(m).strip()
+                if t and t not in out:
+                    out.append(t)
+        except Exception:
+            continue
+    return out
+
+
+def _get_exam_track_policy_version_auto(track_raw: Any) -> dict[str, Any]:
+    """自动识别法规版本，返回版本+置信度+证据。"""
+    track = _normalize_exam_track(track_raw)
+    empty = {"version": "", "confidence": "none", "evidence": None}
+    track_keys_map: dict[str, list[str]] = {
+        "cn": ["gmp", "核查", "核查指南", "检查指南", "生产质量管理规范"],
+        "iso13485": ["iso13485", "iso 13485", "13485", "mdr", "2017/745", "eu 2017"],
+        "mdsap": ["mdsap", "fda", "21 cfr", "anvisa", "pmda", "tga", "sor/", "canada"],
+    }
+    keys = track_keys_map.get(track, [])
+    rows = UploadRecord.query.order_by(UploadRecord.updated_at.desc()).limit(3000).all()
+    for r in rows:
+        txt = " ".join(
+            [
+                str(getattr(r, "task_type", None) or ""),
+                str(getattr(r, "file_name", None) or ""),
+                str(getattr(r, "project_name", None) or ""),
+                str(getattr(r, "notes", None) or ""),
+                str(getattr(r, "project_notes", None) or ""),
+            ]
+        )
+        txt_l = txt.lower()
+        if keys and not any(k in txt_l for k in keys):
+            continue
+        ev_base = {
+            "upload_id": str(getattr(r, "id", "") or ""),
+            "file_name": str(getattr(r, "file_name", "") or ""),
+            "updated_at": getattr(r, "updated_at", None).isoformat() if getattr(r, "updated_at", None) else None,
+        }
+        fv = str(getattr(r, "file_version", None) or "").strip()
+        rv = str(getattr(r, "registration_version", None) or "").strip()
+        if fv:
+            return {
+                "version": fv,
+                "confidence": "high",
+                "evidence": {**ev_base, "matched_by": "file_version"},
+            }
+        if rv:
+            return {
+                "version": rv,
+                "confidence": "high",
+                "evidence": {**ev_base, "matched_by": "registration_version"},
+            }
+        toks = _extract_policy_version_tokens_from_text(txt)
+        if toks:
+            return {
+                "version": toks[0],
+                "confidence": "medium",
+                "evidence": {**ev_base, "matched_by": "text_regex", "matched_token": toks[0]},
+            }
+    return empty
+
+
+def _resolve_exam_track_policy_version(track_raw: Any) -> dict[str, Any]:
+    """返回生效版本、来源、置信度与证据。"""
+    track = _normalize_exam_track(track_raw)
+    auto_info = _get_exam_track_policy_version_auto(track)
+    auto_v = str(auto_info.get("version") or "").strip() if isinstance(auto_info, dict) else ""
+    fallback_v = _get_exam_track_policy_version(track)
+    if auto_v:
+        return {
+            "effective_policy_version": auto_v,
+            "policy_version_source": "auto",
+            "auto_policy_version": auto_v,
+            "fallback_policy_version": fallback_v,
+            "policy_version_confidence": str(auto_info.get("confidence") or "medium"),
+            "policy_version_evidence": auto_info.get("evidence"),
+        }
+    if fallback_v:
+        return {
+            "effective_policy_version": fallback_v,
+            "policy_version_source": "fallback",
+            "auto_policy_version": "",
+            "fallback_policy_version": fallback_v,
+            "policy_version_confidence": "fallback",
+            "policy_version_evidence": None,
+        }
+    return {
+        "effective_policy_version": "",
+        "policy_version_source": "none",
+        "auto_policy_version": "",
+        "fallback_policy_version": "",
+        "policy_version_confidence": "none",
+        "policy_version_evidence": None,
+    }
+
+
+def _normalize_exam_track(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if s in _EXAM_TRACK_REQUIREMENT_PROFILES:
+        return s
+    if s in {"iso", "13485", "iso_13485"}:
+        return "iso13485"
+    if s in {"cn", "china"}:
+        return "cn"
+    if s in {"mdsap", "m_dsap"}:
+        return "mdsap"
+    return "cn"
+
+
+def _app_config_get_json(config_key: str, fallback: Any) -> Any:
+    row = AppConfig.query.filter_by(config_key=config_key).first()
+    raw = str(row.config_value).strip() if row and row.config_value is not None else ""
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
+
+
+def _app_config_set_json(config_key: str, value: Any) -> None:
+    row = AppConfig.query.filter_by(config_key=config_key).first()
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if row:
+        row.config_value = payload
+    else:
+        db.session.add(AppConfig(config_key=config_key, config_value=payload))
+
+
+def _extract_total_from_bank_payload(payload: dict[str, Any]) -> Optional[int]:
+    if not isinstance(payload, dict):
+        return None
+    root = _unwrap_quiz_api_success_data(payload)
+    if not isinstance(root, dict):
+        root = {}
+    inner = root.get("data") if isinstance(root.get("data"), dict) else {}
+    cands = [
+        root.get("total"),
+        root.get("count"),
+        root.get("matched_total"),
+        inner.get("total"),
+        inner.get("count"),
+        inner.get("matched_total"),
+    ]
+    for c in cands:
+        try:
+            if c is None or str(c).strip() == "":
+                continue
+            n = int(c)
+            if n >= 0:
+                return n
+        except Exception:
+            continue
+    items = _extract_bank_items_from_list_root(root)
+    if isinstance(items, list):
+        return len(items)
+    return None
+
+
+def _query_bank_total_for_track(track: str, keyword: str | None = None) -> int:
+    q: dict[str, Any] = {
+        "limit": "1",
+        "offset": "0",
+        "exam_track": track,
+        "examTrack": track,
+        "track": track,
+    }
+    if keyword:
+        q["q"] = keyword
+    st, pl, _ = _quiz_try_paths(
+        ["quiz/bank/questions", "quiz/questions", "quiz/bank/question-list"],
+        method="GET",
+        query=q,
+    )
+    if not (200 <= int(st) < 300 and isinstance(pl, dict)):
+        return 0
+    n = _extract_total_from_bank_payload(pl)
+    return max(0, int(n or 0))
+
+
+def _collect_exam_knowledge_markers(track: str) -> dict[str, Optional[datetime]]:
+    track = _normalize_exam_track(track)
+    track_keys_map: dict[str, list[str]] = {
+        "cn": ["gmp", "核查", "核查指南", "检查指南", "生产质量管理规范"],
+        "iso13485": ["iso13485", "13485", "mdr", "2017/745", "欧盟"],
+        "mdsap": ["mdsap", "fda", "anvisa", "pmda", "tga", "canada", "5国", "五国"],
+    }
+    track_keys = track_keys_map.get(track, [])
+    regs_global = ["法规", "regulation", "guideline", "指南", "标准", "standard"]
+    proc_keys = ["程序", "procedure", "sop", "作业指导", "管理规程"]
+    case_keys = ["案例", "case", "项目案例", "project case"]
+    marker: dict[str, Optional[datetime]] = {
+        "regulations_at": None,
+        "procedures_at": None,
+        "project_case_at": None,
+    }
+    rows = UploadRecord.query.order_by(UploadRecord.updated_at.desc()).limit(3000).all()
+    for r in rows:
+        upd = getattr(r, "updated_at", None)
+        if not upd:
+            continue
+        txt = " ".join(
+            [
+                str(getattr(r, "task_type", None) or ""),
+                str(getattr(r, "file_name", None) or ""),
+                str(getattr(r, "project_name", None) or ""),
+                str(getattr(r, "notes", None) or ""),
+                str(getattr(r, "project_notes", None) or ""),
+            ]
+        ).lower()
+        if any(k in txt for k in (track_keys + regs_global)):
+            if marker["regulations_at"] is None or upd > marker["regulations_at"]:
+                marker["regulations_at"] = upd
+        if any(k in txt for k in proc_keys):
+            if marker["procedures_at"] is None or upd > marker["procedures_at"]:
+                marker["procedures_at"] = upd
+        if any(k in txt for k in case_keys):
+            if marker["project_case_at"] is None or upd > marker["project_case_at"]:
+                marker["project_case_at"] = upd
+    return marker
+
+
+def _build_exam_bank_requirement_status(track_raw: Any) -> dict[str, Any]:
+    track = _normalize_exam_track(track_raw)
+    prof = _EXAM_TRACK_REQUIREMENT_PROFILES.get(track) or _EXAM_TRACK_REQUIREMENT_PROFILES["cn"]
+    total = _query_bank_total_for_track(track, keyword=None)
+    topic_checks: list[dict[str, Any]] = []
+    missing_topics: list[str] = []
+    for g in prof.get("topic_groups") or []:
+        kws = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
+        # 每个主题只取第 1 关键词做轻量检索，避免单次检查请求过多。
+        k0 = kws[0] if kws else ""
+        hit = _query_bank_total_for_track(track, keyword=k0) if k0 else 0
+        ok = hit > 0
+        topic_checks.append({"topic": g.get("topic") or k0, "keyword": k0, "hit_count": hit, "is_met": ok})
+        if not ok:
+            missing_topics.append(str(g.get("topic") or k0))
+
+    min_total = int(prof.get("min_total_questions") or 0)
+    missing_cnt = max(0, min_total - total)
+    baseline_all = _app_config_get_json(_EXAM_REQUIREMENT_BASELINE_KEY, {})
+    base = baseline_all.get(track) if isinstance(baseline_all, dict) else None
+    if not isinstance(base, dict):
+        base = {}
+
+    marker_now = _collect_exam_knowledge_markers(track)
+    pv_info = _resolve_exam_track_policy_version(track)
+    current_policy_ver = str(pv_info.get("effective_policy_version") or "").strip()
+    policy_source = str(pv_info.get("policy_version_source") or "none")
+    auto_policy_ver = str(pv_info.get("auto_policy_version") or "").strip()
+    fallback_policy_ver = str(pv_info.get("fallback_policy_version") or "").strip()
+    policy_conf = str(pv_info.get("policy_version_confidence") or "none")
+    policy_evidence = pv_info.get("policy_version_evidence")
+    base_policy_ver = str(base.get("policy_version") or "").strip()
+
+    def _parse_iso(v: Any) -> Optional[datetime]:
+        s = str(v or "").strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    changed_flags: dict[str, bool] = {}
+    for k in ("regulations_at", "procedures_at", "project_case_at"):
+        cur = marker_now.get(k)
+        old = _parse_iso(base.get(k))
+        changed_flags[k] = bool(cur and (old is None or cur > old))
+    changed_flags["policy_version"] = bool(current_policy_ver and current_policy_ver != base_policy_ver)
+
+    reasons: list[str] = []
+    if missing_cnt > 0:
+        reasons.append(f"当前题量 {total}，低于达标题量 {min_total}。")
+    if missing_topics:
+        reasons.append("主题覆盖不足：" + "、".join(missing_topics) + "。")
+    if not base:
+        reasons.append("尚未建立“达标基线”，请补全后点击“设为当前达标基线”。")
+    if changed_flags.get("policy_version"):
+        reasons.append("法规版本标识已变化，需补充新发布/升级要求对应题目。")
+    if changed_flags.get("regulations_at"):
+        reasons.append("检测到法规资料有新增/修改，需补充题库。")
+    if changed_flags.get("procedures_at"):
+        reasons.append("检测到程序文件有新增/修改，建议补全题库。")
+    if changed_flags.get("project_case_at"):
+        reasons.append("检测到项目案例知识有新增/修改，建议补全题库。")
+    is_satisfied = len(reasons) == 0
+    return {
+        "track": track,
+        "track_label": prof.get("title") or track,
+        "scopes": prof.get("scopes") or [],
+        "required_min_total": min_total,
+        "bank_total": total,
+        "missing_total_count": missing_cnt,
+        "topic_checks": topic_checks,
+        "is_satisfied": is_satisfied,
+        "reasons": reasons,
+        "next_batch_target_count": _EXAM_BATCH_INGEST_SIZE,
+        "can_continue_ingest": True,
+        "knowledge_markers": {
+            "current": {k: (v.isoformat() if v else None) for k, v in marker_now.items()},
+            "baseline": {
+                "regulations_at": base.get("regulations_at"),
+                "procedures_at": base.get("procedures_at"),
+                "project_case_at": base.get("project_case_at"),
+                "policy_version": base.get("policy_version"),
+                "checked_at": base.get("checked_at"),
+            },
+            "changed_flags": changed_flags,
+            "current_policy_version": current_policy_ver,
+            "policy_version_source": policy_source,
+            "policy_version_confidence": policy_conf,
+            "policy_version_evidence": policy_evidence,
+            "auto_policy_version": auto_policy_ver,
+            "fallback_policy_version": fallback_policy_ver,
+        },
+        "recommendations": {
+            "teacher_generate_count": 20 if track == "cn" else (25 if track == "iso13485" else 30),
+            "teacher_generate_difficulty": "easy" if track == "cn" else ("medium" if track == "iso13485" else "hard"),
+            "student_practice_count": 20 if track == "cn" else (25 if track == "iso13485" else 30),
+            "student_practice_difficulty": "easy" if track == "cn" else ("medium" if track == "iso13485" else "hard"),
+            "ingest_batch_size": _EXAM_BATCH_INGEST_SIZE,
+        },
+    }
+
+
+def _normalize_answers_list_shape(out: dict[str, Any]) -> dict[str, Any]:
+    """answers 统一为 list[{question_id, answer, user_answer}]；上游 aicheckword落库字段为 user_answer。"""
+    answers = out.get("answers")
+    if isinstance(answers, dict):
+        out["answers"] = [
+            {"question_id": str(k), "answer": v, "user_answer": v}
+            for k, v in answers.items()
+            if str(k).strip() != ""
+        ]
+    elif isinstance(answers, list):
+        normed: list[dict[str, Any]] = []
+        for it in answers:
+            if not isinstance(it, dict):
+                continue
+            row = dict(it)
+            ua = row.get("user_answer")
+            if ua is None:
+                ua = row.get("answer")
+            if ua is None:
+                ua = row.get("value") or row.get("selected") or row.get("response")
+            if ua is not None:
+                row["user_answer"] = ua
+            normed.append(row)
+        out["answers"] = normed
+    return out
+
+
+def _coerce_attempt_id_int_str(v: Any) -> str:
+    """将任意 attempt 标识归一成可被 int 解析的字符串。"""
+    raw = str(v or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"\d+", raw)
+    if m:
+        return m.group(0)
+    # 纯字符串/UUID 等无数字时，退化为稳定正整数（避免上游 int_parsing）
+    h = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+    try:
+        n = int(h, 16)
+    except Exception:
+        n = 1
+    if n <= 0:
+        n = 1
+    return str(n)
+
+
+def _normalize_practice_submit_upstream_body(body: dict[str, Any]) -> dict[str, Any]:
+    """练习提交：会话 id / set_id 常见别名一并带上，避免上游只认其中一种字段名。"""
+    raw = body if isinstance(body, dict) else {}
+    out = dict(raw)
+    # 上游有些版本要求 attemptId 为整数；空串会触发 422，故空值直接移除
+    if str(out.get("attempt_id") or "").strip() == "":
+        out.pop("attempt_id", None)
+    if str(out.get("attemptId") or "").strip() == "":
+        out.pop("attemptId", None)
+    sid = str(
+        out.get("practice_session_id")
+        or out.get("session_id")
+        or out.get("practiceSessionId")
+        or out.get("sessionId")
+        or ""
+    ).strip()
+    if sid:
+        out["practice_session_id"] = sid
+        out["session_id"] = sid
+        out["practiceSessionId"] = sid
+        out["sessionId"] = sid
+    aid_raw = str(
+        out.get("attempt_id")
+        or out.get("attemptId")
+        or out.get("practice_attempt_id")
+        or out.get("practiceAttemptId")
+        or out.get("practice_id")
+        or out.get("practiceId")
+        or out.get("id")
+        or sid
+        or ""
+    ).strip()
+    aid = _coerce_attempt_id_int_str(aid_raw)
+    if aid:
+        out["attempt_id"] = aid
+        out["attemptId"] = aid
+    # 空串 set_id 会导致上游 int_parsing，先移除再尝试从嵌套对象补齐
+    if str(out.get("set_id") or "").strip() == "":
+        out.pop("set_id", None)
+    if str(out.get("setId") or "").strip() == "":
+        out.pop("setId", None)
+    set_id = str(out.get("set_id") or out.get("setId") or _extract_set_id_from_any(out) or "").strip()
+    if set_id:
+        out["set_id"] = set_id
+        out["setId"] = set_id
+    return _normalize_answers_list_shape(out)
+
+
+def _normalize_exam_submit_upstream_body(body: dict[str, Any], attempt_id: str) -> dict[str, Any]:
+    raw = body if isinstance(body, dict) else {}
+    out = dict(raw)
+    aid = _coerce_attempt_id_int_str(attempt_id)
+    if aid:
+        out["attempt_id"] = aid
+        out["attemptId"] = aid
+    return _normalize_answers_list_shape(out)
+
+
+def _extract_bank_items_from_list_root(root: Any) -> list[dict[str, Any]]:
+    """从题库列表上游 JSON 根对象中取出题目 dict 列表。"""
+    if not isinstance(root, dict):
+        return []
+    inner = root.get("data") if isinstance(root.get("data"), dict) else None
+    cands: list[Any] = [
+        root.get("items"),
+        root.get("questions"),
+        inner.get("items") if inner else None,
+        inner.get("questions") if inner else None,
+    ]
+    for c in cands:
+        if isinstance(c, list) and c:
+            return [x for x in c if isinstance(x, dict)]
+    for c in cands:
+        if isinstance(c, list):
+            return [x for x in c if isinstance(x, dict)]
+    return []
+
+
+def _question_id_from_bank_item(it: dict[str, Any]) -> str:
+    return str(it.get("question_id") or it.get("questionId") or it.get("id") or "").strip()
+
+
+def _find_set_item_dicts(root: Any, depth: int = 0) -> list[dict[str, Any]]:
+    """从 GET quiz/sets/{id} 上游根对象中取出套内题目/条目 dict 列表。"""
+    if depth > 10:
+        return []
+    cand_keys = ("items", "questions", "question_items", "questionItems", "entries")
+    if isinstance(root, list):
+        return [x for x in root if isinstance(x, dict)]
+    if not isinstance(root, dict):
+        return []
+    for hop in ("load_set", "set", "quiz_set", "quizSet", "payload", "result"):
+        inner = root.get(hop)
+        if isinstance(inner, dict):
+            got = _find_set_item_dicts(inner, depth + 1)
+            if got:
+                return got
+    for k in cand_keys:
+        v = root.get(k)
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return [x for x in v if isinstance(x, dict)]
+    for k in cand_keys:
+        v = root.get(k)
+        if isinstance(v, list):
+            out = [x for x in v if isinstance(x, dict)]
+            if out:
+                return out
+    inner = root.get("data")
+    if isinstance(inner, dict):
+        return _find_set_item_dicts(inner, depth + 1)
+    return []
+
+
+def _question_id_from_set_item(it: dict[str, Any]) -> str:
+    for key in (
+        "question_id",
+        "questionId",
+        "id",
+        "bank_question_id",
+        "bankQuestionId",
+        "question_bank_id",
+        "questionBankId",
+        "ref_question_id",
+        "refQuestionId",
+    ):
+        v = it.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    q = it.get("question")
+    if isinstance(q, dict):
+        for key in ("id", "question_id", "questionId", "bank_question_id", "bankQuestionId"):
+            v = q.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return ""
+
+
+def _ordered_question_ids_from_set_upstream_root(root: Any) -> list[str]:
+    out: list[str] = []
+    for it in _find_set_item_dicts(root):
+        qid = _question_id_from_set_item(it)
+        if qid:
+            out.append(qid)
+    return out
+
+
+def _bank_row_matches_set_id(it: dict[str, Any], set_sid: str) -> bool:
+    want = str(set_sid).strip()
+    if not want:
+        return False
+    blobs: list[dict[str, Any]] = [it]
+    q = it.get("question")
+    if isinstance(q, dict):
+        blobs.append(q)
+    for mk in ("meta", "metadata"):
+        m = it.get(mk)
+        if isinstance(m, dict):
+            blobs.append(m)
+    id_keys = (
+        "set_id",
+        "setId",
+        "quiz_set_id",
+        "quizSetId",
+        "parent_set_id",
+        "parentSetId",
+        "exam_set_id",
+        "examSetId",
+    )
+    list_keys = ("set_ids", "setIds", "quiz_set_ids", "quizSetIds")
+    for cur in blobs:
+        if not isinstance(cur, dict):
+            continue
+        for k in id_keys:
+            v = cur.get(k)
+            if v is None or v == "":
+                continue
+            if str(v).strip() == want:
+                return True
+        for lk in list_keys:
+            v = cur.get(lk)
+            if isinstance(v, list) and want in {str(x).strip() for x in v}:
+                return True
+    return False
 
 
 # ---------- 辅助函数 ----------
@@ -549,6 +2081,43 @@ def dashboard_page():
     return render_template("dashboard.html")
 
 
+def _exam_center_display_user() -> str:
+    if session.get("user_id") is not None:
+        name = (session.get("display_name") or session.get("username") or "").strip()
+        if name:
+            return name
+        return str(session.get("user_id"))
+    if session.get("page13_authenticated"):
+        return "页面3已验证"
+    return ""
+
+
+@bp.route("/exam-center")
+def exam_center_page():
+    role = (request.args.get("role") or "student").strip().lower()
+    if role not in {"teacher", "student", "analytics"}:
+        role = "student"
+
+    if role in {"teacher", "analytics"}:
+        if _page13_password_configured() and not session.get("page13_authenticated"):
+            next_url = request.full_path or request.path or "/upload"
+            if next_url.endswith("?"):
+                next_url = next_url[:-1]
+            return render_template("page13_gate.html", next_url=next_url, gate_page=True)
+        allowed_roles = ["teacher", "analytics"]
+    else:
+        if not session.get("user_id"):
+            return redirect(url_for("pages.login_page"))
+        allowed_roles = ["student"]
+
+    return render_template(
+        "exam_center.html",
+        exam_role=role,
+        exam_allowed_roles=allowed_roles,
+        exam_display_user=_exam_center_display_user(),
+    )
+
+
 # ---------- 认证 API ----------
 
 @bp.post("/api/login")
@@ -632,6 +2201,2125 @@ def api_page13_auth():
         return jsonify({"message": "访问密码错误"}), 401
     session["page13_authenticated"] = True
     return jsonify({"success": True, "message": "验证成功"})
+
+
+# ---------- 考试训练中心 API（aiword 代理） ----------
+
+def _json_payload() -> dict[str, Any]:
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _guess_job_id_from_payload(p: dict[str, Any]) -> str:
+    """从代理层整包中提取上游 ingest 的 job_id。上游常见形态：p['data'] = {ok, data: {job_id, set_id}}。"""
+    if not isinstance(p, dict):
+        return ""
+    data = p.get("data")
+    if isinstance(data, dict):
+        for k in ("job_id", "jobId", "id", "jobID"):
+            v = data.get(k)
+            if v:
+                return str(v).strip()
+        inner = data.get("data")
+        if isinstance(inner, dict):
+            for k in ("job_id", "jobId", "id", "jobID"):
+                v = inner.get(k)
+                if v:
+                    return str(v).strip()
+    for k in ("job_id", "jobId", "id", "jobID"):
+        v = p.get(k)
+        if v:
+            return str(v).strip()
+    return ""
+
+
+def _normalize_job_status_from_upstream_data(upstream_data: Any) -> str:
+    if not isinstance(upstream_data, dict):
+        return "unknown"
+    raw = (
+        upstream_data.get("status")
+        or upstream_data.get("state")
+        or upstream_data.get("job_status")
+        or upstream_data.get("jobStatus")
+        or ""
+    )
+    if not raw:
+        inner = upstream_data.get("data")
+        if isinstance(inner, dict):
+            raw = (
+                inner.get("status")
+                or inner.get("state")
+                or inner.get("job_status")
+                or inner.get("jobStatus")
+                or ""
+            )
+        job = upstream_data.get("job")
+        if not raw and isinstance(job, dict):
+            raw = job.get("status") or job.get("state") or ""
+    s = str(raw).strip().lower()
+    if s in {"done", "success", "completed"}:
+        return "done"
+    if s in {"failed", "error"}:
+        return "failed"
+    if s in {"running", "processing", "in_progress", "progress"}:
+        return "running"
+    if s in {"pending", "queued", "created"}:
+        return "pending"
+    return s or "unknown"
+
+
+def _extract_set_id_from_dict(obj: Any) -> str:
+    """从任意 dict 中尽力提取上游 set_id（兼容 setId / quiz_sets.id 等常见形态）。"""
+    if not isinstance(obj, dict):
+        return ""
+    for k in ("set_id", "setId", "quiz_set_id", "quizSetId"):
+        v = obj.get(k)
+        if v:
+            s = str(v).strip()
+            if s:
+                return s
+    inner = obj.get("set")
+    if isinstance(inner, dict):
+        for k in ("id", "set_id", "setId"):
+            v = inner.get(k)
+            if v:
+                s = str(v).strip()
+                if s:
+                    return s
+    return ""
+
+
+def _extract_set_id_from_any(obj: Any) -> str:
+    """递归浅层扫描：优先顶层字段，其次常见嵌套 data/job/result。"""
+    sid = _extract_set_id_from_dict(obj) if isinstance(obj, dict) else ""
+    if sid:
+        return sid
+    if not isinstance(obj, dict):
+        return ""
+    for child_key in ("data", "job", "result", "payload"):
+        child = obj.get(child_key)
+        if isinstance(child, dict):
+            sid = _extract_set_id_from_dict(child)
+            if sid:
+                return sid
+        if isinstance(child, list) and child and isinstance(child[0], dict):
+            sid = _extract_set_id_from_dict(child[0])
+            if sid:
+                return sid
+    return ""
+
+
+def _extract_set_id_from_quiz_proxy_payload(payload: Any) -> str:
+    """
+    aiword 代理返回结构通常是 {code,message,data,request,trace_id}，
+    其中 data 可能是 dict 或 list；set_id 可能在 data 内或更深。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    sid = _extract_set_id_from_any(payload.get("data"))
+    if sid:
+        return sid
+    return _extract_set_id_from_any(payload)
+
+
+@bp.post("/api/exam-center/teacher/sets/generate")
+@page13_access_required
+def api_exam_teacher_generate_set():
+    body = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
+    status, payload = _quiz_api_call("quiz/sets/generate", method="POST", payload=body)
+    return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/teacher/bank/ingest-by-ai")
+@page13_access_required
+def api_exam_teacher_ingest_bank():
+    req_payload = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
+    req_payload["target_count"] = _EXAM_BATCH_INGEST_SIZE
+    req_payload["targetCount"] = _EXAM_BATCH_INGEST_SIZE
+    req_payload["question_count"] = _EXAM_BATCH_INGEST_SIZE
+    req_payload["questionCount"] = _EXAM_BATCH_INGEST_SIZE
+    status, payload = _quiz_api_call("quiz/bank/ingest-by-ai", method="POST", payload=req_payload)
+
+    # 成功拿到 job_id 后：落库生成任务记录（用于后续从记录查询轮询状态与结果）
+    if 200 <= int(status) < 300 and isinstance(payload, dict):
+        upstream_job_id = _guess_job_id_from_payload(payload)
+        if upstream_job_id:
+            created_by = (session.get("display_name") or session.get("username") or "").strip() or None
+            exam_track = (req_payload.get("exam_track") or req_payload.get("examTrack") or "").strip() or None
+            try:
+                target_count = int(req_payload.get("target_count") or req_payload.get("targetCount") or 0) or None
+            except Exception:
+                target_count = None
+            review_mode = (req_payload.get("review_mode") or req_payload.get("reviewMode") or "").strip() or None
+            row = ExamBankIngestJob.query.filter_by(upstream_job_id=upstream_job_id).first()
+            if not row:
+                row = ExamBankIngestJob(
+                    upstream_job_id=upstream_job_id,
+                    exam_track=exam_track,
+                    target_count=target_count,
+                    review_mode=review_mode,
+                    status="pending",
+                    created_by=created_by,
+                )
+            row.last_upstream_http_status = int(status)
+            row.last_upstream_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload.get("data")
+            row.last_upstream_request_url = ((payload.get("request") or {}).get("url") if isinstance(payload.get("request"), dict) else None) or None
+            row.last_upstream_trace_id = (payload.get("trace_id") or None)
+            row.last_message = (payload.get("message") or None)
+            set_id = _extract_set_id_from_quiz_proxy_payload(payload)
+            if set_id:
+                row.upstream_set_id = set_id
+            db.session.add(row)
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                if isinstance(payload, dict):
+                    payload["job_record_error"] = f"aiword 落库失败（不影响上游任务）：{e}"
+            else:
+                if isinstance(payload, dict):
+                    payload["job_record"] = {
+                        "id": row.id,
+                        "upstream_job_id": row.upstream_job_id,
+                        "upstream_set_id": row.upstream_set_id,
+                        "status": row.status,
+                    }
+
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/teacher/bank/requirements-check")
+@page13_access_required
+def api_exam_teacher_bank_requirements_check():
+    track = _normalize_exam_track(
+        request.args.get("exam_track")
+        or request.args.get("examTrack")
+        or request.args.get("track")
+        or "cn"
+    )
+    data = _build_exam_bank_requirement_status(track)
+    msg = "当前题库已满足体考要求。仍可继续录题以增强覆盖。" if data.get("is_satisfied") else "当前题库尚未满足体考要求。"
+    return jsonify({"code": 0, "message": msg, "data": data, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/teacher/bank/policy-version")
+@page13_access_required
+def api_exam_teacher_bank_policy_version_get():
+    track = _normalize_exam_track(
+        request.args.get("exam_track")
+        or request.args.get("examTrack")
+        or request.args.get("track")
+        or "cn"
+    )
+    pv_info = _resolve_exam_track_policy_version(track)
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "track": track,
+                "policy_version": pv_info.get("fallback_policy_version"),
+                "auto_policy_version": pv_info.get("auto_policy_version"),
+                "effective_policy_version": pv_info.get("effective_policy_version"),
+                "policy_version_source": pv_info.get("policy_version_source"),
+                "policy_version_confidence": pv_info.get("policy_version_confidence"),
+                "policy_version_evidence": pv_info.get("policy_version_evidence"),
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.put("/api/exam-center/teacher/bank/policy-version")
+@page13_access_required
+def api_exam_teacher_bank_policy_version_put():
+    body = _json_payload()
+    track = _normalize_exam_track(
+        body.get("exam_track")
+        or body.get("examTrack")
+        or body.get("track")
+        or request.args.get("exam_track")
+        or "cn"
+    )
+    version_value = str(body.get("policy_version") or body.get("policyVersion") or "").strip()
+    _set_exam_track_policy_version(track, version_value)
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": f"保存法规版本失败：{e}", "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify(
+        {
+            "code": 0,
+            "message": "法规版本标识（兜底）已保存。",
+            "data": {"track": track, "policy_version": version_value},
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.post("/api/exam-center/teacher/bank/requirements-baseline")
+@page13_access_required
+def api_exam_teacher_bank_requirements_baseline():
+    body = _json_payload()
+    track = _normalize_exam_track(
+        body.get("exam_track")
+        or body.get("examTrack")
+        or body.get("track")
+        or request.args.get("exam_track")
+        or "cn"
+    )
+    snap = _build_exam_bank_requirement_status(track)
+    km = snap.get("knowledge_markers") if isinstance(snap, dict) else {}
+    current = km.get("current") if isinstance(km, dict) else {}
+    policy_v = km.get("current_policy_version") if isinstance(km, dict) else ""
+    all_base = _app_config_get_json(_EXAM_REQUIREMENT_BASELINE_KEY, {})
+    if not isinstance(all_base, dict):
+        all_base = {}
+    all_base[track] = {
+        "regulations_at": (current.get("regulations_at") if isinstance(current, dict) else None),
+        "procedures_at": (current.get("procedures_at") if isinstance(current, dict) else None),
+        "project_case_at": (current.get("project_case_at") if isinstance(current, dict) else None),
+        "policy_version": str(policy_v or "").strip(),
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "checked_by": (session.get("display_name") or session.get("username") or "").strip() or None,
+    }
+    _app_config_set_json(_EXAM_REQUIREMENT_BASELINE_KEY, all_base)
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": f"写入基线失败：{e}", "data": None, "trace_id": uuid.uuid4().hex}), 500
+    latest = _build_exam_bank_requirement_status(track)
+    return jsonify({"code": 0, "message": "已设置当前达标基线。", "data": latest, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/teacher/bank/ingest-jobs/<job_id>")
+@page13_access_required
+def api_exam_teacher_ingest_job(job_id: str):
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return (
+            jsonify(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": "缺少 job_id",
+                    "data": None,
+                    "trace_id": uuid.uuid4().hex,
+                    "request": {"url": "", "method": "GET", "upstreamPath": ""},
+                }
+            ),
+            400,
+        )
+    # 1) 先查本地任务记录（如果不存在，也允许继续向上游查询）
+    row = ExamBankIngestJob.query.filter_by(upstream_job_id=job_id).first()
+
+    # 2) 默认刷新上游状态（refresh=0 可只看本地快照）
+    refresh = (request.args.get("refresh") or "1").strip()
+    if refresh not in {"0", "false", "no"}:
+        status, payload = _quiz_api_call(
+            f"quiz/bank/ingest-jobs/{job_id}",
+            method="GET",
+            query={k: v for k, v in request.args.to_dict().items() if k != "refresh"},
+        )
+        # 回写本地快照
+        if row is None:
+            row = ExamBankIngestJob(upstream_job_id=job_id, status="unknown")
+        row.last_upstream_http_status = int(status)
+        if isinstance(payload, dict):
+            row.last_message = (payload.get("message") or None)
+            row.last_upstream_trace_id = (payload.get("trace_id") or None)
+            req_meta = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+            row.last_upstream_request_url = (req_meta.get("url") or None)
+            row.last_upstream_data = payload.get("data")
+            row.status = _normalize_job_status_from_upstream_data(payload.get("data"))
+            set_id = _extract_set_id_from_quiz_proxy_payload(payload)
+            if set_id:
+                row.upstream_set_id = set_id
+        db.session.add(row)
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            if isinstance(payload, dict):
+                payload["job_record_error"] = f"aiword 落库失败（不影响上游查询）：{e}"
+        else:
+            if isinstance(payload, dict):
+                payload["job_record"] = {
+                    "id": row.id,
+                    "upstream_job_id": row.upstream_job_id,
+                    "upstream_set_id": row.upstream_set_id,
+                    "status": row.status,
+                }
+        return jsonify(payload), status
+
+    # 仅返回本地记录快照
+    if row is None:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "job_record": {
+                    "id": row.id,
+                    "upstream_job_id": row.upstream_job_id,
+                    "upstream_set_id": getattr(row, "upstream_set_id", None),
+                    "status": row.status,
+                    "exam_track": row.exam_track,
+                    "target_count": row.target_count,
+                    "review_mode": row.review_mode,
+                    "created_by": row.created_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                    "last_message": row.last_message,
+                    "last_upstream_http_status": row.last_upstream_http_status,
+                    "last_upstream_request_url": row.last_upstream_request_url,
+                    "last_upstream_trace_id": row.last_upstream_trace_id,
+                    "last_upstream_data": row.last_upstream_data,
+                }
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    )
+
+
+@bp.get("/api/exam-center/teacher/bank/ingest-jobs")
+@page13_access_required
+def api_exam_teacher_ingest_jobs_list():
+    limit_raw = (request.args.get("limit") or "20").strip()
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        limit = 20
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    rows = (
+        ExamBankIngestJob.query.order_by(ExamBankIngestJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "jobs": [
+                    {
+                        "id": r.id,
+                        "upstream_job_id": r.upstream_job_id,
+                        "upstream_set_id": getattr(r, "upstream_set_id", None),
+                        "status": r.status,
+                        "exam_track": r.exam_track,
+                        "target_count": r.target_count,
+                        "review_mode": r.review_mode,
+                        "created_by": r.created_by,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                        "last_message": r.last_message,
+                        "last_upstream_http_status": r.last_upstream_http_status,
+                        "last_upstream_request_url": r.last_upstream_request_url,
+                        "last_upstream_trace_id": r.last_upstream_trace_id,
+                    }
+                    for r in rows
+                ]
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    )
+
+
+@bp.get("/api/exam-center/teacher/sets")
+@page13_access_required
+def api_exam_teacher_sets_list():
+    """老师端：套题列表（上游）+ 本地 ingest 关联。"""
+    status, payload = _quiz_api_call("quiz/sets", method="GET", query=request.args.to_dict())
+    rows = (
+        ExamBankIngestJob.query.order_by(ExamBankIngestJob.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    by_set: dict[str, Any] = {}
+    without_set: list[dict[str, Any]] = []
+    for r in rows:
+        sid = (getattr(r, "upstream_set_id", None) or "").strip()
+        jr = {
+            "id": r.id,
+            "upstream_job_id": r.upstream_job_id,
+            "upstream_set_id": getattr(r, "upstream_set_id", None),
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        if sid:
+            if sid not in by_set:
+                by_set[sid] = jr
+        else:
+            without_set.append(jr)
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            data.setdefault("aiword", {})
+            if isinstance(data.get("aiword"), dict):
+                data["aiword"]["ingest_jobs_by_set_id"] = by_set
+                data["aiword"]["ingest_jobs_without_set_id"] = without_set[:50]
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/teacher/sets/<set_id>")
+@page13_access_required
+def api_exam_teacher_set_detail(set_id: str):
+    """老师端：套题详情（上游透传）。"""
+    sid = (set_id or "").strip()
+    if not sid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(f"quiz/sets/{sid}", method="GET", query=request.args.to_dict())
+    return jsonify(payload), status
+
+
+@bp.delete("/api/exam-center/teacher/sets/<set_id>")
+@page13_access_required
+def api_exam_teacher_delete_set(set_id: str):
+    """老师端：删除套题（上游透传）。"""
+    sid = (set_id or "").strip()
+    if not sid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(f"quiz/sets/{sid}", method="DELETE", payload=_json_payload())
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/teacher/bank/questions")
+@page13_access_required
+def api_exam_teacher_bank_questions_list():
+    """
+    老师端：题库题目列表。
+    无 set_id：GET quiz/bank/questions 透传（多路径尝试）。
+    有 set_id：先 GET quiz/sets/{id} 取题序并与题库分页扫描求交（上游常忽略 set_id 查询参数）。
+    """
+    args = dict(request.args.items())
+    set_sid = str(
+        args.get("set_id")
+        or args.get("setId")
+        or args.get("bank_set_id")
+        or args.get("bankSetId")
+        or ""
+    ).strip()
+    paths = [
+        "quiz/bank/questions",
+        "quiz/questions",
+        "quiz/bank/question-list",
+    ]
+    if not set_sid:
+        status, payload, tried = _quiz_try_paths(paths, method="GET", query=args)
+        if isinstance(payload, dict) and not (200 <= int(status) < 300):
+            payload.setdefault("aiword_upstream_tried_paths", tried)
+            payload.setdefault(
+                "message",
+                (payload.get("message") or "上游题库列表接口不可用")
+                + "（已尝试路径：" + ", ".join(tried) + "）",
+            )
+        return jsonify(payload), status
+
+    _strip_bank = frozenset({"set_id", "setId", "bank_set_id", "bankSetId"})
+    bank_args = {k: v for k, v in args.items() if k not in _strip_bank}
+    trace_id = uuid.uuid4().hex
+
+    def _int_arg(name: str, default: int, lo: int, hi: int) -> int:
+        try:
+            v = int(str(bank_args.get(name) or default))
+        except (TypeError, ValueError):
+            v = default
+        return max(lo, min(hi, v))
+
+    user_off = _int_arg("offset", 0, 0, 500000)
+    user_lim = _int_arg("limit", 50, 1, 200)
+    scan_lim = 200
+    max_scan = 12000
+
+    def _pull_bank_page(off: int) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+        q = dict(bank_args)
+        q["limit"] = str(scan_lim)
+        q["offset"] = str(off)
+        st_b, pl_b, _tried = _quiz_try_paths(paths, method="GET", query=q)
+        if not (200 <= int(st_b) < 300):
+            return [], int(st_b), pl_b if isinstance(pl_b, dict) else {"data": pl_b}
+        root_b = _unwrap_quiz_api_success_data(pl_b)
+        if not isinstance(root_b, dict):
+            root_b = {}
+        items_page = _extract_bank_items_from_list_root(root_b)
+        return items_page, 200, pl_b
+
+    st_set, pl_set = _quiz_api_call(f"quiz/sets/{set_sid}", method="GET", query={})
+    root_set = _unwrap_quiz_api_success_data(pl_set) if isinstance(pl_set, dict) else {}
+    qids_ordered: list[str] = []
+    if 200 <= int(st_set) < 300:
+        qids_ordered = _ordered_question_ids_from_set_upstream_root(root_set)
+
+    collected_in_order: list[dict[str, Any]] = []
+
+    if qids_ordered:
+        wanted = set(qids_ordered)
+        by_id: dict[str, dict[str, Any]] = {}
+        scan_off = 0
+        while len(by_id) < len(wanted) and scan_off < max_scan:
+            items_page, st_b, pl_err = _pull_bank_page(scan_off)
+            if st_b != 200:
+                return jsonify(pl_err), st_b
+            for it in items_page:
+                bid = _question_id_from_bank_item(it)
+                if bid in wanted and bid not in by_id:
+                    by_id[bid] = it
+            if len(items_page) < scan_lim:
+                break
+            scan_off += scan_lim
+        collected_in_order = [by_id[q] for q in qids_ordered if q in by_id]
+    else:
+        scan_off = 0
+        while scan_off < max_scan:
+            items_page, st_b, pl_err = _pull_bank_page(scan_off)
+            if st_b != 200:
+                if scan_off == 0:
+                    return jsonify(pl_err), st_b
+                break
+            for it in items_page:
+                if _bank_row_matches_set_id(it, set_sid):
+                    collected_in_order.append(it)
+            if len(items_page) < scan_lim:
+                break
+            scan_off += scan_lim
+
+    total = len(collected_in_order)
+    sliced = collected_in_order[user_off : user_off + user_lim]
+    note = (
+        "aiword：已按套题合并过滤。"
+        + ("题序来自 GET quiz/sets。" if qids_ordered else "套题明细无题序，已按题目上的 set_id 类字段扫描题库。")
+    )
+    out_payload: dict[str, Any] = {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "items": sliced,
+            "total": total,
+            "limit": user_lim,
+            "offset": user_off,
+            "meta": {
+                "aiword_bank_set_filter": True,
+                "aiword_set_id": set_sid,
+                "aiword_note": note,
+                "aiword_set_detail_http": int(st_set),
+                "aiword_set_ordered_ids_count": len(qids_ordered),
+            },
+        },
+        "trace_id": trace_id,
+        "request": {"url": "", "method": "GET", "upstreamPath": "quiz/bank/questions + aiword set merge"},
+    }
+    return jsonify(out_payload), 200
+
+
+@bp.patch("/api/exam-center/teacher/bank/questions/<question_id>")
+@page13_access_required
+def api_exam_teacher_bank_question_update(question_id: str):
+    qid = (question_id or "").strip()
+    if not qid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 question_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(
+        f"quiz/bank/questions/{qid}",
+        method="PATCH",
+        payload=_json_payload(),
+        query=request.args.to_dict(),
+    )
+    return jsonify(payload), status
+
+
+@bp.delete("/api/exam-center/teacher/bank/questions/<question_id>")
+@page13_access_required
+def api_exam_teacher_bank_question_delete(question_id: str):
+    qid = (question_id or "").strip()
+    if not qid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 question_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(
+        f"quiz/bank/questions/{qid}",
+        method="DELETE",
+        payload=_json_payload(),
+        query=request.args.to_dict(),
+    )
+    return jsonify(payload), status
+
+
+def _exam_stats_options_local() -> dict[str, Any]:
+    students_map: dict[str, dict[str, str]] = {}
+    try:
+        # 与 _local_stats_overview_all / 按学生表同源：按 user_id 去重，取最近一条活动的展示名
+        rows = (
+            db.session.query(
+                ExamCenterActivity.user_id,
+                ExamCenterActivity.display_name,
+                ExamCenterActivity.username,
+            )
+            .filter(ExamCenterActivity.user_id.isnot(None))
+            .filter(ExamCenterActivity.user_id != "")
+            .order_by(ExamCenterActivity.user_id.asc(), ExamCenterActivity.created_at.desc())
+            .all()
+        )
+        for uid, dname, uname in rows:
+            sid = str(uid or "").strip()
+            if not sid or sid in students_map:
+                continue
+            label = str(dname or uname or sid).strip() or sid
+            students_map[sid] = {"id": sid, "name": label, "label": label}
+    except Exception:
+        students_map = {}
+    students = sorted(students_map.values(), key=lambda x: str(x.get("name") or ""))
+    assignments_map: dict[str, dict[str, str]] = {}
+    try:
+        rows = (
+            db.session.query(ExamCenterActivity.assignment_id, ExamCenterActivity.assignment_label)
+            .filter(ExamCenterActivity.assignment_id.isnot(None))
+            .filter(ExamCenterActivity.assignment_id != "")
+            .distinct()
+            .limit(500)
+            .all()
+        )
+        for aid, alab in rows:
+            k = str(aid or "").strip()
+            if not k:
+                continue
+            lab = str(alab or "").strip() or k
+            assignments_map[k] = {"id": k, "name": lab, "label": lab}
+        local_rows = (
+            ExamCenterAssignment.query.filter(
+                or_(
+                    ExamCenterAssignment.status.is_(None),
+                    ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
+                )
+            )
+            .limit(500)
+            .all()
+        )
+        for r in local_rows:
+            k = str(r.assignment_id or "").strip()
+            if not k:
+                continue
+            lab = str(r.title or "").strip() or k
+            assignments_map[k] = {"id": k, "name": lab, "label": lab}
+    except Exception:
+        assignments_map = {}
+    assignments = sorted(assignments_map.values(), key=lambda x: str(x.get("name") or ""))
+    return {"students": students, "assignments": assignments}
+
+
+def _local_focus_flags_for_student(practice_count: int, wrong_total: int, exam_started: int, exam_submitted: int) -> list[str]:
+    flags: list[str] = []
+    if practice_count < 3:
+        flags.append("练习次数少")
+    if wrong_total >= 10:
+        flags.append("错题多")
+    if exam_started > exam_submitted:
+        flags.append("未完成考试")
+    return flags
+
+
+def _local_stats_for_student(user_id: str) -> dict[str, Any]:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return {}
+    rows = ExamCenterActivity.query.filter_by(user_id=uid).order_by(ExamCenterActivity.created_at.desc()).all()
+    if not rows:
+        return {
+            "student_id": uid,
+            "student_name": uid,
+            "practice_count": 0,
+            "exam_submitted_count": 0,
+            "exam_started_count": 0,
+            "wrong_total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "pass_rate_percent": None,
+            "focus_flags": ["练习次数少"],
+        }
+    ids = [str(r.id) for r in rows if getattr(r, "id", None)]
+    det_map: dict[str, ExamCenterActivityDetail] = {}
+    if ids:
+        ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+        det_map = {str(d.activity_id): d for d in ds}
+    pass_score = _exam_pass_score()
+    practice_count = 0
+    exam_submitted = 0
+    exam_started = 0
+    wrong_total = 0
+    pass_count = 0
+    fail_count = 0
+    student_name = ""
+    for r in rows:
+        if not student_name:
+            student_name = str(r.display_name or r.username or r.user_id or "").strip()
+        m = str(r.mode or "").strip().lower()
+        if m == "practice":
+            practice_count += 1
+        if m == "exam":
+            exam_submitted += 1
+        if r.assignment_id:
+            exam_started += 1
+        d = det_map.get(str(r.id))
+        if d and d.wrong_count is not None:
+            wrong_total += int(d.wrong_count)
+        if d and d.score is not None and m == "exam":
+            if float(d.score) >= pass_score:
+                pass_count += 1
+            else:
+                fail_count += 1
+    if exam_started < exam_submitted:
+        exam_started = exam_submitted
+    graded = pass_count + fail_count
+    pass_rate = round((pass_count * 100.0 / graded), 2) if graded > 0 else None
+    return {
+        "student_id": uid,
+        "student_name": student_name or uid,
+        "practice_count": practice_count,
+        "exam_submitted_count": exam_submitted,
+        "exam_started_count": exam_started,
+        "wrong_total": wrong_total,
+        "pass_score": pass_score,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "pass_rate_percent": pass_rate,
+        "focus_flags": _local_focus_flags_for_student(practice_count, wrong_total, exam_started, exam_submitted),
+    }
+
+
+def _local_stats_all_students_rows() -> list[dict[str, Any]]:
+    """按学生在本地聚合多行指标（与会话下拉中的学生列表同源）。"""
+    opts = _exam_stats_options_local()
+    studs = opts.get("students") if isinstance(opts.get("students"), list) else []
+    rows: list[dict[str, Any]] = []
+    for s in studs:
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("id") or "").strip()
+        if not sid:
+            continue
+        row = _local_stats_for_student(sid)
+        if not row:
+            continue
+        pc = int(row.get("pass_count") or 0)
+        fc = int(row.get("fail_count") or 0)
+        row["graded_exam_count"] = pc + fc
+        row["total_learning_count"] = int(row.get("practice_count") or 0) + int(row.get("exam_submitted_count") or 0)
+        rows.append(row)
+    rows.sort(key=lambda x: str(x.get("student_name") or x.get("student_id") or ""))
+    return rows
+
+
+def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
+    """学生 ×（考试/练习）交叉分组：记录数、已判分、通过/不通过/通过率；判分口径与 /stats/mode 一致（有 score 即计分）。"""
+    opts = _exam_stats_options_local()
+    studs = opts.get("students") if isinstance(opts.get("students"), list) else []
+    pass_score = _exam_pass_score()
+    out: list[dict[str, Any]] = []
+    for s in studs:
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("id") or "").strip()
+        if not sid:
+            continue
+        label = str(s.get("label") or s.get("name") or sid).strip() or sid
+        rows_u = ExamCenterActivity.query.filter_by(user_id=sid).order_by(ExamCenterActivity.created_at.desc()).all()
+        ids = [str(r.id) for r in rows_u if getattr(r, "id", None)]
+        det_map: dict[str, ExamCenterActivityDetail] = {}
+        if ids:
+            ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+            det_map = {str(d.activity_id): d for d in ds}
+        for mode_key, mode_label in (("exam", "考试"), ("practice", "练习")):
+            subset = [r for r in rows_u if str(r.mode or "").strip().lower() == mode_key]
+            total = len(subset)
+            graded = 0
+            pc = 0
+            fc = 0
+            for r in subset:
+                d = det_map.get(str(r.id))
+                if not d or d.score is None:
+                    continue
+                graded += 1
+                if float(d.score) >= pass_score:
+                    pc += 1
+                else:
+                    fc += 1
+            pr = round((pc * 100.0 / graded), 2) if graded > 0 else None
+            out.append(
+                {
+                    "student_id": sid,
+                    "student_name": label,
+                    "mode": mode_key,
+                    "mode_label": mode_label,
+                    "total_count": total,
+                    "graded_count": graded,
+                    "pass_score": pass_score,
+                    "pass_count": pc,
+                    "fail_count": fc,
+                    "pass_rate_percent": pr,
+                }
+            )
+    out.sort(key=lambda x: (str(x.get("student_name") or ""), 0 if x.get("mode") == "exam" else 1))
+    return out
+
+
+def _local_stats_overview_all() -> dict[str, Any]:
+    """全库聚合（不按条数截断），与 /stats/mode、按学生聚合口径一致。"""
+    pass_score = _exam_pass_score()
+    practice_count = ExamCenterActivity.query.filter_by(mode="practice").count()
+    exam_act = ExamCenterActivity.query.filter_by(mode="exam").all()
+    exam_count = len(exam_act)
+    ids_exam = [str(r.id) for r in exam_act if getattr(r, "id", None)]
+    det_map: dict[str, ExamCenterActivityDetail] = {}
+    if ids_exam:
+        ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids_exam)).all()
+        det_map = {str(d.activity_id): d for d in ds}
+    pass_count = 0
+    fail_count = 0
+    for r in exam_act:
+        d = det_map.get(str(r.id))
+        if not d or d.score is None:
+            continue
+        if float(d.score) >= pass_score:
+            pass_count += 1
+        else:
+            fail_count += 1
+    graded_exam_count = pass_count + fail_count
+    pass_rate = round((pass_count * 100.0 / graded_exam_count), 2) if graded_exam_count > 0 else None
+    try:
+        urows = (
+            db.session.query(ExamCenterActivity.user_id)
+            .filter(ExamCenterActivity.user_id.isnot(None))
+            .filter(ExamCenterActivity.user_id != "")
+            .distinct()
+            .all()
+        )
+        uid_list = [str(u[0]).strip() for u in urows if u and u[0]]
+    except Exception:
+        uid_list = []
+    by_student: dict[str, dict[str, Any]] = {}
+    for uid in uid_list:
+        by_student[uid] = _local_stats_for_student(uid)
+    focus_students = [v for v in by_student.values() if v.get("focus_flags")]
+    return {
+        "practice_count": practice_count,
+        "exam_count": exam_count,
+        "graded_exam_count": graded_exam_count,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "pass_score": pass_score,
+        "pass_rate_percent": pass_rate,
+        "students_total": len(by_student),
+        "focus_students": focus_students,
+    }
+
+
+def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
+    lim = max(1, min(200, int(limit or 80)))
+    out: list[dict[str, Any]] = []
+    pass_score = _exam_pass_score()
+    try:
+        rows = ExamCenterActivity.query.order_by(ExamCenterActivity.created_at.desc()).limit(lim).all()
+        ids = [str(r.id) for r in rows if getattr(r, "id", None)]
+        det_map: dict[str, ExamCenterActivityDetail] = {}
+        if ids:
+            ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+            det_map = {str(d.activity_id): d for d in ds}
+        for a in rows:
+            d = det_map.get(str(a.id))
+            mode = str(a.mode or "").strip().lower()
+            mode_label = "练习" if mode == "practice" else ("考试" if mode == "exam" else mode or "-")
+            who = (a.display_name or a.username or a.user_id or "-").strip() or "-"
+            tgt = (a.assignment_label or a.set_id or a.attempt_id or "-") or "-"
+            res = (a.result_summary or "").strip() or "-"
+            out.append(
+                {
+                    "id": a.id,
+                    "created_at": a.created_at.isoformat() if a.created_at else "",
+                    "user_id": a.user_id,
+                    "student_name": who,
+                    "mode": a.mode,
+                    "mode_label": mode_label,
+                    "assignment_id": str(a.assignment_id).strip() if getattr(a, "assignment_id", None) else "",
+                    "target_label": str(tgt),
+                    "result": res[:500],
+                    "score": d.score if d else None,
+                    "total_score": d.total_score if d else None,
+                    "correct_count": d.correct_count if d else None,
+                    "wrong_count": d.wrong_count if d else None,
+                    "pass_score": pass_score,
+                    "passed": (d.score is not None and float(d.score) >= pass_score) if d and d.score is not None else None,
+                    "weakness": d.weakness if d else None,
+                    "recommendation": d.recommendation if d else None,
+                }
+            )
+    except Exception:
+        return []
+    return out
+
+
+@bp.get("/api/exam-center/stats/options")
+@page13_access_required
+def api_exam_stats_options():
+    st, pl = _quiz_api_call(
+        "quiz/stats/options",
+        method="GET",
+        query=request.args.to_dict(),
+        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
+    )
+    if 200 <= int(st) < 300 and isinstance(pl, dict) and pl.get("code") == 0:
+        inner = pl.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("students"), list) and isinstance(
+            inner.get("assignments"), list
+        ):
+            return jsonify(pl), int(st)
+    local = _exam_stats_options_local()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（本地聚合 exam_center_activities；上游 quiz/stats/options 不可用或结构不匹配）",
+            "data": local,
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/options → local"},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/stats/recent-activity")
+@page13_access_required
+def api_exam_stats_recent_activity():
+    try:
+        lim = int(str(request.args.get("limit") or "80"))
+    except (TypeError, ValueError):
+        lim = 80
+    q = dict(request.args.items())
+    st, pl = _quiz_api_call(
+        "quiz/stats/recent-activity",
+        method="GET",
+        query=q,
+        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
+    )
+    if 200 <= int(st) < 300 and isinstance(pl, dict) and pl.get("code") == 0:
+        inner = pl.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("records"), list):
+            # 额外兼容：即使上游已过滤，也允许在代理层再做一次本地过滤（避免结构差异）
+            try:
+                want_uid = str(request.args.get("student_id") or request.args.get("user_id") or "").strip()
+                want_aid = str(request.args.get("assignment_id") or "").strip()
+                if want_uid or want_aid:
+                    recs0 = [x for x in inner.get("records") if isinstance(x, dict)]
+                    if want_uid:
+                        recs0 = [x for x in recs0 if str(x.get("user_id") or x.get("student_id") or "").strip() == want_uid]
+                    if want_aid:
+                        recs0 = [x for x in recs0 if str(x.get("assignment_id") or "").strip() == want_aid]
+                    inner["records"] = recs0
+            except Exception:
+                pass
+            return jsonify(pl), int(st)
+    recs = _exam_stats_recent_activity_local(lim)
+    # 本地筛选：仅影响“记录列表”，不影响看板
+    want_uid = str(request.args.get("student_id") or request.args.get("user_id") or "").strip()
+    want_aid = str(request.args.get("assignment_id") or "").strip()
+    if want_uid:
+        recs = [x for x in recs if str((x or {}).get("user_id") or "").strip() == want_uid]
+    if want_aid:
+        recs = [x for x in recs if str((x or {}).get("assignment_id") or "").strip() == want_aid]
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（本地 exam_center_activities；上游 quiz/stats/recent-activity 不可用或结构不匹配）",
+            "data": {"records": recs},
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/recent-activity → local"},
+        }
+    ), 200
+
+
+@bp.post("/api/exam-center/teacher/sets/review-by-ai")
+@page13_access_required
+def api_exam_teacher_review_set():
+    data = _json_payload()
+    set_id = (data.pop("set_id", "") or "").strip()
+    if not set_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(
+        f"quiz/sets/{set_id}/review-by-ai",
+        method="POST",
+        payload=data,
+    )
+    # 异步复审：上游立即返回 job_id；本地落库便于轮询与任务列表（与录题 ingest 一致）
+    if 200 <= int(status) < 300 and isinstance(payload, dict):
+        upstream_job_id = _guess_job_id_from_payload(payload)
+        if upstream_job_id:
+            created_by = (session.get("display_name") or session.get("username") or "").strip() or None
+            row = ExamSetReviewJob.query.filter_by(upstream_job_id=upstream_job_id).first()
+            if not row:
+                row = ExamSetReviewJob(
+                    upstream_job_id=upstream_job_id,
+                    set_id=set_id,
+                    status="pending",
+                    created_by=created_by,
+                )
+            row.last_upstream_http_status = int(status)
+            row.last_upstream_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload.get("data")
+            row.last_upstream_request_url = ((payload.get("request") or {}).get("url") if isinstance(payload.get("request"), dict) else None) or None
+            row.last_upstream_trace_id = (payload.get("trace_id") or None)
+            row.last_message = (payload.get("message") or None)
+            row.status = _normalize_job_status_from_upstream_data(payload.get("data")) or "running"
+            db.session.add(row)
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                if isinstance(payload, dict):
+                    payload["job_record_error"] = f"aiword 落库失败（不影响上游任务）：{e}"
+            else:
+                if isinstance(payload, dict):
+                    payload["job_record"] = {
+                        "id": row.id,
+                        "upstream_job_id": row.upstream_job_id,
+                        "set_id": row.set_id,
+                        "status": row.status,
+                    }
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/teacher/sets/review-jobs/<job_id>")
+@page13_access_required
+def api_exam_teacher_review_job(job_id: str):
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return (
+            jsonify(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": "缺少 job_id",
+                    "data": None,
+                    "trace_id": uuid.uuid4().hex,
+                    "request": {"url": "", "method": "GET", "upstreamPath": ""},
+                }
+            ),
+            400,
+        )
+    row = ExamSetReviewJob.query.filter_by(upstream_job_id=job_id).first()
+    refresh = (request.args.get("refresh") or "1").strip()
+    if refresh not in {"0", "false", "no"}:
+        status, payload = _quiz_api_call(
+            f"quiz/sets/review-jobs/{job_id}",
+            method="GET",
+            query={k: v for k, v in request.args.to_dict().items() if k != "refresh"},
+        )
+        if row is None:
+            row = ExamSetReviewJob(upstream_job_id=job_id, status="unknown")
+        row.last_upstream_http_status = int(status)
+        if isinstance(payload, dict):
+            row.last_message = (payload.get("message") or None)
+            row.last_upstream_trace_id = (payload.get("trace_id") or None)
+            req_meta = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+            row.last_upstream_request_url = (req_meta.get("url") or None)
+            row.last_upstream_data = payload.get("data")
+            row.status = _normalize_job_status_from_upstream_data(payload.get("data"))
+        db.session.add(row)
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            if isinstance(payload, dict):
+                payload["job_record_error"] = f"aiword 落库失败（不影响上游查询）：{e}"
+        else:
+            if isinstance(payload, dict):
+                payload["job_record"] = {
+                    "id": row.id,
+                    "upstream_job_id": row.upstream_job_id,
+                    "set_id": row.set_id,
+                    "status": row.status,
+                }
+        return jsonify(payload), status
+
+    if row is None:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "job_record": {
+                    "id": row.id,
+                    "upstream_job_id": row.upstream_job_id,
+                    "set_id": row.set_id,
+                    "status": row.status,
+                    "created_by": row.created_by,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                    "last_message": row.last_message,
+                    "last_upstream_http_status": row.last_upstream_http_status,
+                    "last_upstream_request_url": row.last_upstream_request_url,
+                    "last_upstream_trace_id": row.last_upstream_trace_id,
+                    "last_upstream_data": row.last_upstream_data,
+                }
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    )
+
+
+@bp.get("/api/exam-center/teacher/sets/review-jobs")
+@page13_access_required
+def api_exam_teacher_review_jobs_list():
+    limit_raw = (request.args.get("limit") or "20").strip()
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        limit = 20
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    rows = ExamSetReviewJob.query.order_by(ExamSetReviewJob.created_at.desc()).limit(limit).all()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "jobs": [
+                    {
+                        "id": r.id,
+                        "upstream_job_id": r.upstream_job_id,
+                        "set_id": r.set_id,
+                        "status": r.status,
+                        "created_by": r.created_by,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                        "last_message": r.last_message,
+                        "last_upstream_http_status": r.last_upstream_http_status,
+                        "last_upstream_request_url": r.last_upstream_request_url,
+                        "last_upstream_trace_id": r.last_upstream_trace_id,
+                    }
+                    for r in rows
+                ]
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    )
+
+
+@bp.post("/api/exam-center/teacher/sets/publish")
+@page13_access_required
+def api_exam_teacher_publish_set():
+    data = _json_payload()
+    set_id = (data.pop("set_id", "") or "").strip()
+    if not set_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(
+        f"quiz/sets/{set_id}/publish",
+        method="POST",
+        payload=data,
+    )
+    return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/teacher/papers")
+@page13_access_required
+def api_exam_teacher_create_paper():
+    status, payload = _quiz_api_call("quiz/papers", method="POST", payload=_json_payload())
+    return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/teacher/assignments")
+@page13_access_required
+def api_exam_teacher_create_assignment():
+    req = _json_payload()
+    due_val, due_update = _parse_assignment_due_from_request(req)
+    forward = dict(req) if isinstance(req, dict) else {}
+    if due_val and "due_at" not in forward and "dueAt" not in forward:
+        forward["due_at"] = due_val.isoformat(sep=" ", timespec="seconds")
+    status, payload = _quiz_api_call("quiz/assignments", method="POST", payload=forward)
+    if 200 <= int(status) < 300 and isinstance(payload, dict):
+        aid, title, set_id = _extract_assignment_from_quiz_payload(payload)
+        if aid:
+            row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+            if not row:
+                row = ExamCenterAssignment(assignment_id=aid)
+            row.title = title or row.title
+            row.set_id = set_id or row.set_id or str(req.get("set_id") or req.get("setId") or "").strip() or None
+            row.exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or row.exam_track
+            diff_req = str(req.get("difficulty") or req.get("difficultyLevel") or "").strip().lower()
+            if diff_req in ("easy", "medium", "hard"):
+                row.difficulty = diff_req
+            if due_update:
+                row.due_at = due_val
+            sid = str(row.set_id or "").strip()
+            if sid and (not row.difficulty or row.difficulty not in ("easy", "medium", "hard")):
+                st_set, pl_set = _quiz_api_call(f"quiz/sets/{_urlquote(sid, safe='')}", method="GET", query=None)
+                if 200 <= int(st_set) < 300 and isinstance(pl_set, dict):
+                    d2 = _difficulty_from_quiz_get_set_payload(pl_set)
+                    if d2:
+                        row.difficulty = d2
+            row.status = "published"
+            row.created_by = (session.get("display_name") or session.get("username") or "").strip() or row.created_by
+            db.session.add(row)
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            else:
+                payload.setdefault("aiword", {})
+                if isinstance(payload.get("aiword"), dict):
+                    payload["aiword"]["assignment"] = {
+                        "assignment_id": row.assignment_id,
+                        "title": row.title,
+                        "set_id": row.set_id,
+                        "exam_track": row.exam_track,
+                    }
+    return jsonify(payload), status
+
+
+def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+    """对已下发任务调用上游可变路径；不要求全部成功以便本地仍可收口。"""
+    aid = (assignment_id or "").strip()
+    q = _urlquote(aid, safe="")
+    attempts: list[dict[str, Any]] = []
+    last_status = 599
+    last_pl: dict[str, Any] = {}
+    ops = []
+    op_l = op.lower().strip()
+    if op_l == "delete":
+        ops = [(f"quiz/assignments/{q}", "DELETE", None)]
+    elif op_l == "unpublish":
+        ops = [
+            # 常见语义：设为无效/归档
+            (
+                f"quiz/assignments/{q}",
+                "PATCH",
+                {"status": "inactive", "is_active": False, "cancelled": True},
+            ),
+            (f"quiz/assignments/{q}/cancel", "POST", {}),
+        ]
+    for path, meth, bod in ops:
+        st0, pl0 = _quiz_api_call(path.strip("/"), method=meth, payload=bod if isinstance(bod, dict) else None)
+        attempts.append({"path": path, "method": meth, "http_status": int(st0)})
+        last_status = int(st0)
+        last_pl = pl0 if isinstance(pl0, dict) else {}
+        if 200 <= int(st0) < 300:
+            break
+        if int(st0) == 204:
+            break
+    return attempts, last_status, last_pl
+
+
+@bp.get("/api/exam-center/teacher/assignments-local")
+@page13_access_required
+def api_teacher_assignments_local_list():
+    """老师端：列出 aiword 本地镜像的考试任务。"""
+    try:
+        rows = ExamCenterAssignment.query.order_by(ExamCenterAssignment.created_at.desc()).limit(500).all()
+    except Exception as e:
+        return jsonify(
+            {
+                "code": "DB_ERROR",
+                "message": f"查询失败：{e}",
+                "data": {"rows": []},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 500
+    out_rows: list[dict[str, Any]] = []
+    for r in rows:
+        out_rows.append(
+            {
+                "assignment_id": r.assignment_id,
+                "title": (r.title or r.assignment_id or "").strip(),
+                "set_id": r.set_id,
+                "exam_track": r.exam_track,
+                "difficulty": (r.difficulty or "").strip() if getattr(r, "difficulty", None) else "",
+                "status": (r.status or "").strip(),
+                "due_at": r.due_at.isoformat(timespec="seconds") if getattr(r, "due_at", None) else None,
+                "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else "",
+            }
+        )
+    return jsonify(
+        {"code": 0, "message": "ok", "data": {"rows": out_rows}, "trace_id": uuid.uuid4().hex}
+    ), 200
+
+
+@bp.delete("/api/exam-center/teacher/assignments/<assignment_id>")
+@page13_access_required
+def api_teacher_delete_local_assignment(assignment_id: str):
+    aid = (assignment_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "delete")
+    row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    if row:
+        try:
+            ExamCenterAssignment.query.filter_by(assignment_id=aid).delete()
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify(
+        {
+            "code": 0,
+            "message": "已删除本地任务记录" + ("；上游返回值见 data.last_upstream。" if attempts else ""),
+            "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.post("/api/exam-center/teacher/assignments/<assignment_id>/unpublish")
+@page13_access_required
+def api_teacher_unpublish_local_assignment(assignment_id: str):
+    aid = (assignment_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "unpublish")
+    row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    if row:
+        try:
+            row.status = "inactive"
+            db.session.add(row)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify(
+        {
+            "code": 0,
+            "message": "已标记本地任务下架（inactive）；" + ("上游返回码=" + str(last_st)),
+            "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.post("/api/exam-center/student/practice/generate-set")
+@login_required
+def api_exam_student_generate_practice_set():
+    body = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
+    uid = str(session.get("user_id") or "").strip()
+    if uid:
+        body["user_id"] = uid
+        body["userId"] = uid
+    status, payload = _quiz_api_call("quiz/practice/generate-set", method="POST", payload=body)
+    return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/student/practice/submit")
+@login_required
+def api_exam_student_submit_practice():
+    body = _normalize_practice_submit_upstream_body(_json_payload())
+    uid = str(session.get("user_id") or "").strip()
+    if uid:
+        body.setdefault("user_id", uid)
+        body.setdefault("userId", uid)
+    attempt_q = str(body.get("attempt_id") or body.get("attemptId") or "").strip()
+    q = {"attempt_id": attempt_q} if attempt_q else None
+    status, payload = _quiz_api_call("quiz/practice/submit", method="POST", payload=body, query=q)
+    if 200 <= int(status) < 300 and isinstance(payload, dict):
+        # HTTP 成功即落库：上游 data 内 code 非成功时过去会跳过写库，导致历史「丢记录」
+        up_raw = payload.get("data")
+        up_root = up_raw if isinstance(up_raw, dict) else {}
+        merged = _merge_upstream_snapshot_with_submitted_answers(up_root, body)
+        if isinstance(up_raw, dict) and not _exam_activity_upstream_root_ok(up_raw):
+            merged["aiword_upstream_business_uncertain"] = True
+        inner_m = merged.get("data") if isinstance(merged.get("data"), dict) else {}
+        mx = _extract_result_metrics(merged)
+        summ = _exam_activity_history_result_text(
+            "practice",
+            mx,
+            merged.get("message") or payload.get("message"),
+        )
+        set_id = str(body.get("set_id") or inner_m.get("set_id") or inner_m.get("setId") or "").strip() or None
+        etrack = str(body.get("exam_track") or "").strip() or None
+        _log_student_exam_center_activity(
+            mode="practice",
+            exam_track=etrack,
+            set_id=set_id,
+            assignment_id=None,
+            assignment_label=None,
+            attempt_id=str(body.get("attempt_id") or body.get("attemptId") or body.get("session_id") or "").strip() or None,
+            upstream_http_status=int(status),
+            upstream_trace_id=str(payload.get("trace_id") or "").strip() or None,
+            result_summary=summ,
+            upstream_result_payload=merged,
+        )
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/quiz/grading-status/<path:attempt_id>")
+@login_required
+def api_student_quiz_grading_status(attempt_id: str):
+    aid = (attempt_id or "").strip().lstrip("/")
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    st, pl = _quiz_api_call(f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status", method="GET")
+    return jsonify(pl), st
+
+
+@bp.post("/api/exam-center/student/quiz/sync-attempt-result")
+@login_required
+def api_student_sync_quiz_attempt_result():
+    body = _json_payload()
+    aid = str(body.get("attempt_id") or body.get("attemptId") or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+
+    row = (
+        ExamCenterActivity.query.filter_by(user_id=uid, attempt_id=aid)
+        .order_by(ExamCenterActivity.created_at.desc())
+        .first()
+    )
+    if not row:
+        return jsonify(
+            {"code": "NOT_FOUND", "message": "未找到与该 attempt 匹配的本地记录", "data": {"updated": False}, "trace_id": uuid.uuid4().hex}
+        ), 404
+
+    st, pl = _quiz_api_call(f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status", method="GET")
+    if not (200 <= int(st) < 300) or not isinstance(pl, dict):
+        return jsonify(pl), st
+
+    uq = _unwrap_quiz_api_success_data(pl)
+    if isinstance(uq, dict) and uq.get("ok") is True and isinstance(uq.get("data"), dict):
+        gdata = uq["data"]
+    elif isinstance(uq, dict):
+        gdata = uq
+    else:
+        gdata = {}
+
+    ready = bool(gdata.get("ready"))
+    if not ready:
+        return jsonify(
+            {
+                "code": 0,
+                "message": "ok（仍阅卷中）",
+                "data": {"updated": False, "grading": gdata},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 200
+
+    metrics = _extract_result_metrics(dict(gdata))
+    summ = _exam_activity_history_result_text(str(row.mode or ""), metrics, gdata.get("grading_message"))
+    row.result_summary = (summ or "")[:500]
+
+    det = ExamCenterActivityDetail.query.filter_by(activity_id=str(row.id)).first()
+    if det:
+        try:
+            det.score = int(round(float(metrics.get("score") or 0)))
+        except Exception:
+            det.score = metrics.get("score")
+        ts_m = metrics.get("total_score")
+        try:
+            det.total_score = int(round(float(ts_m))) if ts_m is not None else det.score
+        except Exception:
+            det.total_score = ts_m if ts_m is not None else det.score
+        det.correct_count = metrics.get("correct_count")
+        det.wrong_count = metrics.get("wrong_count")
+        merged_up = dict(det.upstream_payload or {})
+        merged_up["grading_sync"] = gdata
+        det.upstream_payload = merged_up
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": {"updated": False}, "trace_id": uuid.uuid4().hex}), 500
+
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {"updated": True, "grading": gdata, "result_summary": summ},
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/student/wrongbook")
+@login_required
+def api_exam_student_wrongbook():
+    q = dict(request.args.to_dict())
+    uid = str(session.get("user_id") or "").strip()
+    if uid:
+        q["user_id"] = uid
+        q["userId"] = uid
+    status, payload = _quiz_api_call("quiz/wrongbook", method="GET", query=q)
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/unpracticed-bank")
+@login_required
+def api_exam_student_unpracticed_bank():
+    q = dict(request.args.to_dict())
+    uid = str(session.get("user_id") or "").strip()
+    if uid:
+        q["user_id"] = uid
+        q["userId"] = uid
+    status, payload = _quiz_api_call("quiz/student/unpracticed-bank", method="GET", query=q)
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/bank/tracks")
+@login_required
+def api_exam_student_tracks():
+    status, payload = _quiz_api_call("quiz/bank/tracks", method="GET", query=request.args.to_dict())
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/assignments")
+@login_required
+def api_exam_student_assignments_list():
+    paths = [
+        "quiz/student/assignments",
+        "quiz/me/assignments",
+        "quiz/student/exams",
+    ]
+    st, pl, tried = _quiz_try_paths(paths, method="GET", query=request.args.to_dict())
+    upstream_http_ok = 200 <= int(st) < 300 and isinstance(pl, dict)
+    raw_list: list[dict[str, Any]] = []
+    if upstream_http_ok:
+        root = _unwrap_quiz_api_success_data(pl)
+        raw_list = _extract_assignments_from_quiz_root(root)
+    normalized: list[dict[str, Any]] = []
+    for x in raw_list:
+        if not isinstance(x, dict):
+            continue
+        row = _normalize_student_assignment_row(x)
+        if row["id"]:
+            normalized.append(row)
+    aids = [str(r.get("id") or "").strip() for r in normalized if str(r.get("id") or "").strip()]
+    due_map: dict[str, Optional[datetime]] = {}
+    if aids:
+        try:
+            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids)).all():
+                aid_k = str(ar.assignment_id or "").strip()
+                if aid_k:
+                    due_map[aid_k] = getattr(ar, "due_at", None)
+        except Exception:
+            due_map = {}
+    for r in normalized:
+        aid_k = str(r.get("id") or "").strip()
+        dt = due_map.get(aid_k)
+        if dt:
+            r["due_at"] = dt.isoformat(timespec="seconds")
+    # 仅当上游请求未成功时使用本地镜像兜底。若上游已 200（即使列表为空），不得展示孤立的本地 assignment，
+    # 否则会列出上游已不可用/或过期的 assignment_id，学生点击开考会一直等待或失败。
+    if not normalized and not upstream_http_ok:
+        try:
+            local_rows = (
+                ExamCenterAssignment.query.filter(
+                    or_(
+                        ExamCenterAssignment.status.is_(None),
+                        ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
+                    )
+                )
+                .order_by(ExamCenterAssignment.created_at.desc())
+                .limit(200)
+                .all()
+            )
+            for r in local_rows:
+                aid = str(r.assignment_id or "").strip()
+                if not aid:
+                    continue
+                nm = str(r.title or aid).strip() or aid
+                diff_l = (getattr(r, "difficulty", None) or "").strip().lower()
+                due_loc = getattr(r, "due_at", None)
+                normalized.append(
+                    {
+                        "id": aid,
+                        "name": nm,
+                        "label": nm,
+                        **({"difficulty": diff_l} if diff_l in ("easy", "medium", "hard") else {}),
+                        **(
+                            {"due_at": due_loc.isoformat(timespec="seconds")}
+                            if due_loc
+                            else {}
+                        ),
+                    }
+                )
+        except Exception:
+            pass
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（含本地 assignment 兜底）" if normalized else "ok（无可用考试任务）",
+            "data": {"assignments": normalized},
+            "trace_id": uuid.uuid4().hex,
+            "request": {"upstreamTried": tried},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/student/history")
+@login_required
+def api_exam_student_history():
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+    try:
+        lim = int(str(request.args.get("limit") or "100"))
+    except (TypeError, ValueError):
+        lim = 100
+    lim = max(1, min(200, lim))
+    try:
+        offset = int(str(request.args.get("offset") or "0"))
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+    pass_score = _exam_pass_score()
+    base_q = ExamCenterActivity.query.filter_by(user_id=uid)
+    total = base_q.count()
+    rows = (
+        base_q.order_by(ExamCenterActivity.created_at.desc())
+        .offset(offset)
+        .limit(lim)
+        .all()
+    )
+    ids = [str(r.id) for r in rows if getattr(r, "id", None)]
+    det_map: dict[str, ExamCenterActivityDetail] = {}
+    if ids:
+        ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+        det_map = {str(d.activity_id): d for d in ds}
+    records: list[dict[str, Any]] = []
+    for a in rows:
+        d = det_map.get(str(a.id))
+        mode_l = (a.mode or "").strip().lower()
+        mode_label = "练习" if mode_l == "practice" else ("考试" if mode_l == "exam" else (a.mode or "-"))
+        tgt = (a.assignment_label or a.set_id or a.attempt_id or "-") or "-"
+        records.append(
+            {
+                "id": a.id,
+                "created_at": a.created_at.isoformat() if a.created_at else "",
+                "mode": a.mode,
+                "mode_label": mode_label,
+                "target_label": str(tgt),
+                "result": (a.result_summary or "-")[:500],
+                "score": d.score if d else None,
+                "total_score": d.total_score if d else None,
+                "correct_count": d.correct_count if d else None,
+                "wrong_count": d.wrong_count if d else None,
+                "pass_score": pass_score,
+                "passed": (d.score is not None and float(d.score) >= pass_score) if d and d.score is not None else None,
+                "weakness": d.weakness if d else None,
+                "recommendation": d.recommendation if d else None,
+            }
+        )
+    return jsonify({"code": 0, "message": "ok", "data": {"records": records}, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.post("/api/exam-center/student/exams/start")
+@login_required
+def api_exam_student_start_exam():
+    data = _json_payload()
+    assignment_id = (data.pop("assignment_id", "") or "").strip()
+    if not assignment_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    status, payload = _quiz_api_call(
+        f"quiz/exams/{assignment_id}/start",
+        method="POST",
+        payload=data,
+    )
+    return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/student/exams/submit")
+@login_required
+def api_exam_student_submit_exam():
+    body = _json_payload()
+    attempt_id = (body.pop("attempt_id", "") or "").strip()
+    if not attempt_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    body = _normalize_exam_submit_upstream_body(body, attempt_id)
+    status, payload = _quiz_api_call(
+        f"quiz/exams/{attempt_id}/submit",
+        method="POST",
+        payload=body,
+    )
+    if 200 <= int(status) < 300 and isinstance(payload, dict):
+        up_raw = payload.get("data")
+        up_root = up_raw if isinstance(up_raw, dict) else {}
+        merged = _merge_upstream_snapshot_with_submitted_answers(up_root, body)
+        if isinstance(up_raw, dict) and not _exam_activity_upstream_root_ok(up_raw):
+            merged["aiword_upstream_business_uncertain"] = True
+        mx = _extract_result_metrics(merged)
+        summ = _exam_activity_history_result_text(
+            "exam",
+            mx,
+            merged.get("message") or payload.get("message"),
+        )
+        a_id = str(body.get("assignment_id") or "").strip() or None
+        lab = str(body.get("assignment_label") or "").strip() or None
+        _log_student_exam_center_activity(
+            mode="exam",
+            exam_track=str(body.get("exam_track") or "").strip() or None,
+            set_id=str(body.get("set_id") or "").strip() or None,
+            assignment_id=a_id,
+            assignment_label=lab,
+            attempt_id=attempt_id or None,
+            upstream_http_status=int(status),
+            upstream_trace_id=str(payload.get("trace_id") or "").strip() or None,
+            result_summary=summ,
+            upstream_result_payload=merged,
+        )
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/activity/<activity_id>")
+@_page13_or_login_required
+def api_exam_activity_detail(activity_id: str):
+    aid = (activity_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 activity_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    row = ExamCenterActivity.query.filter_by(id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    # 学生仅可看自己的记录；老师/统计（page13 通过）可看全部
+    if not session.get("page13_authenticated"):
+        uid = str(session.get("user_id") or "").strip()
+        if not uid or uid != str(row.user_id or ""):
+            return jsonify({"code": "FORBIDDEN", "message": "无权查看该记录", "data": None, "trace_id": uuid.uuid4().hex}), 403
+    det = ExamCenterActivityDetail.query.filter_by(activity_id=aid).first()
+    pass_score = _exam_pass_score()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "activity": {
+                    "id": row.id,
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                    "user_id": row.user_id,
+                    "username": row.username,
+                    "display_name": row.display_name,
+                    "mode": row.mode,
+                    "exam_track": row.exam_track,
+                    "set_id": row.set_id,
+                    "assignment_id": row.assignment_id,
+                    "assignment_label": row.assignment_label,
+                    "attempt_id": row.attempt_id,
+                    "result_summary": row.result_summary,
+                },
+                "detail": {
+                    "score": det.score if det else None,
+                    "total_score": det.total_score if det else None,
+                    "correct_count": det.correct_count if det else None,
+                    "wrong_count": det.wrong_count if det else None,
+                    "pass_score": pass_score,
+                    "passed": (det.score is not None and float(det.score) >= pass_score) if det and det.score is not None else None,
+                    "weakness": det.weakness if det else None,
+                    "recommendation": det.recommendation if det else None,
+                    "upstream_payload": det.upstream_payload if det else None,
+                },
+                # attempt_items 改为异步拉取：避免详情接口阻塞导致弹窗长时间“加载中…”
+                "attempt_items": None,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/activity/<activity_id>/attempt-items")
+@_page13_or_login_required
+def api_exam_activity_attempt_items(activity_id: str):
+    """异步拉取答题明细：前端弹窗先展示基础信息，再调用本接口补全题目对错/答案等。"""
+    aid = (activity_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 activity_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    row = ExamCenterActivity.query.filter_by(id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    # 学生仅可看自己的记录；老师/统计可看全部
+    if not session.get("page13_authenticated"):
+        uid = str(session.get("user_id") or "").strip()
+        if not uid or uid != str(row.user_id or ""):
+            return jsonify({"code": "FORBIDDEN", "message": "无权查看该记录", "data": None, "trace_id": uuid.uuid4().hex}), 403
+    att_id = str(row.attempt_id or "").strip()
+    if not att_id:
+        return jsonify({"code": 0, "message": "ok（无 attempt_id）", "data": {"items": []}, "trace_id": uuid.uuid4().hex}), 200
+
+    det_snap = ExamCenterActivityDetail.query.filter_by(activity_id=aid).first()
+    st, pl = _quiz_api_call(
+        f"quiz/attempts/{att_id}/answers",
+        method="GET",
+        query=request.args.to_dict(),
+        timeout_seconds=_quiz_attempt_answers_quick_timeout_seconds(),
+    )
+    if 200 <= int(st) < 300 and isinstance(pl, dict):
+        root = pl.get("data") if isinstance(pl.get("data"), dict) else None
+        if isinstance(root, dict) and isinstance(root.get("data"), dict):
+            root = root.get("data")
+        items = root.get("items") if isinstance(root, dict) else None
+        if not isinstance(items, list):
+            items = []
+        return jsonify({"code": 0, "message": "ok", "data": {"items": items}, "trace_id": uuid.uuid4().hex}), 200
+
+    fb = _items_from_activity_detail_snapshot(det_snap)
+    if fb:
+        return jsonify(
+            {
+                "code": 0,
+                "message": "ok（上游明细不可用，已降级为本地提交快照）",
+                "data": {"items": fb},
+                "trace_id": uuid.uuid4().hex,
+                "request": {"url": "", "method": "GET", "upstreamPath": f"quiz/attempts/{att_id}/answers → snapshot"},
+            }
+        ), 200
+    return jsonify({"code": "UPSTREAM_ERROR", "message": "上游明细不可用", "data": pl, "trace_id": uuid.uuid4().hex}), 502
+
+
+@bp.get("/api/exam-center/stats/mode")
+@page13_access_required
+def api_exam_stats_mode():
+    """按考试/练习维度的统计（本地聚合），用于第三块看板。"""
+    mode = str(request.args.get("mode") or "").strip().lower()
+    if mode not in {"exam", "practice"}:
+        return jsonify({"code": "BAD_REQUEST", "message": "mode 仅支持 exam/practice", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    pass_score = _exam_pass_score()
+    rows = ExamCenterActivity.query.filter_by(mode=mode).order_by(ExamCenterActivity.created_at.desc()).all()
+    ids = [str(r.id) for r in rows if getattr(r, "id", None)]
+    det_map: dict[str, ExamCenterActivityDetail] = {}
+    if ids:
+        ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+        det_map = {str(d.activity_id): d for d in ds}
+    pass_count = 0
+    fail_count = 0
+    graded = 0
+    for r in rows:
+        d = det_map.get(str(r.id))
+        if not d or d.score is None:
+            continue
+        graded += 1
+        if float(d.score) >= pass_score:
+            pass_count += 1
+        else:
+            fail_count += 1
+    pass_rate = round((pass_count * 100.0 / graded), 2) if graded > 0 else None
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "mode": mode,
+                "total_count": len(rows),
+                "graded_count": graded,
+                "pass_score": pass_score,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "pass_rate_percent": pass_rate,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.delete("/api/exam-center/activity/<activity_id>")
+@page13_access_required
+def api_exam_activity_delete(activity_id: str):
+    """老师端删除学生练习/考试记录（同时删除明细快照）。"""
+    aid = (activity_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 activity_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    row = ExamCenterActivity.query.filter_by(id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    try:
+        ExamCenterActivityDetail.query.filter_by(activity_id=aid).delete()
+        ExamCenterActivity.query.filter_by(id=aid).delete()
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": f"删除失败：{e}", "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify({"code": 0, "message": "ok", "data": {"deleted": 1, "activity_id": aid}, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/stats/overview")
+@page13_access_required
+def api_exam_stats_overview():
+    status, payload = _quiz_api_call(
+        "quiz/stats/overview",
+        method="GET",
+        query=request.args.to_dict(),
+        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
+    )
+    try:
+        local = _local_stats_overview_all()
+        if 200 <= int(status) < 300 and isinstance(payload, dict):
+            payload.setdefault("aiword", {})
+            if isinstance(payload.get("aiword"), dict):
+                payload["aiword"]["local_overview"] = local
+            return jsonify(payload), status
+        out = {
+            "code": 0,
+            "message": "ok（本地统计兜底）",
+            "data": local,
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/overview → local"},
+        }
+        return jsonify(out), 200
+    except Exception:
+        if 200 <= int(status) < 300:
+            return jsonify(payload), status
+        return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/stats/student/<student_id>")
+@page13_access_required
+def api_exam_stats_student(student_id: str):
+    status, payload = _quiz_api_call(
+        f"quiz/stats/student/{student_id}",
+        method="GET",
+        query=request.args.to_dict(),
+    )
+    if 200 <= int(status) < 300:
+        return jsonify(payload), status
+    local = _local_stats_for_student(student_id)
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（本地统计兜底）",
+            "data": local,
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/student/{id} → local"},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/stats/students")
+@page13_access_required
+def api_exam_stats_students():
+    """按学生多维统计表格（本地聚合）。供统计看板一次展示全部学生。"""
+    rows = _local_stats_all_students_rows()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "rows": rows,
+                "pass_score": _exam_pass_score(),
+                "count": len(rows),
+            },
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate → exam_center_activities"},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/stats/students-by-mode")
+@bp.get("/api/exam-center/stats/students_by_mode")
+@page13_access_required
+def api_exam_stats_students_by_mode():
+    """按学生 × 考试/练习 分组统计（本地聚合）。"""
+    rows = _local_stats_rows_student_by_mode()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "rows": rows,
+                "pass_score": _exam_pass_score(),
+                "count": len(rows),
+            },
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate student×mode → exam_center_activities"},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/stats/exam/<assignment_id>")
+@page13_access_required
+def api_exam_stats_exam(assignment_id: str):
+    aid = str(assignment_id or "").strip()
+    status, payload = _quiz_api_call(
+        f"quiz/stats/exam/{assignment_id}",
+        method="GET",
+        query=request.args.to_dict(),
+    )
+    if 200 <= int(status) < 300 and isinstance(payload, dict) and aid:
+        try:
+            ar0 = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+            due0 = getattr(ar0, "due_at", None) if ar0 else None
+            if due0:
+                erows = ExamCenterActivity.query.filter_by(assignment_id=aid).all()
+                dc0 = _deadline_completion_from_exam_rows(erows, due0)
+                payload.setdefault("aiword", {})
+                if isinstance(payload.get("aiword"), dict):
+                    payload["aiword"]["deadline_completion"] = dc0
+        except Exception:
+            pass
+        return jsonify(payload), status
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    rows = ExamCenterActivity.query.filter_by(assignment_id=aid).order_by(ExamCenterActivity.created_at.desc()).all()
+    ids = [str(r.id) for r in rows if getattr(r, "id", None)]
+    det_map: dict[str, ExamCenterActivityDetail] = {}
+    if ids:
+        ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
+        det_map = {str(d.activity_id): d for d in ds}
+    pass_score = _exam_pass_score()
+    pass_count = 0
+    fail_count = 0
+    submitted = 0
+    by_student: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        uid = str(r.user_id or "").strip()
+        d = det_map.get(str(r.id))
+        submitted += 1
+        if d and d.score is not None:
+            if float(d.score) >= pass_score:
+                pass_count += 1
+            else:
+                fail_count += 1
+        if uid and uid not in by_student:
+            by_student[uid] = _local_stats_for_student(uid)
+    graded = pass_count + fail_count
+    pass_rate = round((pass_count * 100.0 / graded), 2) if graded > 0 else None
+    assign_row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    due_end = getattr(assign_row, "due_at", None) if assign_row else None
+    deadline_completion = _deadline_completion_from_exam_rows(rows, due_end)
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（本地统计兜底）",
+            "data": {
+                "assignment_id": aid,
+                "submitted_count": submitted,
+                "graded_count": graded,
+                "pass_score": pass_score,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "pass_rate_percent": pass_rate,
+                "students": list(by_student.values()),
+                "deadline_completion": deadline_completion,
+            },
+            "trace_id": uuid.uuid4().hex,
+            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/exam/{id} → local"},
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/health")
+def api_exam_center_health():
+    """
+    用于排查上游连通性：优先请求 /health；若上游没有该路径，会返回上游错误信息。
+    """
+    # 不要用 3s 硬超时：本机/Windows/反代首次握手或 API 冷启动时容易误判超时；
+    # 与 QUIZ_API_TIMEOUT_SECONDS 对齐，但健康检查仍限制上限，避免按钮长时间无反馈。
+    cfg = _quiz_api_timeout_seconds()
+    health_timeout = min(15, max(8, cfg))
+    status, payload = _quiz_api_call(
+        "health",
+        method="GET",
+        query=request.args.to_dict(),
+        timeout_seconds=health_timeout,
+    )
+    return jsonify(payload), status
 
 
 # ---------- 用户管理 API（页面1管理账号） ----------

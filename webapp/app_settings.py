@@ -24,6 +24,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("DINGTALK_AGENT_ID", "钉钉工作通知 AgentId", False),
     ("PAGE13_ACCESS_PASSWORD", "页面1/3 访问密码", True),
     ("INTEGRATION_SECRET", "开放接口校验密钥（INTEGRATION_SECRET）", True),
+    ("QUIZ_API_BASE_URL", "考试训练中心后端地址（如 http://127.0.0.1:8000）", False),
+    ("QUIZ_API_BEARER_TOKEN", "考试训练中心后端 Bearer Token（可选）", True),
+    ("QUIZ_API_SECRET", "考试训练中心后端集成密钥（X-Integration-Secret，可选）", True),
+    ("QUIZ_API_TIMEOUT_SECONDS", "考试训练中心后端超时时间（秒，默认 20）", False),
+    ("EXAM_PASS_SCORE", "考试及格线（分，默认 80；用于统计端及格率）", False),
     ("UPLOAD_FOLDER", "上传文件目录（绝对路径，留空用默认 uploads）", False),
     ("OUTPUT_FOLDER", "文档生成输出目录（绝对路径，留空用默认 outputs）", False),
     (
@@ -59,6 +64,10 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "DINGTALK_APP_KEY": ("DINGTALK_APP_KEY", "dingtalk_app_key"),
     "DINGTALK_APP_SECRET": ("DINGTALK_APP_SECRET", "dingtalk_app_secret"),
     "DINGTALK_AGENT_ID": ("DINGTALK_AGENT_ID", "dingtalk_agent_id"),
+    "QUIZ_API_BASE_URL": ("QUIZ_API_BASE_URL", "quiz_api_base_url", "quizApiBaseUrl"),
+    "QUIZ_API_BEARER_TOKEN": ("QUIZ_API_BEARER_TOKEN", "quiz_api_bearer_token", "quizApiBearerToken"),
+    "QUIZ_API_SECRET": ("QUIZ_API_SECRET", "quiz_api_secret", "quizApiSecret"),
+    "QUIZ_API_TIMEOUT_SECONDS": ("QUIZ_API_TIMEOUT_SECONDS", "quiz_api_timeout_seconds", "quizApiTimeoutSeconds"),
 }
 
 # 每个 config.json 绝对路径 -> (mtime_ns, data)
@@ -76,6 +85,10 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "INTEGRATION_SECRET": ("INTEGRATION_SECRET",),
     "BASE_URL": ("BASE_URL", "base_url"),
     "SECRET_KEY": ("SECRET_KEY", "SECRET_KEY_FLASK"),
+    "QUIZ_API_BASE_URL": ("QUIZ_API_BASE_URL",),
+    "QUIZ_API_BEARER_TOKEN": ("QUIZ_API_BEARER_TOKEN",),
+    "QUIZ_API_SECRET": ("QUIZ_API_SECRET",),
+    "QUIZ_API_TIMEOUT_SECONDS": ("QUIZ_API_TIMEOUT_SECONDS",),
 }
 
 # 这些键在 os.environ 里按「名称大写相等」再扫一遍（解决 Windows 等环境下变量名不一致）
@@ -87,6 +100,10 @@ _ENV_CASEFOLD_KEYS = frozenset(
         "INTEGRATION_SECRET",
         "BASE_URL",
         "SECRET_KEY",
+        "QUIZ_API_BASE_URL",
+        "QUIZ_API_BEARER_TOKEN",
+        "QUIZ_API_SECRET",
+        "QUIZ_API_TIMEOUT_SECONDS",
     }
 )
 

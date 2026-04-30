@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}页面1 - 上传{% endblock %}
 {% block content %}
-<div class="hero-bar">
-    <h1>页面1 · 模板上传与任务管理</h1>
-    <p>批量录入任务信息，支持上传模板文件或输入文档链接，自动发送钉钉通知。</p>
+<div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
+    <div>
+        <h1>页面1 · 模板上传与任务管理</h1>
+        <p>批量录入任务信息，支持上传模板文件或输入文档链接，自动发送钉钉通知。</p>
+    </div>
+    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
 </div>
 
 <div class="card mb-4">

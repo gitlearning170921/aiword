@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}页面3 - 统计{% endblock %}
 {% block content %}
-<div class="hero-bar">
-    <h1>页面3 · 统计面板</h1>
-    <p>实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+<div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
+    <div>
+        <h1>页面3 · 统计面板</h1>
+        <p>实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+    </div>
+    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='analytics') }}">进入考试训练中心</a>
 </div>
 
 <div class="row g-4 mb-4">
