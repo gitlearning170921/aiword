@@ -13,22 +13,29 @@
 {% if not hide_main_nav and request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4 shadow-lg">
     <div class="container-fluid">
-        <a class="navbar-brand fw-bold" href="{{ url_for('pages.upload_page') }}">AI Word 工具</a>
+        <a class="navbar-brand fw-bold"
+           href="{% if session.get('page13_authenticated') %}{{ url_for('pages.upload_page') }}{% elif session.get('user_id') %}{{ url_for('pages.generate_page') }}{% else %}{{ url_for('pages.login_page') }}{% endif %}">AI Word 工具</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
             <span class="navbar-toggler-icon"></span>
         </button>
         <div class="collapse navbar-collapse" id="navbarNav">
             {% if not hide_main_nav and request.endpoint != 'pages.generate_page' and request.endpoint != 'pages.login_page' %}
             <ul class="navbar-nav me-auto gap-2">
+                {% if session.get('page13_authenticated') %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="{{ url_for('pages.upload_page') }}">页面1 · 上传</a>
                 </li>
+                {% endif %}
+                {% if session.get('user_id') %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/generate' %}active{% endif %}" href="{{ url_for('pages.generate_page') }}">页面2 · 生成</a>
                 </li>
+                {% endif %}
+                {% if session.get('page13_authenticated') %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" href="{{ url_for('pages.dashboard_page') }}">页面3 · 统计</a>
                 </li>
+                {% endif %}
             </ul>
             {% endif %}
         </div>

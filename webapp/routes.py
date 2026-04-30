@@ -52,6 +52,11 @@ from .models import (
     ExamCenterActivity,
     ExamCenterAssignment,
     ExamCenterActivityDetail,
+    ExamCenterAssignmentExtra,
+    ExamCenterAssignmentAudience,
+    ExamAttempt,
+    ExamAttemptItem,
+    ExamGradingJob,
 )
 from . import dingtalk_service
 
@@ -428,6 +433,110 @@ def _norm_answer_plain(v: Any) -> str:
     return str(v).strip()
 
 
+def _activity_item_options(row: dict[str, Any]) -> list[Any]:
+    raw = row.get("options") or row.get("choices")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            p = json.loads(raw)
+            return list(p) if isinstance(p, list) else []
+        except Exception:
+            return []
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _letter_choice_index_activity(raw: Any) -> int | None:
+    if raw is None or isinstance(raw, (dict, list)):
+        return None
+    s = str(raw).strip().upper()
+    if len(s) != 1 or s < "A" or s > "Z":
+        return None
+    return ord(s) - ord("A")
+
+
+def _resolve_letter_to_option_aiword(value: Any, options: list[Any]) -> Any:
+    if not options:
+        return value
+    ix = _letter_choice_index_activity(value)
+    if ix is None or ix >= len(options):
+        return value
+    return options[ix]
+
+
+def _true_false_to_bool_aiword(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return float(v) != 0.0
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("false", "0", "no", "n", "f", "wrong", "错误", "错", "否", "不正确", "不对"):
+            return False
+        if t in ("true", "1", "yes", "y", "t", "正确", "对", "是", "√"):
+            return True
+        return False
+    return False
+
+
+def _tf_maybe_literal_aiword(v: Any) -> bool:
+    if isinstance(v, bool):
+        return True
+    if not isinstance(v, str):
+        return False
+    s = v.strip()
+    sl = s.lower()
+    if sl in ("true", "false", "1", "0"):
+        return True
+    return s in ("正确", "错误", "对", "错", "是", "否")
+
+
+def _norm_single_choice_key_aiword(value: Any, options: list[Any]) -> str:
+    v = _resolve_letter_to_option_aiword(value, options)
+    if v is None:
+        return ""
+    return str(v).strip().lower()
+
+
+def _norm_multiple_choice_set_aiword(raw: Any, options: list[Any]) -> set[str]:
+    if raw is None:
+        return set()
+    items = raw if isinstance(raw, list) else [raw]
+    out: set[str] = set()
+    for x in items:
+        v = _resolve_letter_to_option_aiword(x, options)
+        k = str(v).strip().lower() if v is not None else ""
+        if k:
+            out.add(k)
+    return out
+
+
+def _question_type_from_activity_row(row: dict[str, Any]) -> str:
+    return str(row.get("question_type") or row.get("type") or "").strip().lower()
+
+
+def _objective_answers_equivalent_aiword(row: dict[str, Any], ua: Any, ca: Any) -> bool:
+    """与 aicheckword quiz 判分维度对齐：选项字母先解析为选项原文，判断题再按真假比较。"""
+    opts = _activity_item_options(row)
+    qt = _question_type_from_activity_row(row)
+    if qt == "true_false":
+        aa = _resolve_letter_to_option_aiword(ca, opts)
+        uu = _resolve_letter_to_option_aiword(ua, opts)
+        return _true_false_to_bool_aiword(aa) == _true_false_to_bool_aiword(uu)
+    if qt == "single_choice":
+        return _norm_single_choice_key_aiword(ua, opts) == _norm_single_choice_key_aiword(ca, opts)
+    if qt == "multiple_choice":
+        s_ca = _norm_multiple_choice_set_aiword(ca, opts)
+        s_ua = _norm_multiple_choice_set_aiword(ua, opts)
+        return bool(s_ca) and s_ca == s_ua
+    if opts:
+        if _norm_single_choice_key_aiword(ua, opts) == _norm_single_choice_key_aiword(ca, opts):
+            return True
+        u_r = _resolve_letter_to_option_aiword(ua, opts)
+        c_r = _resolve_letter_to_option_aiword(ca, opts)
+        if isinstance(c_r, bool) or _tf_maybe_literal_aiword(c_r) or _tf_maybe_literal_aiword(u_r):
+            return _true_false_to_bool_aiword(c_r) == _true_false_to_bool_aiword(u_r)
+    return _norm_answer_plain(ua) == _norm_answer_plain(ca)
+
+
 def _exam_activity_history_result_text(mode: str, metrics: dict[str, Any], raw_msg: Any) -> str:
     """列表「结果」列：用分数推导通过/不通过，避免出现英文 ok。"""
     try:
@@ -552,7 +661,7 @@ def _merge_upstream_snapshot_with_submitted_answers(up_root: dict[str, Any], bod
         if ic_any in (0, 1, True, False):
             row["is_correct"] = bool(ic_any)
         elif needs_compare:
-            row["is_correct"] = _norm_answer_plain(ua_v) == _norm_answer_plain(ca_v)
+            row["is_correct"] = _objective_answers_equivalent_aiword(row, ua_v, ca_v)
         else:
             row["is_correct"] = None
         return row
@@ -2055,7 +2164,14 @@ def favicon():
 
 @bp.route("/")
 def index():
-    return redirect(url_for("pages.upload_page"))
+    # 两套用户体系：
+    # - page13（管理员/老师/统计端）：进入页面1/3
+    # - user_id（学生端/页面2）：进入页面2
+    if session.get("page13_authenticated"):
+        return redirect(url_for("pages.upload_page"))
+    if session.get("user_id"):
+        return redirect(url_for("pages.generate_page"))
+    return redirect(url_for("pages.login_page"))
 
 
 @bp.route("/upload")
@@ -2098,23 +2214,29 @@ def exam_center_page():
     if role not in {"teacher", "student", "analytics"}:
         role = "student"
 
+    # 两套体系可叠加：登录(user_id)→学生端；page13→老师端/统计端
+    allowed_roles = []
+    if session.get("user_id"):
+        allowed_roles.append("student")
+    if session.get("page13_authenticated"):
+        allowed_roles.extend(["teacher", "analytics"])
+
     if role in {"teacher", "analytics"}:
         if _page13_password_configured() and not session.get("page13_authenticated"):
             next_url = request.full_path or request.path or "/upload"
             if next_url.endswith("?"):
                 next_url = next_url[:-1]
             return render_template("page13_gate.html", next_url=next_url, gate_page=True)
-        allowed_roles = ["teacher", "analytics"]
     else:
         if not session.get("user_id"):
             return redirect(url_for("pages.login_page"))
-        allowed_roles = ["student"]
 
     return render_template(
         "exam_center.html",
         exam_role=role,
         exam_allowed_roles=allowed_roles,
         exam_display_user=_exam_center_display_user(),
+        hide_main_nav=(role == "student"),
     )
 
 
@@ -3166,26 +3288,14 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
 @bp.get("/api/exam-center/stats/options")
 @page13_access_required
 def api_exam_stats_options():
-    st, pl = _quiz_api_call(
-        "quiz/stats/options",
-        method="GET",
-        query=request.args.to_dict(),
-        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
-    )
-    if 200 <= int(st) < 300 and isinstance(pl, dict) and pl.get("code") == 0:
-        inner = pl.get("data")
-        if isinstance(inner, dict) and isinstance(inner.get("students"), list) and isinstance(
-            inner.get("assignments"), list
-        ):
-            return jsonify(pl), int(st)
     local = _exam_stats_options_local()
     return jsonify(
         {
             "code": 0,
-            "message": "ok（本地聚合 exam_center_activities；上游 quiz/stats/options 不可用或结构不匹配）",
+            "message": "ok（本地统计）",
             "data": local,
             "trace_id": uuid.uuid4().hex,
-            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/options → local"},
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate"},
         }
     ), 200
 
@@ -3197,30 +3307,6 @@ def api_exam_stats_recent_activity():
         lim = int(str(request.args.get("limit") or "80"))
     except (TypeError, ValueError):
         lim = 80
-    q = dict(request.args.items())
-    st, pl = _quiz_api_call(
-        "quiz/stats/recent-activity",
-        method="GET",
-        query=q,
-        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
-    )
-    if 200 <= int(st) < 300 and isinstance(pl, dict) and pl.get("code") == 0:
-        inner = pl.get("data")
-        if isinstance(inner, dict) and isinstance(inner.get("records"), list):
-            # 额外兼容：即使上游已过滤，也允许在代理层再做一次本地过滤（避免结构差异）
-            try:
-                want_uid = str(request.args.get("student_id") or request.args.get("user_id") or "").strip()
-                want_aid = str(request.args.get("assignment_id") or "").strip()
-                if want_uid or want_aid:
-                    recs0 = [x for x in inner.get("records") if isinstance(x, dict)]
-                    if want_uid:
-                        recs0 = [x for x in recs0 if str(x.get("user_id") or x.get("student_id") or "").strip() == want_uid]
-                    if want_aid:
-                        recs0 = [x for x in recs0 if str(x.get("assignment_id") or "").strip() == want_aid]
-                    inner["records"] = recs0
-            except Exception:
-                pass
-            return jsonify(pl), int(st)
     recs = _exam_stats_recent_activity_local(lim)
     # 本地筛选：仅影响“记录列表”，不影响看板
     want_uid = str(request.args.get("student_id") or request.args.get("user_id") or "").strip()
@@ -3232,10 +3318,10 @@ def api_exam_stats_recent_activity():
     return jsonify(
         {
             "code": 0,
-            "message": "ok（本地 exam_center_activities；上游 quiz/stats/recent-activity 不可用或结构不匹配）",
+            "message": "ok（本地统计）",
             "data": {"records": recs},
             "trace_id": uuid.uuid4().hex,
-            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/recent-activity → local"},
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate"},
         }
     ), 200
 
@@ -3439,7 +3525,72 @@ def api_exam_teacher_create_assignment():
     forward = dict(req) if isinstance(req, dict) else {}
     if due_val and "due_at" not in forward and "dueAt" not in forward:
         forward["due_at"] = due_val.isoformat(sep=" ", timespec="seconds")
-    status, payload = _quiz_api_call("quiz/assignments", method="POST", payload=forward)
+    # 上游（aicheckword）在部分版本中不提供 quiz/assignments 下发接口；
+    # 404/405 时回退为“仅本地下发”（学生端列表已有上游失败→本地镜像兜底）。
+    status, payload, tried = _quiz_try_paths(
+        [
+            "quiz/assignments",  # 某些上游实现
+            "quiz/teacher/assignments",
+            "quiz/exam-center/assignments",
+        ],
+        method="POST",
+        payload=forward,
+        query=None,
+    )
+    if isinstance(payload, dict) and tried:
+        payload.setdefault("request", {})
+        if isinstance(payload.get("request"), dict):
+            payload["request"]["upstreamTried"] = tried
+
+    if int(status) in (404, 405) or (
+        isinstance(payload, dict)
+        and payload.get("code") in ("QUIZ_API_UPSTREAM_ERROR", "QUIZ_API_NOT_CONFIGURED")
+        and int(status) in (404, 405, 503)
+    ):
+        # 本地下发：生成 assignment_id 并写入镜像表
+        aid_local = "loc-" + uuid.uuid4().hex[:24]
+        title_local = str(req.get("title") or req.get("name") or req.get("label") or "").strip() or None
+        set_id_local = str(req.get("set_id") or req.get("setId") or "").strip() or None
+        exam_track_local = str(req.get("exam_track") or req.get("examTrack") or "").strip() or None
+        diff_req = str(req.get("difficulty") or req.get("difficultyLevel") or "").strip().lower()
+        if diff_req not in ("easy", "medium", "hard"):
+            diff_req = ""
+        row = ExamCenterAssignment(assignment_id=aid_local)
+        row.title = title_local
+        row.set_id = set_id_local
+        row.exam_track = exam_track_local
+        row.difficulty = diff_req or None
+        row.status = "published"
+        row.created_by = (session.get("display_name") or session.get("username") or "").strip() or None
+        if due_update:
+            row.due_at = due_val
+        db.session.add(row)
+        try:
+            db.session.commit()
+            return (
+                jsonify(
+                    {
+                        "code": 0,
+                        "message": "ok（上游不支持下发接口，已改为仅本地下发）",
+                        "data": {
+                            "assignment_id": row.assignment_id,
+                            "title": row.title,
+                            "set_id": row.set_id,
+                            "exam_track": row.exam_track,
+                            "difficulty": row.difficulty,
+                            "status": row.status,
+                            "due_at": row.due_at.isoformat(timespec="seconds") if getattr(row, "due_at", None) else None,
+                            "aiword_local_only": True,
+                        },
+                        "trace_id": uuid.uuid4().hex,
+                    }
+                ),
+                200,
+            )
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+
     if 200 <= int(status) < 300 and isinstance(payload, dict):
         aid, title, set_id = _extract_assignment_from_quiz_payload(payload)
         if aid:
@@ -3478,6 +3629,96 @@ def api_exam_teacher_create_assignment():
                         "exam_track": row.exam_track,
                     }
     return jsonify(payload), status
+
+
+@bp.post("/api/exam-center/teacher/assignments/issue")
+@page13_access_required
+def api_exam_teacher_issue_assignments_modal():
+    """老师端弹窗：本地下发考试任务（含受众/截止/目的），学生端仅受众可见。"""
+    req = _json_payload()
+    due_val, due_update = _parse_assignment_due_from_request(req)
+    purpose = str(req.get("purpose") or req.get("exam_purpose") or "").strip() or None
+    exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or None
+
+    aud = req.get("audience_user_ids") or req.get("audienceUserIds") or req.get("user_ids") or []
+    audience_ids = [str(x).strip() for x in aud] if isinstance(aud, list) else []
+    audience_ids = [x for x in audience_ids if x]
+
+    items = req.get("items")
+    set_ids: list[str] = []
+    title_by_set: dict[str, str] = {}
+    if isinstance(items, list) and items:
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sid = str(it.get("set_id") or it.get("setId") or "").strip()
+            if not sid:
+                continue
+            set_ids.append(sid)
+            ttl = str(it.get("title") or it.get("name") or "").strip()
+            if ttl:
+                title_by_set[sid] = ttl
+    else:
+        sid0 = str(req.get("set_id") or req.get("setId") or "").strip()
+        if sid0:
+            set_ids = [sid0]
+            ttl0 = str(req.get("title") or req.get("name") or "").strip()
+            if ttl0:
+                title_by_set[sid0] = ttl0
+
+    if not set_ids:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id/items", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    if not audience_ids:
+        return jsonify({"code": "BAD_REQUEST", "message": "请选择考试对象（至少1人）", "data": None, "trace_id": uuid.uuid4().hex}), 400
+
+    created: list[dict[str, Any]] = []
+    try:
+        for sid in set_ids:
+            aid_local = "loc-" + uuid.uuid4().hex[:24]
+            title = (title_by_set.get(sid) or "").strip()
+            if title:
+                nm = title + " 考试任务"
+            else:
+                nm = f"{sid} 考试任务"
+            row = ExamCenterAssignment(assignment_id=aid_local)
+            row.title = nm
+            row.set_id = sid
+            row.exam_track = exam_track
+            row.status = "published"
+            row.created_by = (session.get("display_name") or session.get("username") or "").strip() or None
+            if due_update:
+                row.due_at = due_val
+            db.session.add(row)
+            db.session.flush()
+
+            if purpose:
+                ex = ExamCenterAssignmentExtra.query.filter_by(assignment_id=aid_local).first()
+                if not ex:
+                    ex = ExamCenterAssignmentExtra(assignment_id=aid_local)
+                ex.purpose = purpose
+                db.session.add(ex)
+
+            for uid in audience_ids:
+                db.session.add(ExamCenterAssignmentAudience(assignment_id=aid_local, user_id=uid))
+
+            created.append(
+                {
+                    "assignment_id": aid_local,
+                    "title": nm,
+                    "set_id": sid,
+                    "exam_track": exam_track,
+                    "due_at": due_val.isoformat(timespec="seconds") if (due_update and due_val) else None,
+                    "purpose": purpose,
+                    "audience_user_ids": audience_ids,
+                    "aiword_local_only": True,
+                }
+            )
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+
+    return jsonify({"code": 0, "message": "ok", "data": {"created": created}, "trace_id": uuid.uuid4().hex}), 200
 
 
 def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
@@ -3824,9 +4065,34 @@ def api_exam_student_assignments_list():
                 .limit(200)
                 .all()
             )
+            uid_cur = str(session.get("user_id") or "").strip()
+            allow_ids: set[str] = set()
+            any_audience_ids: set[str] = set()
+            try:
+                # 若任务配置了受众，则仅允许受众可见；未配置受众的历史任务默认全员可见。
+                aids_all = [str(r.assignment_id or "").strip() for r in local_rows if str(r.assignment_id or "").strip()]
+                if aids_all:
+                    any_audience_ids = {
+                        str(x.assignment_id)
+                        for x in ExamCenterAssignmentAudience.query.filter(
+                            ExamCenterAssignmentAudience.assignment_id.in_(aids_all)
+                        ).all()
+                    }
+                    if uid_cur:
+                        allow_ids = {
+                            str(x.assignment_id)
+                            for x in ExamCenterAssignmentAudience.query.filter_by(user_id=uid_cur).filter(
+                                ExamCenterAssignmentAudience.assignment_id.in_(aids_all)
+                            ).all()
+                        }
+            except Exception:
+                allow_ids = set()
+                any_audience_ids = set()
             for r in local_rows:
                 aid = str(r.assignment_id or "").strip()
                 if not aid:
+                    continue
+                if any_audience_ids and aid in any_audience_ids and aid not in allow_ids:
                     continue
                 nm = str(r.title or aid).strip() or aid
                 diff_l = (getattr(r, "difficulty", None) or "").strip().lower()
@@ -3917,58 +4183,449 @@ def api_exam_student_history():
 @bp.post("/api/exam-center/student/exams/start")
 @login_required
 def api_exam_student_start_exam():
-    data = _json_payload()
-    assignment_id = (data.pop("assignment_id", "") or "").strip()
-    if not assignment_id:
-        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
-    status, payload = _quiz_api_call(
-        f"quiz/exams/{assignment_id}/start",
-        method="POST",
-        payload=data,
-    )
-    return jsonify(payload), status
+    # 兼容旧前端路径：考试链路已迁移到 aiword 本地，不再调用上游 /quiz/exams/*
+    return api_exam_student_start_exam_local()
 
 
 @bp.post("/api/exam-center/student/exams/submit")
 @login_required
 def api_exam_student_submit_exam():
+    # 兼容旧前端路径：考试链路已迁移到 aiword 本地，不再调用上游 /quiz/exams/*
+    return api_exam_student_submit_exam_local()
+
+
+def _assignment_visible_to_user(*, assignment_id: str, user_id: str) -> bool:
+    """若该任务配置了受众，则仅受众可见；未配置受众的历史任务默认可见。"""
+    aid = (assignment_id or "").strip()
+    uid = (user_id or "").strip()
+    if not aid or not uid:
+        return False
+    try:
+        any_rows = ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).limit(1).all()
+        if not any_rows:
+            return True
+        ok = (
+            ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid, user_id=uid)
+            .limit(1)
+            .all()
+        )
+        return bool(ok)
+    except Exception:
+        # 安全兜底：数据库异常时不扩大可见范围
+        return False
+
+
+def _attempt_items_total_score_100(rows: list[ExamAttemptItem]) -> tuple[float, int, int]:
+    """总分按 0~100 百分制：每题满分 1，客观题 0/1，主观题使用 0~1 score。"""
+    if not rows:
+        return 0.0, 0, 0
+    total = len(rows)
+    score_sum = 0.0
+    corr = wrong = 0
+    for it in rows:
+        if getattr(it, "subjective_needed", False):
+            sc = getattr(it, "subjective_score", None)
+            if sc is None:
+                continue
+            try:
+                score_sum += max(0.0, min(1.0, float(sc)))
+            except Exception:
+                pass
+        else:
+            ic = getattr(it, "is_correct", None)
+            if ic is True:
+                score_sum += 1.0
+                corr += 1
+            elif ic is False:
+                wrong += 1
+    pct = (score_sum / float(total)) * 100.0 if total > 0 else 0.0
+    if pct < 0.0:
+        pct = 0.0
+    if pct > 100.0:
+        pct = 100.0
+    return pct, corr, wrong
+
+
+@bp.post("/api/exam-center/student/exams/start-local")
+@login_required
+def api_exam_student_start_exam_local():
     body = _json_payload()
-    attempt_id = (body.pop("attempt_id", "") or "").strip()
+    assignment_id = (body.get("assignment_id") or body.get("assignmentId") or "").strip()
+    if not assignment_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+    if not _assignment_visible_to_user(assignment_id=assignment_id, user_id=uid):
+        return jsonify({"code": "FORBIDDEN", "message": "无权参加该考试任务", "data": None, "trace_id": uuid.uuid4().hex}), 403
+
+    row = ExamCenterAssignment.query.filter_by(assignment_id=assignment_id).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "考试任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    due_at = getattr(row, "due_at", None)
+    if due_at and now_local() > due_at:
+        return jsonify(
+            {
+                "code": "OVERDUE",
+                "message": "已超过截止完成时间",
+                "data": {"due_at": due_at.isoformat(timespec="seconds")},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 400
+    set_id = str(getattr(row, "set_id", None) or "").strip()
+    if not set_id:
+        return jsonify({"code": "BAD_REQUEST", "message": "任务缺少 set_id，无法开考", "data": None, "trace_id": uuid.uuid4().hex}), 400
+
+    st_set, pl_set = _quiz_api_call(f"quiz/sets/{_urlquote(set_id, safe='')}", method="GET", query={})
+    if not (200 <= int(st_set) < 300) or not isinstance(pl_set, dict):
+        return jsonify(pl_set), st_set
+    up = _unwrap_quiz_api_success_data(pl_set)
+    items = _find_set_item_dicts(up)
+    if not items:
+        return jsonify({"code": "UPSTREAM_EMPTY_SET", "message": "上游套题明细为空", "data": {"set_id": set_id}, "trace_id": uuid.uuid4().hex}), 502
+
+    attempt_id = uuid.uuid4().hex
+    try:
+        att = ExamAttempt(
+            attempt_id=attempt_id,
+            assignment_id=assignment_id,
+            user_id=uid,
+            exam_track=str(getattr(row, "exam_track", None) or "").strip() or None,
+            state="started",
+            started_at=now_local(),
+        )
+        db.session.add(att)
+        out_items: list[dict[str, Any]] = []
+        for ix, it in enumerate(items):
+            if not isinstance(it, dict):
+                continue
+            qid = _question_id_from_set_item(it) or f"q-{ix}"
+            qt = str(it.get("question_type") or it.get("type") or "").strip().lower() or None
+            stem = str(it.get("stem") or it.get("title") or "").strip() or None
+            opts = it.get("options") if isinstance(it.get("options"), list) else None
+            ans = it.get("answer") if "answer" in it else (it.get("correct_answer") if "correct_answer" in it else None)
+            # 案例分析题：不展示选项，作答为文本；标准答案不按单选处理（快照置空，避免上游误带 options/answer）
+            if qt == "case_analysis":
+                opts = None
+                ans = None
+            # 主观题：无标准答案可立即判分（按用户要求）
+            subj = ans is None or (qt is not None and qt not in ("single_choice", "multiple_choice", "true_false"))
+            db.session.add(
+                ExamAttemptItem(
+                    attempt_id=attempt_id,
+                    question_id=str(qid),
+                    question_type=qt,
+                    stem_snapshot=stem,
+                    options_snapshot=opts,
+                    answer_snapshot={"answer": ans} if ans is not None else None,
+                    user_answer=None,
+                    is_correct=None,
+                    score=None,
+                    subjective_needed=bool(subj),
+                )
+            )
+            out_items.append(
+                {"question_id": str(qid), "question_type": qt, "stem": stem or "", "options": opts or []}
+            )
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+
+    return jsonify({"code": 0, "message": "ok", "data": {"attempt_id": attempt_id, "assignment_id": assignment_id, "set_id": set_id, "items": out_items}, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.post("/api/exam-center/student/exams/submit-local")
+@login_required
+def api_exam_student_submit_exam_local():
+    body = _json_payload()
+    attempt_id = str(body.get("attempt_id") or body.get("attemptId") or "").strip()
     if not attempt_id:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
-    body = _normalize_exam_submit_upstream_body(body, attempt_id)
-    status, payload = _quiz_api_call(
-        f"quiz/exams/{attempt_id}/submit",
-        method="POST",
-        payload=body,
-    )
-    if 200 <= int(status) < 300 and isinstance(payload, dict):
-        up_raw = payload.get("data")
-        up_root = up_raw if isinstance(up_raw, dict) else {}
-        merged = _merge_upstream_snapshot_with_submitted_answers(up_root, body)
-        if isinstance(up_raw, dict) and not _exam_activity_upstream_root_ok(up_raw):
-            merged["aiword_upstream_business_uncertain"] = True
-        mx = _extract_result_metrics(merged)
-        summ = _exam_activity_history_result_text(
-            "exam",
-            mx,
-            merged.get("message") or payload.get("message"),
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+
+    att = ExamAttempt.query.filter_by(attempt_id=attempt_id).first()
+    if not att or str(att.user_id or "").strip() != uid:
+        return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+
+    answers = body.get("answers") or body.get("items") or []
+    ans_map: dict[str, Any] = {}
+    if isinstance(answers, dict):
+        ans_map = {str(k).strip(): v for k, v in answers.items() if str(k).strip()}
+    elif isinstance(answers, list):
+        for r in answers:
+            if not isinstance(r, dict):
+                continue
+            qid = str(r.get("question_id") or r.get("questionId") or "").strip()
+            if not qid:
+                continue
+            if "answer" in r:
+                ans_map[qid] = r.get("answer")
+            elif "user_answer" in r:
+                ans_map[qid] = r.get("user_answer")
+
+    rows = ExamAttemptItem.query.filter_by(attempt_id=attempt_id).all()
+    if not rows:
+        return jsonify({"code": "BAD_REQUEST", "message": "attempt 无题目明细", "data": None, "trace_id": uuid.uuid4().hex}), 400
+
+    try:
+        # 写入作答与客观题判分
+        for it in rows:
+            qid = str(it.question_id or "").strip()
+            if not qid:
+                continue
+            ua = ans_map.get(qid)
+            it.user_answer = {"value": ua} if ua is not None else None
+            if not getattr(it, "subjective_needed", False):
+                ca = None
+                try:
+                    ca = (it.answer_snapshot or {}).get("answer") if isinstance(it.answer_snapshot, dict) else None
+                except Exception:
+                    ca = None
+                base_row = {
+                    "question_type": it.question_type,
+                    "type": it.question_type,
+                    "options": it.options_snapshot,
+                }
+                ok = _objective_answers_equivalent_aiword(base_row, ua, ca)
+                it.is_correct = bool(ok)
+                it.score = 1.0 if ok else 0.0
+            it.updated_at = now_local()
+
+        # 状态与汇总
+        att.submitted_at = now_local()
+        has_subj = any(bool(getattr(x, "subjective_needed", False)) for x in rows)
+        if has_subj:
+            att.state = "grading"
+        else:
+            att.state = "graded"
+            sc, corr, wrong = _attempt_items_total_score_100(rows)
+            att.score = sc
+            att.total_score = 100.0
+            att.correct_count = corr
+            att.wrong_count = wrong
+
+        db.session.add(att)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+
+    # 触发上游整卷主观判分 job（异步）
+    if att.state == "grading":
+        try:
+            subj_items: list[dict[str, Any]] = []
+            for it in rows:
+                if not getattr(it, "subjective_needed", False):
+                    continue
+                subj_items.append(
+                    {
+                        "question_id": it.question_id,
+                        "question_type": it.question_type,
+                        "stem": it.stem_snapshot,
+                        "options": it.options_snapshot or [],
+                        "user_answer": (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None,
+                    }
+                )
+            payload = {
+                "attempt_id": attempt_id,
+                "exam_track": att.exam_track,
+                "assignment_id": att.assignment_id,
+                "items": subj_items,
+            }
+            st_g, pl_g = _quiz_api_call("quiz/grading/paper-by-ai", method="POST", payload=payload)
+            job_id = ""
+            if 200 <= int(st_g) < 300 and isinstance(pl_g, dict):
+                root = _unwrap_quiz_api_success_data(pl_g)
+                if isinstance(root, dict):
+                    inner = root.get("data") if isinstance(root.get("data"), dict) else root
+                    job_id = str(inner.get("job_id") or inner.get("jobId") or inner.get("id") or "").strip()
+            gj = ExamGradingJob.query.filter_by(attempt_id=attempt_id).first()
+            if not gj:
+                gj = ExamGradingJob(attempt_id=attempt_id)
+            gj.upstream_job_id = job_id or gj.upstream_job_id
+            gj.status = "running" if job_id else "failed"
+            gj.last_upstream_http_status = int(st_g)
+            gj.last_upstream_trace_id = str((pl_g or {}).get("trace_id") or "").strip() if isinstance(pl_g, dict) else None
+            gj.last_upstream_payload = pl_g if isinstance(pl_g, dict) else {"data": pl_g}
+            gj.last_message = str((pl_g or {}).get("message") or "")[:500] if isinstance(pl_g, dict) else None
+            db.session.add(gj)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+    return jsonify({"code": 0, "message": "ok", "data": {"attempt_id": attempt_id, "state": att.state}, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/student/attempts/<attempt_id>/grading-status")
+@login_required
+def api_exam_student_attempt_grading_status_local(attempt_id: str):
+    aid = (attempt_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    uid = str(session.get("user_id") or "").strip()
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att or str(att.user_id or "").strip() != uid:
+        return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    gj = ExamGradingJob.query.filter_by(attempt_id=aid).first()
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "attempt_id": aid,
+                "state": att.state,
+                "score": att.score,
+                "total_score": att.total_score,
+                "correct_count": att.correct_count,
+                "wrong_count": att.wrong_count,
+                "job": {
+                    "upstream_job_id": gj.upstream_job_id if gj else None,
+                    "status": gj.status if gj else None,
+                    "last_message": gj.last_message if gj else None,
+                }
+                if gj
+                else None,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.post("/api/exam-center/student/attempts/<attempt_id>/sync-grading")
+@login_required
+def api_exam_student_attempt_sync_grading_local(attempt_id: str):
+    aid = (attempt_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    uid = str(session.get("user_id") or "").strip()
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att or str(att.user_id or "").strip() != uid:
+        return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    gj = ExamGradingJob.query.filter_by(attempt_id=aid).first()
+    if not gj or not str(gj.upstream_job_id or "").strip():
+        return jsonify({"code": "NOT_FOUND", "message": "未找到判分任务 job_id", "data": None, "trace_id": uuid.uuid4().hex}), 404
+
+    st, pl = _quiz_api_call(f"quiz/grading/jobs/{_urlquote(str(gj.upstream_job_id), safe='')}", method="GET")
+    if isinstance(pl, dict):
+        gj.last_upstream_http_status = int(st)
+        gj.last_upstream_trace_id = str(pl.get("trace_id") or "").strip() or None
+        gj.last_upstream_payload = pl
+        gj.last_message = str(pl.get("message") or "")[:500] or None
+    try:
+        root = _unwrap_quiz_api_success_data(pl) if isinstance(pl, dict) else {}
+        inner = root.get("data") if isinstance(root, dict) and isinstance(root.get("data"), dict) else root
+        status = str((inner or {}).get("status") or (inner or {}).get("state") or "").strip().lower()
+    except Exception:
+        inner = {}
+        status = ""
+    if status in ("done", "success", "completed", "graded", "complete"):
+        try:
+            items = (inner or {}).get("items") if isinstance(inner, dict) else None
+            if not isinstance(items, list):
+                items = []
+            by_q: dict[str, dict[str, Any]] = {}
+            for x in items:
+                if not isinstance(x, dict):
+                    continue
+                qid = str(x.get("question_id") or x.get("questionId") or "").strip()
+                if qid:
+                    by_q[qid] = x
+            rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
+            for it in rows:
+                if not getattr(it, "subjective_needed", False):
+                    continue
+                qid = str(it.question_id or "").strip()
+                x = by_q.get(qid) or {}
+                sc = x.get("score")
+                try:
+                    it.subjective_score = max(0.0, min(1.0, float(sc))) if sc is not None else None
+                except Exception:
+                    it.subjective_score = None
+                it.subjective_reason = str(x.get("reason") or "")[:2000] or None
+                it.subjective_recommendation = str(x.get("recommendation") or "")[:2000] or None
+                ev = x.get("evidence_used") or x.get("evidenceUsed") or []
+                it.evidence_used = ev if isinstance(ev, list) else None
+                it.updated_at = now_local()
+            sc2, corr2, wrong2 = _attempt_items_total_score_100(rows)
+            att.state = "graded"
+            att.score = sc2
+            att.total_score = 100.0
+            att.correct_count = corr2
+            att.wrong_count = wrong2
+            gj.status = "done"
+            db.session.add(att)
+            db.session.add(gj)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+    elif status in ("failed", "error"):
+        gj.status = "failed"
+        try:
+            db.session.add(gj)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+    return jsonify({"code": 0, "message": "ok", "data": {"attempt_id": aid, "job_status": gj.status, "state": att.state}, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/student/attempts/<attempt_id>")
+@login_required
+def api_exam_student_attempt_detail_local(attempt_id: str):
+    aid = (attempt_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    uid = str(session.get("user_id") or "").strip()
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att or str(att.user_id or "").strip() != uid:
+        return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
+    items: list[dict[str, Any]] = []
+    for it in rows:
+        ua = (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None
+        ans = (it.answer_snapshot or {}).get("answer") if isinstance(it.answer_snapshot, dict) else None
+        items.append(
+            {
+                "question_id": it.question_id,
+                "question_type": it.question_type,
+                "stem": it.stem_snapshot,
+                "options": it.options_snapshot or [],
+                "user_answer": ua,
+                "answer": ans,
+                "is_correct": it.is_correct,
+                "subjective_needed": bool(it.subjective_needed),
+                "subjective_score": it.subjective_score,
+                "subjective_reason": it.subjective_reason,
+                "subjective_recommendation": it.subjective_recommendation,
+                "evidence_used": it.evidence_used if isinstance(it.evidence_used, list) else None,
+            }
         )
-        a_id = str(body.get("assignment_id") or "").strip() or None
-        lab = str(body.get("assignment_label") or "").strip() or None
-        _log_student_exam_center_activity(
-            mode="exam",
-            exam_track=str(body.get("exam_track") or "").strip() or None,
-            set_id=str(body.get("set_id") or "").strip() or None,
-            assignment_id=a_id,
-            assignment_label=lab,
-            attempt_id=attempt_id or None,
-            upstream_http_status=int(status),
-            upstream_trace_id=str(payload.get("trace_id") or "").strip() or None,
-            result_summary=summ,
-            upstream_result_payload=merged,
-        )
-    return jsonify(payload), status
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "attempt": {
+                    "attempt_id": aid,
+                    "assignment_id": att.assignment_id,
+                    "state": att.state,
+                    "exam_track": att.exam_track,
+                    "started_at": att.started_at.isoformat(timespec="seconds") if att.started_at else None,
+                    "submitted_at": att.submitted_at.isoformat(timespec="seconds") if att.submitted_at else None,
+                    "score": att.score,
+                    "total_score": att.total_score,
+                    "correct_count": att.correct_count,
+                    "wrong_count": att.wrong_count,
+                },
+                "items": items,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
 
 
 @bp.get("/api/exam-center/activity/<activity_id>")
@@ -4142,51 +4799,29 @@ def api_exam_activity_delete(activity_id: str):
 @bp.get("/api/exam-center/stats/overview")
 @page13_access_required
 def api_exam_stats_overview():
-    status, payload = _quiz_api_call(
-        "quiz/stats/overview",
-        method="GET",
-        query=request.args.to_dict(),
-        timeout_seconds=_stats_upstream_quick_timeout_seconds(),
-    )
-    try:
-        local = _local_stats_overview_all()
-        if 200 <= int(status) < 300 and isinstance(payload, dict):
-            payload.setdefault("aiword", {})
-            if isinstance(payload.get("aiword"), dict):
-                payload["aiword"]["local_overview"] = local
-            return jsonify(payload), status
-        out = {
+    local = _local_stats_overview_all()
+    return jsonify(
+        {
             "code": 0,
-            "message": "ok（本地统计兜底）",
+            "message": "ok（本地统计）",
             "data": local,
             "trace_id": uuid.uuid4().hex,
-            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/overview → local"},
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate"},
         }
-        return jsonify(out), 200
-    except Exception:
-        if 200 <= int(status) < 300:
-            return jsonify(payload), status
-        return jsonify(payload), status
+    ), 200
 
 
 @bp.get("/api/exam-center/stats/student/<student_id>")
 @page13_access_required
 def api_exam_stats_student(student_id: str):
-    status, payload = _quiz_api_call(
-        f"quiz/stats/student/{student_id}",
-        method="GET",
-        query=request.args.to_dict(),
-    )
-    if 200 <= int(status) < 300:
-        return jsonify(payload), status
     local = _local_stats_for_student(student_id)
     return jsonify(
         {
             "code": 0,
-            "message": "ok（本地统计兜底）",
+            "message": "ok（本地统计）",
             "data": local,
             "trace_id": uuid.uuid4().hex,
-            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/student/{id} → local"},
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate"},
         }
     ), 200
 
@@ -4236,24 +4871,6 @@ def api_exam_stats_students_by_mode():
 @page13_access_required
 def api_exam_stats_exam(assignment_id: str):
     aid = str(assignment_id or "").strip()
-    status, payload = _quiz_api_call(
-        f"quiz/stats/exam/{assignment_id}",
-        method="GET",
-        query=request.args.to_dict(),
-    )
-    if 200 <= int(status) < 300 and isinstance(payload, dict) and aid:
-        try:
-            ar0 = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
-            due0 = getattr(ar0, "due_at", None) if ar0 else None
-            if due0:
-                erows = ExamCenterActivity.query.filter_by(assignment_id=aid).all()
-                dc0 = _deadline_completion_from_exam_rows(erows, due0)
-                payload.setdefault("aiword", {})
-                if isinstance(payload.get("aiword"), dict):
-                    payload["aiword"]["deadline_completion"] = dc0
-        except Exception:
-            pass
-        return jsonify(payload), status
     if not aid:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     rows = ExamCenterActivity.query.filter_by(assignment_id=aid).order_by(ExamCenterActivity.created_at.desc()).all()
@@ -4299,7 +4916,7 @@ def api_exam_stats_exam(assignment_id: str):
                 "deadline_completion": deadline_completion,
             },
             "trace_id": uuid.uuid4().hex,
-            "request": {"url": "", "method": "GET", "upstreamPath": "quiz/stats/exam/{id} → local"},
+            "request": {"url": "", "method": "GET", "upstreamPath": "local aggregate"},
         }
     ), 200
 

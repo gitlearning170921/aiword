@@ -5,6 +5,9 @@
     .exam-due-pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; line-height: 1.35; }
     .exam-due-pill-warn { background: #FDE2E2; color: #C03639; }
     .exam-due-pill-overdue { background: #C03639; color: #fff; }
+    .exam-sticky-subnav { position: sticky; top: 10px; z-index: 5; background: #fff; }
+    details.exam-collapse > summary { cursor: pointer; user-select: none; }
+    details.exam-collapse[open] > summary { margin-bottom: 10px; }
 </style>
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
@@ -28,7 +31,9 @@
     <div>
         <div class="mb-1">
             当前角色：<span class="fw-bold" id="examCurrentRoleLabel">{{ exam_role }}</span>
+            {% if exam_role == 'student' %}
             <span class="ms-2">当前用户：<span class="fw-bold" id="examCurrentUserLabel">{{ exam_display_user or "—" }}</span></span>
+            {% endif %}
         </div>
         <div id="examChromeProxyHint" class="small text-muted {% if exam_role == 'student' %}d-none{% endif %}">后端接口统一走 aiword 代理；相关配置请在页面3「系统配置」中维护。</div>
     </div>
@@ -49,6 +54,17 @@
 <div id="examRoleTeacher" class="card mb-4 d-none exam-role-panel">
     <div class="card-body">
         <h5 class="card-title">页面1能力：老师出题/扩库/发布</h5>
+        <div class="exam-sticky-subnav border rounded p-2 mb-3">
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+                <span class="small text-muted">快速跳转：</span>
+                <a class="btn btn-sm btn-outline-secondary" href="#teacherQuickOps">全局选项</a>
+                <a class="btn btn-sm btn-outline-secondary" href="#teacherSets">套题列表</a>
+                <a class="btn btn-sm btn-outline-secondary" href="#teacherIssued">已下发任务</a>
+                <a class="btn btn-sm btn-outline-secondary" href="#teacherBank">题库管理</a>
+                <a class="btn btn-sm btn-outline-secondary" href="#teacherJobs">任务记录</a>
+                <span class="small text-muted ms-auto">体考类型为全局选项；题量/难度仅影响「来一套」。</span>
+            </div>
+        </div>
         <div id="teacherIngestProgress" class="alert alert-secondary py-2 d-none mb-3">
             <span class="fw-bold">批量录题进度：</span>
             <span id="teacherIngestProgressText">等待开始…</span>
@@ -59,37 +75,52 @@
             <span id="teacherReviewProgressText">等待开始…</span>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2 d-none" id="btnTeacherReviewStop">停止轮询</button>
         </div>
-        <div class="row g-3">
+        <div class="row g-3" id="teacherQuickOps">
             <div class="col-md-2">
-                <label class="form-label">体考类型</label>
+                <label class="form-label">体考类型（全局：来一套 + 录题）</label>
                 <select class="form-select" id="teacherExamTrack">
                     <option value="cn">国内体考</option>
                     <option value="iso13485">13485体考</option>
                     <option value="mdsap">MDSAP体考</option>
                 </select>
             </div>
-            <div class="col-md-2">
-                <label class="form-label">题量</label>
-                <input class="form-control" id="teacherQuestionCount" type="number" min="1" value="20">
+            <div class="col-md-6">
+                <div class="border rounded p-2 bg-light">
+                    <div class="fw-bold small mb-2">来一套设置（仅影响来一套）</div>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-4">
+                            <label class="form-label mb-1 small">题量</label>
+                            <input class="form-control" id="teacherQuestionCount" type="number" min="1" value="20">
+                        </div>
+                        <div class="col-4">
+                            <label class="form-label mb-1 small">难度</label>
+                            <select class="form-select" id="teacherDifficulty">
+                                <option value="">默认</option>
+                                <option value="easy">简单</option>
+                                <option value="medium">中等</option>
+                                <option value="hard">困难</option>
+                            </select>
+                        </div>
+                        <div class="col-4 d-grid">
+                            <button class="btn btn-primary" id="btnTeacherGenerateSet" type="button">来一套（考试草稿）</button>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-2">体考类型切换会联动题量/难度推荐值。</div>
+                </div>
             </div>
-            <div class="col-md-2">
-                <label class="form-label">难度</label>
-                <select class="form-select" id="teacherDifficulty">
-                    <option value="">默认</option>
-                    <option value="easy">简单</option>
-                    <option value="medium">中等</option>
-                    <option value="hard">困难</option>
-                </select>
-            </div>
-            <div class="col-md-6 d-flex align-items-end gap-2">
-                <button class="btn btn-primary" id="btnTeacherGenerateSet" type="button">来一套（考试草稿）</button>
-                <button class="btn btn-outline-primary" id="btnTeacherIngestBank" type="button">AI批量录入题库</button>
+            <div class="col-md-4">
+                <div class="border rounded p-2">
+                    <div class="fw-bold small mb-2">AI 批量录入题库</div>
+                    <button class="btn btn-outline-primary" id="btnTeacherIngestBank" type="button">开始录题</button>
+                    <div class="small text-muted mt-2">
+                        录题：项目案例 30% / 审核点 30% / 法规标准 20% / 程序文件 20%；题型：单选 30% / 多选 10% / 判断 10% / 主观案例 50%；每批 50 题。
+                    </div>
+                </div>
             </div>
         </div>
-        <p class="small text-muted mb-0 mt-2">
-            AI 批量录题按知识来源：项目案例 30%、审核点 30%、法规标准 20%、程序文件 20%；题型：单选 30%、多选 10%、判断 10%、主观案例分析 50%。
-            考试草稿「来一套」按所选<strong>难度</strong>自动配比题型：简单＝单选 50% + 判断 50%；中等＝单选 40% + 多选 30% + 判断 30%；困难＝单选 30% + 多选 20% + 判断 30% + 主观案例分析 20%（未选难度时按中等处理）。
-        </p>
+        <div class="mt-2 small text-muted">
+            <div><strong>说明：</strong>体考类型为全局选项；录题的题型占比/难度策略以提示词/上游策略为准。</div>
+        </div>
         <div class="mt-2 p-2 border rounded bg-light">
             <div class="d-flex gap-2 align-items-center flex-wrap">
                 <button class="btn btn-sm btn-outline-primary" id="btnTeacherCheckRequirements" type="button">检查体考达标情况</button>
@@ -103,7 +134,10 @@
             </div>
             <div id="teacherRequirementStatus" class="small text-muted mt-2">待检查：请选择体考类型后点击“检查体考达标情况”。</div>
         </div>
-        <div class="mt-4 pt-3 border-top">
+        <details class="exam-collapse mt-4 pt-3 border-top" id="teacherJobs">
+            <summary class="fw-bold">任务记录（录题 / 复审）</summary>
+            <div class="small text-muted mb-2">不影响主要操作，默认收起。需要排查任务状态时再展开。</div>
+            <div class="mt-2">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="form-section-title mb-0">批量录题任务记录（aiword 本地）</h6>
                 <div class="d-flex gap-2 align-items-center">
@@ -134,9 +168,42 @@
                     </tbody>
                 </table>
             </div>
-        </div>
+            </div>
+            <div class="mt-4 pt-3 border-top">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="form-section-title mb-0">AI复审套题任务记录（aiword 本地）</h6>
+                    <div class="d-flex gap-2 align-items-center">
+                        <select class="form-select form-select-sm" id="teacherReviewJobsLimit" style="width: 120px;">
+                            <option value="10">最近 10 条</option>
+                            <option value="20" selected>最近 20 条</option>
+                            <option value="50">最近 50 条</option>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherReviewJobsRefresh">刷新列表</button>
+                    </div>
+                </div>
+                <p class="small text-muted mb-2">列表来自数据库表 <code>exam_set_review_jobs</code>；轮询接口会刷新上游状态并回写快照。</p>
+                <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
+                    <table class="table table-sm table-striped align-middle mb-0">
+                        <thead class="table-light sticky-top">
+                        <tr>
+                            <th style="width: 160px">创建时间</th>
+                            <th style="width: 100px">状态</th>
+                            <th style="width: 120px">套题 set_id</th>
+                            <th>上游 job_id</th>
+                            <th style="width: 120px">操作</th>
+                        </tr>
+                        </thead>
+                        <tbody id="teacherReviewJobsBody">
+                        <tr><td colspan="5" class="text-muted small">加载中…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </details>
 
-        <div class="mt-4 pt-3 border-top">
+        <details class="exam-collapse mt-4 pt-3 border-top" id="teacherSets" open>
+            <summary class="fw-bold">套题列表与批量操作</summary>
+            <div class="mt-2">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="form-section-title mb-0">题库/套题列表（整合：套题 + 批量录题任务）</h6>
                 <div class="d-flex gap-2 flex-wrap align-items-center">
@@ -147,11 +214,6 @@
                     <button type="button" class="btn btn-sm btn-success" id="btnTeacherBatchPublish">批量同步</button>
                     <button type="button" class="btn btn-sm btn-outline-danger" id="btnTeacherBatchDelete">批量删除</button>
                 </div>
-            </div>
-            <div class="d-flex flex-wrap gap-2 align-items-center mt-2 mb-1">
-                <label class="small text-muted mb-0" for="teacherAssignDueDate">下发默认截止日（可选）</label>
-                <input type="date" class="form-control form-control-sm" id="teacherAssignDueDate" style="width: 168px;" title="选中日期视为当日 23:59:59 前完成；学生端临期/逾期样式与页面3一致">
-                <span class="small text-muted">留空表示不设截止时间；单行「下发考试任务」与批量下发均使用该日期。</span>
             </div>
             <p class="small text-muted mb-2">本表优先展示上游套题列表，并用 set_id 关联显示本地批量录题任务状态（running/done 等）。复审/发布支持多选批量操作。状态为已同步时，行内按钮显示「已同步」并与详情弹窗一致为灰色不可点。</p>
             <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
@@ -171,40 +233,12 @@
                     </tbody>
                 </table>
             </div>
-        </div>
-
-        <div class="mt-4 pt-3 border-top">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="form-section-title mb-0">AI复审套题任务记录（aiword 本地）</h6>
-                <div class="d-flex gap-2 align-items-center">
-                    <select class="form-select form-select-sm" id="teacherReviewJobsLimit" style="width: 120px;">
-                        <option value="10">最近 10 条</option>
-                        <option value="20" selected>最近 20 条</option>
-                        <option value="50">最近 50 条</option>
-                    </select>
-                    <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherReviewJobsRefresh">刷新列表</button>
-                </div>
             </div>
-            <p class="small text-muted mb-2">列表来自数据库表 <code>exam_set_review_jobs</code>；轮询接口会刷新上游状态并回写快照。</p>
-            <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
-                <table class="table table-sm table-striped align-middle mb-0">
-                    <thead class="table-light sticky-top">
-                    <tr>
-                        <th style="width: 160px">创建时间</th>
-                        <th style="width: 100px">状态</th>
-                        <th style="width: 120px">套题 set_id</th>
-                        <th>上游 job_id</th>
-                        <th style="width: 120px">操作</th>
-                    </tr>
-                    </thead>
-                    <tbody id="teacherReviewJobsBody">
-                    <tr><td colspan="5" class="text-muted small">加载中…</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+        </details>
 
-        <div class="mt-4 pt-3 border-top">
+        <details class="exam-collapse mt-4 pt-3 border-top" id="teacherIssued">
+            <summary class="fw-bold">已下发考试任务（镜像）</summary>
+            <div class="mt-2">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="form-section-title mb-0">已下发考试任务</h6>
                 <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherIssuedAssignmentsRefresh">刷新列表</button>
@@ -228,9 +262,12 @@
                     </tbody>
                 </table>
             </div>
-        </div>
+            </div>
+        </details>
 
-        <div class="mt-4 pt-3 border-top" id="examTeacherBankSection">
+        <details class="exam-collapse mt-4 pt-3 border-top" id="teacherBank">
+            <summary class="fw-bold">题库题目管理（分页 / 筛选 / 搜索 / 修改 / 下架 / 删除）</summary>
+            <div class="mt-2" id="examTeacherBankSection">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="form-section-title mb-0">题库题目管理（分页 / 筛选 / 搜索 / 修改 / 下架 / 删除）</h6>
                 <div class="d-flex gap-2 flex-wrap align-items-center">
@@ -283,7 +320,8 @@
                     </tbody>
                 </table>
             </div>
-        </div>
+            </div>
+        </details>
 
         <div class="modal fade" id="teacherBankEditModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -403,6 +441,54 @@
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal fade" id="teacherAssignIssueModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">下发考试任务</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <label class="form-label">截止完成日期（可选）</label>
+                                <input type="date" class="form-control" id="teacherAssignModalDueDate">
+                                <div class="small text-muted mt-1">默认视为当日 23:59:59 前完成。</div>
+                            </div>
+                            <div class="col-md-8">
+                                <label class="form-label">考试目的（可选）</label>
+                                <input type="text" class="form-control" id="teacherAssignModalPurpose" placeholder="例如：阶段测评/章节验收/摸底测试">
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label">考试对象（可多选；来自页面1录入人员）</label>
+                                <div class="d-flex gap-2 flex-wrap align-items-center mb-2">
+                                    <input class="form-control form-control-sm" id="teacherAssignModalUserSearch" placeholder="搜索姓名/账号" style="width: 220px;">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherAssignModalSelectAll">全选</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherAssignModalClearAll">清空</button>
+                                    <span class="small text-muted">仅被选中的对象可见该考试任务列表。</span>
+                                </div>
+                                <div class="border rounded p-2" style="max-height: 260px; overflow-y: auto;">
+                                    <div id="teacherAssignModalUsers" class="d-flex flex-column gap-1 small text-break">
+                                        <div class="text-muted small">加载中…</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-12">
+                                <div class="alert alert-light border small mb-0">
+                                    <div class="fw-bold mb-1">将要下发的套题</div>
+                                    <div id="teacherAssignModalSets" class="text-muted">—</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary" id="btnTeacherAssignModalSubmit">确认下发</button>
                     </div>
                 </div>
             </div>

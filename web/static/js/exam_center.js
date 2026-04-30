@@ -479,7 +479,19 @@
         var btnSetDetailDelete = document.getElementById("btnTeacherSetDetailDelete");
         var btnIssuedRefresh = document.getElementById("btnTeacherIssuedAssignmentsRefresh");
         var tbodyIssued = document.getElementById("teacherIssuedAssignmentsBody");
-        var inputAssignDueDate = document.getElementById("teacherAssignDueDate");
+        // 下发任务改为弹窗表单（截止/目的/对象）
+        var assignModalEl = document.getElementById("teacherAssignIssueModal");
+        var assignModalDue = document.getElementById("teacherAssignModalDueDate");
+        var assignModalPurpose = document.getElementById("teacherAssignModalPurpose");
+        var assignModalUsers = document.getElementById("teacherAssignModalUsers");
+        var assignModalSets = document.getElementById("teacherAssignModalSets");
+        var assignModalSearch = document.getElementById("teacherAssignModalUserSearch");
+        var btnAssignModalSelectAll = document.getElementById("btnTeacherAssignModalSelectAll");
+        var btnAssignModalClearAll = document.getElementById("btnTeacherAssignModalClearAll");
+        var btnAssignModalSubmit = document.getElementById("btnTeacherAssignModalSubmit");
+        var assignModal = null;
+        var teacherSetTitleMap = {};
+        var assignModalState = { setIds: [], items: [] };
         var btnCheckReq = document.getElementById("btnTeacherCheckRequirements");
         var btnMarkReqBase = document.getElementById("btnTeacherMarkRequirementBaseline");
         var requirementBox = document.getElementById("teacherRequirementStatus");
@@ -546,6 +558,7 @@
         }
 
         function applyTeacherTrackDefaults() {
+            // 体考类型联动题量/难度（仅影响「来一套」的输入框默认值；录题不读取这些下拉/输入）
             var preset = trackRecommendedPreset(readValue("teacherExamTrack") || "cn");
             if (inputTeacherCount) inputTeacherCount.value = String(preset.teacherCount);
             if (selTeacherDifficulty) selTeacherDifficulty.value = String(preset.teacherDifficulty);
@@ -824,26 +837,95 @@
             syncTeacherPublishButtonUi(btnSetDetailPublish, statusRaw);
         }
 
-        async function createAssignmentForSet(setId, title) {
-            var sid = String(setId || "").trim();
-            if (!sid) {
-                throw new Error("缺少 set_id，无法下发考试任务");
+        function ensureAssignModal() {
+            try {
+                if (assignModalEl && window.bootstrap && window.bootstrap.Modal) {
+                    if (!assignModal) assignModal = window.bootstrap.Modal.getOrCreateInstance(assignModalEl);
+                }
+            } catch (e0) {}
+            return assignModal;
+        }
+
+        async function loadAssignableUsersIntoModal() {
+            if (!assignModalUsers) return;
+            assignModalUsers.innerHTML = '<div class="text-muted small">加载中…</div>';
+            try {
+                var resp = await apiRequest("/api/users", "GET");
+                if (resp && resp.__ok === false) {
+                    assignModalUsers.innerHTML = '<div class="text-danger small">' + escHtml(resp.message || "加载失败") + "</div>";
+                    return;
+                }
+                // 兼容：/api/users 返回 {users:[...]}（页面1使用） vs {data:{users:[...]}}（部分接口风格）
+                var rows = [];
+                if (resp && resp.data && Array.isArray(resp.data.users)) rows = resp.data.users;
+                else if (resp && Array.isArray(resp.users)) rows = resp.users;
+                if (!rows.length) {
+                    assignModalUsers.innerHTML = '<div class="text-muted small">暂无人员（请先在页面1录入/管理用户）。</div>';
+                    return;
+                }
+                var html = [];
+                rows.forEach(function (u) {
+                    if (!u || typeof u !== "object") return;
+                    var uid = String(u.id || "").trim();
+                    if (!uid) return;
+                    var dn = String(u.display_name || u.displayName || "").trim();
+                    var un = String(u.username || "").trim();
+                    var label = (dn || un || uid).trim();
+                    html.push(
+                        '<label class="d-flex align-items-center gap-2 user-row" data-key="' +
+                            escHtml((label + " " + un).toLowerCase()) +
+                            '"><input type="checkbox" class="form-check-input assign-user" value="' +
+                            escHtml(uid) +
+                            '"><span>' +
+                            escHtml(label) +
+                            (un && dn ? ' <span class="text-muted">(' + escHtml(un) + ")</span>" : "") +
+                            "</span></label>"
+                    );
+                });
+                assignModalUsers.innerHTML = html.join("") || '<div class="text-muted small">暂无可选人员。</div>';
+            } catch (e) {
+                assignModalUsers.innerHTML = '<div class="text-danger small">' + escHtml(e.message || "加载失败") + "</div>";
             }
-            var payloadA = {
-                set_id: sid,
-                exam_track: readValue("teacherExamTrack") || "cn",
-            };
-            var t = String(title || "").trim();
-            if (t) {
-                payloadA.title = t;
-                payloadA.name = t;
-                payloadA.label = t;
+        }
+
+        function filterAssignModalUsers() {
+            if (!assignModalUsers) return;
+            var kw = assignModalSearch ? String(assignModalSearch.value || "").trim().toLowerCase() : "";
+            var rows = assignModalUsers.querySelectorAll(".user-row");
+            rows.forEach(function (r) {
+                var k = String(r.getAttribute("data-key") || "");
+                r.style.display = !kw || k.indexOf(kw) >= 0 ? "" : "none";
+            });
+        }
+
+        function collectAssignModalUserIds() {
+            if (!assignModalUsers) return [];
+            var ids = [];
+            assignModalUsers.querySelectorAll('input.assign-user[type="checkbox"]:checked').forEach(function (c) {
+                var v = String(c.value || "").trim();
+                if (v) ids.push(v);
+            });
+            return ids;
+        }
+
+        async function openIssueAssignmentsModal(setIds) {
+            var ids = Array.isArray(setIds) ? setIds : [];
+            ids = ids.map(function (x) { return String(x || "").trim(); }).filter(function (x) { return x; });
+            if (!ids.length) throw new Error("请选择至少一个套题再下发");
+            assignModalState.setIds = ids.slice();
+            assignModalState.items = ids.map(function (sid) {
+                return { set_id: sid, title: teacherSetTitleMap[sid] || "" };
+            });
+            if (assignModalSets) {
+                assignModalSets.textContent = ids.join("，");
             }
-            var dd = inputAssignDueDate ? String(inputAssignDueDate.value || "").trim() : "";
-            if (dd) {
-                payloadA.due_date = dd;
-            }
-            return await apiRequest("/api/exam-center/teacher/assignments", "POST", payloadA);
+            if (assignModalDue) assignModalDue.value = "";
+            if (assignModalPurpose) assignModalPurpose.value = "";
+            if (assignModalSearch) assignModalSearch.value = "";
+            await loadAssignableUsersIntoModal();
+            filterAssignModalUsers();
+            var m = ensureAssignModal();
+            if (m) m.show();
         }
 
         function syncBankSetIdToUrl(raw) {
@@ -1010,9 +1092,11 @@
                     return;
                 }
                 tbodySets.innerHTML = "";
+                teacherSetTitleMap = {};
                 sets.forEach(function (s) {
                     var row = normalizeSetRow(s);
                     if (!row.id) return;
+                    teacherSetTitleMap[row.id] = row.title || "";
                     var jr = ingestBySet && ingestBySet[row.id] ? ingestBySet[row.id] : null;
                     var ingestText = jr ? "job_id=" + (jr.upstream_job_id || "") + " / " + (jr.status || "") : "—";
                     var tr = document.createElement("tr");
@@ -1069,9 +1153,11 @@
                     bAssign.textContent = "下发考试任务";
                     bAssign.title = "基于当前套题 set_id 下发考试任务（学生端任务列表可见）";
                     bAssign.addEventListener("click", async function () {
-                        var name = row.title ? String(row.title) + " 考试任务" : "";
-                        var dAssign = await createAssignmentForSet(row.id, name);
-                        render(dAssign);
+                        try {
+                            await openIssueAssignmentsModal([row.id]);
+                        } catch (e0) {
+                            render({ code: "UI_ERROR", message: e0.message || String(e0), data: null });
+                        }
                     });
                     var b2 = document.createElement("button");
                     b2.type = "button";
@@ -1529,7 +1615,8 @@
                             await apiRequest("/api/exam-center/teacher/sets/review-by-ai", "POST", { set_id: sid })
                         );
                     } else if (action === "assign") {
-                        results.push(await createAssignmentForSet(sid, ""));
+                        // 批量下发改为弹窗统一提交，不在循环里逐个提交
+                        results.push({ code: 0, message: "请使用“批量下发考试任务”弹窗提交", data: { set_id: sid } });
                     } else if (action === "publish") {
                         results.push(await apiRequest("/api/exam-center/teacher/sets/publish", "POST", { set_id: sid }));
                     } else if (action === "delete") {
@@ -1678,7 +1765,67 @@
                     });
             });
         btnBatchReview && btnBatchReview.addEventListener("click", function () { batchSetsAction("review"); });
-        btnBatchAssign && btnBatchAssign.addEventListener("click", function () { batchSetsAction("assign"); });
+        btnBatchAssign &&
+            btnBatchAssign.addEventListener("click", async function () {
+                try {
+                    var ids = selectedSetIds();
+                    await openIssueAssignmentsModal(ids);
+                } catch (e0) {
+                    render({ code: "UI_ERROR", message: e0.message || String(e0), data: null });
+                }
+            });
+
+        if (assignModalSearch) {
+            assignModalSearch.addEventListener("input", function () {
+                filterAssignModalUsers();
+            });
+        }
+        btnAssignModalSelectAll &&
+            btnAssignModalSelectAll.addEventListener("click", function () {
+                if (!assignModalUsers) return;
+                assignModalUsers.querySelectorAll('input.assign-user[type="checkbox"]').forEach(function (c) {
+                    if (c.closest(".user-row") && c.closest(".user-row").style.display === "none") return;
+                    c.checked = true;
+                });
+            });
+        btnAssignModalClearAll &&
+            btnAssignModalClearAll.addEventListener("click", function () {
+                if (!assignModalUsers) return;
+                assignModalUsers.querySelectorAll('input.assign-user[type="checkbox"]').forEach(function (c) {
+                    c.checked = false;
+                });
+            });
+        btnAssignModalSubmit &&
+            btnAssignModalSubmit.addEventListener("click", async function () {
+                var ids = collectAssignModalUserIds();
+                if (!ids.length) {
+                    render({ code: "BAD_REQUEST", message: "请选择考试对象（至少1人）", data: null });
+                    return;
+                }
+                var dd = assignModalDue ? String(assignModalDue.value || "").trim() : "";
+                var purpose = assignModalPurpose ? String(assignModalPurpose.value || "").trim() : "";
+                var payload = {
+                    exam_track: readValue("teacherExamTrack") || "cn",
+                    items: assignModalState.items || [],
+                    audience_user_ids: ids,
+                };
+                if (dd) payload.due_date = dd;
+                if (purpose) payload.purpose = purpose;
+                setButtonLoading(btnAssignModalSubmit, true, "下发中…");
+                try {
+                    var resp = await apiRequest("/api/exam-center/teacher/assignments/issue", "POST", payload);
+                    render(resp);
+                    if (!(resp && resp.__ok === false)) {
+                        try {
+                            var m = ensureAssignModal();
+                            if (m) m.hide();
+                        } catch (e1) {}
+                        await loadTeacherIssuedAssignments();
+                    }
+                } finally {
+                    setButtonLoading(btnAssignModalSubmit, false);
+                }
+            });
         btnBatchPublish && btnBatchPublish.addEventListener("click", function () { batchSetsAction("publish"); });
         btnBatchDelete && btnBatchDelete.addEventListener("click", function () { batchSetsAction("delete"); });
         btnSetDetailBankFilter &&
@@ -1792,13 +1939,13 @@
             setButtonLoading(btnIngest, true, "已提交…");
             setIngestProgress(true, "正在发起批量录题任务…");
             try {
+                // 录题：题量/难度/题型占比由上游提示词/策略统一控制（每批 50 题等），
+                // 老师端下拉框仅影响「来一套」。
                 var ingestBody = {
                     exam_track: readValue("teacherExamTrack") || "cn",
                     target_count: 50,
                     review_mode: "draft"
                 };
-                var ingDiff = readValue("teacherDifficulty");
-                if (ingDiff) ingestBody.difficulty = ingDiff;
                 var startResp = await apiRequest("/api/exam-center/teacher/bank/ingest-by-ai", "POST", ingestBody);
                 render(startResp);
                 maybeAutofillSetIdFromAnyResp(startResp);
@@ -2294,6 +2441,47 @@
             });
         }
 
+        /** 本地考试：轮询主观题整卷判分完成（aiword 本地 attempt）。 */
+        function pollLocalGradingUntilReady(attemptId, opts) {
+            opts = opts || {};
+            var maxMs = opts.maxMs != null ? opts.maxMs : 180000;
+            var intervalMs = opts.intervalMs != null ? opts.intervalMs : 2500;
+            var deadline = Date.now() + maxMs;
+            var aid = String(attemptId || "").trim();
+            if (!aid) return Promise.resolve({ ready: false, timeout: false });
+            return new Promise(function (resolve) {
+                function tick() {
+                    if (Date.now() >= deadline) {
+                        resolve({ ready: false, timeout: true });
+                        return;
+                    }
+                    apiRequest("/api/exam-center/student/attempts/" + encodeURIComponent(aid) + "/sync-grading", "POST", {})
+                        .then(function () {
+                            return apiRequest(
+                                "/api/exam-center/student/attempts/" + encodeURIComponent(aid) + "/grading-status",
+                                "GET"
+                            );
+                        })
+                        .then(function (resp) {
+                            if (!resp || resp.__ok === false) {
+                                setTimeout(tick, intervalMs);
+                                return;
+                            }
+                            var d = resp.data || {};
+                            if (String(d.state || "") === "graded") {
+                                resolve({ ready: true, grading: d, timeout: false });
+                                return;
+                            }
+                            setTimeout(tick, intervalMs);
+                        })
+                        .catch(function () {
+                            setTimeout(tick, intervalMs);
+                        });
+                }
+                tick();
+            });
+        }
+
         function ensureActivityModal() {
             var el = document.getElementById("examActivityDetailModal");
             if (!el || !window.bootstrap || !window.bootstrap.Modal) return null;
@@ -2347,11 +2535,21 @@
                     if (!r || typeof r !== "object") return;
                     var tr = document.createElement("tr");
                     var stem = String(r.stem || r.title || "").trim();
-                    var fakeIt = { user_answer: r.user_answer, answer: r.answer, teacher_comment: "" };
+                    var fakeIt = {
+                        user_answer: r.user_answer,
+                        answer: r.answer,
+                        options: r.options,
+                        options_json: r.options_json,
+                        question_type: r.question_type,
+                        type: r.type,
+                        teacher_comment: "",
+                    };
                     var ua = pickItemUserAnswer(fakeIt);
                     var ca = pickItemCorrectAnswer(fakeIt);
-                    var uaStr = ua == null ? "" : typeof ua === "object" ? safeJson(ua) : String(ua);
-                    var caStr = ca == null ? "" : typeof ca === "object" ? safeJson(ca) : String(ca);
+                    var uaStr =
+                        ua == null ? "" : typeof ua === "object" ? safeJson(ua) : formatAnswerDetailDisplay(fakeIt, ua);
+                    var caStr =
+                        ca == null ? "" : typeof ca === "object" ? safeJson(ca) : formatAnswerDetailDisplay(fakeIt, ca);
                     tr.innerHTML =
                         '<td class="small">' +
                         String(idx + 1) +
@@ -2430,6 +2628,154 @@
                 }
             }
             return String(v).trim();
+        }
+
+        function letterChoiceIndex(v) {
+            if (v === null || v === undefined) return null;
+            var s = String(v).trim().toUpperCase();
+            if (s.length !== 1 || s < "A" || s > "Z") return null;
+            return s.charCodeAt(0) - "A".charCodeAt(0);
+        }
+
+        function resolveLetterToOptionValue(value, it) {
+            var opts = pickItemOptions(it);
+            if (!opts.length) return value;
+            var ix = letterChoiceIndex(value);
+            if (ix === null || ix >= opts.length) return value;
+            return opts[ix];
+        }
+
+        function trueFalseToBool(v) {
+            if (v === true || v === false) return v;
+            if (typeof v === "number" && isFinite(v)) return v !== 0;
+            if (typeof v === "string") {
+                var t = v.trim().toLowerCase();
+                if (
+                    t === "false" ||
+                    t === "0" ||
+                    t === "no" ||
+                    t === "n" ||
+                    t === "f" ||
+                    t === "wrong" ||
+                    t === "错误" ||
+                    t === "错" ||
+                    t === "否" ||
+                    t === "不正确" ||
+                    t === "不对"
+                ) {
+                    return false;
+                }
+                if (
+                    t === "true" ||
+                    t === "1" ||
+                    t === "yes" ||
+                    t === "y" ||
+                    t === "t" ||
+                    t === "正确" ||
+                    t === "对" ||
+                    t === "是" ||
+                    t === "√"
+                ) {
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+
+        function tfMaybeLiteralJs(v) {
+            if (v === true || v === false) return true;
+            if (typeof v !== "string") return false;
+            var s = v.trim();
+            var sl = s.toLowerCase();
+            if (sl === "true" || sl === "false" || sl === "1" || sl === "0") return true;
+            return ["正确", "错误", "对", "错", "是", "否"].indexOf(s) >= 0;
+        }
+
+        function normSingleChoiceKeyJs(value, it) {
+            var v = resolveLetterToOptionValue(value, it);
+            if (v === null || v === undefined) return "";
+            return String(v).trim().toLowerCase();
+        }
+
+        function normMcKeysSorted(raw, it) {
+            var items = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+            var out = [];
+            var j;
+            for (j = 0; j < items.length; j++) {
+                var v = resolveLetterToOptionValue(items[j], it);
+                var k = v == null ? "" : String(v).trim().toLowerCase();
+                if (k) out.push(k);
+            }
+            out.sort();
+            return out;
+        }
+
+        function multipleChoiceAnswersEqual(ca, ua, it) {
+            var a = normMcKeysSorted(ca, it);
+            var b = normMcKeysSorted(ua, it);
+            if (!a.length) return false;
+            if (a.length !== b.length) return false;
+            var i;
+            for (i = 0; i < a.length; i++) {
+                if (a[i] !== b[i]) return false;
+            }
+            return true;
+        }
+
+        /** 客观题比对：与 aicheckword `_score_objective_answer` / aiword `_objective_answers_equivalent_aiword` 维度一致 */
+        function objectiveAnswersEqualJs(it, ua, ca) {
+            if (!it || typeof it !== "object") {
+                return normAnswerPlainForCompare(ua) === normAnswerPlainForCompare(ca);
+            }
+            var opts = pickItemOptions(it);
+            var qt = String(it.question_type || it.type || "").toLowerCase();
+            if (qt === "true_false") {
+                var aa = resolveLetterToOptionValue(ca, it);
+                var uu = resolveLetterToOptionValue(ua, it);
+                return trueFalseToBool(aa) === trueFalseToBool(uu);
+            }
+            if (qt === "single_choice") {
+                return normSingleChoiceKeyJs(ua, it) === normSingleChoiceKeyJs(ca, it);
+            }
+            if (qt === "multiple_choice") {
+                return multipleChoiceAnswersEqual(ca, ua, it);
+            }
+            if (opts.length) {
+                if (normSingleChoiceKeyJs(ua, it) === normSingleChoiceKeyJs(ca, it)) return true;
+                var ur = resolveLetterToOptionValue(ua, it);
+                var cr = resolveLetterToOptionValue(ca, it);
+                if (typeof cr === "boolean" || tfMaybeLiteralJs(cr) || tfMaybeLiteralJs(ur)) {
+                    return trueFalseToBool(cr) === trueFalseToBool(ur);
+                }
+            }
+            return normAnswerPlainForCompare(ua) === normAnswerPlainForCompare(ca);
+        }
+
+        /** 详情弹窗：学生/标准答案与判分维度一致展示（判断题不显裸字母 A）。 */
+        function formatAnswerDetailDisplay(it, raw) {
+            if (raw === null || raw === undefined) return "";
+            if (typeof raw === "object") {
+                try {
+                    return JSON.stringify(raw);
+                } catch (e) {
+                    return String(raw);
+                }
+            }
+            var qt = String(it && it.question_type ? it.question_type : it && it.type ? it.type : "").toLowerCase();
+            var opts = it && typeof it === "object" ? pickItemOptions(it) : [];
+            var ix = letterChoiceIndex(raw);
+            if (opts.length && ix !== null && ix >= 0 && ix < opts.length) {
+                var lbl = String(opts[ix]);
+                if (qt === "true_false") {
+                    return trueFalseToBool(lbl) ? "正确" : "错误";
+                }
+                return String.fromCharCode(65 + ix) + "（" + lbl + "）";
+            }
+            if (qt === "true_false" || (opts.length === 2 && (typeof raw === "boolean" || tfMaybeLiteralJs(String(raw))))) {
+                return trueFalseToBool(raw) ? "正确" : "错误";
+            }
+            return String(raw);
         }
 
         /** 与后端/快照字段对齐：取学生作答（含 camelCase、本地快照列名）。 */
@@ -2519,11 +2865,19 @@
             var ua = pickItemUserAnswer(it);
             var ca = pickItemCorrectAnswer(it);
             if (ua === undefined || ua === null || ca === undefined || ca === null) return null;
-            return normAnswerPlainForCompare(ua) === normAnswerPlainForCompare(ca);
+            return objectiveAnswersEqualJs(it, ua, ca);
         }
 
         function judgeLabelFromItem(it) {
             if (!it || typeof it !== "object") return judgeLabel(null);
+            if (it.subjective_needed === true || it.subjectiveNeeded === true) {
+                var sc = it.subjective_score != null ? Number(it.subjective_score) : null;
+                if (sc != null && isFinite(sc)) {
+                    var pct = Math.round(Math.max(0, Math.min(1, sc)) * 100);
+                    return '<span class="badge bg-info text-dark">主观</span> <span class="small">得分 ' + String(pct) + "/100</span>";
+                }
+                return '<span class="badge bg-warning text-dark">阅卷中</span>';
+            }
             var tc = String(it.teacher_comment || it.teacherComment || "").trim();
             if (tc.indexOf("pending_subjective") >= 0 || tc.indexOf("阅卷中") >= 0) {
                 return '<span class="badge bg-warning text-dark">阅卷中</span>';
@@ -2604,8 +2958,10 @@
                 var stem = String(it.stem || "").trim();
                 var ua = pickItemUserAnswer(it);
                 var ca = pickItemCorrectAnswer(it);
-                var uaStr = ua == null ? "" : typeof ua === "object" ? safeJson(ua) : String(ua);
-                var caStr = ca == null ? "" : typeof ca === "object" ? safeJson(ca) : String(ca);
+                var uaStr =
+                    ua == null ? "" : typeof ua === "object" ? safeJson(ua) : formatAnswerDetailDisplay(it, ua);
+                var caStr =
+                    ca == null ? "" : typeof ca === "object" ? safeJson(ca) : formatAnswerDetailDisplay(it, ca);
                 var pen = deriveItemCorrectness(it);
                 var uaCls = pen === false ? "text-danger fw-semibold" : "text-body";
                 var caCls = "text-body";
@@ -2628,6 +2984,19 @@
                     caCls +
                     '">' +
                     escSt(caStr) +
+                    (it.subjective_reason
+                        ? '<div class="text-muted small mt-1">' + escSt(String(it.subjective_reason)) + "</div>"
+                        : "") +
+                    (Array.isArray(it.evidence_used) && it.evidence_used.length
+                        ? '<div class="text-muted small mt-1">证据：' +
+                          escSt(
+                              it.evidence_used
+                                  .map(function (e) { return (e && e.source_file) ? String(e.source_file) : ""; })
+                                  .filter(function (s) { return s; })
+                                  .join("，")
+                          ) +
+                          "</div>"
+                        : "") +
                     "</code></td>" +
                     '<td class="small">' +
                     judgeLabelFromItem(it) +
@@ -2775,6 +3144,91 @@
             });
         }
 
+        function questionTypeFromItem(it) {
+            if (!it || typeof it !== "object") return "single_choice";
+            var qt = String(it.question_type || it.questionType || it.type || "").trim().toLowerCase();
+            if (!qt && it.question && typeof it.question === "object") {
+                qt = String(it.question.question_type || it.question.type || "").trim().toLowerCase();
+            }
+            if (qt === "single" || qt === "sc" || qt === "singlechoice") return "single_choice";
+            if (qt === "multiple" || qt === "mc" || qt === "multiplechoice") return "multiple_choice";
+            if (qt === "tf" || qt === "judge" || qt === "truefalse") return "true_false";
+            if (qt === "case" || qt === "analysis" || qt === "caseanalysis") return "case_analysis";
+            if (qt === "single_choice" || qt === "multiple_choice" || qt === "true_false" || qt === "case_analysis") return qt;
+            return qt || "single_choice";
+        }
+
+        function questionTypeLabelZh(qt) {
+            var t = String(qt || "").trim().toLowerCase();
+            if (t === "single_choice") return "单选题";
+            if (t === "multiple_choice") return "多选题";
+            if (t === "true_false") return "判断题";
+            if (t === "case_analysis") return "案例分析题";
+            return "其它题型";
+        }
+
+        function indexToLetterAZ(i) {
+            var n = Number(i);
+            if (!Number.isFinite(n) || n < 0) return "";
+            return "ABCDEFGHIJKLMNOPQRSTUVWXYZ".charAt(n) || "";
+        }
+
+        function draftStorageKey() {
+            var base = sessionState.mode || "x";
+            var a = sessionState.assignmentId || "";
+            var s = sessionState.setId || "";
+            var t = sessionState.attemptId || sessionState.sessionId || "";
+            return "aiword_exam_draft__" + base + "__" + String(a || s || "unknown") + "__" + String(t || "noattempt");
+        }
+
+        function loadDraftAnswers() {
+            var k = draftStorageKey();
+            sessionState.draftKey = k;
+            sessionState.draftAnswers = {};
+            try {
+                var raw = localStorage.getItem(k);
+                if (!raw) return;
+                var obj = JSON.parse(raw);
+                if (obj && typeof obj === "object") sessionState.draftAnswers = obj;
+            } catch (e) {
+                sessionState.draftAnswers = {};
+            }
+        }
+
+        function saveDraftAnswers() {
+            try {
+                if (!sessionState.draftKey) sessionState.draftKey = draftStorageKey();
+                localStorage.setItem(sessionState.draftKey, JSON.stringify(sessionState.draftAnswers || {}));
+            } catch (e) {}
+        }
+
+        function clearDraftAnswers() {
+            try {
+                if (!sessionState.draftKey) sessionState.draftKey = draftStorageKey();
+                localStorage.removeItem(sessionState.draftKey);
+            } catch (e) {}
+            sessionState.draftAnswers = {};
+        }
+
+        function updateDraftAnswer(qid, v) {
+            if (!qid) return;
+            if (!sessionState.draftAnswers || typeof sessionState.draftAnswers !== "object") sessionState.draftAnswers = {};
+            if (v == null || (Array.isArray(v) && !v.length) || (typeof v === "string" && !String(v).trim())) {
+                delete sessionState.draftAnswers[qid];
+            } else {
+                sessionState.draftAnswers[qid] = v;
+            }
+            saveDraftAnswers();
+            try {
+                if (metaIx) {
+                    var n = Object.keys(sessionState.draftAnswers || {}).length;
+                    var base = metaIx.textContent || "";
+                    base = base.replace(/\s*（已暂存.*?）\s*$/, "");
+                    metaIx.textContent = base + "（已暂存 " + String(n) + " 题）";
+                }
+            } catch (e) {}
+        }
+
         function hideStudentInteraction() {
             if (cardIx) cardIx.classList.add("d-none");
             if (qListIx) qListIx.innerHTML = "";
@@ -2786,7 +3240,9 @@
                 assignmentId: "",
                 assignmentLabel: "",
                 questions: [],
-                upstreamSnapshot: null
+                upstreamSnapshot: null,
+                draftKey: "",
+                draftAnswers: {}
             };
         }
 
@@ -2826,39 +3282,89 @@
 
         function renderQuestionCard(it, idx) {
             var qid = qidFromItem(it, idx);
+            var qt = questionTypeFromItem(it);
             var stem = String(it.stem || it.title || it.question || "题目").trim();
             if (typeof it.question === "object" && it.question) {
                 stem = String(it.question.stem || it.question.title || stem).trim();
             }
-            var opts = optionsFromItem(it);
+            var opts = qt === "case_analysis" ? [] : optionsFromItem(it);
             var nm = "stq-" + safeInputNamePart(qid);
             var body;
-            if (opts.length) {
+            var draftV = sessionState.draftAnswers ? sessionState.draftAnswers[qid] : null;
+            if (qt === "multiple_choice" && opts.length) {
+                var picked = Array.isArray(draftV) ? draftV.map(String) : typeof draftV === "string" ? [draftV] : [];
                 body = opts
                     .map(function (o, j) {
+                        var letter = indexToLetterAZ(j) || String(j);
                         var oid = nm + "-" + j;
+                        var checked = picked.indexOf(letter) >= 0 ? ' checked' : '';
+                        return (
+                            '<div class="form-check">' +
+                            '<input class="form-check-input" type="checkbox" name="' +
+                            escSt(nm) +
+                            '" data-qid="' +
+                            escSt(qid) +
+                            '" data-qtype="' +
+                            escSt(qt) +
+                            '" id="' +
+                            escSt(oid) +
+                            '" value="' +
+                            escSt(letter) +
+                            '"' +
+                            checked +
+                            '>' +
+                            '<label class="form-check-label small" for="' +
+                            escSt(oid) +
+                            '">' +
+                            escSt(letter + ". " + String(o.label || "")) +
+                            "</label></div>"
+                        );
+                    })
+                    .join("");
+            } else if (opts.length && qt !== "case_analysis") {
+                var pickedOne = draftV != null ? String(draftV) : "";
+                body = opts
+                    .map(function (o, j) {
+                        var letter = indexToLetterAZ(j) || String(j);
+                        var oid = nm + "-" + j;
+                        var checked = pickedOne && pickedOne === letter ? ' checked' : '';
                         return (
                             '<div class="form-check">' +
                             '<input class="form-check-input" type="radio" name="' +
                             escSt(nm) +
+                            '" data-qid="' +
+                            escSt(qid) +
+                            '" data-qtype="' +
+                            escSt(qt) +
                             '" id="' +
                             escSt(oid) +
                             '" value="' +
-                            escSt(o.value) +
-                            '">' +
+                            escSt(letter) +
+                            '"' +
+                            checked +
+                            '>' +
                             '<label class="form-check-label small" for="' +
                             escSt(oid) +
                             '">' +
-                            escSt(o.label) +
+                            escSt(letter + ". " + String(o.label || "")) +
                             "</label></div>"
                         );
                     })
                     .join("");
             } else {
+                var tv = draftV != null ? String(draftV) : "";
                 body =
-                    '<textarea class="form-control form-control-sm" rows="2" data-student-answer="' +
+                    '<textarea class="form-control form-control-sm" rows="3" data-student-answer="' +
                     escSt(qid) +
-                    '" placeholder="作答"></textarea>';
+                    '" data-qid="' +
+                    escSt(qid) +
+                    '" data-qtype="' +
+                    escSt(qt) +
+                    '" placeholder="' +
+                    escSt(qt === "case_analysis" ? "请在此输入案例分析作答（文本）" : "作答") +
+                    '">' +
+                    escSt(tv) +
+                    "</textarea>";
             }
             return (
                 '<div class="card mb-2"><div class="card-body py-2"><div class="fw-semibold small mb-2">' +
@@ -2898,11 +3404,90 @@
                     (sessionState.sessionId ? "，session=" + sessionState.sessionId : "") +
                     (sessionState.attemptId ? "，attempt=" + sessionState.attemptId : "");
             }
-            qListIx.innerHTML = sessionState.questions.map(function (it, i) {
-                return renderQuestionCard(it, i);
-            }).join("");
+            loadDraftAnswers();
+            var groups = {
+                single_choice: [],
+                multiple_choice: [],
+                true_false: [],
+                case_analysis: [],
+                other: []
+            };
+            sessionState.questions.forEach(function (it) {
+                var qt = questionTypeFromItem(it);
+                if (qt === "single_choice") groups.single_choice.push(it);
+                else if (qt === "multiple_choice") groups.multiple_choice.push(it);
+                else if (qt === "true_false") groups.true_false.push(it);
+                else if (qt === "case_analysis") groups.case_analysis.push(it);
+                else groups.other.push(it);
+            });
+            function secHtml(qtKey, arr) {
+                if (!arr || !arr.length) return "";
+                var label = questionTypeLabelZh(qtKey);
+                var head =
+                    '<div class="mt-3 mb-2 d-flex align-items-center justify-content-between">' +
+                    '<div class="fw-semibold">' +
+                    escSt(label) +
+                    "（" +
+                    String(arr.length) +
+                    "）</div>" +
+                    (qtKey === "multiple_choice"
+                        ? '<div class="small text-muted">可多选</div>'
+                        : qtKey === "case_analysis"
+                        ? '<div class="small text-muted">文本作答</div>'
+                        : '<div class="small text-muted">单选</div>') +
+                    "</div>";
+                var body = arr
+                    .map(function (it, i) {
+                        return renderQuestionCard(it, i);
+                    })
+                    .join("");
+                return head + body;
+            }
+            qListIx.innerHTML =
+                secHtml("single_choice", groups.single_choice) +
+                secHtml("multiple_choice", groups.multiple_choice) +
+                secHtml("true_false", groups.true_false) +
+                secHtml("case_analysis", groups.case_analysis) +
+                secHtml("other", groups.other);
             sessionState.upstreamSnapshot = Object.assign({}, inner);
             cardIx.classList.remove("d-none");
+            try {
+                if (metaIx) {
+                    var n2 = Object.keys(sessionState.draftAnswers || {}).length;
+                    if (n2 > 0) {
+                        metaIx.textContent = metaIx.textContent + "（已暂存 " + String(n2) + " 题）";
+                    } else {
+                        metaIx.textContent = metaIx.textContent + "（自动暂存已开启）";
+                    }
+                }
+            } catch (eMetaDraft) {}
+
+            // 绑定暂存事件（radio/checkbox/textarea）
+            try {
+                if (qListIx) {
+                    qListIx.querySelectorAll('input[type="radio"][data-qid]').forEach(function (el) {
+                        el.addEventListener("change", function () {
+                            updateDraftAnswer(String(el.getAttribute("data-qid") || ""), String(el.value || ""));
+                        });
+                    });
+                    qListIx.querySelectorAll('input[type="checkbox"][data-qid]').forEach(function (el) {
+                        el.addEventListener("change", function () {
+                            var qid = String(el.getAttribute("data-qid") || "");
+                            var nm = el.getAttribute("name") || "";
+                            var checked = [];
+                            qListIx.querySelectorAll('input[type="checkbox"][name="' + nm + '"]:checked').forEach(function (c) {
+                                checked.push(String(c.value || "").trim());
+                            });
+                            updateDraftAnswer(qid, checked);
+                        });
+                    });
+                    qListIx.querySelectorAll('textarea[data-qid]').forEach(function (el) {
+                        el.addEventListener("input", function () {
+                            updateDraftAnswer(String(el.getAttribute("data-qid") || ""), String(el.value || ""));
+                        });
+                    });
+                }
+            } catch (eBindDraft) {}
             try {
                 cardIx.scrollIntoView({ behavior: "smooth", block: "nearest" });
             } catch (eScroll) {}
@@ -2948,13 +3533,30 @@
 
             sessionState.questions.forEach(function (it, idx) {
                 var qid = qidFromItem(it, idx);
+                var qt = questionTypeFromItem(it);
                 var nm = "stq-" + safeInputNamePart(qid);
-                var picked = qListIx
-                    ? qListIx.querySelector('input[type="radio"][name="' + nm + '"]:checked')
-                    : document.querySelector('input[type="radio"][name="' + nm + '"]:checked');
-                if (picked) {
-                    out.push({ question_id: qid, answer: normalizePickedAnswer(picked) });
-                    return;
+                if (qt === "multiple_choice") {
+                    var cands = qListIx
+                        ? qListIx.querySelectorAll('input[type="checkbox"][name="' + nm + '"]:checked')
+                        : document.querySelectorAll('input[type="checkbox"][name="' + nm + '"]:checked');
+                    var arr = [];
+                    cands &&
+                        cands.forEach &&
+                        cands.forEach(function (el) {
+                            arr.push(normalizePickedAnswer(el));
+                        });
+                    if (arr.length) {
+                        out.push({ question_id: qid, answer: arr });
+                        return;
+                    }
+                } else {
+                    var picked = qListIx
+                        ? qListIx.querySelector('input[type="radio"][name="' + nm + '"]:checked')
+                        : document.querySelector('input[type="radio"][name="' + nm + '"]:checked');
+                    if (picked) {
+                        out.push({ question_id: qid, answer: normalizePickedAnswer(picked) });
+                        return;
+                    }
                 }
                 var ta = null;
                 if (qListIx) {
@@ -3025,9 +3627,8 @@
                             openInteractionPending("正在加载考试试卷…", "任务：" + escSt(name) + "（" + escSt(aid) + "）");
                             setButtonLoading(b, true, "开考中…");
                             try {
-                                var data2 = await apiRequest("/api/exam-center/student/exams/start", "POST", {
-                                    assignment_id: aid,
-                                    exam_track: readValue("studentExamTrack") || "cn"
+                                var data2 = await apiRequest("/api/exam-center/student/exams/start-local", "POST", {
+                                    assignment_id: aid
                                 });
                                 if (data2 && data2.__ok === false) {
                                     showInteractionError("无法开始考试", data2.message || "请求失败");
@@ -3035,7 +3636,13 @@
                                     return;
                                 }
                                 render(data2);
-                                maybeOpenExamFromResponse(data2, aid, name);
+                                var inner = data2 && data2.data ? data2.data : {};
+                                var qarr = Array.isArray(inner.items) ? inner.items : [];
+                                inner.assignment_id = aid;
+                                inner.assignmentId = aid;
+                                inner.assignment_label = name;
+                                inner.assignmentLabel = name;
+                                showStudentInteraction("exam", inner, qarr);
                                 if (sessionState.mode === "exam" && !sessionState.questions.length) {
                                     showInteractionError(
                                         "未加载到题目",
@@ -3366,6 +3973,7 @@
                             var rs1 = pickQuizSubmitResult(r1);
                             if (rs1 && rs1.grading_status === "pending") {
                                 studentShowFeedback("答卷已提交，主观题阅卷中，总分与是否通过将于阅卷完成后更新。", "info");
+                            clearDraftAnswers();
                                 hideStudentInteraction();
                                 loadStudentHistory();
                                 var aidPg = String(
@@ -3383,6 +3991,7 @@
                                 }
                             } else {
                                 studentShowFeedback("练习答案已提交。", "success");
+                            clearDraftAnswers();
                                 hideStudentInteraction();
                                 loadStudentHistory();
                             }
@@ -3396,49 +4005,63 @@
                             }
                         }
                     } else if (sessionState.mode === "exam") {
-                        var examAttemptId = normalizeAttemptIdAsIntString(sessionState.attemptId);
                         var payE = Object.assign({}, snap, {
-                            attempt_id: examAttemptId,
-                            attemptId: examAttemptId,
-                            assignment_id: sessionState.assignmentId,
-                            assignment_label: sessionState.assignmentLabel,
-                            exam_track: readValue("studentExamTrack") || "cn",
-                            set_id: sessionState.setId || snap.set_id || snap.setId || "",
-                            answers: rows,
-                            responses: rows,
-                            submission_questions_snapshot: submissionQuestionsSnapshotPayload()
+                            attempt_id: String(sessionState.attemptId || "").trim(),
+                            attemptId: String(sessionState.attemptId || "").trim(),
+                            answers: rows
                         });
-                        var r2 = await apiRequest("/api/exam-center/student/exams/submit", "POST", payE);
+                        var r2 = await apiRequest("/api/exam-center/student/exams/submit-local", "POST", payE);
                         render(r2);
                         scrollExamApiResultIntoView();
-                        if (quizPayloadBusinessOk(r2)) {
-                            var rs2 = pickQuizSubmitResult(r2);
-                            if (rs2 && rs2.grading_status === "pending") {
-                                studentShowFeedback("答卷已提交，主观题阅卷中，总分与是否通过将于阅卷完成后更新。", "info");
-                                hideStudentInteraction();
-                                loadStudentHistory();
-                                var aidPg2 = String((rs2 && (rs2.attempt_id || rs2.attemptId)) || examAttemptId || "").trim();
-                                if (aidPg2) {
-                                    pollGradingUntilReady(aidPg2).then(function (pg2) {
-                                        loadStudentHistory();
-                                        if (pg2 && pg2.ready) {
-                                            studentShowFeedback("阅卷已完成，成绩已更新。", "success");
-                                        }
-                                    });
-                                }
-                            } else {
-                                studentShowFeedback("考试答卷已提交。", "success");
-                                hideStudentInteraction();
-                                loadStudentHistory();
+                        if (r2 && r2.__ok === false) {
+                            studentShowFeedback("考试提交未成功：" + (r2.message ? String(r2.message) : "请重试"), "danger");
+                            return;
+                        }
+                        var st2 = r2 && r2.data ? String(r2.data.state || "") : "";
+                        if (st2 === "grading") {
+                            studentShowFeedback("答卷已提交，主观题阅卷中。阅卷完成后可查看详情。", "info");
+                            clearDraftAnswers();
+                            hideStudentInteraction();
+                            loadStudentHistory();
+                            var aidPg2 = String(sessionState.attemptId || "").trim();
+                            if (aidPg2) {
+                                pollLocalGradingUntilReady(aidPg2).then(function (pg2) {
+                                    loadStudentHistory();
+                                    if (pg2 && pg2.ready) {
+                                        studentShowFeedback("阅卷已完成，成绩已更新。", "success");
+                                        apiRequest("/api/exam-center/student/attempts/" + encodeURIComponent(aidPg2), "GET")
+                                            .then(function (det) {
+                                                if (!det || det.__ok === false) return;
+                                                render(det);
+                                                renderActivityDetailModal({
+                                                    data: {
+                                                        activity: {
+                                                            created_at: (det.data.attempt && det.data.attempt.submitted_at) || "",
+                                                            mode: "exam",
+                                                            result_summary: "阅卷完成"
+                                                        },
+                                                        detail: {
+                                                            score: (det.data.attempt && det.data.attempt.score) || null,
+                                                            total_score: (det.data.attempt && det.data.attempt.total_score) || null,
+                                                            pass_score: 80
+                                                        },
+                                                        attempt_items: det.data.items || []
+                                                    }
+                                                });
+                                                try {
+                                                    var m = ensureActivityModal();
+                                                    if (m) m.show();
+                                                } catch (eM) {}
+                                            })
+                                            .catch(function () {});
+                                    }
+                                });
                             }
                         } else if (metaIx) {
-                            metaIx.textContent = "提交未成功，请检查提示或稍后重试。";
-                            if (!(r2 && r2.__ok === false)) {
-                                studentShowFeedback(
-                                    "考试提交未成功：" + (r2 && r2.message ? String(r2.message) : "请重试"),
-                                    "danger"
-                                );
-                            }
+                            studentShowFeedback("考试答卷已提交。", "success");
+                            clearDraftAnswers();
+                            hideStudentInteraction();
+                            loadStudentHistory();
                         }
                     } else {
                         render({ code: "UI_ERROR", message: "当前无进行中的作答会话。", data: null });

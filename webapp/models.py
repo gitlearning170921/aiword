@@ -382,6 +382,92 @@ class ExamCenterAssignment(db.Model):
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 
 
+class ExamCenterAssignmentExtra(db.Model):
+    """考试训练中心：下发任务的扩展字段（不修改主表结构，避免迁移）。"""
+    __tablename__ = "exam_center_assignment_extras"
+    __table_args__ = (UniqueConstraint("assignment_id", name="uq_exam_center_assignment_extra_assignment_id"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
+    purpose: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamCenterAssignmentAudience(db.Model):
+    """考试训练中心：下发任务受众（仅指定用户可见）。"""
+    __tablename__ = "exam_center_assignment_audience"
+    __table_args__ = (UniqueConstraint("assignment_id", "user_id", name="uq_exam_center_assignment_audience"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class ExamAttempt(db.Model):
+    """本地考试 attempt：开始/提交/阅卷状态均在 aiword 落库。"""
+    __tablename__ = "exam_attempts"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    attempt_id: Mapped[str] = mapped_column(db.String(36), nullable=False, unique=True, index=True)
+    assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    state: Mapped[str] = mapped_column(db.String(16), default="started")  # started|submitted|grading|graded
+    started_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    total_score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    correct_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    wrong_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamAttemptItem(db.Model):
+    """本地考试 attempt 题目快照与作答/判分结果。"""
+    __tablename__ = "exam_attempt_items"
+    __table_args__ = (UniqueConstraint("attempt_id", "question_id", name="uq_exam_attempt_item_attempt_question"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    attempt_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    question_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
+    question_type: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    stem_snapshot: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    options_snapshot: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    answer_snapshot: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    user_answer: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    is_correct: Mapped[Optional[bool]] = mapped_column(db.Boolean, nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+
+    subjective_needed: Mapped[bool] = mapped_column(db.Boolean, default=False)
+    subjective_score: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    subjective_reason: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    subjective_recommendation: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    evidence_used: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)  # [{source_file,snippet,...}]
+
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class ExamGradingJob(db.Model):
+    """本地考试整卷主观判分 job 镜像（上游异步 job + 最后结果快照）。"""
+    __tablename__ = "exam_grading_jobs"
+    __table_args__ = (UniqueConstraint("attempt_id", name="uq_exam_grading_job_attempt_id"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    attempt_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")  # pending|running|done|failed
+    last_upstream_http_status: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    last_upstream_trace_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    last_upstream_payload: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    last_message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
 class ExamCenterActivityDetail(db.Model):
     """练习/考试提交后明细快照，供老师端/统计端查看成绩与薄弱项。"""
     __tablename__ = "exam_center_activity_details"
