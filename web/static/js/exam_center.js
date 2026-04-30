@@ -2205,7 +2205,11 @@
                 }
             });
         applyTeacherTrackDefaults();
-        loadTeacherPolicyVersion();
+        // 学生端进入页面时不要触发老师端初始化请求，否则会 401 needsPage13Auth → 重载 → 死循环刷新
+        if (getExamRole() === "teacher") {
+            loadTeacherPolicyVersion();
+            loadTeacherRequirementStatus();
+        }
 
         // 供角色切换/页面初始化调用：加载任务记录列表
         window.__examLoadTeacherIngestJobs = loadTeacherIngestJobs;

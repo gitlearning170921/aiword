@@ -15,14 +15,18 @@
         <p id="examHeroSubtitle" class="mb-0 {% if exam_role == 'student' %}d-none{% endif %}">独立于原页面状态，支持老师出题与发布、学生来一套练习、统计看板查看。</p>
     </div>
     <div class="d-flex gap-2" id="heroBarActions">
-        {% if "teacher" in exam_allowed_roles %}
-        <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="teacher">老师端</button>
-        {% endif %}
-        {% if "student" in exam_allowed_roles %}
-        <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="student">学生端</button>
-        {% endif %}
-        {% if "analytics" in exam_allowed_roles %}
-        <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="analytics">统计端</button>
+        {% if exam_role != "student" %}
+            {% if "teacher" in exam_allowed_roles %}
+            <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="teacher">老师端</button>
+            {% endif %}
+            {% if "student" in exam_allowed_roles %}
+            <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="student">学生端</button>
+            {% endif %}
+            {% if "analytics" in exam_allowed_roles %}
+            <button type="button" class="btn btn-sm btn-outline-primary exam-role-btn" data-role="analytics">统计端</button>
+            {% endif %}
+        {% else %}
+            <span class="badge bg-light text-dark">学生端</span>
         {% endif %}
     </div>
 </div>

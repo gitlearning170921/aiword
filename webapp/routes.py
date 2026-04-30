@@ -2210,7 +2210,13 @@ def _exam_center_display_user() -> str:
 
 @bp.route("/exam-center")
 def exam_center_page():
-    role = (request.args.get("role") or "student").strip().lower()
+    role_arg = request.args.get("role")
+    if role_arg is None or str(role_arg).strip() == "":
+        # 兼容“从页面1/3进入考试中心”的默认行为：管理员体系默认进入老师端；
+        # 学生体系默认进入学生端（并由下方逻辑要求已登录）。
+        role = "teacher" if session.get("page13_authenticated") else "student"
+    else:
+        role = str(role_arg).strip().lower()
     if role not in {"teacher", "student", "analytics"}:
         role = "student"
 
