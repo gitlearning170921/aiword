@@ -100,8 +100,9 @@ def _quiz_api_timeout_seconds() -> int:
         val = 20
     if val < 3:
         return 3
-    if val > 120:
-        return 120
+    # 与 _quiz_api_call 上限对齐：LLM 类接口（如法规更新提示）可能需要数分钟
+    if val > 600:
+        return 600
     return val
 
 
@@ -191,8 +192,8 @@ def _quiz_api_call(
         _timeout = _quiz_api_timeout_seconds() if timeout_seconds is None else int(timeout_seconds)
         if _timeout < 1:
             _timeout = 1
-        if _timeout > 120:
-            _timeout = 120
+        if _timeout > 600:
+            _timeout = 600
         with urlopen(req, timeout=_timeout) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
             try:
@@ -238,7 +239,7 @@ def _quiz_api_call(
             "message": (
                 "考试训练中心后端响应超时。"
                 "请检查 QUIZ_API_BASE_URL 是否正确、aicheckword 服务是否在运行，"
-                "或在系统配置中调大 QUIZ_API_TIMEOUT_SECONDS（如 60）。"
+                "或在系统配置中调大 QUIZ_API_TIMEOUT_SECONDS（如 180；法规提示等 LLM 接口上限 600）。"
             ),
             "data": {"timeoutSeconds": _timeout},
             "trace_id": trace_id,
@@ -737,6 +738,7 @@ def _log_student_exam_center_activity(
     *,
     mode: str,
     exam_track: str | None,
+    exam_category: str | None = None,
     set_id: str | None,
     assignment_id: str | None,
     assignment_label: str | None,
@@ -766,6 +768,7 @@ def _log_student_exam_center_activity(
             display_name=str(display_name) if display_name else None,
             mode=str(mode or "").strip()[:16] or "unknown",
             exam_track=(exam_track or "").strip() or None,
+            exam_category=_normalize_exam_category(exam_category or "daily"),
             set_id=(set_id or "").strip() or None,
             assignment_id=(assignment_id or "").strip() or None,
             assignment_label=(assignment_label or "").strip() or None,
@@ -924,7 +927,10 @@ def _deadline_completion_from_exam_rows(
             late += 1
     out["on_time_count"] = on_time
     out["late_count"] = late
-    out["note"] = "按每名学生在任务下首次考试提交时间与截止时刻比对（本地 activity.created_at）。"
+    out["note"] = (
+        "按每名学生在任务下首次考试提交时间与截止时刻比对（本地 activity.created_at）；"
+        "截止时间后仍可开考，晚于截止的提交计入逾期。"
+    )
     return out
 
 
@@ -939,6 +945,13 @@ def _normalize_student_assignment_row(x: dict[str, Any]) -> dict[str, Any]:
         dv = x.get(dk)
         if dv is not None and str(dv).strip():
             row["due_at"] = str(dv).strip()
+            break
+    for sk in ("set_id", "setId", "quiz_set_id", "quizSetId"):
+        sv = x.get(sk)
+        if sv is not None and str(sv).strip():
+            svs = str(sv).strip()
+            row["set_id"] = svs
+            row["setId"] = svs
             break
     return row
 
@@ -1027,6 +1040,33 @@ def _expand_question_count_aliases(body: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _normalize_exam_category(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if s in ("new_standard", "new_standard_release", "newstd", "新标", "新标发布"):
+        return "new_standard"
+    return "daily"
+
+
+def _expand_exam_category_aliases(body: dict[str, Any]) -> dict[str, Any]:
+    """考试类型：daily=日常考试；new_standard=新标发布（与体考类型 exam_track 正交）。历史数据迁移后统一为 daily。"""
+    out = dict(body or {})
+    raw = (
+        out.get("exam_category")
+        or out.get("examCategory")
+        or out.get("exam_kind")
+        or out.get("examKind")
+        or ""
+    )
+    cat = _normalize_exam_category(raw)
+    for key in ("exam_category", "examCategory", "exam_kind", "examKind"):
+        out[key] = cat
+    return out
+
+
+def _expand_quiz_request_body(body: dict[str, Any] | None) -> dict[str, Any]:
+    return _expand_exam_category_aliases(_expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(body or {})))
+
+
 def _expand_exam_track_and_difficulty_aliases(body: dict[str, Any]) -> dict[str, Any]:
     """体考类型、难度与页面设置对齐：写入多种常见键名，避免上游只认 camelCase 或其它字段。"""
     out = dict(body or {})
@@ -1067,11 +1107,21 @@ def _expand_exam_track_and_difficulty_aliases(body: dict[str, Any]) -> dict[str,
 _EXAM_TRACK_REQUIREMENT_PROFILES: dict[str, dict[str, Any]] = {
     "cn": {
         "title": "国内体考",
-        "scopes": ["GMP", "核查指南"],
+        "scopes": ["GMP", "核查指南", "42061法规"],
         "min_total_questions": 200,
         "topic_groups": [
             {"topic": "GMP", "keywords": ["gmp", "药品生产质量管理规范", "生产质量管理规范"]},
             {"topic": "核查指南", "keywords": ["核查指南", "核查要点", "检查指南"]},
+            {
+                "topic": "42061法规",
+                "keywords": [
+                    "42061",
+                    "yy/t 42061",
+                    "yy/t42061",
+                    "t 42061",
+                    "yyt42061",
+                ],
+            },
         ],
     },
     "iso13485": {
@@ -1099,6 +1149,63 @@ _EXAM_TRACK_REQUIREMENT_PROFILES: dict[str, dict[str, Any]] = {
 }
 _EXAM_BATCH_INGEST_SIZE = 50
 _EXAM_REQUIREMENT_BASELINE_KEY = "EXAM_BANK_REQUIREMENT_BASELINES_JSON"
+
+
+def _exam_ingest_target_count() -> int:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("EXAM_INGEST_TARGET_COUNT") or "").strip()
+    try:
+        n = int(raw)
+    except Exception:
+        n = _EXAM_BATCH_INGEST_SIZE
+    return max(1, min(n, 200))
+
+
+def _parse_csv_four_weights(raw: str, default: tuple[float, float, float, float]) -> list[float]:
+    s = (raw or "").replace("，", ",").strip()
+    if not s:
+        return list(default)
+    parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+    if len(parts) != 4:
+        return list(default)
+    out: list[float] = []
+    for p in parts:
+        try:
+            out.append(float(p))
+        except Exception:
+            return list(default)
+    if any(x < 0 for x in out):
+        return list(default)
+    tot = sum(out)
+    if tot <= 0:
+        return list(default)
+    return [x / tot for x in out]
+
+
+def _exam_ingest_knowledge_weights() -> list[float]:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("EXAM_INGEST_KNOWLEDGE_WEIGHTS") or "").strip()
+    return _parse_csv_four_weights(raw, (0.3, 0.3, 0.2, 0.2))
+
+
+def _exam_ingest_question_type_weights() -> list[float]:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("EXAM_INGEST_QUESTION_TYPE_WEIGHTS") or "").strip()
+    return _parse_csv_four_weights(raw, (0.3, 0.1, 0.1, 0.5))
+
+
+def _exam_ingest_max_similar_frac() -> float:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("EXAM_INGEST_MAX_SIMILAR_FRAC") or "").strip()
+    try:
+        x = float(raw)
+    except Exception:
+        x = 0.1
+    return max(0.0, min(x, 0.5))
 
 
 def _exam_track_policy_version_key(track: str) -> str:
@@ -2455,7 +2562,7 @@ def _extract_set_id_from_quiz_proxy_payload(payload: Any) -> str:
 @bp.post("/api/exam-center/teacher/sets/generate")
 @page13_access_required
 def api_exam_teacher_generate_set():
-    body = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
+    body = _expand_quiz_request_body(_json_payload())
     status, payload = _quiz_api_call("quiz/sets/generate", method="POST", payload=body)
     return jsonify(payload), status
 
@@ -2463,11 +2570,18 @@ def api_exam_teacher_generate_set():
 @bp.post("/api/exam-center/teacher/bank/ingest-by-ai")
 @page13_access_required
 def api_exam_teacher_ingest_bank():
-    req_payload = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
-    req_payload["target_count"] = _EXAM_BATCH_INGEST_SIZE
-    req_payload["targetCount"] = _EXAM_BATCH_INGEST_SIZE
-    req_payload["question_count"] = _EXAM_BATCH_INGEST_SIZE
-    req_payload["questionCount"] = _EXAM_BATCH_INGEST_SIZE
+    req_payload = _expand_quiz_request_body(_json_payload())
+    tc = _exam_ingest_target_count()
+    wk = _exam_ingest_knowledge_weights()
+    wt = _exam_ingest_question_type_weights()
+    msf = _exam_ingest_max_similar_frac()
+    req_payload["target_count"] = tc
+    req_payload["targetCount"] = tc
+    req_payload["question_count"] = tc
+    req_payload["questionCount"] = tc
+    req_payload["ingest_knowledge_weights"] = wk
+    req_payload["ingest_question_type_weights"] = wt
+    req_payload["max_similar_frac"] = msf
     status, payload = _quiz_api_call("quiz/bank/ingest-by-ai", method="POST", payload=req_payload)
 
     # 成功拿到 job_id 后：落库生成任务记录（用于后续从记录查询轮询状态与结果）
@@ -2476,6 +2590,9 @@ def api_exam_teacher_ingest_bank():
         if upstream_job_id:
             created_by = (session.get("display_name") or session.get("username") or "").strip() or None
             exam_track = (req_payload.get("exam_track") or req_payload.get("examTrack") or "").strip() or None
+            exam_category = _normalize_exam_category(
+                req_payload.get("exam_category") or req_payload.get("examCategory") or "daily"
+            )
             try:
                 target_count = int(req_payload.get("target_count") or req_payload.get("targetCount") or 0) or None
             except Exception:
@@ -2486,11 +2603,13 @@ def api_exam_teacher_ingest_bank():
                 row = ExamBankIngestJob(
                     upstream_job_id=upstream_job_id,
                     exam_track=exam_track,
+                    exam_category=exam_category,
                     target_count=target_count,
                     review_mode=review_mode,
                     status="pending",
                     created_by=created_by,
                 )
+            row.exam_category = exam_category
             row.last_upstream_http_status = int(status)
             row.last_upstream_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload.get("data")
             row.last_upstream_request_url = ((payload.get("request") or {}).get("url") if isinstance(payload.get("request"), dict) else None) or None
@@ -2530,6 +2649,49 @@ def api_exam_teacher_bank_requirements_check():
     data = _build_exam_bank_requirement_status(track)
     msg = "当前题库已满足体考要求。仍可继续录题以增强覆盖。" if data.get("is_satisfied") else "当前题库尚未满足体考要求。"
     return jsonify({"code": 0, "message": msg, "data": data, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.get("/api/exam-center/teacher/system-settings")
+@page13_access_required
+def api_exam_teacher_system_settings_get():
+    """老师端「考试与录题配置」：与页面3同源读写 app_configs，仅返回考试相关键列表。"""
+    from .app_settings import (
+        EXAM_CENTER_TEACHER_SETTINGS_KEYS,
+        SYSTEM_CONFIG_KEYS,
+        persist_config_json_into_empty_db_keys,
+        sync_authoritative_sources_into_db,
+        system_settings_for_api_get,
+    )
+
+    app = current_app._get_current_object()
+    project_root = Path(app.root_path).resolve().parent
+    sync_authoritative_sources_into_db(project_root, app)
+    persist_config_json_into_empty_db_keys(project_root, app)
+    meta_by_key = {k: (k, lbl, sens) for k, lbl, sens in SYSTEM_CONFIG_KEYS}
+    keys_meta: list[dict[str, Any]] = []
+    for key in EXAM_CENTER_TEACHER_SETTINGS_KEYS:
+        row = meta_by_key.get(key)
+        if not row:
+            continue
+        kk, lbl, sens = row
+        keys_meta.append({"key": kk, "label": lbl, "sensitive": sens})
+    return jsonify({"settings": system_settings_for_api_get(app, project_root), "keys": keys_meta})
+
+
+@bp.post("/api/exam-center/teacher/regulatory-updates-hint")
+@page13_access_required
+def api_exam_teacher_regulatory_updates_hint():
+    """「新标发布」备考：按体考类型请求 aicheckword 归纳需关注的法规/标准/指南更新方向（模型输出，非官方清单）。"""
+    body = _expand_quiz_request_body(_json_payload())
+    # 法规提示走 LLM，耗时常超过默认 20s/120s；在配置值基础上至少给 3 分钟，且不超过代理硬上限 600s
+    hint_to = max(int(_quiz_api_timeout_seconds()), 180)
+    st, pl = _quiz_api_call(
+        "quiz/tools/regulatory-updates-hint",
+        method="POST",
+        payload=body,
+        timeout_seconds=min(hint_to, 600),
+    )
+    return jsonify(pl), st
 
 
 @bp.get("/api/exam-center/teacher/bank/policy-version")
@@ -2744,6 +2906,7 @@ def api_exam_teacher_ingest_jobs_list():
                         "upstream_set_id": getattr(r, "upstream_set_id", None),
                         "status": r.status,
                         "exam_track": r.exam_track,
+                        "exam_category": getattr(r, "exam_category", None) or "daily",
                         "target_count": r.target_count,
                         "review_mode": r.review_mode,
                         "created_by": r.created_by,
@@ -2781,6 +2944,7 @@ def api_exam_teacher_sets_list():
             "upstream_job_id": r.upstream_job_id,
             "upstream_set_id": getattr(r, "upstream_set_id", None),
             "status": r.status,
+            "exam_category": getattr(r, "exam_category", None) or "daily",
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         }
@@ -3003,7 +3167,7 @@ def _exam_stats_options_local() -> dict[str, Any]:
     except Exception:
         students_map = {}
     students = sorted(students_map.values(), key=lambda x: str(x.get("name") or ""))
-    assignments_map: dict[str, dict[str, str]] = {}
+    assignments_map: dict[str, dict[str, Any]] = {}
     try:
         rows = (
             db.session.query(ExamCenterActivity.assignment_id, ExamCenterActivity.assignment_label)
@@ -3018,7 +3182,7 @@ def _exam_stats_options_local() -> dict[str, Any]:
             if not k:
                 continue
             lab = str(alab or "").strip() or k
-            assignments_map[k] = {"id": k, "name": lab, "label": lab}
+            assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": ""}
         local_rows = (
             ExamCenterAssignment.query.filter(
                 or_(
@@ -3034,7 +3198,16 @@ def _exam_stats_options_local() -> dict[str, Any]:
             if not k:
                 continue
             lab = str(r.title or "").strip() or k
-            assignments_map[k] = {"id": k, "name": lab, "label": lab}
+            sid = str(getattr(r, "set_id", None) or "").strip()
+            assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": sid}
+        all_aids = [x for x in assignments_map.keys() if x]
+        if all_aids:
+            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(all_aids)).all():
+                kk = str(ar.assignment_id or "").strip()
+                if kk in assignments_map:
+                    s2 = str(getattr(ar, "set_id", None) or "").strip()
+                    if s2:
+                        assignments_map[kk]["set_id"] = s2
     except Exception:
         assignments_map = {}
     assignments = sorted(assignments_map.values(), key=lambda x: str(x.get("name") or ""))
@@ -3258,6 +3431,18 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
         if ids:
             ds = ExamCenterActivityDetail.query.filter(ExamCenterActivityDetail.activity_id.in_(ids)).all()
             det_map = {str(d.activity_id): d for d in ds}
+        exam_attempt_ids = [
+            str(x.attempt_id).strip()
+            for x in rows
+            if str(x.mode or "").strip().lower() == "exam" and str(getattr(x, "attempt_id", None) or "").strip()
+        ]
+        att_by_tid: dict[str, ExamAttempt] = {}
+        gj_by_tid: dict[str, ExamGradingJob] = {}
+        pending_subj: set[str] = set()
+        if exam_attempt_ids:
+            att_by_tid = {str(x.attempt_id): x for x in ExamAttempt.query.filter(ExamAttempt.attempt_id.in_(exam_attempt_ids)).all()}
+            gj_by_tid = {str(x.attempt_id): x for x in ExamGradingJob.query.filter(ExamGradingJob.attempt_id.in_(exam_attempt_ids)).all()}
+            pending_subj = _local_exam_attempt_ids_with_pending_subjective(exam_attempt_ids)
         for a in rows:
             d = det_map.get(str(a.id))
             mode = str(a.mode or "").strip().lower()
@@ -3265,27 +3450,37 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
             who = (a.display_name or a.username or a.user_id or "-").strip() or "-"
             tgt = (a.assignment_label or a.set_id or a.attempt_id or "-") or "-"
             res = (a.result_summary or "").strip() or "-"
-            out.append(
-                {
-                    "id": a.id,
-                    "created_at": a.created_at.isoformat() if a.created_at else "",
-                    "user_id": a.user_id,
-                    "student_name": who,
-                    "mode": a.mode,
-                    "mode_label": mode_label,
-                    "assignment_id": str(a.assignment_id).strip() if getattr(a, "assignment_id", None) else "",
-                    "target_label": str(tgt),
-                    "result": res[:500],
-                    "score": d.score if d else None,
-                    "total_score": d.total_score if d else None,
-                    "correct_count": d.correct_count if d else None,
-                    "wrong_count": d.wrong_count if d else None,
-                    "pass_score": pass_score,
-                    "passed": (d.score is not None and float(d.score) >= pass_score) if d and d.score is not None else None,
-                    "weakness": d.weakness if d else None,
-                    "recommendation": d.recommendation if d else None,
-                }
-            )
+            tid = str(getattr(a, "attempt_id", None) or "").strip()
+            att_row = att_by_tid.get(tid) if tid else None
+            gj_row = gj_by_tid.get(tid) if tid else None
+            regrade_ok = False
+            if mode == "exam" and tid and att_row and tid in pending_subj:
+                regrade_ok, _ = _local_exam_admin_regrade_allowed(att_row, gj_row)
+            rec: dict[str, Any] = {
+                "id": a.id,
+                "created_at": a.created_at.isoformat() if a.created_at else "",
+                "user_id": a.user_id,
+                "student_name": who,
+                "mode": a.mode,
+                "mode_label": mode_label,
+                "assignment_id": str(a.assignment_id).strip() if getattr(a, "assignment_id", None) else "",
+                "set_id": str(getattr(a, "set_id", None) or "").strip() or None,
+                "setId": str(getattr(a, "set_id", None) or "").strip() or None,
+                "attempt_id": tid or None,
+                "target_label": str(tgt),
+                "result": res[:500],
+                "score": d.score if d else None,
+                "total_score": d.total_score if d else None,
+                "correct_count": d.correct_count if d else None,
+                "wrong_count": d.wrong_count if d else None,
+                "pass_score": pass_score,
+                "passed": (d.score is not None and float(d.score) >= pass_score) if d and d.score is not None else None,
+                "weakness": d.weakness if d else None,
+                "recommendation": d.recommendation if d else None,
+                "local_exam_regrade_eligible": bool(regrade_ok),
+                "grading_job_status": (gj_row.status if gj_row else None),
+            }
+            out.append(rec)
     except Exception:
         return []
     return out
@@ -3558,6 +3753,7 @@ def api_exam_teacher_create_assignment():
         title_local = str(req.get("title") or req.get("name") or req.get("label") or "").strip() or None
         set_id_local = str(req.get("set_id") or req.get("setId") or "").strip() or None
         exam_track_local = str(req.get("exam_track") or req.get("examTrack") or "").strip() or None
+        exam_cat_local = _normalize_exam_category(req.get("exam_category") or req.get("examCategory") or "daily")
         diff_req = str(req.get("difficulty") or req.get("difficultyLevel") or "").strip().lower()
         if diff_req not in ("easy", "medium", "hard"):
             diff_req = ""
@@ -3565,6 +3761,7 @@ def api_exam_teacher_create_assignment():
         row.title = title_local
         row.set_id = set_id_local
         row.exam_track = exam_track_local
+        row.exam_category = exam_cat_local
         row.difficulty = diff_req or None
         row.status = "published"
         row.created_by = (session.get("display_name") or session.get("username") or "").strip() or None
@@ -3583,6 +3780,7 @@ def api_exam_teacher_create_assignment():
                             "title": row.title,
                             "set_id": row.set_id,
                             "exam_track": row.exam_track,
+                            "exam_category": getattr(row, "exam_category", None) or "daily",
                             "difficulty": row.difficulty,
                             "status": row.status,
                             "due_at": row.due_at.isoformat(timespec="seconds") if getattr(row, "due_at", None) else None,
@@ -3606,6 +3804,9 @@ def api_exam_teacher_create_assignment():
             row.title = title or row.title
             row.set_id = set_id or row.set_id or str(req.get("set_id") or req.get("setId") or "").strip() or None
             row.exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or row.exam_track
+            row.exam_category = _normalize_exam_category(
+                req.get("exam_category") or req.get("examCategory") or getattr(row, "exam_category", None) or "daily"
+            )
             diff_req = str(req.get("difficulty") or req.get("difficultyLevel") or "").strip().lower()
             if diff_req in ("easy", "medium", "hard"):
                 row.difficulty = diff_req
@@ -3633,6 +3834,7 @@ def api_exam_teacher_create_assignment():
                         "title": row.title,
                         "set_id": row.set_id,
                         "exam_track": row.exam_track,
+                        "exam_category": getattr(row, "exam_category", None) or "daily",
                     }
     return jsonify(payload), status
 
@@ -3645,6 +3847,7 @@ def api_exam_teacher_issue_assignments_modal():
     due_val, due_update = _parse_assignment_due_from_request(req)
     purpose = str(req.get("purpose") or req.get("exam_purpose") or "").strip() or None
     exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or None
+    exam_category = _normalize_exam_category(req.get("exam_category") or req.get("examCategory") or "daily")
 
     aud = req.get("audience_user_ids") or req.get("audienceUserIds") or req.get("user_ids") or []
     audience_ids = [str(x).strip() for x in aud] if isinstance(aud, list) else []
@@ -3690,6 +3893,7 @@ def api_exam_teacher_issue_assignments_modal():
             row.title = nm
             row.set_id = sid
             row.exam_track = exam_track
+            row.exam_category = exam_category
             row.status = "published"
             row.created_by = (session.get("display_name") or session.get("username") or "").strip() or None
             if due_update:
@@ -3713,6 +3917,7 @@ def api_exam_teacher_issue_assignments_modal():
                     "title": nm,
                     "set_id": sid,
                     "exam_track": exam_track,
+                    "exam_category": exam_category,
                     "due_at": due_val.isoformat(timespec="seconds") if (due_update and due_val) else None,
                     "purpose": purpose,
                     "audience_user_ids": audience_ids,
@@ -3747,6 +3952,14 @@ def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> t
                 {"status": "inactive", "is_active": False, "cancelled": True},
             ),
             (f"quiz/assignments/{q}/cancel", "POST", {}),
+        ]
+    elif op_l == "publish":
+        ops = [
+            (
+                f"quiz/assignments/{q}",
+                "PATCH",
+                {"status": "published", "is_active": True, "cancelled": False},
+            ),
         ]
     for path, meth, bod in ops:
         st0, pl0 = _quiz_api_call(path.strip("/"), method=meth, payload=bod if isinstance(bod, dict) else None)
@@ -3783,6 +3996,7 @@ def api_teacher_assignments_local_list():
                 "title": (r.title or r.assignment_id or "").strip(),
                 "set_id": r.set_id,
                 "exam_track": r.exam_track,
+                "exam_category": getattr(r, "exam_category", None) or "daily",
                 "difficulty": (r.difficulty or "").strip() if getattr(r, "difficulty", None) else "",
                 "status": (r.status or "").strip(),
                 "due_at": r.due_at.isoformat(timespec="seconds") if getattr(r, "due_at", None) else None,
@@ -3791,6 +4005,166 @@ def api_teacher_assignments_local_list():
         )
     return jsonify(
         {"code": 0, "message": "ok", "data": {"rows": out_rows}, "trace_id": uuid.uuid4().hex}
+    ), 200
+
+
+@bp.get("/api/exam-center/teacher/assignments/<assignment_id>")
+@page13_access_required
+def api_teacher_get_assignment(assignment_id: str):
+    """老师端：单条考试任务详情（用于编辑已下发任务）。"""
+    aid = (assignment_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    purpose = ""
+    try:
+        ex = ExamCenterAssignmentExtra.query.filter_by(assignment_id=aid).first()
+        if ex and ex.purpose:
+            purpose = str(ex.purpose).strip()
+    except Exception:
+        purpose = ""
+    audience_ids: list[str] = []
+    try:
+        for ar in ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).all():
+            uid = str(getattr(ar, "user_id", None) or "").strip()
+            if uid:
+                audience_ids.append(uid)
+    except Exception:
+        audience_ids = []
+    data = {
+        "assignment_id": row.assignment_id,
+        "title": (row.title or "").strip(),
+        "set_id": (row.set_id or "").strip() if getattr(row, "set_id", None) else "",
+        "exam_track": (row.exam_track or "").strip() if getattr(row, "exam_track", None) else "",
+        "exam_category": getattr(row, "exam_category", None) or "daily",
+        "difficulty": (row.difficulty or "").strip() if getattr(row, "difficulty", None) else "",
+        "status": (row.status or "").strip() if getattr(row, "status", None) else "",
+        "due_at": row.due_at.isoformat(timespec="seconds") if getattr(row, "due_at", None) else None,
+        "purpose": purpose,
+        "audience_user_ids": audience_ids,
+    }
+    return jsonify({"code": 0, "message": "ok", "data": data, "trace_id": uuid.uuid4().hex}), 200
+
+
+@bp.patch("/api/exam-center/teacher/assignments/<assignment_id>")
+@page13_access_required
+def api_teacher_patch_assignment(assignment_id: str):
+    """更新已下发的本地考试任务镜像（标题/截止/目的/受众/体考维度等）；并尽力同步上游 PATCH（失败不阻断）。"""
+    aid = (assignment_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    req = _json_payload()
+    if not isinstance(req, dict):
+        req = {}
+    row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+
+    if "title" in req:
+        row.title = str(req.get("title") or "").strip() or None
+    elif "name" in req:
+        row.title = str(req.get("name") or "").strip() or None
+
+    if "set_id" in req or "setId" in req:
+        sid = str((req.get("set_id") if "set_id" in req else req.get("setId")) or "").strip()
+        if not sid:
+            return jsonify({"code": "BAD_REQUEST", "message": "set_id 不能为空", "data": None, "trace_id": uuid.uuid4().hex}), 400
+        row.set_id = sid
+
+    if "exam_track" in req or "examTrack" in req:
+        et = str(req.get("exam_track") if "exam_track" in req else req.get("examTrack") or "").strip()
+        if et:
+            row.exam_track = et
+    if "exam_category" in req or "examCategory" in req:
+        row.exam_category = _normalize_exam_category(
+            req.get("exam_category") if "exam_category" in req else req.get("examCategory")
+        )
+
+    if "difficulty" in req or "difficultyLevel" in req:
+        diff_req = str(req.get("difficulty") if "difficulty" in req else req.get("difficultyLevel") or "").strip().lower()
+        if diff_req in ("easy", "medium", "hard"):
+            row.difficulty = diff_req
+        elif diff_req == "" and ("difficulty" in req or "difficultyLevel" in req):
+            row.difficulty = None
+
+    due_val, due_update = _parse_assignment_due_from_request(req)
+    if due_update:
+        row.due_at = due_val
+
+    if "purpose" in req:
+        pv = str(req.get("purpose") or "").strip()
+        ex = ExamCenterAssignmentExtra.query.filter_by(assignment_id=aid).first()
+        if pv:
+            if not ex:
+                ex = ExamCenterAssignmentExtra(assignment_id=aid)
+            ex.purpose = pv
+            db.session.add(ex)
+        else:
+            if ex:
+                db.session.delete(ex)
+
+    audience_updated = False
+    audience_ids: list[str] = []
+    if "audience_user_ids" in req or "audienceUserIds" in req:
+        raw = req.get("audience_user_ids") if "audience_user_ids" in req else req.get("audienceUserIds")
+        audience_ids = [str(x).strip() for x in raw] if isinstance(raw, list) else []
+        audience_ids = [x for x in audience_ids if x]
+        ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).delete()
+        for uid in audience_ids:
+            db.session.add(ExamCenterAssignmentAudience(assignment_id=aid, user_id=uid))
+        audience_updated = True
+
+    try:
+        db.session.add(row)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+
+    upstream_attempts: list[dict[str, Any]] = []
+    last_st = 599
+    last_pl: dict[str, Any] = {}
+    forward: dict[str, Any] = {}
+    if row.title:
+        forward["title"] = row.title
+    if row.set_id:
+        forward["set_id"] = str(row.set_id).strip()
+    if row.due_at:
+        forward["due_at"] = row.due_at.isoformat(sep=" ", timespec="seconds")
+    else:
+        forward["due_at"] = None
+    if row.exam_track:
+        forward["exam_track"] = row.exam_track
+    if getattr(row, "exam_category", None):
+        forward["exam_category"] = row.exam_category
+    if row.difficulty:
+        forward["difficulty"] = row.difficulty
+    if audience_updated:
+        forward["audience_user_ids"] = audience_ids
+
+    q = _urlquote(aid, safe="")
+    for path in (f"quiz/assignments/{q}", f"quiz/teacher/assignments/{q}", f"quiz/exam-center/assignments/{q}"):
+        st0, pl0 = _quiz_api_call(path.strip("/"), method="PATCH", payload=forward)
+        upstream_attempts.append({"path": path, "method": "PATCH", "http_status": int(st0)})
+        last_st = int(st0)
+        last_pl = pl0 if isinstance(pl0, dict) else {}
+        if 200 <= int(st0) < 300 or int(st0) == 204:
+            break
+
+    return jsonify(
+        {
+            "code": 0,
+            "message": "已更新本地任务" + ("；上游 PATCH 未成功（可忽略，仅 loc- 任务时正常）" if not (200 <= int(last_st) < 300 or int(last_st) == 204) else ""),
+            "data": {
+                "assignment_id": aid,
+                "upstream_attempts": upstream_attempts,
+                "last_upstream": last_pl,
+                "last_http_status": last_st,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
     ), 200
 
 
@@ -3845,10 +4219,38 @@ def api_teacher_unpublish_local_assignment(assignment_id: str):
     ), 200
 
 
+@bp.post("/api/exam-center/teacher/assignments/<assignment_id>/publish")
+@page13_access_required
+def api_teacher_publish_local_assignment(assignment_id: str):
+    """重新上架：本地标记 published，并尽力请求上游恢复（失败不阻断）。"""
+    aid = (assignment_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录，无法上架", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "publish")
+    try:
+        row.status = "published"
+        db.session.add(row)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify(
+        {
+            "code": 0,
+            "message": "已标记本地任务上架（published）；" + ("上游返回码=" + str(last_st)),
+            "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
 @bp.post("/api/exam-center/student/practice/generate-set")
 @login_required
 def api_exam_student_generate_practice_set():
-    body = _expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(_json_payload()))
+    body = _expand_quiz_request_body(_json_payload())
     uid = str(session.get("user_id") or "").strip()
     if uid:
         body["user_id"] = uid
@@ -3884,9 +4286,11 @@ def api_exam_student_submit_practice():
         )
         set_id = str(body.get("set_id") or inner_m.get("set_id") or inner_m.get("setId") or "").strip() or None
         etrack = str(body.get("exam_track") or "").strip() or None
+        ecat = _normalize_exam_category(body.get("exam_category") or body.get("examCategory") or "daily")
         _log_student_exam_center_activity(
             mode="practice",
             exam_track=etrack,
+            exam_category=ecat,
             set_id=set_id,
             assignment_id=None,
             assignment_label=None,
@@ -4056,9 +4460,26 @@ def api_exam_student_assignments_list():
         dt = due_map.get(aid_k)
         if dt:
             r["due_at"] = dt.isoformat(timespec="seconds")
-    # 仅当上游请求未成功时使用本地镜像兜底。若上游已 200（即使列表为空），不得展示孤立的本地 assignment，
-    # 否则会列出上游已不可用/或过期的 assignment_id，学生点击开考会一直等待或失败。
-    if not normalized and not upstream_http_ok:
+    if aids:
+        try:
+            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids)).all():
+                aid_k = str(ar.assignment_id or "").strip()
+                if not aid_k:
+                    continue
+                sid = str(getattr(ar, "set_id", None) or "").strip()
+                if not sid:
+                    continue
+                for r in normalized:
+                    if str(r.get("id") or "").strip() != aid_k:
+                        continue
+                    if not str(r.get("set_id") or r.get("setId") or "").strip():
+                        r["set_id"] = sid
+                        r["setId"] = sid
+        except Exception:
+            pass
+    # 上游 200 但 assignments 为空（aicheckword 未实现该列表、或兼容桩返回空）时，仍须合并 aiword 本地下发任务。
+    # 仅当「上游已成功解析出非空任务列表」时才不合并本地，避免与上游真实列表混用过期 assignment_id。
+    if not normalized:
         try:
             local_rows = (
                 ExamCenterAssignment.query.filter(
@@ -4103,11 +4524,15 @@ def api_exam_student_assignments_list():
                 nm = str(r.title or aid).strip() or aid
                 diff_l = (getattr(r, "difficulty", None) or "").strip().lower()
                 due_loc = getattr(r, "due_at", None)
+                sid_loc = str(getattr(r, "set_id", None) or "").strip()
                 normalized.append(
                     {
                         "id": aid,
                         "name": nm,
                         "label": nm,
+                        **({"set_id": sid_loc, "setId": sid_loc} if sid_loc else {}),
+                        "exam_track": (getattr(r, "exam_track", None) or "").strip() or None,
+                        "exam_category": getattr(r, "exam_category", None) or "daily",
                         **({"difficulty": diff_l} if diff_l in ("easy", "medium", "hard") else {}),
                         **(
                             {"due_at": due_loc.isoformat(timespec="seconds")}
@@ -4118,6 +4543,8 @@ def api_exam_student_assignments_list():
                 )
         except Exception:
             pass
+    uid_assign = str(session.get("user_id") or "").strip()
+    _attach_student_local_exam_statuses(uid_assign, normalized)
     return jsonify(
         {
             "code": 0,
@@ -4171,6 +4598,9 @@ def api_exam_student_history():
                 "created_at": a.created_at.isoformat() if a.created_at else "",
                 "mode": a.mode,
                 "mode_label": mode_label,
+                "assignment_id": str(a.assignment_id).strip() if getattr(a, "assignment_id", None) else "",
+                "set_id": str(getattr(a, "set_id", None) or "").strip() or None,
+                "setId": str(getattr(a, "set_id", None) or "").strip() or None,
                 "target_label": str(tgt),
                 "result": (a.result_summary or "-")[:500],
                 "score": d.score if d else None,
@@ -4221,6 +4651,63 @@ def _assignment_visible_to_user(*, assignment_id: str, user_id: str) -> bool:
         return False
 
 
+def _merge_local_exam_attempt_status(attempts: list[ExamAttempt]) -> str:
+    """同一学生对同一 assignment 多条 attempt 时合并状态：graded > grading > in_progress > open。"""
+    if not attempts:
+        return "open"
+    states = {str(getattr(x, "state", None) or "").strip().lower() for x in attempts}
+    if "graded" in states:
+        return "graded"
+    if "grading" in states:
+        return "grading"
+    if "started" in states:
+        return "in_progress"
+    return "open"
+
+
+def _attach_student_local_exam_statuses(uid_cur: str, normalized: list[dict[str, Any]]) -> None:
+    """
+    为学生任务列表附加本地考试进度（ExamAttempt），用于：
+    - 学生端：已提交/已出分后不再显示「开始考试」；
+    - 后续钉钉：与页面3一致可用字段区分「仍需参加/未提交」与「已交卷」。
+    """
+    for r in normalized or []:
+        if isinstance(r, dict):
+            r.setdefault("local_exam_status", "open")
+            r.setdefault("exam_task_closed_for_student", False)
+            r.setdefault("student_exam_needs_submit", True)
+    if not uid_cur or not normalized:
+        return
+    aids = [str(r.get("id") or "").strip() for r in normalized if isinstance(r, dict) and str(r.get("id") or "").strip()]
+    if not aids:
+        return
+    try:
+        all_atts = ExamAttempt.query.filter(ExamAttempt.user_id == uid_cur, ExamAttempt.assignment_id.in_(aids)).all()
+        by_aid: dict[str, list[ExamAttempt]] = {}
+        for atx in all_atts:
+            k = str(atx.assignment_id or "").strip()
+            if k:
+                by_aid.setdefault(k, []).append(atx)
+        for r in normalized:
+            if not isinstance(r, dict):
+                continue
+            aid_k = str(r.get("id") or "").strip()
+            st = _merge_local_exam_attempt_status(by_aid.get(aid_k) or [])
+            r["local_exam_status"] = st
+            # 已交卷（含阅卷中）：前端不再展示「开始考试」；钉钉「未完成」可筛 not finalized 或 needs_submit
+            closed = st in ("grading", "graded")
+            r["exam_task_closed_for_student"] = closed
+            r["student_exam_needs_submit"] = st in ("open", "in_progress")
+            r["student_exam_finalized"] = st == "graded"
+    except Exception:
+        for r in normalized:
+            if isinstance(r, dict):
+                r["local_exam_status"] = "open"
+                r["exam_task_closed_for_student"] = False
+                r["student_exam_needs_submit"] = True
+                r["student_exam_finalized"] = False
+
+
 def _attempt_items_total_score_100(rows: list[ExamAttemptItem]) -> tuple[float, int, int]:
     """总分按 0~100 百分制：每题满分 1，客观题 0/1，主观题使用 0~1 score。"""
     if not rows:
@@ -4252,6 +4739,308 @@ def _attempt_items_total_score_100(rows: list[ExamAttemptItem]) -> tuple[float, 
     return pct, corr, wrong
 
 
+def _local_exam_attempt_items_payload(attempt_id_key: str, att: Optional[ExamAttempt] = None) -> Optional[list[dict[str, Any]]]:
+    """
+    aiword 本地 ExamAttempt 的题目行，字段形态对齐练习上游 quiz/attempts/*/answers 的 items，
+    供「练习/考试详情」弹窗与活动快照降级展示（options / answer / user_answer）。
+    """
+    aid = (attempt_id_key or "").strip()
+    if not aid:
+        return None
+    att_row = att if att is not None else ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att_row:
+        return None
+    state_l = str(getattr(att_row, "state", None) or "").strip().lower()
+    rows = ExamAttemptItem.query.filter_by(attempt_id=aid).order_by(ExamAttemptItem.created_at.asc()).all()
+    items: list[dict[str, Any]] = []
+    for it in rows:
+        ua = (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None
+        ans = (it.answer_snapshot or {}).get("answer") if isinstance(it.answer_snapshot, dict) else None
+        opts = it.options_snapshot if isinstance(it.options_snapshot, list) else []
+        entry: dict[str, Any] = {
+            "question_id": it.question_id,
+            "question_type": it.question_type,
+            "stem": it.stem_snapshot,
+            "options": opts,
+            "user_answer": ua,
+            "answer": ans,
+            "is_correct": it.is_correct,
+            "subjective_needed": bool(it.subjective_needed),
+            "subjective_score": it.subjective_score,
+            "subjective_reason": it.subjective_reason,
+            "subjective_recommendation": it.subjective_recommendation,
+            "evidence_used": it.evidence_used if isinstance(it.evidence_used, list) else None,
+        }
+        if (
+            bool(it.subjective_needed)
+            and state_l == "grading"
+            and getattr(it, "subjective_score", None) is None
+        ):
+            entry["teacher_comment"] = "pending_subjective_grading"
+        items.append(entry)
+    return items
+
+
+def _local_exam_attempt_ids_with_pending_subjective(attempt_ids: list[str]) -> set[str]:
+    """给定 attempt_id 列表，返回其中「存在主观题且尚未给出 subjective_score」的 attempt_id 集合。"""
+    ids = [str(x or "").strip() for x in attempt_ids if str(x or "").strip()]
+    if not ids:
+        return set()
+    q = (
+        db.session.query(ExamAttemptItem.attempt_id)
+        .filter(ExamAttemptItem.attempt_id.in_(ids))
+        .filter(ExamAttemptItem.subjective_needed.is_(True))
+        .filter(ExamAttemptItem.subjective_score.is_(None))
+        .distinct()
+    )
+    return {str(r[0]) for r in q.all() if r and r[0]}
+
+
+def _enqueue_local_exam_ai_grading(att: ExamAttempt, rows: Optional[list[ExamAttemptItem]] = None) -> dict[str, Any]:
+    """
+    调用上游 quiz/grading/paper-by-ai 并 upsert ExamGradingJob（不 commit）。
+    用于提交后首次入队，或统计端「重新阅卷」。
+    """
+    attempt_id = str(att.attempt_id or "").strip()
+    if not attempt_id:
+        return {"ok": False, "reason": "missing_attempt_id"}
+    if rows is None:
+        rows = ExamAttemptItem.query.filter_by(attempt_id=attempt_id).all()
+    subj_items: list[dict[str, Any]] = []
+    for it in rows:
+        if not getattr(it, "subjective_needed", False):
+            continue
+        subj_items.append(
+            {
+                "question_id": it.question_id,
+                "question_type": it.question_type,
+                "stem": it.stem_snapshot,
+                "options": it.options_snapshot or [],
+                "user_answer": (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None,
+            }
+        )
+    if not subj_items:
+        return {"ok": False, "reason": "no_subjective_items"}
+    payload = {
+        "attempt_id": attempt_id,
+        "exam_track": att.exam_track,
+        "assignment_id": att.assignment_id,
+        "items": subj_items,
+    }
+    st_g, pl_g = _quiz_api_call("quiz/grading/paper-by-ai", method="POST", payload=payload)
+    job_id = ""
+    if 200 <= int(st_g) < 300 and isinstance(pl_g, dict):
+        root = _unwrap_quiz_api_success_data(pl_g)
+        if isinstance(root, dict):
+            inner = root.get("data") if isinstance(root.get("data"), dict) else root
+            job_id = str(inner.get("job_id") or inner.get("jobId") or inner.get("id") or "").strip()
+    gj = ExamGradingJob.query.filter_by(attempt_id=attempt_id).first()
+    if not gj:
+        gj = ExamGradingJob(attempt_id=attempt_id)
+    gj.upstream_job_id = job_id or gj.upstream_job_id
+    gj.status = "running" if job_id else "failed"
+    gj.last_upstream_http_status = int(st_g)
+    gj.last_upstream_trace_id = str((pl_g or {}).get("trace_id") or "").strip() if isinstance(pl_g, dict) else None
+    gj.last_upstream_payload = pl_g if isinstance(pl_g, dict) else {"data": pl_g}
+    gj.last_message = str((pl_g or {}).get("message") or "")[:500] if isinstance(pl_g, dict) else None
+    db.session.add(gj)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "http_status": int(st_g),
+        "payload": pl_g if isinstance(pl_g, dict) else None,
+        "job_status": gj.status,
+    }
+
+
+def _local_exam_admin_regrade_allowed(att: ExamAttempt, gj: Optional[ExamGradingJob]) -> tuple[bool, str]:
+    """统计/老师端：仅允许对「仍有待判主观分」且（阅卷中 / 阅卷失败 / 异常 graded）的记录重新入队。"""
+    aid = str(att.attempt_id or "").strip()
+    if not aid:
+        return False, "缺少 attempt"
+    pending_set = _local_exam_attempt_ids_with_pending_subjective([aid])
+    if aid not in pending_set:
+        return False, "主观题均已判分或无主观题，无需重新阅卷"
+    ast = str(att.state or "").strip().lower()
+    gj_st = str(gj.status or "").strip().lower() if gj else ""
+    if ast == "grading":
+        return True, ""
+    if gj_st == "failed":
+        return True, ""
+    if ast == "graded":
+        # 数据不一致：已标记 graded 但主观分未回填，仍允许管理员重试入队
+        return True, ""
+    return False, "仅支持对阅卷中、阅卷失败或判分未完成的本地考试重新发起判分"
+
+
+def _update_exam_center_activity_snapshot_for_local_attempt(attempt_id_key: str) -> bool:
+    """
+    将 ExamAttempt 当前分数/阅卷状态写回 exam_center_activities 与 exam_center_activity_details，
+    供统计端列表与「练习/考试详情」弹窗与 submit-local 落库口径一致。
+    """
+    aid = (attempt_id_key or "").strip()
+    if not aid:
+        return False
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att:
+        return False
+    act = ExamCenterActivity.query.filter_by(attempt_id=aid).order_by(ExamCenterActivity.created_at.desc()).first()
+    if not act:
+        return False
+    assign_row = None
+    aid_assign = str(att.assignment_id or "").strip()
+    if aid_assign:
+        assign_row = ExamCenterAssignment.query.filter_by(assignment_id=aid_assign).first()
+    set_id_log = str(getattr(assign_row, "set_id", None) or "").strip() or None
+    items_snap = _local_exam_attempt_items_payload(aid, att=att) or []
+    gs = "pending" if str(getattr(att, "state", None) or "").strip().lower() == "grading" else "graded"
+    merged_log: dict[str, Any] = {
+        "code": 0,
+        "message": "local-grading-synced",
+        "grading_status": gs,
+        "score": getattr(att, "score", None),
+        "total_score": getattr(att, "total_score", None),
+        "correct_count": getattr(att, "correct_count", None),
+        "wrong_count": getattr(att, "wrong_count", None),
+        "data": {
+            "score": getattr(att, "score", None),
+            "total_score": getattr(att, "total_score", None),
+            "correct_count": getattr(att, "correct_count", None),
+            "wrong_count": getattr(att, "wrong_count", None),
+            "grading_status": gs,
+            "attempt_id": att.attempt_id,
+            "assignment_id": att.assignment_id,
+            "set_id": set_id_log,
+        },
+        "attempt_items": items_snap,
+    }
+    mx = _extract_result_metrics(merged_log)
+    summ = _exam_activity_history_result_text("exam", mx, merged_log.get("message"))
+    if summ:
+        act.result_summary = str(summ)[:500]
+    det = ExamCenterActivityDetail.query.filter_by(activity_id=str(act.id)).first()
+    if det is None:
+        det = ExamCenterActivityDetail(activity_id=str(act.id), mode=str(act.mode or "")[:16] or "exam")
+    det.mode = str(act.mode or "")[:16] or det.mode
+    det.score = getattr(att, "score", None)
+    det.total_score = getattr(att, "total_score", None)
+    det.correct_count = getattr(att, "correct_count", None)
+    det.wrong_count = getattr(att, "wrong_count", None)
+    wk = mx.get("weakness")
+    det.weakness = str(wk)[:1000] if wk is not None and str(wk).strip() else None
+    rc = mx.get("recommendation")
+    det.recommendation = str(rc)[:1000] if rc is not None and str(rc).strip() else None
+    det.upstream_payload = _json_sanitize_for_db(merged_log)
+    db.session.add(act)
+    db.session.add(det)
+    return True
+
+
+def _local_exam_pull_grading_job_and_persist(aid_raw: str) -> dict[str, Any]:
+    """
+    拉取上游 quiz/grading/jobs/{job_id}，写回 ExamAttemptItem/ExamAttempt/ExamGradingJob，
+    若已出分则同步活动快照（内含 db.session.commit）。
+    返回 {"error": bool, "http": int, "message": str, "data": dict|None, "trace_id": str}
+    """
+    aid = (aid_raw or "").strip()
+    trace = uuid.uuid4().hex
+    if not aid:
+        return {"error": True, "http": 400, "message": "缺少 attempt_id", "data": None, "trace_id": trace}
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att:
+        return {"error": True, "http": 404, "message": "attempt 不存在", "data": None, "trace_id": trace}
+    gj = ExamGradingJob.query.filter_by(attempt_id=aid).first()
+    if not gj or not str(gj.upstream_job_id or "").strip():
+        return {"error": True, "http": 404, "message": "未找到判分任务 job_id", "data": None, "trace_id": trace}
+
+    st, pl = _quiz_api_call(f"quiz/grading/jobs/{_urlquote(str(gj.upstream_job_id), safe='')}", method="GET")
+    if isinstance(pl, dict):
+        gj.last_upstream_http_status = int(st)
+        gj.last_upstream_trace_id = str(pl.get("trace_id") or "").strip() or None
+        gj.last_upstream_payload = pl
+        gj.last_message = str(pl.get("message") or "")[:500] or None
+    try:
+        root = _unwrap_quiz_api_success_data(pl) if isinstance(pl, dict) else {}
+        inner = root.get("data") if isinstance(root, dict) and isinstance(root.get("data"), dict) else root
+        status = str((inner or {}).get("status") or (inner or {}).get("state") or "").strip().lower()
+    except Exception:
+        inner = {}
+        status = ""
+
+    activity_synced = False
+    if status in ("done", "success", "completed", "graded", "complete"):
+        try:
+            items = (inner or {}).get("items") if isinstance(inner, dict) else None
+            if not isinstance(items, list):
+                items = []
+            by_q: dict[str, dict[str, Any]] = {}
+            for x in items:
+                if not isinstance(x, dict):
+                    continue
+                qid = str(x.get("question_id") or x.get("questionId") or "").strip()
+                if qid:
+                    by_q[qid] = x
+            rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
+            for it in rows:
+                if not getattr(it, "subjective_needed", False):
+                    continue
+                qid = str(it.question_id or "").strip()
+                x = by_q.get(qid) or {}
+                sc = x.get("score")
+                try:
+                    it.subjective_score = max(0.0, min(1.0, float(sc))) if sc is not None else None
+                except Exception:
+                    it.subjective_score = None
+                it.subjective_reason = str(x.get("reason") or "")[:2000] or None
+                it.subjective_recommendation = str(x.get("recommendation") or "")[:2000] or None
+                ev = x.get("evidence_used") or x.get("evidenceUsed") or []
+                it.evidence_used = ev if isinstance(ev, list) else None
+                it.updated_at = now_local()
+            sc2, corr2, wrong2 = _attempt_items_total_score_100(rows)
+            att.state = "graded"
+            att.score = sc2
+            att.total_score = 100.0
+            att.correct_count = corr2
+            att.wrong_count = wrong2
+            gj.status = "done"
+            _update_exam_center_activity_snapshot_for_local_attempt(aid)
+            activity_synced = True
+            db.session.add(att)
+            db.session.add(gj)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return {"error": True, "http": 500, "message": str(e), "data": None, "trace_id": trace}
+    elif status in ("failed", "error"):
+        gj.status = "failed"
+        try:
+            db.session.add(gj)
+            db.session.commit()
+        except Exception as e2:
+            db.session.rollback()
+            return {"error": True, "http": 500, "message": str(e2), "data": None, "trace_id": trace}
+    else:
+        try:
+            db.session.add(gj)
+            db.session.commit()
+        except Exception as e3:
+            db.session.rollback()
+            return {"error": True, "http": 500, "message": str(e3), "data": None, "trace_id": trace}
+
+    return {
+        "error": False,
+        "http": 200,
+        "message": "ok",
+        "data": {
+            "attempt_id": aid,
+            "job_status": gj.status,
+            "state": att.state,
+            "activity_synced": activity_synced,
+        },
+        "trace_id": trace,
+    }
+
+
 @bp.post("/api/exam-center/student/exams/start-local")
 @login_required
 def api_exam_student_start_exam_local():
@@ -4268,16 +5057,7 @@ def api_exam_student_start_exam_local():
     row = ExamCenterAssignment.query.filter_by(assignment_id=assignment_id).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "考试任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    due_at = getattr(row, "due_at", None)
-    if due_at and now_local() > due_at:
-        return jsonify(
-            {
-                "code": "OVERDUE",
-                "message": "已超过截止完成时间",
-                "data": {"due_at": due_at.isoformat(timespec="seconds")},
-                "trace_id": uuid.uuid4().hex,
-            }
-        ), 400
+    # 截止后仍允许开考；是否按时完成由统计端按提交时间与 deadline 比对（见 /stats/exam/*）
     set_id = str(getattr(row, "set_id", None) or "").strip()
     if not set_id:
         return jsonify({"code": "BAD_REQUEST", "message": "任务缺少 set_id，无法开考", "data": None, "trace_id": uuid.uuid4().hex}), 400
@@ -4297,6 +5077,7 @@ def api_exam_student_start_exam_local():
             assignment_id=assignment_id,
             user_id=uid,
             exam_track=str(getattr(row, "exam_track", None) or "").strip() or None,
+            exam_category=_normalize_exam_category(getattr(row, "exam_category", None) or "daily"),
             state="started",
             started_at=now_local(),
         )
@@ -4422,45 +5203,61 @@ def api_exam_student_submit_exam_local():
     # 触发上游整卷主观判分 job（异步）
     if att.state == "grading":
         try:
-            subj_items: list[dict[str, Any]] = []
-            for it in rows:
-                if not getattr(it, "subjective_needed", False):
-                    continue
-                subj_items.append(
-                    {
-                        "question_id": it.question_id,
-                        "question_type": it.question_type,
-                        "stem": it.stem_snapshot,
-                        "options": it.options_snapshot or [],
-                        "user_answer": (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None,
-                    }
-                )
-            payload = {
-                "attempt_id": attempt_id,
-                "exam_track": att.exam_track,
-                "assignment_id": att.assignment_id,
-                "items": subj_items,
-            }
-            st_g, pl_g = _quiz_api_call("quiz/grading/paper-by-ai", method="POST", payload=payload)
-            job_id = ""
-            if 200 <= int(st_g) < 300 and isinstance(pl_g, dict):
-                root = _unwrap_quiz_api_success_data(pl_g)
-                if isinstance(root, dict):
-                    inner = root.get("data") if isinstance(root.get("data"), dict) else root
-                    job_id = str(inner.get("job_id") or inner.get("jobId") or inner.get("id") or "").strip()
-            gj = ExamGradingJob.query.filter_by(attempt_id=attempt_id).first()
-            if not gj:
-                gj = ExamGradingJob(attempt_id=attempt_id)
-            gj.upstream_job_id = job_id or gj.upstream_job_id
-            gj.status = "running" if job_id else "failed"
-            gj.last_upstream_http_status = int(st_g)
-            gj.last_upstream_trace_id = str((pl_g or {}).get("trace_id") or "").strip() if isinstance(pl_g, dict) else None
-            gj.last_upstream_payload = pl_g if isinstance(pl_g, dict) else {"data": pl_g}
-            gj.last_message = str((pl_g or {}).get("message") or "")[:500] if isinstance(pl_g, dict) else None
-            db.session.add(gj)
-            db.session.commit()
+            enq = _enqueue_local_exam_ai_grading(att, rows)
+            if enq.get("ok"):
+                db.session.commit()
+            else:
+                db.session.rollback()
         except Exception:
             db.session.rollback()
+
+    # 学生历史列表读 exam_center_activities；本地考试提交原先只更新 exam_attempts，导致「提交成功但无记录」
+    try:
+        assign_row = ExamCenterAssignment.query.filter_by(assignment_id=str(att.assignment_id or "").strip()).first()
+        set_id_log = str(getattr(assign_row, "set_id", None) or "").strip() or None
+        assignment_label_log = str(getattr(assign_row, "title", None) or "").strip() or None
+        items_snap = _local_exam_attempt_items_payload(str(att.attempt_id), att=att) or []
+        gs = "pending" if str(getattr(att, "state", None) or "").strip().lower() == "grading" else "graded"
+        merged_log: dict[str, Any] = {
+            "code": 0,
+            "message": "submit-local",
+            "grading_status": gs,
+            "score": getattr(att, "score", None),
+            "total_score": getattr(att, "total_score", None),
+            "correct_count": getattr(att, "correct_count", None),
+            "wrong_count": getattr(att, "wrong_count", None),
+            "data": {
+                "score": getattr(att, "score", None),
+                "total_score": getattr(att, "total_score", None),
+                "correct_count": getattr(att, "correct_count", None),
+                "wrong_count": getattr(att, "wrong_count", None),
+                "grading_status": gs,
+                "attempt_id": att.attempt_id,
+                "assignment_id": att.assignment_id,
+                "set_id": set_id_log,
+            },
+            "attempt_items": items_snap,
+        }
+        mx = _extract_result_metrics(merged_log)
+        summ = _exam_activity_history_result_text("exam", mx, merged_log.get("message"))
+        _log_student_exam_center_activity(
+            mode="exam",
+            exam_track=str(getattr(att, "exam_track", None) or "").strip() or None,
+            exam_category=str(getattr(att, "exam_category", None) or "").strip() or "daily",
+            set_id=set_id_log,
+            assignment_id=str(att.assignment_id or "").strip() or None,
+            assignment_label=assignment_label_log,
+            attempt_id=str(att.attempt_id or "").strip() or None,
+            upstream_http_status=200,
+            upstream_trace_id=None,
+            result_summary=summ,
+            upstream_result_payload=merged_log,
+        )
+    except Exception:
+        try:
+            current_app.logger.exception("exam_submit_local_activity_log_failed attempt_id=%s", attempt_id)
+        except Exception:
+            pass
 
     return jsonify({"code": 0, "message": "ok", "data": {"attempt_id": attempt_id, "state": att.state}, "trace_id": uuid.uuid4().hex}), 200
 
@@ -4510,73 +5307,100 @@ def api_exam_student_attempt_sync_grading_local(attempt_id: str):
     att = ExamAttempt.query.filter_by(attempt_id=aid).first()
     if not att or str(att.user_id or "").strip() != uid:
         return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    out = _local_exam_pull_grading_job_and_persist(aid)
+    if out.get("error"):
+        code = "DB_ERROR" if int(out.get("http") or 500) == 500 else "NOT_FOUND"
+        if int(out.get("http") or 400) == 400:
+            code = "BAD_REQUEST"
+        return (
+            jsonify(
+                {
+                    "code": code,
+                    "message": str(out.get("message") or "同步失败"),
+                    "data": out.get("data"),
+                    "trace_id": str(out.get("trace_id") or uuid.uuid4().hex),
+                }
+            ),
+            int(out.get("http") or 500),
+        )
+    return jsonify({"code": 0, "message": "ok", "data": out.get("data"), "trace_id": out.get("trace_id")}), 200
+
+
+@bp.post("/api/exam-center/teacher/local-exam/attempts/<attempt_id>/sync-grading")
+@page13_access_required
+def api_exam_teacher_sync_local_exam_grading(attempt_id: str):
+    """统计/老师端（page13）：将上游主观阅卷结果拉回 aiword 并更新活动快照（学生端同逻辑，但不校验答卷归属）。"""
+    aid = (attempt_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    out = _local_exam_pull_grading_job_and_persist(aid)
+    if out.get("error"):
+        code = "DB_ERROR" if int(out.get("http") or 500) == 500 else "NOT_FOUND"
+        if int(out.get("http") or 400) == 400:
+            code = "BAD_REQUEST"
+        return (
+            jsonify(
+                {
+                    "code": code,
+                    "message": str(out.get("message") or "同步失败"),
+                    "data": out.get("data"),
+                    "trace_id": str(out.get("trace_id") or uuid.uuid4().hex),
+                }
+            ),
+            int(out.get("http") or 500),
+        )
+    return jsonify({"code": 0, "message": "ok（本地阅卷已同步）", "data": out.get("data"), "trace_id": out.get("trace_id")}), 200
+
+
+@bp.post("/api/exam-center/teacher/local-exam/attempts/<attempt_id>/retry-grading")
+@page13_access_required
+def api_exam_teacher_retry_local_exam_grading(attempt_id: str):
+    """统计端/老师端（page13）：对阅卷中或阅卷失败的本地考试重新发起上游主观判分任务。"""
+    aid = (attempt_id or "").strip()
+    if not aid:
+        return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    att = ExamAttempt.query.filter_by(attempt_id=aid).first()
+    if not att:
+        return jsonify({"code": "NOT_FOUND", "message": "本地考试 attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     gj = ExamGradingJob.query.filter_by(attempt_id=aid).first()
-    if not gj or not str(gj.upstream_job_id or "").strip():
-        return jsonify({"code": "NOT_FOUND", "message": "未找到判分任务 job_id", "data": None, "trace_id": uuid.uuid4().hex}), 404
-
-    st, pl = _quiz_api_call(f"quiz/grading/jobs/{_urlquote(str(gj.upstream_job_id), safe='')}", method="GET")
-    if isinstance(pl, dict):
-        gj.last_upstream_http_status = int(st)
-        gj.last_upstream_trace_id = str(pl.get("trace_id") or "").strip() or None
-        gj.last_upstream_payload = pl
-        gj.last_message = str(pl.get("message") or "")[:500] or None
+    ok_elig, msg_elig = _local_exam_admin_regrade_allowed(att, gj)
+    if not ok_elig:
+        return jsonify({"code": "BAD_STATE", "message": msg_elig, "data": None, "trace_id": uuid.uuid4().hex}), 400
+    ast0 = str(att.state or "").strip().lower()
+    if ast0 != "grading":
+        att.state = "grading"
+        db.session.add(att)
     try:
-        root = _unwrap_quiz_api_success_data(pl) if isinstance(pl, dict) else {}
-        inner = root.get("data") if isinstance(root, dict) and isinstance(root.get("data"), dict) else root
-        status = str((inner or {}).get("status") or (inner or {}).get("state") or "").strip().lower()
-    except Exception:
-        inner = {}
-        status = ""
-    if status in ("done", "success", "completed", "graded", "complete"):
-        try:
-            items = (inner or {}).get("items") if isinstance(inner, dict) else None
-            if not isinstance(items, list):
-                items = []
-            by_q: dict[str, dict[str, Any]] = {}
-            for x in items:
-                if not isinstance(x, dict):
-                    continue
-                qid = str(x.get("question_id") or x.get("questionId") or "").strip()
-                if qid:
-                    by_q[qid] = x
-            rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
-            for it in rows:
-                if not getattr(it, "subjective_needed", False):
-                    continue
-                qid = str(it.question_id or "").strip()
-                x = by_q.get(qid) or {}
-                sc = x.get("score")
-                try:
-                    it.subjective_score = max(0.0, min(1.0, float(sc))) if sc is not None else None
-                except Exception:
-                    it.subjective_score = None
-                it.subjective_reason = str(x.get("reason") or "")[:2000] or None
-                it.subjective_recommendation = str(x.get("recommendation") or "")[:2000] or None
-                ev = x.get("evidence_used") or x.get("evidenceUsed") or []
-                it.evidence_used = ev if isinstance(ev, list) else None
-                it.updated_at = now_local()
-            sc2, corr2, wrong2 = _attempt_items_total_score_100(rows)
-            att.state = "graded"
-            att.score = sc2
-            att.total_score = 100.0
-            att.correct_count = corr2
-            att.wrong_count = wrong2
-            gj.status = "done"
-            db.session.add(att)
-            db.session.add(gj)
-            db.session.commit()
-        except Exception as e:
+        rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
+        enq = _enqueue_local_exam_ai_grading(att, rows)
+        if not enq.get("ok"):
             db.session.rollback()
-            return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
-    elif status in ("failed", "error"):
-        gj.status = "failed"
-        try:
-            db.session.add(gj)
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-
-    return jsonify({"code": 0, "message": "ok", "data": {"attempt_id": aid, "job_status": gj.status, "state": att.state}, "trace_id": uuid.uuid4().hex}), 200
+            return jsonify(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": str(enq.get("reason") or "无法入队"),
+                    "data": None,
+                    "trace_id": uuid.uuid4().hex,
+                }
+            ), 400
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"code": "DB_ERROR", "message": str(e), "data": None, "trace_id": uuid.uuid4().hex}), 500
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok（已重新发起主观题判分）",
+            "data": {
+                "attempt_id": aid,
+                "state": att.state,
+                "upstream_job_id": str(enq.get("job_id") or "").strip() or None,
+                "job_status": enq.get("job_status"),
+                "http_status": enq.get("http_status"),
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
 
 
 @bp.get("/api/exam-center/student/attempts/<attempt_id>")
@@ -4589,27 +5413,7 @@ def api_exam_student_attempt_detail_local(attempt_id: str):
     att = ExamAttempt.query.filter_by(attempt_id=aid).first()
     if not att or str(att.user_id or "").strip() != uid:
         return jsonify({"code": "NOT_FOUND", "message": "attempt 不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    rows = ExamAttemptItem.query.filter_by(attempt_id=aid).all()
-    items: list[dict[str, Any]] = []
-    for it in rows:
-        ua = (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None
-        ans = (it.answer_snapshot or {}).get("answer") if isinstance(it.answer_snapshot, dict) else None
-        items.append(
-            {
-                "question_id": it.question_id,
-                "question_type": it.question_type,
-                "stem": it.stem_snapshot,
-                "options": it.options_snapshot or [],
-                "user_answer": ua,
-                "answer": ans,
-                "is_correct": it.is_correct,
-                "subjective_needed": bool(it.subjective_needed),
-                "subjective_score": it.subjective_score,
-                "subjective_reason": it.subjective_reason,
-                "subjective_recommendation": it.subjective_recommendation,
-                "evidence_used": it.evidence_used if isinstance(it.evidence_used, list) else None,
-            }
-        )
+    items = _local_exam_attempt_items_payload(aid, att=att) or []
     return jsonify(
         {
             "code": 0,
@@ -4708,6 +5512,17 @@ def api_exam_activity_attempt_items(activity_id: str):
         return jsonify({"code": 0, "message": "ok（无 attempt_id）", "data": {"items": []}, "trace_id": uuid.uuid4().hex}), 200
 
     det_snap = ExamCenterActivityDetail.query.filter_by(activity_id=aid).first()
+    local_items = _local_exam_attempt_items_payload(att_id)
+    if local_items is not None:
+        return jsonify(
+            {
+                "code": 0,
+                "message": "ok（本地考试明细）",
+                "data": {"items": local_items},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 200
+
     st, pl = _quiz_api_call(
         f"quiz/attempts/{att_id}/answers",
         method="GET",

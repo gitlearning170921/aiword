@@ -11,6 +11,161 @@
             .replace(/"/g, "&quot;");
     }
 
+    /** 详情/历史列表分数条整数化。 */
+    function roundScoreIntForSlash(x) {
+        var n = Number(x);
+        if (!Number.isFinite(n)) return "";
+        return String(Math.round(n));
+    }
+
+    /**
+     * 练习/考试记录分数展示：考试（exam）统一为「得分/100」百分制，避免历史 total 与 score 相同（如 80/80）被误解为满分 80。
+     * 练习（practice）仍用接口返回的 score/total_score。
+     */
+    function formatActivityScoreSlash(score, total, mode) {
+        var m = String(mode || "").trim().toLowerCase();
+        if (m === "exam" && score != null && score !== "") {
+            var a = roundScoreIntForSlash(score);
+            return a ? a + "/100" : "";
+        }
+        var a2 = score == null || score === "" ? "" : roundScoreIntForSlash(score);
+        var b2 = total == null || total === "" ? "" : roundScoreIntForSlash(total);
+        if (a2 && b2) return a2 + "/" + b2;
+        return a2 || b2 || "";
+    }
+
+    /** 考试任务/活动上套题 ID 的统一读取（与后端 set_id / setId 对齐）。 */
+    function pickAssignmentSetId(it) {
+        if (!it || typeof it !== "object") return "";
+        return String(it.set_id || it.setId || it.quiz_set_id || it.quizSetId || "").trim();
+    }
+
+    /** 从 aiword 代理返回中取出法规提示业务对象（兼容嵌套 data）。 */
+    function extractRegulatoryPayloadFromApiResp(h) {
+        if (!h || typeof h !== "object") return { err: "无响应", payload: null };
+        if (h.__ok === false) return { err: String(h.message || "请求失败"), payload: null };
+        var c = h.code;
+        if (c != null && Number(c) !== 0 && String(c) !== "0") {
+            return { err: String(h.message || "业务失败"), payload: null };
+        }
+        var d = h.data;
+        if (!d || typeof d !== "object") return { err: "响应缺少 data", payload: null };
+        if (d.ok === true && d.data && typeof d.data === "object") return { err: "", payload: d.data };
+        if (Array.isArray(d.checklist)) return { err: "", payload: d };
+        return { err: "未识别的数据结构", payload: null };
+    }
+
+    function renderRegulatoryHintBodyHtml(payload) {
+        if (!payload || typeof payload !== "object") {
+            return '<p class="text-muted mb-0">无结构化内容。</p>';
+        }
+        var parts = [];
+        if (payload.since || payload.as_of) {
+            parts.push(
+                '<p class="mb-2 text-muted">时间窗：<strong>' +
+                    escExam(payload.since || "—") +
+                    "</strong> ～ <strong>" +
+                    escExam(payload.as_of || "—") +
+                    "</strong> · 体考类型：<strong>" +
+                    escExam(payload.exam_track || "—") +
+                    "</strong></p>"
+            );
+        }
+        if (payload.disclaimer) {
+            parts.push('<div class="alert alert-warning py-2 small mb-3">' + escExam(payload.disclaimer) + "</div>");
+        }
+        var list = payload.checklist;
+        if (Array.isArray(list) && list.length) {
+            parts.push('<h6 class="small fw-bold mb-2">建议关注清单</h6><ul class="mb-3 small ps-3">');
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i] || {};
+                parts.push('<li class="mb-2">');
+                parts.push('<div><span class="badge bg-secondary">' + escExam(it.domain || "—") + "</span></div>");
+                if (it.what_to_watch) {
+                    parts.push("<div><strong>关注：</strong>" + escExam(it.what_to_watch) + "</div>");
+                }
+                if (it.why_for_software) {
+                    parts.push("<div><strong>对软件：</strong>" + escExam(it.why_for_software) + "</div>");
+                }
+                if (it.how_to_verify) {
+                    parts.push("<div><strong>核对建议：</strong>" + escExam(it.how_to_verify) + "</div>");
+                }
+                parts.push("</li>");
+            }
+            parts.push("</ul>");
+        }
+        var angles = payload.suggested_question_angles;
+        if (Array.isArray(angles) && angles.length) {
+            parts.push('<h6 class="small fw-bold mb-2">命题角度参考</h6><ol class="small mb-0 ps-3">');
+            for (var j = 0; j < angles.length; j++) {
+                parts.push("<li class=\"mb-1\">" + escExam(angles[j]) + "</li>");
+            }
+            parts.push("</ol>");
+        }
+        if (payload.error) {
+            parts.push('<div class="alert alert-danger py-2 small mb-0">' + escExam(String(payload.error)) + "</div>");
+        }
+        return parts.length ? parts.join("") : '<p class="text-muted mb-0">暂无清单条目，可展开下方「接口调试」查看原始响应。</p>';
+    }
+
+    /**
+     * 法规/标准更新提示（仅老师端入口）：可读卡片 + 卡片内折叠 JSON；并 renderRaw 写入页底「接口调试」。
+     * 统计端不单独提供该按钮；统计端与老师端共用页底「可读摘要 + 折叠 JSON」反馈其它操作。
+     * opts: { renderRaw, track, since, asOf, panelId, bodyId, debugId }
+     */
+    async function performRegulatoryHintFlow(opts) {
+        var renderRaw = opts.renderRaw;
+        var track = String(opts.track || "cn").trim() || "cn";
+        var since = opts.since;
+        var asOf = opts.asOf;
+        var panel = document.getElementById(opts.panelId);
+        var bodyEl = document.getElementById(opts.bodyId);
+        var debugEl = document.getElementById(opts.debugId);
+        // 浏览器侧须略长于 aiword→aicheckword 代理（后端法规提示最少 180s、上限 600s），避免上游已成功而前端先 Abort
+        var h = await apiRequest(
+            "/api/exam-center/teacher/regulatory-updates-hint",
+            "POST",
+            {
+                exam_track: track,
+                examTrack: track,
+                track: track,
+                exam_type: track,
+                exam_category: "new_standard",
+                examCategory: "new_standard",
+                as_of: asOf,
+                since: since
+            },
+            { timeoutMs: 660000 }
+        );
+        if (debugEl) {
+            try {
+                debugEl.textContent = JSON.stringify(h, null, 2);
+            } catch (e0) {
+                debugEl.textContent = String(h);
+            }
+        }
+        if (renderRaw) renderRaw(h);
+        var ex = extractRegulatoryPayloadFromApiResp(h);
+        if (panel) panel.classList.remove("d-none");
+        if (bodyEl) {
+            if (ex.err) {
+                bodyEl.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escExam(ex.err) + "</div>";
+            } else {
+                bodyEl.innerHTML = renderRegulatoryHintBodyHtml(ex.payload || {});
+            }
+        }
+        var det = document.getElementById("examApiResultDetails");
+        if (det) {
+            try {
+                det.open = !!(h && h.__ok === false);
+            } catch (e1) {}
+        }
+        try {
+            if (panel) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        } catch (e2) {}
+        return h;
+    }
+
     /** 截止完成时间展示：与页面3截止日期列配色一致（#FDE2E2 / #C03639）。 */
     function examDueCompletionPillHtml(dueAtIso) {
         if (!dueAtIso) return '<span class="text-muted">—</span>';
@@ -84,7 +239,13 @@
         return p + q + h;
     }
 
-    async function apiRequest(url, method, payload) {
+    async function apiRequest(url, method, payload, reqOpts) {
+        reqOpts = reqOpts || {};
+        var timeoutMs =
+            typeof reqOpts.timeoutMs === "number" && reqOpts.timeoutMs > 0
+                ? Math.floor(reqOpts.timeoutMs)
+                : 120000;
+        if (timeoutMs > 660000) timeoutMs = 660000;
         var fetchOpts = {
             method: method || "GET",
             credentials: "include",
@@ -95,7 +256,7 @@
             body: payload ? JSON.stringify(payload) : undefined
         };
         if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-            fetchOpts.signal = AbortSignal.timeout(120000);
+            fetchOpts.signal = AbortSignal.timeout(timeoutMs);
         }
         var response = await fetch(withRoot(url), fetchOpts);
         var text = await response.text();
@@ -281,9 +442,67 @@
 
     function bindOutput() {
         var resultBox = document.getElementById("examApiResult");
+        var fb = document.getElementById("examApiCompactFeedback");
         return function (payload) {
-            if (!resultBox) return;
-            resultBox.textContent = JSON.stringify(payload, null, 2);
+            if (resultBox) {
+                try {
+                    resultBox.textContent = JSON.stringify(payload, null, 2);
+                } catch (e) {
+                    resultBox.textContent = String(payload);
+                }
+            }
+            if (!fb) return;
+            var role = getExamRole();
+            if (role === "student") {
+                fb.classList.add("d-none");
+                fb.textContent = "";
+                return;
+            }
+            if (!payload || typeof payload !== "object") {
+                fb.classList.add("d-none");
+                fb.textContent = "";
+                return;
+            }
+            var det = document.getElementById("examApiResultDetails");
+            var danger =
+                payload.__ok === false ||
+                payload.code === "UI_ERROR" ||
+                payload.code === "BAD_RESPONSE";
+            var pending = payload.code === "UI";
+            var msg = String(payload.message != null ? payload.message : "").trim();
+            if (danger) {
+                fb.className = "alert alert-danger py-2 small mb-2";
+                if (!msg && payload.__http_status) msg = "请求失败（HTTP " + payload.__http_status + "）";
+                if (!msg) msg = "请求失败";
+                if (msg.length > 600) msg = msg.slice(0, 600) + "…";
+                fb.textContent = msg;
+                fb.classList.remove("d-none");
+                if (det) {
+                    try {
+                        det.open = true;
+                    } catch (e2) {}
+                }
+            } else if (pending) {
+                fb.className = "alert alert-info py-2 small mb-2";
+                fb.textContent = msg || "处理中…";
+                fb.classList.remove("d-none");
+            } else {
+                var okish =
+                    payload.success === true ||
+                    payload.code === 0 ||
+                    payload.code === "0" ||
+                    (payload.code == null && payload.__ok !== false);
+                if (okish || msg) {
+                    fb.className = "alert alert-success py-2 small mb-2";
+                    var outMsg = msg && msg !== "undefined" ? msg : "";
+                    if (outMsg.length > 260) outMsg = outMsg.slice(0, 260) + "…";
+                    fb.textContent = outMsg || "操作已完成（详情见下方「接口调试」JSON）";
+                    fb.classList.remove("d-none");
+                } else {
+                    fb.classList.add("d-none");
+                    fb.textContent = "";
+                }
+            }
         };
     }
 
@@ -297,6 +516,14 @@
         var n = parseInt(raw, 10);
         if (!Number.isFinite(n) || n <= 0) return fallback;
         return n;
+    }
+
+    /** 与体考类型正交：daily=日常；new_standard=新标发布 */
+    function readExamCategory(which) {
+        var id = which === "student" ? "studentExamCategory" : "teacherExamCategory";
+        var v = readValue(id);
+        if (v === "new_standard") return "new_standard";
+        return "daily";
     }
 
     function setButtonLoading(btn, loading, loadingText) {
@@ -313,13 +540,184 @@
         }
     }
 
-    function setIngestProgress(visible, text) {
+    function setIngestProgress(visible, text, opts) {
+        opts = opts || {};
+        var showStop = opts.showStop !== false;
         var box = document.getElementById("teacherIngestProgress");
         var el = document.getElementById("teacherIngestProgressText");
         var stopBtn = document.getElementById("btnTeacherIngestStop");
         if (box) box.classList.toggle("d-none", !visible);
         if (el && text != null) el.textContent = String(text);
-        if (stopBtn) stopBtn.classList.toggle("d-none", !visible);
+        if (stopBtn) stopBtn.classList.toggle("d-none", !visible || !showStop);
+    }
+
+    /** 老师端：将「接口响应」卡片滚入视口（法规提示等仅 render 时易被忽略）。 */
+    function scrollExamApiResponseIntoView() {
+        var card = document.getElementById("examApiResultCard");
+        var pre = document.getElementById("examApiResult");
+        var el = card || pre;
+        if (!el) return;
+        try {
+            el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        } catch (eScrollApi) {}
+    }
+
+    /** 老师端「考试与录题配置」：与页面3同源 GET/PUT /api/system-settings（键列表由专用 GET 过滤）。 */
+    function bindExamTeacherSystemSettings(renderRaw) {
+        var modal = document.getElementById("examTeacherSystemSettingsModal");
+        var formEl = document.getElementById("examTeacherSystemSettingsForm");
+        var btnOpen = document.getElementById("btnExamTeacherSystemSettings");
+        var btnClose = document.getElementById("closeExamTeacherSystemSettingsBtn");
+        var btnSave = document.getElementById("saveExamTeacherSystemSettingsBtn");
+
+        function escAttr(s) {
+            return String(s == null ? "" : s)
+                .replace(/&/g, "&amp;")
+                .replace(/"/g, "&quot;")
+                .replace(/</g, "&lt;");
+        }
+
+        function showExamSysModal() {
+            if (!modal) return;
+            modal.classList.add("show");
+            modal.setAttribute("aria-hidden", "false");
+            modal.style.display = "block";
+            modal.style.position = "fixed";
+            modal.style.left = "0";
+            modal.style.top = "0";
+            modal.style.right = "0";
+            modal.style.bottom = "0";
+            modal.style.zIndex = "2100";
+            document.body.style.overflow = "hidden";
+        }
+
+        function hideExamSysModal() {
+            if (!modal) return;
+            modal.classList.remove("show");
+            modal.setAttribute("aria-hidden", "true");
+            modal.style.display = "none";
+            modal.style.position = "";
+            modal.style.zIndex = "";
+            document.body.style.overflow = "";
+        }
+
+        async function loadExamSysForm() {
+            if (!formEl) return;
+            formEl.innerHTML = '<div class="col-12"><div class="alert alert-info mb-0 small">加载中…</div></div>';
+            try {
+                var res = await apiRequest("/api/exam-center/teacher/system-settings", "GET");
+                var keys = res.keys || [];
+                var settings = res.settings || {};
+                if (!keys.length) {
+                    formEl.innerHTML =
+                        '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项，请确认页面1/3访问密码已通过。</div></div>';
+                    return;
+                }
+                formEl.innerHTML = keys
+                    .map(function (k) {
+                        var raw = settings[k.key] != null ? String(settings[k.key]) : "";
+                        var showVal = escAttr(raw);
+                        var isDb = k.key === "DATABASE_URL";
+                        var unchanged = raw === "(不变)" || raw === "******";
+                        var webhookLike = k.key === "DINGTALK_WEBHOOK";
+                        var typ =
+                            k.sensitive && !unchanged && raw && !webhookLike ? "password" : "text";
+                        var ph = "";
+                        if (isDb) {
+                            ph = raw
+                                ? "当前已连接（脱敏）；修改请填写完整 URI"
+                                : "填写 MySQL/SQLite 连接串";
+                        } else if (k.sensitive && !raw) {
+                            ph = "未配置";
+                        }
+                        var lab = String(k.label || k.key || "").replace(/</g, "&lt;");
+                        return (
+                            '<div class="col-md-6"><label class="form-label small mb-0">' +
+                            lab +
+                            '</label><input type="' +
+                            typ +
+                            '" class="form-control form-control-sm exam-sys-cfg-input" data-key="' +
+                            escAttr(k.key) +
+                            '" data-sensitive="' +
+                            (k.sensitive ? "1" : "0") +
+                            '" value="' +
+                            showVal +
+                            '" placeholder="' +
+                            escAttr(ph) +
+                            '" autocomplete="off"></div>'
+                        );
+                    })
+                    .join("");
+            } catch (e0) {
+                formEl.innerHTML =
+                    '<div class="col-12"><div class="alert alert-danger mb-0 small">加载失败：' +
+                    escAttr(e0.message || String(e0)) +
+                    "</div></div>";
+            }
+        }
+
+        btnOpen &&
+            btnOpen.addEventListener("click", async function () {
+                showExamSysModal();
+                try {
+                    await loadExamSysForm();
+                } catch (_) {}
+            });
+        btnClose &&
+            btnClose.addEventListener("click", function () {
+                hideExamSysModal();
+            });
+        modal &&
+            modal.addEventListener("click", function (e) {
+                if (e.target && e.target.getAttribute && e.target.getAttribute("data-exam-sys-close") === "1") {
+                    hideExamSysModal();
+                }
+            });
+        window.addEventListener("keydown", function (ke) {
+            if (ke.key === "Escape" && modal && modal.classList.contains("show")) {
+                hideExamSysModal();
+            }
+        });
+
+        btnSave &&
+            btnSave.addEventListener("click", async function () {
+                if (!formEl) return;
+                var payload = {};
+                formEl.querySelectorAll(".exam-sys-cfg-input").forEach(function (inp) {
+                    var key = inp.getAttribute("data-key");
+                    var sens = inp.getAttribute("data-sensitive") === "1";
+                    var v = (inp.value || "").trim();
+                    if (key === "DATABASE_URL") {
+                        if (v && v.indexOf("****") === -1) payload[key] = v;
+                        return;
+                    }
+                    if (sens) {
+                        if (v && v !== "(不变)" && v !== "******" && v !== "***") payload[key] = v;
+                    } else {
+                        payload[key] = v;
+                    }
+                });
+                try {
+                    var out = await apiRequest("/api/system-settings", "PUT", payload);
+                    if (out && out.__ok === false) {
+                        if (renderRaw) renderRaw(out);
+                        scrollExamApiResponseIntoView();
+                        return;
+                    }
+                    if (renderRaw) renderRaw({ code: 0, message: "考试与录题配置已保存", data: out || null });
+                    setIngestProgress(true, "考试与录题配置已保存。", { showStop: false });
+                    scrollExamApiResponseIntoView();
+                    setTimeout(function () {
+                        setIngestProgress(false, "");
+                    }, 4000);
+                    await loadExamSysForm();
+                } catch (e1) {
+                    if (renderRaw) {
+                        renderRaw({ code: "UI_ERROR", message: e1.message || String(e1), data: null });
+                    }
+                    scrollExamApiResponseIntoView();
+                }
+            });
     }
 
     function setReviewProgress(visible, text) {
@@ -489,9 +887,15 @@
         var btnAssignModalSelectAll = document.getElementById("btnTeacherAssignModalSelectAll");
         var btnAssignModalClearAll = document.getElementById("btnTeacherAssignModalClearAll");
         var btnAssignModalSubmit = document.getElementById("btnTeacherAssignModalSubmit");
+        var assignModalTitleHeading = document.getElementById("teacherAssignModalTitle");
+        var assignModalTitleRow = document.getElementById("teacherAssignModalTitleRow");
+        var assignModalTitleInput = document.getElementById("teacherAssignModalTitleInput");
+        var assignModalSetsLabel = document.getElementById("teacherAssignModalSetsLabel");
+        var assignModalSetIdRow = document.getElementById("teacherAssignModalSetIdRow");
+        var assignModalSetIdInput = document.getElementById("teacherAssignModalSetIdInput");
         var assignModal = null;
         var teacherSetTitleMap = {};
-        var assignModalState = { setIds: [], items: [] };
+        var assignModalState = { setIds: [], items: [], mode: "create", editAssignmentId: null };
         var btnCheckReq = document.getElementById("btnTeacherCheckRequirements");
         var btnMarkReqBase = document.getElementById("btnTeacherMarkRequirementBaseline");
         var requirementBox = document.getElementById("teacherRequirementStatus");
@@ -908,7 +1312,20 @@
             return ids;
         }
 
+        function setAssignModalCreateChrome() {
+            assignModalState.mode = "create";
+            assignModalState.editAssignmentId = null;
+            if (assignModalTitleRow) assignModalTitleRow.classList.add("d-none");
+            if (assignModalSetIdRow) assignModalSetIdRow.classList.add("d-none");
+            if (assignModalSetsLabel) assignModalSetsLabel.textContent = "将要下发的套题";
+            if (assignModalTitleHeading) assignModalTitleHeading.textContent = "下发考试任务";
+            if (btnAssignModalSubmit) btnAssignModalSubmit.textContent = "确认下发";
+            if (assignModalTitleInput) assignModalTitleInput.value = "";
+            if (assignModalSetIdInput) assignModalSetIdInput.value = "";
+        }
+
         async function openIssueAssignmentsModal(setIds) {
+            setAssignModalCreateChrome();
             var ids = Array.isArray(setIds) ? setIds : [];
             ids = ids.map(function (x) { return String(x || "").trim(); }).filter(function (x) { return x; });
             if (!ids.length) throw new Error("请选择至少一个套题再下发");
@@ -923,6 +1340,69 @@
             if (assignModalPurpose) assignModalPurpose.value = "";
             if (assignModalSearch) assignModalSearch.value = "";
             await loadAssignableUsersIntoModal();
+            filterAssignModalUsers();
+            var m = ensureAssignModal();
+            if (m) m.show();
+        }
+
+        async function openEditAssignmentModal(aid) {
+            var id = String(aid || "").trim();
+            if (!id) throw new Error("缺少 assignment_id");
+            var resp = await apiRequest("/api/exam-center/teacher/assignments/" + encodeURIComponent(id), "GET");
+            if (resp && resp.__ok === false) {
+                throw new Error((resp && resp.message) || "加载任务失败");
+            }
+            var c = resp != null ? resp.code : undefined;
+            if (c != null && String(c) !== "0" && Number(c) !== 0) {
+                throw new Error((resp && resp.message) || "加载任务失败");
+            }
+            var d = resp && resp.data ? resp.data : null;
+            if (!d || typeof d !== "object") throw new Error("任务数据为空");
+            assignModalState.mode = "edit";
+            assignModalState.editAssignmentId = id;
+            assignModalState.setIds = d.set_id ? [String(d.set_id).trim()] : [];
+            assignModalState.items = [{ set_id: String(d.set_id || "").trim(), title: String(d.title || "").trim() }];
+            if (assignModalTitleRow) assignModalTitleRow.classList.remove("d-none");
+            if (assignModalSetIdRow) assignModalSetIdRow.classList.remove("d-none");
+            if (assignModalSetsLabel) assignModalSetsLabel.textContent = "当前套题";
+            if (assignModalSets) assignModalSets.textContent = String(d.set_id || "").trim() || "—";
+            if (assignModalSetIdInput) assignModalSetIdInput.value = String(d.set_id || "").trim();
+            if (assignModalTitleInput) assignModalTitleInput.value = String(d.title || "").trim();
+            if (assignModalDue) {
+                var rawDue = d.due_at != null ? String(d.due_at) : "";
+                var day = "";
+                if (rawDue) {
+                    var ds = rawDue.replace(" ", "T");
+                    day = ds.length >= 10 ? ds.slice(0, 10) : "";
+                }
+                assignModalDue.value = day;
+            }
+            if (assignModalPurpose) assignModalPurpose.value = String(d.purpose || "").trim();
+            if (selTrack && d.exam_track) selTrack.value = String(d.exam_track).trim();
+            var selCat = document.getElementById("teacherExamCategory");
+            if (selCat && d.exam_category) selCat.value = String(d.exam_category).trim();
+            if (selTeacherDifficulty) {
+                var df = String(d.difficulty || "").trim().toLowerCase();
+                if (df === "easy" || df === "medium" || df === "hard") selTeacherDifficulty.value = df;
+            }
+            if (assignModalTitleHeading) assignModalTitleHeading.textContent = "编辑考试任务";
+            if (btnAssignModalSubmit) btnAssignModalSubmit.textContent = "保存修改";
+            if (assignModalSearch) assignModalSearch.value = "";
+            await loadAssignableUsersIntoModal();
+            var want = {};
+            var aud = d.audience_user_ids;
+            if (Array.isArray(aud)) {
+                aud.forEach(function (uid) {
+                    var u = String(uid || "").trim();
+                    if (u) want[u] = true;
+                });
+            }
+            if (assignModalUsers) {
+                assignModalUsers.querySelectorAll("input.assign-user[type='checkbox']").forEach(function (c) {
+                    var v = String(c.value || "").trim();
+                    c.checked = !!want[v];
+                });
+            }
             filterAssignModalUsers();
             var m = ensureAssignModal();
             if (m) m.show();
@@ -1798,29 +2278,62 @@
         btnAssignModalSubmit &&
             btnAssignModalSubmit.addEventListener("click", async function () {
                 var ids = collectAssignModalUserIds();
-                if (!ids.length) {
+                var isEdit = assignModalState.mode === "edit" && !!assignModalState.editAssignmentId;
+                if (!isEdit && !ids.length) {
                     render({ code: "BAD_REQUEST", message: "请选择考试对象（至少1人）", data: null });
                     return;
                 }
                 var dd = assignModalDue ? String(assignModalDue.value || "").trim() : "";
                 var purpose = assignModalPurpose ? String(assignModalPurpose.value || "").trim() : "";
-                var payload = {
-                    exam_track: readValue("teacherExamTrack") || "cn",
-                    items: assignModalState.items || [],
-                    audience_user_ids: ids,
-                };
-                if (dd) payload.due_date = dd;
-                if (purpose) payload.purpose = purpose;
-                setButtonLoading(btnAssignModalSubmit, true, "下发中…");
+                setButtonLoading(btnAssignModalSubmit, true, isEdit ? "保存中…" : "下发中…");
                 try {
-                    var resp = await apiRequest("/api/exam-center/teacher/assignments/issue", "POST", payload);
-                    render(resp);
-                    if (!(resp && resp.__ok === false)) {
-                        try {
-                            var m = ensureAssignModal();
-                            if (m) m.hide();
-                        } catch (e1) {}
-                        await loadTeacherIssuedAssignments();
+                    if (isEdit) {
+                        var aid = String(assignModalState.editAssignmentId || "").trim();
+                        var title0 = assignModalTitleInput ? String(assignModalTitleInput.value || "").trim() : "";
+                        var sid0 = assignModalSetIdInput ? String(assignModalSetIdInput.value || "").trim() : "";
+                        var diff0 = readValue("teacherDifficulty");
+                        var payloadEdit = {
+                            exam_track: readValue("teacherExamTrack") || "cn",
+                            exam_category: readExamCategory("teacher"),
+                            audience_user_ids: ids,
+                            title: title0,
+                            due_date: dd,
+                            purpose: purpose,
+                            difficulty: diff0 ? diff0 : "",
+                            set_id: sid0,
+                        };
+                        var respEdit = await apiRequest(
+                            "/api/exam-center/teacher/assignments/" + encodeURIComponent(aid),
+                            "PATCH",
+                            payloadEdit
+                        );
+                        render(respEdit);
+                        if (!(respEdit && respEdit.__ok === false)) {
+                            try {
+                                var m2 = ensureAssignModal();
+                                if (m2) m2.hide();
+                            } catch (e1b) {}
+                            setAssignModalCreateChrome();
+                            await loadTeacherIssuedAssignments();
+                        }
+                    } else {
+                        var payload = {
+                            exam_track: readValue("teacherExamTrack") || "cn",
+                            exam_category: readExamCategory("teacher"),
+                            items: assignModalState.items || [],
+                            audience_user_ids: ids,
+                        };
+                        if (dd) payload.due_date = dd;
+                        if (purpose) payload.purpose = purpose;
+                        var resp = await apiRequest("/api/exam-center/teacher/assignments/issue", "POST", payload);
+                        render(resp);
+                        if (!(resp && resp.__ok === false)) {
+                            try {
+                                var m = ensureAssignModal();
+                                if (m) m.hide();
+                            } catch (e1) {}
+                            await loadTeacherIssuedAssignments();
+                        }
                     }
                 } finally {
                     setButtonLoading(btnAssignModalSubmit, false);
@@ -1895,11 +2408,14 @@
             setButtonLoading(btnGenerate, true, "生成中…");
             try {
                 var track = readValue("teacherExamTrack") || "cn";
+                var ecat = readExamCategory("teacher");
                 var payload = {
                     exam_track: track,
                     examTrack: track,
                     track: track,
                     exam_type: track,
+                    exam_category: ecat,
+                    examCategory: ecat,
                     question_count: readInt("teacherQuestionCount", 20),
                 };
                 // aicheckword：difficulty 须为 string；「默认」为空则不传难度字段（避免 422）
@@ -1922,6 +2438,55 @@
             }
         });
 
+        var btnRegHint = document.getElementById("btnTeacherRegulatoryHint");
+        var btnRegHintClose = document.getElementById("btnTeacherRegulatoryHintClose");
+        var panelReg = document.getElementById("teacherRegulatoryHintPanel");
+        btnRegHintClose &&
+            btnRegHintClose.addEventListener("click", function () {
+                if (panelReg) panelReg.classList.add("d-none");
+            });
+        btnRegHint &&
+            btnRegHint.addEventListener("click", async function () {
+                if (btnRegHint && btnRegHint.disabled) return;
+                setButtonLoading(btnRegHint, true, "查询中…");
+                setIngestProgress(true, "正在查询近一年法规/标准更新提示…", { showStop: false });
+                try {
+                    var track = readValue("teacherExamTrack") || "cn";
+                    var today = new Date();
+                    var asOf = today.toISOString().slice(0, 10);
+                    var sinceDate = new Date(today.getTime() - 365 * 24 * 60 * 60 * 1000);
+                    var since = sinceDate.toISOString().slice(0, 10);
+                    var h = await performRegulatoryHintFlow({
+                        renderRaw: render,
+                        track: track,
+                        since: since,
+                        asOf: asOf,
+                        panelId: "teacherRegulatoryHintPanel",
+                        bodyId: "teacherRegulatoryHintBody",
+                        debugId: "teacherRegulatoryHintDebug"
+                    });
+                    if (h && h.__ok === false) {
+                        setIngestProgress(true, "法规/标准更新提示请求失败（已展开上方 JSON 调试区）。", { showStop: false });
+                    } else {
+                        setIngestProgress(true, "法规/标准更新提示已展示（时间窗约 " + since + "～" + asOf + "）。", { showStop: false });
+                    }
+                    setTimeout(function () {
+                        setIngestProgress(false, "");
+                    }, 4500);
+                } catch (e) {
+                    render({ code: "UI_ERROR", message: e.message, data: null });
+                    setIngestProgress(true, "法规/标准更新提示异常：" + (e.message || String(e)), { showStop: false });
+                    var det2 = document.getElementById("examApiResultDetails");
+                    if (det2) {
+                        try {
+                            det2.open = true;
+                        } catch (e3) {}
+                    }
+                } finally {
+                    setButtonLoading(btnRegHint, false);
+                }
+            });
+
         btnIngest && btnIngest.addEventListener("click", async function () {
             if (reviewState.running) {
                 setIngestProgress(true, "已有 AI 复审任务轮询中，请先停止复审轮询或等待结束。");
@@ -1943,7 +2508,7 @@
                 // 老师端下拉框仅影响「来一套」。
                 var ingestBody = {
                     exam_track: readValue("teacherExamTrack") || "cn",
-                    target_count: 50,
+                    exam_category: readExamCategory("teacher"),
                     review_mode: "draft"
                 };
                 var startResp = await apiRequest("/api/exam-center/teacher/bank/ingest-by-ai", "POST", ingestBody);
@@ -2060,13 +2625,13 @@
 
         async function loadTeacherIssuedAssignments() {
             if (!tbodyIssued) return;
-            tbodyIssued.innerHTML = '<tr><td colspan="7" class="text-muted small">加载中…</td></tr>';
+            tbodyIssued.innerHTML = '<tr><td colspan="8" class="text-muted small">加载中…</td></tr>';
             try {
                 var resp = await apiRequest("/api/exam-center/teacher/assignments-local", "GET");
                 render(resp);
                 if (resp && resp.__ok === false) {
                     tbodyIssued.innerHTML =
-                        '<tr><td colspan="7" class="text-danger small">' +
+                        '<tr><td colspan="8" class="text-danger small">' +
                         escHtml(resp.message || "请求失败") +
                         "（HTTP " +
                         escHtml(String(resp.__http_status || "?")) +
@@ -2076,13 +2641,13 @@
                 var c = resp != null ? resp.code : undefined;
                 if (c != null && String(c) !== "0" && Number(c) !== 0) {
                     tbodyIssued.innerHTML =
-                        '<tr><td colspan="7" class="text-danger small">' + escHtml(resp.message || "加载失败") + "</td></tr>";
+                        '<tr><td colspan="8" class="text-danger small">' + escHtml(resp.message || "加载失败") + "</td></tr>";
                     return;
                 }
                 var rows = resp && resp.data && resp.data.rows ? resp.data.rows : [];
                 if (!rows.length) {
                     tbodyIssued.innerHTML =
-                        '<tr><td colspan="7" class="text-muted small">暂无已下发记录（或未在 aiword 落库镜像）。</td></tr>';
+                        '<tr><td colspan="8" class="text-muted small">暂无已下发记录（或未在 aiword 落库镜像）。</td></tr>';
                     return;
                 }
                 tbodyIssued.innerHTML = "";
@@ -2091,6 +2656,8 @@
                     if (!aid) return;
                     var dueCell = r.due_at ? examDueCompletionPillHtml(r.due_at) : '<span class="text-muted">—</span>';
                     var tr = document.createElement("tr");
+                    var ecat = String(r.exam_category || r.examCategory || "daily").trim();
+                    var ecatLabel = ecat === "new_standard" ? "新标发布" : "日常";
                     tr.innerHTML =
                         '<td class="small">' +
                         escHtml(r.title || aid) +
@@ -2099,8 +2666,11 @@
                         escHtml(aid) +
                         "</code></td>" +
                         '<td class="small"><code>' +
-                        escHtml(r.set_id || "") +
+                        escHtml(pickAssignmentSetId(r) || "") +
                         "</code></td>" +
+                        '<td class="small"><span class="badge bg-light text-dark">' +
+                        escHtml(ecatLabel) +
+                        "</span></td>" +
                         '<td class="small">' +
                         escHtml(difficultyLabelZh(r.difficulty)) +
                         "</td>" +
@@ -2116,28 +2686,74 @@
                     var opWrap = tr.querySelector(".exam-issued-ops");
                     tbodyIssued.appendChild(tr);
                     if (!opWrap) return;
-                    var bUn = document.createElement("button");
-                    bUn.type = "button";
-                    bUn.className = "btn btn-sm btn-outline-warning";
-                    bUn.textContent = "下架";
-                    bUn.title = "本地标记 inactive；并尝试上游取消/停用";
-                    bUn.addEventListener("click", async function () {
-                        if (!window.confirm("确定下架该考试任务？学生端本地兜底列表将不再显示。")) return;
-                        setButtonLoading(bUn, true, "下架中…");
+                    var bEd = document.createElement("button");
+                    bEd.type = "button";
+                    bEd.className = "btn btn-sm btn-outline-primary";
+                    bEd.textContent = "编辑";
+                    bEd.title = "修改标题、截止、目的、考试对象或套题 set_id";
+                    bEd.addEventListener("click", async function () {
                         try {
-                            var d = await apiRequest(
-                                "/api/exam-center/teacher/assignments/" + encodeURIComponent(aid) + "/unpublish",
-                                "POST",
-                                {}
-                            );
-                            render(d);
-                            await loadTeacherIssuedAssignments();
+                            await openEditAssignmentModal(aid);
                         } catch (e) {
-                            render({ code: "UI_ERROR", message: e.message, data: null });
-                        } finally {
-                            setButtonLoading(bUn, false);
+                            render({ code: "UI_ERROR", message: (e && e.message) || String(e), data: null });
                         }
                     });
+                    opWrap.appendChild(bEd);
+                    var stIssued = String(r.status || "").trim().toLowerCase();
+                    var isInactive =
+                        stIssued === "inactive" ||
+                        stIssued === "cancelled" ||
+                        stIssued === "archived" ||
+                        stIssued === "deleted";
+                    if (isInactive) {
+                        var bPub = document.createElement("button");
+                        bPub.type = "button";
+                        bPub.className = "btn btn-sm btn-outline-success";
+                        bPub.textContent = "上架";
+                        bPub.title = "本地标记 published；并尝试上游恢复";
+                        bPub.addEventListener("click", async function () {
+                            if (!window.confirm("确定重新上架该考试任务？学生端将可再次看到该任务。")) return;
+                            setButtonLoading(bPub, true, "上架中…");
+                            try {
+                                var dP = await apiRequest(
+                                    "/api/exam-center/teacher/assignments/" + encodeURIComponent(aid) + "/publish",
+                                    "POST",
+                                    {}
+                                );
+                                render(dP);
+                                await loadTeacherIssuedAssignments();
+                            } catch (e) {
+                                render({ code: "UI_ERROR", message: e.message, data: null });
+                            } finally {
+                                setButtonLoading(bPub, false);
+                            }
+                        });
+                        opWrap.appendChild(bPub);
+                    } else {
+                        var bUn = document.createElement("button");
+                        bUn.type = "button";
+                        bUn.className = "btn btn-sm btn-outline-warning";
+                        bUn.textContent = "下架";
+                        bUn.title = "本地标记 inactive；并尝试上游取消/停用";
+                        bUn.addEventListener("click", async function () {
+                            if (!window.confirm("确定下架该考试任务？学生端本地兜底列表将不再显示。")) return;
+                            setButtonLoading(bUn, true, "下架中…");
+                            try {
+                                var d = await apiRequest(
+                                    "/api/exam-center/teacher/assignments/" + encodeURIComponent(aid) + "/unpublish",
+                                    "POST",
+                                    {}
+                                );
+                                render(d);
+                                await loadTeacherIssuedAssignments();
+                            } catch (e) {
+                                render({ code: "UI_ERROR", message: e.message, data: null });
+                            } finally {
+                                setButtonLoading(bUn, false);
+                            }
+                        });
+                        opWrap.appendChild(bUn);
+                    }
                     var bDel = document.createElement("button");
                     bDel.type = "button";
                     bDel.className = "btn btn-sm btn-outline-danger";
@@ -2159,12 +2775,11 @@
                             setButtonLoading(bDel, false);
                         }
                     });
-                    opWrap.appendChild(bUn);
                     opWrap.appendChild(bDel);
                 });
             } catch (e) {
                 tbodyIssued.innerHTML =
-                    '<tr><td colspan="7" class="text-danger small">' + escHtml(e.message || String(e)) + "</td></tr>";
+                    '<tr><td colspan="8" class="text-danger small">' + escHtml(e.message || String(e)) + "</td></tr>";
             }
         }
 
@@ -2608,19 +3223,6 @@
             return ok === true ? "对" : ok === false ? "错" : "未知";
         }
 
-        function roundScoreInt(x) {
-            var n = Number(x);
-            if (!Number.isFinite(n)) return "";
-            return String(Math.round(n));
-        }
-
-        function formatScoreSlashDisplay(score, total) {
-            var a = score == null || score === "" ? "" : roundScoreInt(score);
-            var b = total == null || total === "" ? "" : roundScoreInt(total);
-            if (a && b) return a + "/" + b;
-            return a || b || "";
-        }
-
         function normAnswerPlainForCompare(v) {
             if (v === null || v === undefined) return "";
             if (typeof v === "boolean") return v ? "true" : "false";
@@ -2872,13 +3474,42 @@
             return objectiveAnswersEqualJs(it, ua, ca);
         }
 
+        /**
+         * 详情摘要统计：客观题用 is_correct/答案比对；主观题用 subjective_score（0~1）分为错/半对/对；阅卷中单独计。
+         */
+        function classifyItemOutcome(it) {
+            if (!it || typeof it !== "object") return "unknown";
+            var subj = it.subjective_needed === true || it.subjectiveNeeded === true;
+            var tc = String(it.teacher_comment || it.teacherComment || "").trim();
+            if (tc.indexOf("pending_subjective") >= 0) {
+                return "pending";
+            }
+            if (subj) {
+                var sc = it.subjective_score != null ? Number(it.subjective_score) : NaN;
+                if (!isFinite(sc)) {
+                    return "pending";
+                }
+                if (sc >= 1 - 1e-9) return "correct";
+                if (sc <= 0 + 1e-9) return "wrong";
+                return "partial";
+            }
+            var pen = deriveItemCorrectness(it);
+            if (pen === true) return "correct";
+            if (pen === false) return "wrong";
+            return "unknown";
+        }
+
         function judgeLabelFromItem(it) {
             if (!it || typeof it !== "object") return judgeLabel(null);
             if (it.subjective_needed === true || it.subjectiveNeeded === true) {
                 var sc = it.subjective_score != null ? Number(it.subjective_score) : null;
                 if (sc != null && isFinite(sc)) {
                     var pct = Math.round(Math.max(0, Math.min(1, sc)) * 100);
-                    return '<span class="badge bg-info text-dark">主观</span> <span class="small">得分 ' + String(pct) + "/100</span>";
+                    return (
+                        '<span class="badge bg-info text-dark">主观</span> <span class="small">该题折分 ' +
+                        String(pct) +
+                        "%（计入卷面百分制）</span>"
+                    );
                 }
                 return '<span class="badge bg-warning text-dark">阅卷中</span>';
             }
@@ -2903,15 +3534,21 @@
             var total = items.length;
             var correct = 0;
             var wrong = 0;
+            var partial = 0;
+            var pending = 0;
+            var unknown = 0;
             items.forEach(function (it) {
                 if (!it || typeof it !== "object") return;
-                var pen = deriveItemCorrectness(it);
-                if (pen === true) correct += 1;
-                else if (pen === false) wrong += 1;
+                var oc = classifyItemOutcome(it);
+                if (oc === "correct") correct += 1;
+                else if (oc === "wrong") wrong += 1;
+                else if (oc === "partial") partial += 1;
+                else if (oc === "pending") pending += 1;
+                else unknown += 1;
             });
             var scoreTxt = "";
             if (det && det.score != null) {
-                scoreTxt = formatScoreSlashDisplay(det.score, det.total_score);
+                scoreTxt = formatActivityScoreSlash(det.score, det.total_score, act.mode);
             }
             if (!scoreTxt && act.result_summary && String(act.result_summary).indexOf("阅卷中") >= 0) {
                 scoreTxt = "阅卷中";
@@ -2950,7 +3587,10 @@
                 "</span>" +
                 '<span class="me-2">错：' +
                 String(wrong) +
-                "</span>";
+                "</span>" +
+                (partial > 0 ? '<span class="me-2">半对：' + String(partial) + "</span>" : "") +
+                (pending > 0 ? '<span class="me-2">阅卷中：' + String(pending) + "</span>" : "") +
+                (unknown > 0 ? '<span class="me-2">未判定：' + String(unknown) + "</span>" : "");
             if (!items.length) {
                 bodyEl.innerHTML =
                     '<tr><td colspan="6" class="text-muted small">暂无题目明细（无答题记录 attempt、上游暂无答案或可参考下方接口响应）。</td></tr>';
@@ -2966,8 +3606,13 @@
                     ua == null ? "" : typeof ua === "object" ? safeJson(ua) : formatAnswerDetailDisplay(it, ua);
                 var caStr =
                     ca == null ? "" : typeof ca === "object" ? safeJson(ca) : formatAnswerDetailDisplay(it, ca);
-                var pen = deriveItemCorrectness(it);
-                var uaCls = pen === false ? "text-danger fw-semibold" : "text-body";
+                var ocRow = classifyItemOutcome(it);
+                var uaCls =
+                    ocRow === "wrong"
+                        ? "text-danger fw-semibold"
+                        : ocRow === "partial"
+                          ? "text-warning fw-semibold"
+                          : "text-body";
                 var caCls = "text-body";
                 tr.innerHTML =
                     '<td class="small">' +
@@ -3608,7 +4253,7 @@
                     var aid = String(a.id || a.assignment_id || a.assignmentId || "").trim();
                     if (!aid) return;
                     var name = String(a.name || a.title || a.label || aid).trim() || aid;
-                    var setId = String(a.set_id || a.setId || "").trim();
+                    var setId = pickAssignmentSetId(a);
                     var diff = String(a.difficulty || "").trim().toLowerCase();
                     var dueIso = String(a.due_at || a.dueAt || "").trim();
                     var dueCell = dueIso ? examDueCompletionPillHtml(dueIso) : '<span class="text-muted">—</span>';
@@ -3623,6 +4268,25 @@
                     tbodyAssign.appendChild(tr);
                     var op = tr.querySelector(".assign-op");
                     if (op) {
+                        var lst = String(a.local_exam_status || a.localExamStatus || "").trim().toLowerCase();
+                        var closed =
+                            a.exam_task_closed_for_student === true ||
+                            a.examTaskClosedForStudent === true ||
+                            lst === "grading" ||
+                            lst === "graded";
+                        if (closed) {
+                            if (lst === "graded") {
+                                op.innerHTML =
+                                    '<span class="badge bg-success align-middle" title="已提交且已出分">已完成</span>';
+                            } else if (lst === "grading") {
+                                op.innerHTML =
+                                    '<span class="badge bg-info text-dark align-middle" title="答卷已提交，主观题阅卷中">阅卷中</span>';
+                            } else {
+                                op.innerHTML =
+                                    '<span class="badge bg-secondary align-middle" title="答卷已提交">已提交</span>';
+                            }
+                            return;
+                        }
                         var b = document.createElement("button");
                         b.type = "button";
                         b.className = "btn btn-sm btn-outline-primary";
@@ -3682,9 +4346,7 @@
 
         function historyResultCellHtml(r) {
             var scoreText =
-                r && r.score != null
-                    ? formatScoreSlashDisplay(r.score, r.total_score)
-                    : "";
+                r && r.score != null ? formatActivityScoreSlash(r.score, r.total_score, r.mode) : "";
             var parts = [];
             if (scoreText) {
                 parts.push('<div class="text-muted small">分数：' + escSt(scoreText) + "</div>");
@@ -3873,8 +4535,10 @@
                 setButtonLoading(btnSet, true, "生成中…");
                 openInteractionPending("正在生成练习卷…", "体考类型：" + escSt(readValue("studentExamTrack") || "cn"));
                 try {
+                    var stEcat = readExamCategory("student");
                     var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", {
                         exam_track: readValue("studentExamTrack") || "cn",
+                        exam_category: stEcat,
                         question_count: readInt("studentSetSize", 10),
                         difficulty: readValue("studentDifficulty") || "medium"
                     });
@@ -3959,6 +4623,7 @@
                                 snap.sessionId ||
                                 "",
                             exam_track: readValue("studentExamTrack") || "cn",
+                            exam_category: readExamCategory("student"),
                             answers: rows,
                             responses: rows,
                             submission_questions_snapshot: submissionQuestionsSnapshotPayload()
@@ -4027,10 +4692,12 @@
                             clearDraftAnswers();
                             hideStudentInteraction();
                             loadStudentHistory();
+                            loadStudentAssignments();
                             var aidPg2 = String(sessionState.attemptId || "").trim();
                             if (aidPg2) {
                                 pollLocalGradingUntilReady(aidPg2).then(function (pg2) {
                                     loadStudentHistory();
+                                    loadStudentAssignments();
                                     if (pg2 && pg2.ready) {
                                         studentShowFeedback("阅卷已完成，成绩已更新。", "success");
                                         apiRequest("/api/exam-center/student/attempts/" + encodeURIComponent(aidPg2), "GET")
@@ -4061,11 +4728,13 @@
                                     }
                                 });
                             }
-                        } else if (metaIx) {
+                        } else {
+                            // graded 或空 state：原先误写成 else if(metaIx)，学生端无 meta 节点时会导致「提交成功但界面无反应、历史不刷新」
                             studentShowFeedback("考试答卷已提交。", "success");
                             clearDraftAnswers();
                             hideStudentInteraction();
                             loadStudentHistory();
+                            loadStudentAssignments();
                         }
                     } else {
                         render({ code: "UI_ERROR", message: "当前无进行中的作答会话。", data: null });
@@ -4190,9 +4859,10 @@
             var id = String(it.id || it.assignment_id || it.assignmentId || "").trim();
             if (!id) return;
             var name = String(it.name || it.label || id);
+            var sid = pickAssignmentSetId(it);
             var opt = document.createElement("option");
             opt.value = id;
-            opt.textContent = name;
+            opt.textContent = sid ? name + " · 套题 " + sid : name;
             selectEl.appendChild(opt);
         });
         if (old) {
@@ -4322,6 +4992,9 @@
                 } else if (dc.note) {
                     parts.push(' <span class="text-muted small">(' + escStats(dc.note) + ")</span>");
                 }
+                parts.push(
+                    ' <span class="text-muted small">（截止后仍可开考；晚于截止的提交计入「逾期」。）</span>'
+                );
                 panel.innerHTML = "<div>" + parts.join("") + "</div>";
             } catch (e) {
                 panel.innerHTML =
@@ -4407,10 +5080,7 @@
             list.forEach(function (r) {
                 var tr = document.createElement("tr");
                 var who = escStats(r.student_name || r.user_id || "-");
-                var scoreTxt =
-                    r && r.score != null
-                        ? String(r.score) + (r.total_score != null ? "/" + String(r.total_score) : "")
-                        : "";
+                var scoreTxt = r && r.score != null ? formatActivityScoreSlash(r.score, r.total_score, r.mode) : "";
                 var resultParts = [];
                 if (scoreTxt) {
                     resultParts.push(
@@ -4444,6 +5114,11 @@
                     "</td>" +
                     '<td class="small">' +
                     escStats(r.target_label || "-") +
+                    (pickAssignmentSetId(r)
+                        ? '<div class="text-muted small mt-1">套题 <code>' +
+                          escStats(pickAssignmentSetId(r)) +
+                          "</code></div>"
+                        : "") +
                     "</td>" +
                     '<td class="small">' +
                     resultCell +
@@ -4476,6 +5151,123 @@
                         });
                         td5.appendChild(document.createElement("br"));
                         td5.appendChild(bDetail);
+
+                        var tidRe = String(r.attempt_id || r.attemptId || "").trim();
+                        var canRegrade =
+                            String(r.mode || "")
+                                .trim()
+                                .toLowerCase() === "exam" &&
+                            tidRe &&
+                            (r.local_exam_regrade_eligible === true || r.localExamRegradeEligible === true);
+                        if (canRegrade) {
+                            var bRegrade = document.createElement("button");
+                            bRegrade.type = "button";
+                            bRegrade.className = "btn btn-sm btn-outline-warning mt-1";
+                            bRegrade.textContent = "重新阅卷";
+                            bRegrade.title =
+                                "对阅卷中或阅卷失败的本地考试重新发起主观题判分（需上游 quiz 服务可用）";
+                            bRegrade.addEventListener("click", async function () {
+                                var okc = window.confirm(
+                                    "确定对该场考试重新发起主观题阅卷吗？将重新请求上游判分任务。"
+                                );
+                                if (!okc) return;
+                                setButtonLoading(bRegrade, true, "提交中…");
+                                try {
+                                    var r2 = await apiRequest(
+                                        "/api/exam-center/teacher/local-exam/attempts/" +
+                                            encodeURIComponent(tidRe) +
+                                            "/retry-grading",
+                                        "POST",
+                                        {}
+                                    );
+                                    render(r2);
+                                    var failed =
+                                        !r2 ||
+                                        r2.__ok === false ||
+                                        (r2.code != null &&
+                                            Number(r2.code) !== 0 &&
+                                            String(r2.code) !== "0");
+                                    if (failed) {
+                                        window.alert(String((r2 && r2.message) || "重新阅卷失败"));
+                                        return;
+                                    }
+                                    var activityIdForRefresh = String(r.id || "").trim();
+                                    var pollStart = Date.now();
+                                    var maxWaitMs = 120000;
+                                    var pollIntervalMs = 1500;
+                                    var terminal = false;
+                                    var lastSync = null;
+                                    while (Date.now() - pollStart < maxWaitMs) {
+                                        lastSync = await apiRequest(
+                                            "/api/exam-center/teacher/local-exam/attempts/" +
+                                                encodeURIComponent(tidRe) +
+                                                "/sync-grading",
+                                            "POST",
+                                            {}
+                                        );
+                                        render(lastSync);
+                                        var syncFail =
+                                            !lastSync ||
+                                            lastSync.__ok === false ||
+                                            (lastSync.code != null &&
+                                                Number(lastSync.code) !== 0 &&
+                                                String(lastSync.code) !== "0");
+                                        if (syncFail) {
+                                            window.alert(
+                                                String((lastSync && lastSync.message) || "同步阅卷结果失败")
+                                            );
+                                            terminal = true;
+                                            break;
+                                        }
+                                        var dd = lastSync && lastSync.data ? lastSync.data : {};
+                                        var stL = String(dd.state || "").toLowerCase();
+                                        var jsL = String(dd.job_status || "").toLowerCase();
+                                        if (stL === "graded" || jsL === "failed") {
+                                            if (stL === "graded") {
+                                                window.alert("阅卷已完成，成绩已写回列表与活动明细。");
+                                            } else {
+                                                window.alert(
+                                                    "上游判分任务失败，请查看页底「接口调试」或日志；可再次尝试重新阅卷。"
+                                                );
+                                            }
+                                            terminal = true;
+                                            break;
+                                        }
+                                        await new Promise(function (resolve) {
+                                            setTimeout(resolve, pollIntervalMs);
+                                        });
+                                    }
+                                    if (!terminal) {
+                                        window.alert(
+                                            "阅卷仍在处理中（已轮询约 " +
+                                                String(Math.round(maxWaitMs / 1000)) +
+                                                " 秒）。列表已尽量刷新；您可稍后再打开「详情」查看。"
+                                        );
+                                    }
+                                    if (typeof window.__examLoadStatsRecentActivity === "function") {
+                                        window.__examLoadStatsRecentActivity();
+                                    }
+                                    if (typeof window.__examLoadStatsOverview === "function") {
+                                        window.__examLoadStatsOverview();
+                                    }
+                                    var mel = document.getElementById("examActivityDetailModal");
+                                    if (
+                                        mel &&
+                                        mel.classList.contains("show") &&
+                                        activityIdForRefresh &&
+                                        typeof window.__examOpenActivityDetail === "function"
+                                    ) {
+                                        await window.__examOpenActivityDetail(activityIdForRefresh, render);
+                                    }
+                                } catch (eRg) {
+                                    render({ code: "UI_ERROR", message: eRg.message, data: null });
+                                    window.alert(String(eRg.message || "请求异常"));
+                                } finally {
+                                    setButtonLoading(bRegrade, false);
+                                }
+                            });
+                            td5.appendChild(bRegrade);
+                        }
 
                         var bDel = document.createElement("button");
                         bDel.type = "button";
@@ -4859,6 +5651,7 @@
         });
         // 必须先注册各列表加载函数（挂到 window），再 bindRoleSwitch → activate，
         // 否则会首次进入时空跑 onRoleChange、列表永远停在「加载中」直到手动刷新。
+        bindExamTeacherSystemSettings(renderRaw);
         bindTeacherActions(render);
         bindStudentActions(render);
         bindAnalyticsActions(render);

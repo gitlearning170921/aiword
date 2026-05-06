@@ -39,7 +39,7 @@
             <span class="ms-2">当前用户：<span class="fw-bold" id="examCurrentUserLabel">{{ exam_display_user or "—" }}</span></span>
             {% endif %}
         </div>
-        <div id="examChromeProxyHint" class="small text-muted {% if exam_role == 'student' %}d-none{% endif %}">后端接口统一走 aiword 代理；相关配置请在页面3「系统配置」中维护。</div>
+        <div id="examChromeProxyHint" class="small text-muted {% if exam_role == 'student' %}d-none{% endif %}">后端接口统一走 aiword 代理；考试与录题相关参数可在老师端「考试与录题配置」中维护（与页面3系统配置同源写入数据库）。</div>
     </div>
     <div class="d-flex gap-2 flex-wrap align-items-center" id="examTopNavReturns">
         <a class="btn btn-sm btn-outline-secondary exam-nav-return-btn {% if exam_role != 'teacher' %}d-none{% endif %}"
@@ -66,6 +66,7 @@
                 <a class="btn btn-sm btn-outline-secondary" href="#teacherIssued">已下发任务</a>
                 <a class="btn btn-sm btn-outline-secondary" href="#teacherBank">题库管理</a>
                 <a class="btn btn-sm btn-outline-secondary" href="#teacherJobs">任务记录</a>
+                <button type="button" class="btn btn-sm btn-primary" id="btnExamTeacherSystemSettings">考试与录题配置</button>
                 <span class="small text-muted ms-auto">体考类型为全局选项；题量/难度仅影响「来一套」。</span>
             </div>
         </div>
@@ -87,6 +88,14 @@
                     <option value="iso13485">13485体考</option>
                     <option value="mdsap">MDSAP体考</option>
                 </select>
+                <label class="form-label mt-2">考试类型</label>
+                <select class="form-select" id="teacherExamCategory" title="与体考类型正交：日常考试为历史默认；新标发布侧重法规/标准/指南修订与变化导向录题">
+                    <option value="daily" selected>日常考试</option>
+                    <option value="new_standard">新标发布</option>
+                </select>
+                <button type="button" class="btn btn-outline-secondary btn-sm w-100 mt-2" id="btnTeacherRegulatoryHint">
+                    检查法规/标准更新提示
+                </button>
             </div>
             <div class="col-md-6">
                 <div class="border rounded p-2 bg-light">
@@ -117,19 +126,36 @@
                     <div class="fw-bold small mb-2">AI 批量录入题库</div>
                     <button class="btn btn-outline-primary" id="btnTeacherIngestBank" type="button">开始录题</button>
                     <div class="small text-muted mt-2">
-                        录题：项目案例 30% / 审核点 30% / 法规标准 20% / 程序文件 20%；题型：单选 30% / 多选 10% / 判断 10% / 主观案例 50%；每批 50 题。
+                        录题配比、每批题量、近似重复上限与考试及格线由「考试与录题配置」维护（默认：知识来源 30/30/20/20；题型 30/10/10/50；每批 50；重复≤10%；及格 80 分）。
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="row g-3 mt-1 d-none" id="teacherRegulatoryHintPanel">
+            <div class="col-12">
+                <div class="card border-info">
+                    <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <span class="fw-bold small mb-0">法规/标准更新提示（模型归纳，非官方清单）</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherRegulatoryHintClose" aria-label="收起">收起</button>
+                    </div>
+                    <div class="card-body small" id="teacherRegulatoryHintBody"></div>
+                    <div class="card-footer py-2 bg-light">
+                        <details class="exam-collapse mb-0">
+                            <summary class="small text-muted">接口调试（JSON）</summary>
+                            <pre class="small mb-0 mt-2 exam-api-result" id="teacherRegulatoryHintDebug" style="max-height:220px;overflow:auto;">—</pre>
+                        </details>
                     </div>
                 </div>
             </div>
         </div>
         <div class="mt-2 small text-muted">
-            <div><strong>说明：</strong>体考类型为全局选项；录题的题型占比/难度策略以提示词/上游策略为准。</div>
+            <div><strong>说明：</strong>体考类型为全局选项；录题占比与批大小以「考试与录题配置」为准。</div>
         </div>
         <div class="mt-2 p-2 border rounded bg-light">
             <div class="d-flex gap-2 align-items-center flex-wrap">
                 <button class="btn btn-sm btn-outline-primary" id="btnTeacherCheckRequirements" type="button">检查体考达标情况</button>
                 <button class="btn btn-sm btn-outline-success" id="btnTeacherMarkRequirementBaseline" type="button">设为当前达标基线</button>
-                <span class="small text-muted">录题按批次执行：每批 50 题；达标后可继续录题或停止录题。</span>
+                <span class="small text-muted">录题按批次执行：每批题量见配置；达标后可继续录题或停止录题。</span>
             </div>
             <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
                 <label class="small text-muted mb-0" for="teacherRegPolicyVersion">法规版本兜底标识</label>
@@ -255,6 +281,7 @@
                         <th>标题</th>
                         <th style="width: 90px">任务ID</th>
                         <th style="width: 120px">套题 set_id</th>
+                        <th style="width: 96px">考试类型</th>
                         <th style="width: 88px">难度</th>
                         <th style="width: 100px">状态</th>
                         <th style="width: 120px">截止完成</th>
@@ -262,7 +289,7 @@
                     </tr>
                     </thead>
                     <tbody id="teacherIssuedAssignmentsBody">
-                    <tr><td colspan="7" class="text-muted small">加载中…</td></tr>
+                    <tr><td colspan="8" class="text-muted small">加载中…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -454,11 +481,15 @@
             <div class="modal-dialog modal-lg modal-dialog-scrollable">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title">下发考试任务</h5>
+                        <h5 class="modal-title" id="teacherAssignModalTitle">下发考试任务</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                     </div>
                     <div class="modal-body">
                         <div class="row g-3">
+                            <div class="col-12 d-none" id="teacherAssignModalTitleRow">
+                                <label class="form-label">任务显示名称</label>
+                                <input type="text" class="form-control" id="teacherAssignModalTitleInput" placeholder="学生端任务列表中显示的名称" autocomplete="off">
+                            </div>
                             <div class="col-md-4">
                                 <label class="form-label">截止完成日期（可选）</label>
                                 <input type="date" class="form-control" id="teacherAssignModalDueDate">
@@ -484,8 +515,12 @@
                             </div>
                             <div class="col-12">
                                 <div class="alert alert-light border small mb-0">
-                                    <div class="fw-bold mb-1">将要下发的套题</div>
+                                    <div class="fw-bold mb-1" id="teacherAssignModalSetsLabel">将要下发的套题</div>
                                     <div id="teacherAssignModalSets" class="text-muted">—</div>
+                                    <div class="d-none mt-2" id="teacherAssignModalSetIdRow">
+                                        <label class="form-label small mb-0">套题 set_id（谨慎修改）</label>
+                                        <input type="text" class="form-control form-control-sm" id="teacherAssignModalSetIdInput" placeholder="set_id" autocomplete="off">
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -511,6 +546,11 @@
                     <option value="cn">国内体考</option>
                     <option value="iso13485">13485体考</option>
                     <option value="mdsap">MDSAP体考</option>
+                </select>
+                <label class="form-label mt-2">考试类型</label>
+                <select class="form-select" id="studentExamCategory">
+                    <option value="daily" selected>日常考试</option>
+                    <option value="new_standard">新标发布</option>
                 </select>
             </div>
             <div class="col-md-2">
@@ -803,11 +843,15 @@
 
 <div class="card{% if exam_role == 'student' %} d-none{% endif %}" id="examApiResultCard">
     <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="mb-0">接口响应</h6>
-            <span class="text-muted small">code / message / data / trace_id</span>
-        </div>
-        <pre id="examApiResult" class="exam-api-result mb-0">等待操作...</pre>
+        <p class="small text-muted mb-2 mb-md-1">老师端 / 统计端：以下为最近一次操作的<strong>可读摘要</strong>；展开「接口调试」查看完整 JSON。</p>
+        <div id="examApiCompactFeedback" class="d-none" role="status" aria-live="polite"></div>
+        <details class="exam-collapse" id="examApiResultDetails">
+            <summary class="d-flex justify-content-between align-items-center mb-0">
+                <span class="fw-bold">接口调试（JSON）</span>
+                <span class="text-muted small ms-2">code / message / data / trace_id</span>
+            </summary>
+            <pre id="examApiResult" class="exam-api-result mb-0 mt-2">等待操作...</pre>
+        </details>
     </div>
 </div>
 
@@ -838,7 +882,7 @@
                         </tbody>
                     </table>
                 </div>
-                <div class="small text-muted mt-2">说明：客观题在已判分时「判定」显示对/错；主观题阅卷中显示阅卷中。</div>
+                <div class="small text-muted mt-2">说明：考试列表与详情中分数为「得分/100」。题数摘要：客观题对/错；主观题已出分按折分计入对、错或半对；未出分计入「阅卷中」。</div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
@@ -876,6 +920,23 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
             </div>
+        </div>
+    </div>
+</div>
+
+<div id="examTeacherSystemSettingsModal" class="system-modal" aria-hidden="true">
+    <div class="system-modal-backdrop" data-exam-sys-close="1"></div>
+    <div class="system-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="examTeacherSystemSettingsModalTitle">
+        <div class="system-modal-header">
+            <div class="system-modal-title" id="examTeacherSystemSettingsModalTitle">考试与录题配置</div>
+            <button type="button" class="system-modal-close" id="closeExamTeacherSystemSettingsBtn" aria-label="关闭">×</button>
+        </div>
+        <div class="system-modal-body">
+            <p class="small text-muted mb-2">与页面3「系统配置」相同机制：写入数据库 <code>app_configs</code>；保存后立即影响本进程及格线与录题策略。</p>
+            <div id="examTeacherSystemSettingsForm" class="row g-2"></div>
+        </div>
+        <div class="system-modal-footer">
+            <button type="button" class="btn btn-sm btn-primary" id="saveExamTeacherSystemSettingsBtn">保存</button>
         </div>
     </div>
 </div>

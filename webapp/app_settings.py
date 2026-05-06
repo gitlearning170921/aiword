@@ -27,8 +27,24 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("QUIZ_API_BASE_URL", "考试训练中心后端地址（如 http://127.0.0.1:8000）", False),
     ("QUIZ_API_BEARER_TOKEN", "考试训练中心后端 Bearer Token（可选）", True),
     ("QUIZ_API_SECRET", "考试训练中心后端集成密钥（X-Integration-Secret，可选）", True),
-    ("QUIZ_API_TIMEOUT_SECONDS", "考试训练中心后端超时时间（秒，默认 20）", False),
-    ("EXAM_PASS_SCORE", "考试及格线（分，默认 80；用于统计端及格率）", False),
+    (
+        "QUIZ_API_TIMEOUT_SECONDS",
+        "考试训练中心后端超时时间（秒，默认 20；上限 600。法规/类 LLM 接口建议 ≥180）",
+        False,
+    ),
+    ("EXAM_PASS_SCORE", "考试及格线（分，默认 80；统计端及格率与老师端「考试与录题配置」均可维护）", False),
+    ("EXAM_INGEST_TARGET_COUNT", "每批 AI 录题题量（正整数，默认 50；上限 200）", False),
+    (
+        "EXAM_INGEST_KNOWLEDGE_WEIGHTS",
+        "录题知识来源占比（英文逗号分隔四个小数：项目案例、审核点、法规标准、程序文件；和约 1；默认 0.3,0.3,0.2,0.2）",
+        False,
+    ),
+    (
+        "EXAM_INGEST_QUESTION_TYPE_WEIGHTS",
+        "录题题型占比（英文逗号分隔：单选、多选、判断、案例分析；和约 1；默认 0.3,0.1,0.1,0.5）",
+        False,
+    ),
+    ("EXAM_INGEST_MAX_SIMILAR_FRAC", "录题同一考点近似重复上限比例（0～1，默认 0.1 即 10%）", False),
     ("UPLOAD_FOLDER", "上传文件目录（绝对路径，留空用默认 uploads）", False),
     ("OUTPUT_FOLDER", "文档生成输出目录（绝对路径，留空用默认 outputs）", False),
     (
@@ -39,6 +55,15 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
 ]
 
 SENSITIVE_KEYS = {k for k, _, sens in SYSTEM_CONFIG_KEYS if sens}
+
+# 老师端考试中心「考试与录题配置」弹窗展示的键（须为 SYSTEM_CONFIG_KEYS 的子集，顺序即展示顺序）
+EXAM_CENTER_TEACHER_SETTINGS_KEYS: tuple[str, ...] = (
+    "EXAM_PASS_SCORE",
+    "EXAM_INGEST_TARGET_COUNT",
+    "EXAM_INGEST_KNOWLEDGE_WEIGHTS",
+    "EXAM_INGEST_QUESTION_TYPE_WEIGHTS",
+    "EXAM_INGEST_MAX_SIMILAR_FRAC",
+)
 
 # config.json 中可能出现的别名（键名不一致时仍能读到）
 CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {

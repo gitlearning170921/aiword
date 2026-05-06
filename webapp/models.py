@@ -302,6 +302,8 @@ class ExamBankIngestJob(db.Model):
     # 上游套题 ID：ingest-by-ai 可能在任务进行中就返回（不必等 done）
     upstream_set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    # 与体考类型正交：daily=日常考试；new_standard=新标发布（法规/标准/指南/专标修订与变化导向录题）
+    exam_category: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     target_count: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
     review_mode: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
 
@@ -352,6 +354,7 @@ class ExamCenterActivity(db.Model):
 
     mode: Mapped[str] = mapped_column(db.String(16), nullable=False)  # practice | exam
     exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    exam_category: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     assignment_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     assignment_label: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
@@ -373,6 +376,7 @@ class ExamCenterAssignment(db.Model):
     set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True, index=True)
     title: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
     exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    exam_category: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     difficulty: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True)
     status: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     # 截止完成时间（本地镜像）：老师下发时填写，用于学生端展示与按时完成统计；可为空。
@@ -414,6 +418,7 @@ class ExamAttempt(db.Model):
     assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
     exam_track: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    exam_category: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     state: Mapped[str] = mapped_column(db.String(16), default="started")  # started|submitted|grading|graded
     started_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     submitted_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)

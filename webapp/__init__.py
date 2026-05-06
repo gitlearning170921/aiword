@@ -468,6 +468,31 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE exam_center_assignments ADD COLUMN due_at DATETIME",
         ddl_other="ALTER TABLE exam_center_assignments ADD COLUMN due_at DATETIME NULL",
     )
+    # 考试类型：daily=日常；new_standard=新标发布（与体考类型 exam_track 正交）
+    ensure_column(
+        "exam_center_assignments",
+        "exam_category",
+        ddl_sqlite="ALTER TABLE exam_center_assignments ADD COLUMN exam_category VARCHAR(32)",
+        ddl_other="ALTER TABLE exam_center_assignments ADD COLUMN exam_category VARCHAR(32) NULL",
+    )
+    ensure_column(
+        "exam_center_activities",
+        "exam_category",
+        ddl_sqlite="ALTER TABLE exam_center_activities ADD COLUMN exam_category VARCHAR(32)",
+        ddl_other="ALTER TABLE exam_center_activities ADD COLUMN exam_category VARCHAR(32) NULL",
+    )
+    ensure_column(
+        "exam_attempts",
+        "exam_category",
+        ddl_sqlite="ALTER TABLE exam_attempts ADD COLUMN exam_category VARCHAR(32)",
+        ddl_other="ALTER TABLE exam_attempts ADD COLUMN exam_category VARCHAR(32) NULL",
+    )
+    ensure_column(
+        "exam_bank_ingest_jobs",
+        "exam_category",
+        ddl_sqlite="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN exam_category VARCHAR(32)",
+        ddl_other="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN exam_category VARCHAR(32) NULL",
+    )
 
 
 def init_default_configs():
