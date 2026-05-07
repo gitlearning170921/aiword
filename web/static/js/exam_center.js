@@ -428,6 +428,9 @@
                     onRoleChange(role);
                 } catch (e) {}
             }
+            try {
+                syncProjectCaseExamUi();
+            } catch (eSyncPc) {}
         }
 
         document.querySelectorAll(".exam-role-btn").forEach(function (btn) {
@@ -518,12 +521,184 @@
         return n;
     }
 
-    /** 与体考类型正交：daily=日常；new_standard=新标发布 */
+    /** 与体考类型正交：daily=日常；new_standard=新标发布；project_case=项目案例（须选已训练案例） */
     function readExamCategory(which) {
         var id = which === "student" ? "studentExamCategory" : "teacherExamCategory";
         var v = readValue(id);
         if (v === "new_standard") return "new_standard";
+        if (v === "project_case") return "project_case";
         return "daily";
+    }
+
+    function readTeacherQuizCollection() {
+        var el = document.getElementById("teacherBankCollection");
+        var v = el ? String(el.value || "").trim() : "";
+        return v || "regulations";
+    }
+
+    function readStudentQuizCollection() {
+        return "regulations";
+    }
+
+    function readProjectCaseId(which) {
+        var id = which === "student" ? "studentProjectCaseId" : "teacherProjectCaseId";
+        var v = readValue(id);
+        var n = parseInt(v, 10);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function requireProjectCaseSelection(which, renderFn) {
+        if (readExamCategory(which) !== "project_case") return true;
+        if (readProjectCaseId(which) > 0) return true;
+        var msg = "项目案例考试请先在下拉中选择已训练入库的项目案例。";
+        if (typeof renderFn === "function") {
+            renderFn({ code: "BAD_REQUEST", message: msg, data: null });
+        }
+        return false;
+    }
+
+    function attachProjectCasePayload(payload, which) {
+        if (readExamCategory(which) === "project_case") {
+            var pid = readProjectCaseId(which);
+            if (pid > 0) {
+                payload.project_case_id = pid;
+                payload.projectCaseId = pid;
+            }
+        }
+        return payload;
+    }
+
+    function extractQuizNestedCases(resp) {
+        if (!resp || typeof resp !== "object") return [];
+        var d = resp.data;
+        if (!d || typeof d !== "object") return [];
+        if (d.ok === true && d.data && typeof d.data === "object" && Array.isArray(d.data.cases)) return d.data.cases;
+        if (Array.isArray(d.cases)) return d.cases;
+        return [];
+    }
+
+    /** 解析为点分短名各段（段内原句中的「.」改为间隔号，避免与分隔点混淆） */
+    function projectCaseOptionDotParts(c) {
+        if (!c || typeof c !== "object") return { id: "", parts: [] };
+        var id = c.id != null ? String(c.id).trim() : "";
+        function seg(v) {
+            var s = String(v == null ? "" : v).trim();
+            if (!s) return "";
+            return s.replace(/\./g, "\u00b7");
+        }
+        var name = seg(c.case_name);
+        if (!name) name = seg(c.product_name);
+        if (!name) name = "案例#" + id;
+        var country = seg(c.registration_country);
+        var rtype = seg(c.registration_type);
+        var tail = seg(c.project_form) || seg(c.registration_component);
+        var parts = [name, country, rtype, tail].filter(function (p) {
+            return !!p;
+        });
+        return { id: id, parts: parts };
+    }
+
+    /** 下拉短名：示例「呼吸护理工作站软件.欧盟.一类.独立软件」 */
+    function formatProjectCaseOptionLabel(c) {
+        var o = projectCaseOptionDotParts(c);
+        var out = o.parts.join(".");
+        if (out.length > 120) out = out.slice(0, 117) + "…";
+        return out;
+    }
+
+    /** 悬停：完整点分串 + id + 补充字段 */
+    function formatProjectCaseOptionTitle(c) {
+        if (!c || typeof c !== "object") return "";
+        var o = projectCaseOptionDotParts(c);
+        var full = o.parts.join(".");
+        var bits = [full];
+        if (o.id) bits.push("id=" + o.id);
+        var pn = String(c.product_name || "").trim();
+        var cn = String(c.case_name || "").trim();
+        if (pn && pn !== cn) bits.push("产品：" + pn);
+        var comp = String(c.registration_component || "").trim();
+        var pf = String(c.project_form || "").trim();
+        if (comp && pf && comp !== pf) bits.push("组成：" + comp);
+        return bits.join(" ");
+    }
+
+    async function loadExamCenterProjectCaseOptions(which) {
+        var coll = which === "student" ? readStudentQuizCollection() : readTeacherQuizCollection();
+        var selId = which === "student" ? "studentProjectCaseId" : "teacherProjectCaseId";
+        var sel = document.getElementById(selId);
+        if (!sel) return;
+        var prev = readValue(selId);
+        sel.innerHTML = '<option value="">加载中…</option>';
+        sel.disabled = true;
+        try {
+            var path =
+                which === "student"
+                    ? "/api/exam-center/student/project-cases?collection=" + encodeURIComponent(coll)
+                    : "/api/exam-center/teacher/project-cases?collection=" + encodeURIComponent(coll);
+            var resp = await apiRequest(path, "GET", null);
+            var cases = extractQuizNestedCases(resp);
+            sel.innerHTML = '<option value="">请选择已训练项目案例…</option>';
+            if (!cases.length) {
+                sel.innerHTML = '<option value="">（暂无已训练入库的项目案例）</option>';
+            } else {
+                cases.forEach(function (c) {
+                    if (!c || typeof c !== "object") return;
+                    var id = String(c.id != null ? c.id : "").trim();
+                    if (!id) return;
+                    var label = formatProjectCaseOptionLabel(c);
+                    var opt = document.createElement("option");
+                    opt.value = id;
+                    opt.textContent = label;
+                    opt.title = formatProjectCaseOptionTitle(c);
+                    sel.appendChild(opt);
+                });
+            }
+            if (prev) {
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === prev) {
+                        sel.selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+        } catch (eLoadPc) {
+            sel.innerHTML = '<option value="">（加载失败，请检查网络或权限）</option>';
+        } finally {
+            var catEl = which === "student" ? "studentExamCategory" : "teacherExamCategory";
+            var cat = readValue(catEl);
+            sel.disabled = cat !== "project_case";
+        }
+    }
+
+    function syncProjectCaseExamUi() {
+        var tCat = readValue("teacherExamCategory");
+        var tSel = document.getElementById("teacherProjectCaseId");
+        var tRow = document.getElementById("teacherProjectCaseRow");
+        if (tSel && tRow) {
+            if (tCat === "project_case") {
+                tRow.classList.remove("d-none");
+                tSel.disabled = false;
+                loadExamCenterProjectCaseOptions("teacher");
+            } else {
+                tRow.classList.add("d-none");
+                tSel.disabled = true;
+                tSel.value = "";
+            }
+        }
+        var sCat = readValue("studentExamCategory");
+        var sSel = document.getElementById("studentProjectCaseId");
+        var sRow = document.getElementById("studentProjectCaseRow");
+        if (sSel && sRow) {
+            if (sCat === "project_case") {
+                sRow.classList.remove("d-none");
+                sSel.disabled = false;
+                loadExamCenterProjectCaseOptions("student");
+            } else {
+                sRow.classList.add("d-none");
+                sSel.disabled = true;
+                sSel.value = "";
+            }
+        }
     }
 
     function setButtonLoading(btn, loading, loadingText) {
@@ -1343,6 +1518,9 @@
             filterAssignModalUsers();
             var m = ensureAssignModal();
             if (m) m.show();
+            try {
+                syncProjectCaseExamUi();
+            } catch (eSyncPc3) {}
         }
 
         async function openEditAssignmentModal(aid) {
@@ -1381,6 +1559,9 @@
             if (selTrack && d.exam_track) selTrack.value = String(d.exam_track).trim();
             var selCat = document.getElementById("teacherExamCategory");
             if (selCat && d.exam_category) selCat.value = String(d.exam_category).trim();
+            try {
+                syncProjectCaseExamUi();
+            } catch (eSyncPc2) {}
             if (selTeacherDifficulty) {
                 var df = String(d.difficulty || "").trim().toLowerCase();
                 if (df === "easy" || df === "medium" || df === "hard") selTeacherDifficulty.value = df;
@@ -2128,6 +2309,9 @@
             selBankCollection.addEventListener("change", function () {
                 bankState.offset = 0;
                 loadTeacherBankQuestions();
+                if (readValue("teacherExamCategory") === "project_case") {
+                    loadExamCenterProjectCaseOptions("teacher");
+                }
             });
         selBankIsActive &&
             selBankIsActive.addEventListener("change", function () {
@@ -2283,6 +2467,7 @@
                     render({ code: "BAD_REQUEST", message: "请选择考试对象（至少1人）", data: null });
                     return;
                 }
+                if (!requireProjectCaseSelection("teacher", render)) return;
                 var dd = assignModalDue ? String(assignModalDue.value || "").trim() : "";
                 var purpose = assignModalPurpose ? String(assignModalPurpose.value || "").trim() : "";
                 setButtonLoading(btnAssignModalSubmit, true, isEdit ? "保存中…" : "下发中…");
@@ -2302,6 +2487,7 @@
                             difficulty: diff0 ? diff0 : "",
                             set_id: sid0,
                         };
+                        attachProjectCasePayload(payloadEdit, "teacher");
                         var respEdit = await apiRequest(
                             "/api/exam-center/teacher/assignments/" + encodeURIComponent(aid),
                             "PATCH",
@@ -2323,6 +2509,7 @@
                             items: assignModalState.items || [],
                             audience_user_ids: ids,
                         };
+                        attachProjectCasePayload(payload, "teacher");
                         if (dd) payload.due_date = dd;
                         if (purpose) payload.purpose = purpose;
                         var resp = await apiRequest("/api/exam-center/teacher/assignments/issue", "POST", payload);
@@ -2405,6 +2592,7 @@
 
         btnGenerate && btnGenerate.addEventListener("click", async function () {
             if (btnGenerate && btnGenerate.disabled) return;
+            if (!requireProjectCaseSelection("teacher", render)) return;
             setButtonLoading(btnGenerate, true, "生成中…");
             try {
                 var track = readValue("teacherExamTrack") || "cn";
@@ -2417,7 +2605,9 @@
                     exam_category: ecat,
                     examCategory: ecat,
                     question_count: readInt("teacherQuestionCount", 20),
+                    collection: readTeacherQuizCollection(),
                 };
+                attachProjectCasePayload(payload, "teacher");
                 // aicheckword：difficulty 须为 string；「默认」为空则不传难度字段（避免 422）
                 var diff = readValue("teacherDifficulty");
                 if (diff) {
@@ -2504,13 +2694,23 @@
             setButtonLoading(btnIngest, true, "已提交…");
             setIngestProgress(true, "正在发起批量录题任务…");
             try {
+                if (!requireProjectCaseSelection("teacher", render)) {
+                    ingestState.running = false;
+                    setButtonLoading(btnIngest, false);
+                    setIngestProgress(false, "");
+                    return;
+                }
                 // 录题：题量/难度/题型占比由上游提示词/策略统一控制（每批 50 题等），
                 // 老师端下拉框仅影响「来一套」。
+                var ingestEcat = readExamCategory("teacher");
                 var ingestBody = {
                     exam_track: readValue("teacherExamTrack") || "cn",
-                    exam_category: readExamCategory("teacher"),
-                    review_mode: "draft"
+                    exam_category: ingestEcat,
+                    examCategory: ingestEcat,
+                    review_mode: "draft",
+                    collection: readTeacherQuizCollection(),
                 };
+                attachProjectCasePayload(ingestBody, "teacher");
                 var startResp = await apiRequest("/api/exam-center/teacher/bank/ingest-by-ai", "POST", ingestBody);
                 render(startResp);
                 maybeAutofillSetIdFromAnyResp(startResp);
@@ -2807,6 +3007,16 @@
                 loadTeacherPolicyVersion();
                 loadTeacherRequirementStatus();
             });
+        var selTeacherExamCat = document.getElementById("teacherExamCategory");
+        selTeacherExamCat &&
+            selTeacherExamCat.addEventListener("change", function () {
+                syncProjectCaseExamUi();
+            });
+        var selStudentExamCat = document.getElementById("studentExamCategory");
+        selStudentExamCat &&
+            selStudentExamCat.addEventListener("change", function () {
+                syncProjectCaseExamUi();
+            });
         btnSavePolicyVersion &&
             btnSavePolicyVersion.addEventListener("click", async function () {
                 setButtonLoading(btnSavePolicyVersion, true, "保存中…");
@@ -2824,6 +3034,9 @@
         if (getExamRole() === "teacher") {
             loadTeacherPolicyVersion();
             loadTeacherRequirementStatus();
+            syncProjectCaseExamUi();
+        } else {
+            syncProjectCaseExamUi();
         }
 
         // 供角色切换/页面初始化调用：加载任务记录列表
@@ -2884,6 +3097,11 @@
                 .replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;")
                 .replace(/"/g, "&quot;");
+        }
+
+        /** 题干 innerHTML：先转义再仅注入 &lt;br&gt;，保留换行且防 XSS */
+        function stemToHtml(s) {
+            return escSt(s).replace(/\r\n|\n|\r/g, "<br>");
         }
 
         function applyStudentTrackDefaults() {
@@ -4016,10 +4234,10 @@
                     "</textarea>";
             }
             return (
-                '<div class="card mb-2"><div class="card-body py-2"><div class="fw-semibold small mb-2">' +
+                '<div class="card exam-question-card mb-2"><div class="card-body py-2"><div class="exam-question-stem fw-semibold small mb-2">' +
                 (idx + 1) +
                 ". " +
-                escSt(stem) +
+                stemToHtml(stem) +
                 "</div>" +
                 body +
                 "</div></div>"
@@ -4532,16 +4750,24 @@
         btnSet &&
             btnSet.addEventListener("click", async function () {
                 if (btnSet && btnSet.disabled) return;
+                if (readExamCategory("student") === "project_case" && readProjectCaseId("student") <= 0) {
+                    studentShowFeedback("项目案例练习请先在下拉中选择已训练入库的项目案例。", "danger");
+                    return;
+                }
                 setButtonLoading(btnSet, true, "生成中…");
                 openInteractionPending("正在生成练习卷…", "体考类型：" + escSt(readValue("studentExamTrack") || "cn"));
                 try {
                     var stEcat = readExamCategory("student");
-                    var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", {
+                    var payS = {
                         exam_track: readValue("studentExamTrack") || "cn",
                         exam_category: stEcat,
+                        examCategory: stEcat,
                         question_count: readInt("studentSetSize", 10),
-                        difficulty: readValue("studentDifficulty") || "medium"
-                    });
+                        difficulty: readValue("studentDifficulty") || "medium",
+                        collection: readStudentQuizCollection(),
+                    };
+                    attachProjectCasePayload(payS, "student");
+                    var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", payS);
                     if (data && data.__ok === false) {
                         showInteractionError("无法开始练习", data.message || "请求失败");
                         if (getExamRole() !== "student") render(data);

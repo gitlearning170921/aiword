@@ -1044,7 +1044,38 @@ def _normalize_exam_category(v: Any) -> str:
     s = str(v or "").strip().lower()
     if s in ("new_standard", "new_standard_release", "newstd", "新标", "新标发布"):
         return "new_standard"
+    if s in (
+        "project_case",
+        "projectcase",
+        "case_audit",
+        "caseaudit",
+        "项目案例",
+        "案例考试",
+        "项目案例考试",
+    ):
+        return "project_case"
     return "daily"
+
+
+def _expand_project_case_id_aliases(body: dict[str, Any]) -> dict[str, Any]:
+    """project_case_id / projectCaseId → 同步为 int，便于上游 Pydantic 校验。"""
+    out = dict(body or {})
+    raw = out.get("project_case_id")
+    if raw is None:
+        raw = out.get("projectCaseId")
+    if raw is None or str(raw).strip() == "":
+        return out
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        out["project_case_id"] = raw
+        out["projectCaseId"] = raw
+        return out
+    if pid <= 0:
+        return out
+    out["project_case_id"] = pid
+    out["projectCaseId"] = pid
+    return out
 
 
 def _expand_exam_category_aliases(body: dict[str, Any]) -> dict[str, Any]:
@@ -1064,7 +1095,9 @@ def _expand_exam_category_aliases(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _expand_quiz_request_body(body: dict[str, Any] | None) -> dict[str, Any]:
-    return _expand_exam_category_aliases(_expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(body or {})))
+    return _expand_project_case_id_aliases(
+        _expand_exam_category_aliases(_expand_exam_track_and_difficulty_aliases(_expand_question_count_aliases(body or {})))
+    )
 
 
 def _expand_exam_track_and_difficulty_aliases(body: dict[str, Any]) -> dict[str, Any]:
@@ -2564,6 +2597,24 @@ def _extract_set_id_from_quiz_proxy_payload(payload: Any) -> str:
 def api_exam_teacher_generate_set():
     body = _expand_quiz_request_body(_json_payload())
     status, payload = _quiz_api_call("quiz/sets/generate", method="POST", payload=body)
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/teacher/project-cases")
+@page13_access_required
+def api_exam_teacher_project_cases():
+    """已训练项目案例列表（透传 aicheckword quiz/tools/project-cases）。"""
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    status, payload = _quiz_api_call("quiz/tools/project-cases", method="GET", query={"collection": coll})
+    return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/project-cases")
+@login_required
+def api_exam_student_project_cases():
+    """学生端练习：已训练项目案例列表（同上，不要求 page13 老师权限）。"""
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    status, payload = _quiz_api_call("quiz/tools/project-cases", method="GET", query={"collection": coll})
     return jsonify(payload), status
 
 

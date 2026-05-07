@@ -8,6 +8,38 @@
     .exam-sticky-subnav { position: sticky; top: 10px; z-index: 5; background: #fff; }
     details.exam-collapse > summary { cursor: pointer; user-select: none; }
     details.exam-collapse[open] > summary { margin-bottom: 10px; }
+    /* 考试训练中心：老师/学生「体考+考试类型+项目案例」左栏层级与对齐 */
+    .exam-quickops-section-title {
+        font-size: 0.7rem;
+        letter-spacing: 0.06em;
+        color: #6c757d;
+        text-transform: uppercase;
+        margin-bottom: 0.65rem;
+        font-weight: 600;
+    }
+    .exam-quickops-stack .form-label { font-size: 0.875rem; font-weight: 600; color: #343a40; margin-bottom: 0.25rem; }
+    .exam-quickops-stack .form-select,
+    .exam-quickops-stack .form-control { margin-bottom: 0.35rem; }
+    .exam-quickops-stack .form-select:last-of-type { margin-bottom: 0; }
+    .exam-project-case-select { font-size: 0.8125rem; line-height: 1.35; }
+    .exam-quickops-right-card { min-height: 100%; }
+    /* 学生作答区：长题干（无空格中文、摘录拼接）避免行高塌陷/叠字；选项长句正常换行 */
+    .exam-question-card .exam-question-stem {
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.55;
+        max-width: 100%;
+    }
+    .exam-question-card .card-body {
+        min-width: 0;
+    }
+    .exam-question-card .form-check-label {
+        white-space: normal;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.45;
+    }
 </style>
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
@@ -80,33 +112,46 @@
             <span id="teacherReviewProgressText">等待开始…</span>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2 d-none" id="btnTeacherReviewStop">停止轮询</button>
         </div>
-        <div class="row g-3" id="teacherQuickOps">
-            <div class="col-md-2">
-                <label class="form-label">体考类型（全局：来一套 + 录题）</label>
-                <select class="form-select" id="teacherExamTrack">
-                    <option value="cn">国内体考</option>
-                    <option value="iso13485">13485体考</option>
-                    <option value="mdsap">MDSAP体考</option>
-                </select>
-                <label class="form-label mt-2">考试类型</label>
-                <select class="form-select" id="teacherExamCategory" title="与体考类型正交：日常考试为历史默认；新标发布侧重法规/标准/指南修订与变化导向录题">
-                    <option value="daily" selected>日常考试</option>
-                    <option value="new_standard">新标发布</option>
-                </select>
-                <button type="button" class="btn btn-outline-secondary btn-sm w-100 mt-2" id="btnTeacherRegulatoryHint">
-                    检查法规/标准更新提示
-                </button>
+        <div class="row g-3 align-items-stretch" id="teacherQuickOps">
+            <div class="col-lg-3 col-md-4">
+                <div class="exam-quickops-stack border rounded p-3 bg-light h-100 d-flex flex-column">
+                    <div class="exam-quickops-section-title">体考与考试类型（全局）</div>
+                    <label class="form-label" for="teacherExamTrack">体考类型</label>
+                    <select class="form-select" id="teacherExamTrack" title="影响来一套与录题">
+                        <option value="cn">国内体考</option>
+                        <option value="iso13485">13485体考</option>
+                        <option value="mdsap">MDSAP体考</option>
+                    </select>
+                    <label class="form-label mt-2" for="teacherExamCategory">考试类型</label>
+                    <select class="form-select" id="teacherExamCategory" title="与体考类型正交：日常考试为历史默认；新标发布侧重法规/标准/指南修订与变化导向录题；项目案例为模拟核查提问（须选已训练案例）">
+                        <option value="daily" selected>日常考试</option>
+                        <option value="new_standard">新标发布</option>
+                        <option value="project_case">项目案例</option>
+                    </select>
+                    <div id="teacherProjectCaseRow" class="mt-2 pt-2 border-top d-none">
+                        <label class="form-label mb-1" for="teacherProjectCaseId">项目案例</label>
+                        <div class="small text-muted mb-1">与「题库管理」当前 collection 一致；选项含注册国家/类别</div>
+                        <select class="form-select exam-project-case-select" id="teacherProjectCaseId" disabled title="须先在「题库管理」选择 collection，且案例已在 aicheckword 训练入库">
+                            <option value="">请选择…</option>
+                        </select>
+                    </div>
+                    <div class="mt-auto pt-3">
+                        <button type="button" class="btn btn-outline-secondary btn-sm w-100" id="btnTeacherRegulatoryHint">
+                            检查法规/标准更新提示
+                        </button>
+                    </div>
+                </div>
             </div>
-            <div class="col-md-6">
-                <div class="border rounded p-2 bg-light">
-                    <div class="fw-bold small mb-2">来一套设置（仅影响来一套）</div>
+            <div class="col-lg-5 col-md-8">
+                <div class="border rounded p-3 bg-light exam-quickops-right-card">
+                    <div class="exam-quickops-section-title">来一套（仅影响考试草稿）</div>
                     <div class="row g-2 align-items-end">
-                        <div class="col-4">
-                            <label class="form-label mb-1 small">题量</label>
+                        <div class="col-sm-4">
+                            <label class="form-label mb-1 small" for="teacherQuestionCount">题量</label>
                             <input class="form-control" id="teacherQuestionCount" type="number" min="1" value="20">
                         </div>
-                        <div class="col-4">
-                            <label class="form-label mb-1 small">难度</label>
+                        <div class="col-sm-4">
+                            <label class="form-label mb-1 small" for="teacherDifficulty">难度</label>
                             <select class="form-select" id="teacherDifficulty">
                                 <option value="">默认</option>
                                 <option value="easy">简单</option>
@@ -114,18 +159,18 @@
                                 <option value="hard">困难</option>
                             </select>
                         </div>
-                        <div class="col-4 d-grid">
+                        <div class="col-sm-4 d-grid">
                             <button class="btn btn-primary" id="btnTeacherGenerateSet" type="button">来一套（考试草稿）</button>
                         </div>
                     </div>
-                    <div class="small text-muted mt-2">体考类型切换会联动题量/难度推荐值。</div>
+                    <div class="small text-muted mt-2 mb-0">体考类型切换会联动题量/难度推荐值。</div>
                 </div>
             </div>
-            <div class="col-md-4">
-                <div class="border rounded p-2">
-                    <div class="fw-bold small mb-2">AI 批量录入题库</div>
+            <div class="col-lg-4 col-md-12">
+                <div class="border rounded p-3 h-100">
+                    <div class="exam-quickops-section-title">AI 批量录入题库</div>
                     <button class="btn btn-outline-primary" id="btnTeacherIngestBank" type="button">开始录题</button>
-                    <div class="small text-muted mt-2">
+                    <div class="small text-muted mt-2 mb-0">
                         录题配比、每批题量、近似重复上限与考试及格线由「考试与录题配置」维护（默认：知识来源 30/30/20/20；题型 30/10/10/50；每批 50；重复≤10%；及格 80 分）。
                     </div>
                 </div>
@@ -539,36 +584,58 @@
     <div class="card-body">
         <h5 class="card-title">页面2能力：来一套练习/考试作答（前端交互）</h5>
         <div id="studentOperationFeedback" class="mb-3 d-none" role="status" aria-live="polite"></div>
-        <div class="row g-3">
-            <div class="col-md-3">
-                <label class="form-label">体考类型</label>
-                <select class="form-select" id="studentExamTrack">
-                    <option value="cn">国内体考</option>
-                    <option value="iso13485">13485体考</option>
-                    <option value="mdsap">MDSAP体考</option>
-                </select>
-                <label class="form-label mt-2">考试类型</label>
-                <select class="form-select" id="studentExamCategory">
-                    <option value="daily" selected>日常考试</option>
-                    <option value="new_standard">新标发布</option>
-                </select>
+        <div class="row g-3 align-items-stretch">
+            <div class="col-lg-3 col-md-4">
+                <div class="exam-quickops-stack border rounded p-3 bg-light h-100 d-flex flex-column">
+                    <div class="exam-quickops-section-title">体考与考试类型</div>
+                    <label class="form-label" for="studentExamTrack">体考类型</label>
+                    <select class="form-select" id="studentExamTrack">
+                        <option value="cn">国内体考</option>
+                        <option value="iso13485">13485体考</option>
+                        <option value="mdsap">MDSAP体考</option>
+                    </select>
+                    <label class="form-label mt-2" for="studentExamCategory">考试类型</label>
+                    <select class="form-select" id="studentExamCategory">
+                        <option value="daily" selected>日常考试</option>
+                        <option value="new_standard">新标发布</option>
+                        <option value="project_case">项目案例</option>
+                    </select>
+                    <div id="studentProjectCaseRow" class="mt-2 pt-2 border-top d-none">
+                        <label class="form-label mb-1" for="studentProjectCaseId">项目案例</label>
+                        <div class="small text-muted mb-1">选项含注册国家/类别（与 aicheckword 已训练案例一致）</div>
+                        <select class="form-select exam-project-case-select" id="studentProjectCaseId" disabled title="与 aicheckword 项目案例知识库一致">
+                            <option value="">请选择…</option>
+                        </select>
+                    </div>
+                </div>
             </div>
-            <div class="col-md-2">
-                <label class="form-label">练习题量</label>
-                <input class="form-control" id="studentSetSize" type="number" min="1" value="10">
+            <div class="col-lg-2 col-md-4">
+                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
+                    <div class="exam-quickops-section-title">题量</div>
+                    <label class="form-label" for="studentSetSize">练习题量</label>
+                    <input class="form-control" id="studentSetSize" type="number" min="1" value="10">
+                </div>
             </div>
-            <div class="col-md-2">
-                <label class="form-label">难度</label>
-                <select class="form-select" id="studentDifficulty">
-                    <option value="easy">简单</option>
-                    <option value="medium" selected>中等</option>
-                    <option value="hard">困难</option>
-                </select>
+            <div class="col-lg-2 col-md-4">
+                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
+                    <div class="exam-quickops-section-title">难度</div>
+                    <label class="form-label" for="studentDifficulty">难度</label>
+                    <select class="form-select" id="studentDifficulty">
+                        <option value="easy">简单</option>
+                        <option value="medium" selected>中等</option>
+                        <option value="hard">困难</option>
+                    </select>
+                </div>
             </div>
-            <div class="col-md-4 d-flex align-items-end gap-2">
-                <button class="btn btn-primary" id="btnStudentGenerateSet" type="button">来一套（练习）</button>
-                <button class="btn btn-outline-secondary" id="btnStudentWrongbook" type="button">查看错题本</button>
-                <button class="btn btn-outline-secondary" id="btnStudentTracks" type="button">未练题量</button>
+            <div class="col-lg-5 col-md-12">
+                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
+                    <div class="exam-quickops-section-title">操作</div>
+                    <div class="d-flex flex-wrap gap-2 align-items-start mt-1">
+                        <button class="btn btn-primary" id="btnStudentGenerateSet" type="button">来一套（练习）</button>
+                        <button class="btn btn-outline-secondary" id="btnStudentWrongbook" type="button">查看错题本</button>
+                        <button class="btn btn-outline-secondary" id="btnStudentTracks" type="button">未练题量</button>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="mt-3 pt-3 border-top">
