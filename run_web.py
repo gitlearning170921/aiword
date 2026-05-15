@@ -8,6 +8,8 @@ if __name__ == '__main__':
     print("\n服务器正在启动...")
     print("访问地址: http://localhost:5000")
     print("按 Ctrl+C 停止服务器\n")
+    print("实时日志（INFO）输出在本窗口；更详细可设置环境变量 AIWORD_LOG_LEVEL=DEBUG")
+    print("关闭控制台日志：AIWORD_CONSOLE_LOG=0")
     print("=" * 50)
     
     # use_reloader=False：后台运行时避免 reloader 杀子进程导致“daemon threads + stderr”崩溃；需热重载可前台运行 python run_web.py

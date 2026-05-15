@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}初稿生成 · AI Word{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <h2 class="mb-3">文档初稿生成（aicheckword）</h2>
+    <p class="text-muted small">
+      以下为<strong>页面2个人</strong>初稿用 LLM 配置（加密存 Key），<strong>不会写入或覆盖</strong> aicheckword 系统设置里的管理员 AI 配置。
+      可选提供方与策略由上游 <code>interop-config</code> 同步。
+      下方「生成设置」中的名称、顺序与 aicheckword 侧栏知识库及<strong>文档初稿生成</strong>页下拉选项<strong>对齐</strong>；选项数据来自上游 <code>/api/integration/draft/meta</code>。
+      系统需配置 <code>AICHECKWORD_DRAFT_API_BASE</code> 或 <code>QUIZ_API_BASE_URL</code>。
+    </p>
+    <div id="dg_msg" class="alert d-none" role="alert"></div>
+    <div id="dg_interop_info" class="alert alert-secondary d-none small" role="status"></div>
+
+    <div
+      id="dg_bootstrap_loading"
+      class="d-none position-fixed top-0 start-0 w-100 h-100 align-items-center justify-content-center flex-column"
+      style="z-index: 10900; background: rgba(255, 255, 255, 0.88); backdrop-filter: blur(2px)"
+      aria-hidden="true"
+      role="progressbar"
+      aria-busy="true"
+      aria-valuetext="加载中"
+    >
+      <div class="text-center p-4 rounded-3 bg-white shadow-sm border">
+        <div class="spinner-border text-primary mb-2" role="status" aria-label="加载中"></div>
+        <div id="dg_bootstrap_loading_text" class="small text-body-secondary">正在加载清单与生成选项（上游知识库/案例/模板）…</div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header">个人 LLM 设置（页面2专用）</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-md-4">
+            <label class="form-label">LLM 提供方</label>
+            <select id="dg_provider" class="form-select">
+              <option value="deepseek">DeepSeek</option>
+              <option value="cursor">Cursor</option>
+              <option value="tongyi">通义千问（DashScope）</option>
+            </select>
+          </div>
+          <div class="col-12" id="dg_api_key_block">
+            <label class="form-label"><span class="dg-req dg-req-llm d-none" title="上游要求仅个人 Key 时须填写并保存">*</span><span id="dg_key_label">API Key</span> <span id="dg_key_hint" class="text-muted small"></span></label>
+            <input id="dg_api_key" type="password" class="form-control" autocomplete="new-password"/>
+            <div id="dg_provider_hint" class="form-text"></div>
+          </div>
+          <div class="col-12">
+            <label class="form-label">API Base URL（可选）</label>
+            <input id="dg_api_base_url" class="form-control" placeholder="留空则用 aicheckword 默认（DeepSeek/Cursor 等）" autocomplete="off"/>
+          </div>
+          <div class="col-12">
+            <label class="form-label">审核/对话模型（可选）</label>
+            <input id="dg_llm_model" class="form-control" placeholder="留空则用 aicheckword 默认；通义示例 qwen-plus" autocomplete="off"/>
+            <div class="form-text">以上两项与 API Key 均按<strong>当前所选提供方</strong>分别保存；切换提供方时会自动切换为该方已保存内容（当前方未提交的编辑会先暂存在本页再切换）。</div>
+          </div>
+          <div class="col-12">
+            <button type="button" class="btn btn-primary" id="dg_btn_save_llm">保存 LLM 设置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header">生成设置（与 aicheckword 初稿页一致）</div>
+      <div class="card-body row g-3">
+        <div class="col-md-6">
+          <label class="form-label" id="dg_lbl_collection"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">知识库名称</span><span id="dg_pf_collection" class="dg-prefill-tag d-none">已默认</span></label>
+          <input type="search" id="dg_collection_filter" class="form-control form-control-sm mb-1" placeholder="筛选知识库…" autocomplete="off"/>
+          <select id="dg_collection" class="form-select"></select>
+          <div class="form-text">与 aicheckword 侧栏「知识库名称」同一取值；多库时可在 aiword 系统配置增加 <code>AICHECKWORD_DRAFT_COLLECTION_IDS</code>（英文逗号分隔）。</div>
+        </div>
+        <div class="col-md-6 d-flex align-items-end">
+          <button type="button" class="btn btn-outline-secondary" id="dg_btn_refresh_bootstrap">刷新列表（案例/模板/项目）</button>
+        </div>
+        <div class="col-12">
+          <label class="form-label" id="dg_lbl_base_case"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">2) 选择模板项目案例（用于生成格式/法规部分）</span><span id="dg_pf_base_case" class="dg-prefill-tag d-none">已默认</span></label>
+          <input type="search" id="dg_base_case_filter" class="form-control form-control-sm mb-1" placeholder="筛选案例（名称/产品/国家/语言/ID）…" autocomplete="off"/>
+          <select id="dg_base_case" class="form-select">
+            <option value="">请先选择或刷新列表</option>
+          </select>
+        </div>
+        <div class="col-12">
+          <label class="form-label">2.1) 待生成模板文件范围</label>
+          <select id="dg_template_scope" class="form-select"></select>
+        </div>
+        <div class="col-12">
+          <label class="form-label" id="dg_lbl_templates"><span class="dg-req" title="选择「仅所选」时至少勾选一个">*</span><span class="dg-lbl-text">2.2) 选择要生成的文件名称（勾选多选；与 aicheckword 案例库文件名一致）</span><span id="dg_pf_templates" class="dg-prefill-tag d-none">已默认</span></label>
+          <input type="search" id="dg_template_filter" class="form-control form-control-sm mb-1" placeholder="筛选模板文件名…" autocomplete="off"/>
+          <div id="dg_template_selection_summary" class="small text-body-secondary mb-2" role="status" aria-live="polite"></div>
+          <div class="d-flex flex-wrap gap-2 mb-2" id="dg_tpl_actions_bar">
+            <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_tpl_all">全选</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_tpl_none">全不选</button>
+          </div>
+          <div
+            id="dg_template_files_box"
+            class="border rounded p-2 bg-white"
+            style="max-height: 14rem; overflow-y: auto;"
+            role="group"
+            aria-label="待生成模板文件，可多选"
+          ></div>
+          <div class="form-text">逐项勾选即可多选；若上项为「该案例下全部模板文件」，提交时无需勾选（将包含本案例全部模板）。</div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">3) 生成文档语言</label>
+          <input type="search" id="dg_doc_lang_filter" class="form-control form-control-sm mb-1" placeholder="筛选语言选项…" autocomplete="off"/>
+          <select id="dg_doc_lang" class="form-select"></select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">生成策略（新项目复用 vs 注册变更）</label>
+          <input type="search" id="dg_strategy_filter" class="form-control form-control-sm mb-1" placeholder="筛选策略…" autocomplete="off"/>
+          <select id="dg_strategy" class="form-select"></select>
+        </div>
+        <div class="col-12">
+          <label class="form-label" id="dg_lbl_author"><span class="dg-lbl-text">编写人员身份（默认按文件名与项目信息匹配，可改）</span><span id="dg_pf_author" class="dg-prefill-tag d-none">已匹配</span></label>
+          <input type="search" id="dg_author_role_filter" class="form-control form-control-sm mb-1" placeholder="筛选身份…" autocomplete="off"/>
+          <select id="dg_author_role" class="form-select"></select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">项目模式</label>
+          <select id="dg_project_mode" class="form-select"></select>
+        </div>
+        <div class="col-md-6" id="dg_project_pick_wrap">
+          <label class="form-label" id="dg_lbl_project_id"><span class="dg-lbl-text">选择已有项目</span><span id="dg_pf_project" class="dg-prefill-tag d-none">已默认</span></label>
+          <input type="search" id="dg_project_id_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目（名称/编号/ID）…" autocomplete="off"/>
+          <select id="dg_project_id" class="form-select">
+            <option value="">（请先刷新列表）</option>
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" id="dg_inplace_label"><span class="dg-lbl-text">就地修改</span><span id="dg_pf_inplace" class="dg-prefill-tag d-none">已默认</span></label>
+          <select id="dg_inplace" class="form-select"></select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" id="dg_save_case_label"><span class="dg-lbl-text">写入案例库</span><span id="dg_pf_save_case" class="dg-prefill-tag d-none">已默认</span></label>
+          <select id="dg_save_case" class="form-select"></select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" id="dg_multi_route_label"><span class="dg-lbl-text">多基础自动分配</span><span id="dg_pf_multi_route" class="dg-prefill-tag d-none">已默认</span></label>
+          <select id="dg_multi_route" class="form-select"></select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" id="dg_track_label"><span class="dg-lbl-text">Word 修订标记</span><span id="dg_pf_track" class="dg-prefill-tag d-none">已默认</span></label>
+          <select id="dg_docx_track" class="form-select"></select>
+        </div>
+        <details class="col-12">
+          <summary class="text-muted small">上游 meta 原始 JSON（排障）</summary>
+          <textarea id="dg_meta_preview" class="form-control font-monospace mt-2" rows="6" readonly></textarea>
+        </details>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header">提交初稿任务</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label" id="dg_lbl_input_files"><span class="dg-req" title="提交前须至少一个文件">*</span><span class="dg-lbl-text">8) 上传输入/参考文件（可多批追加，与 aicheckword 多文件上传一致）</span></label>
+            <p class="text-muted small mb-1">
+              与 aicheckword「文档初稿生成」相同：支持 Word / Excel / PDF 等；可<strong>多次</strong>点「选择文件」继续追加。
+              在系统文件对话框内仍可用 Ctrl/Shift 一次多选。
+            </p>
+            <div class="d-flex flex-wrap gap-2 mb-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_pick_input">选择文件…</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_clear_input">清空列表</button>
+            </div>
+            <input type="file" id="dg_input_files_picker" class="d-none" multiple
+              accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz"/>
+            <ul class="list-group list-group-flush border rounded small" id="dg_input_files_list" style="max-height: 10rem; overflow-y: auto;"></ul>
+            <div class="form-text" id="dg_input_files_count"></div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">基础文件 Base（可选，可多批追加）</label>
+            <p class="text-muted small mb-1">与 aicheckword 就地修改用基底一致；可多次追加多份 Base。</p>
+            <div class="d-flex flex-wrap gap-2 mb-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_pick_base">选择 Base…</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_clear_base">清空列表</button>
+            </div>
+            <input type="file" id="dg_base_files_picker" class="d-none" multiple
+              accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz"/>
+            <ul class="list-group list-group-flush border rounded small" id="dg_base_files_list" style="max-height: 10rem; overflow-y: auto;"></ul>
+            <div class="form-text" id="dg_base_files_count"></div>
+            <div class="mt-2 d-none" id="dg_task_base_hint_wrap">
+              <label class="form-label small mb-1" for="dg_task_base_ftp_display">页面2任务 Base（FTP 路径或服务端读取库内文件）</label>
+              <div class="input-group input-group-sm">
+                <input type="text" class="form-control font-monospace" id="dg_task_base_ftp_display" readonly placeholder="从页面2「初稿生成」带入后自动加载"/>
+                <button type="button" class="btn btn-outline-secondary" id="dg_btn_clear_task_base" title="不再使用当前任务的模板作 Base">清除</button>
+              </div>
+              <div class="form-text">提交时由服务端从 FTP 下载或从数据库读取，再作为 Base 转发上游（无需再手动选择同一文件）。</div>
+            </div>
+          </div>
+          <div class="col-12">
+            <label class="form-label">附加高级参数（JSON，可选）</label>
+            <textarea id="dg_payload_extra" class="form-control font-monospace" rows="3" placeholder='一般留空；高级用户可合并额外 payload 字段'></textarea>
+          </div>
+          <div class="col-12">
+            <button type="button" class="btn btn-success" id="dg_btn_submit">提交生成</button>
+          </div>
+          <div class="col-12 d-none" id="dg_progress_wrap" role="status" aria-live="polite">
+            <div id="dg_progress_headline" class="small text-muted mb-1">任务进度与状态</div>
+            <div class="progress" style="height: 1.25rem;">
+              <div id="dg_progress_bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%;">0%</div>
+            </div>
+            <div id="dg_progress_caption" class="small text-muted mt-1">准备中…</div>
+            <div id="dg_poll_status" class="small text-secondary mt-1"></div>
+          </div>
+          <div class="col-12">
+            <label class="form-label">当前本地任务编号</label>
+            <input id="dg_local_job_id" class="form-control" readonly/>
+          </div>
+          <div class="col-12">
+            <button type="button" class="btn btn-outline-primary" id="dg_btn_download" disabled>下载 ZIP</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">初稿生成历史记录（可下载）</div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">
+          与 aicheckword「文档初稿生成」历史区类似：展示最近任务、摘要与上游任务号；成功且已落本地 ZIP 时可下载。
+          任务元数据保存在 aiword 数据库表 <code>draft_generation_jobs</code>，重启服务后列表仍在；ZIP 需在成功后在当前环境至少下载一次才会缓存在 <code>outputs/draft_zips</code>。
+        </p>
+        <div class="table-responsive">
+        <table class="table table-sm table-striped align-middle">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>摘要</th>
+              <th>本地编号</th>
+              <th>上游任务号</th>
+              <th>耗时(ms)</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="dg_job_rows"></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/draft_gen.js', v=static_version) }}"></script>
+{% endblock %}

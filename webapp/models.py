@@ -172,6 +172,8 @@ class UploadRecord(db.Model):
     stored_file_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     storage_path: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
     template_file_blob: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    ftp_path: Mapped[Optional[str]] = mapped_column(db.String(768), nullable=True)
+    ftp_last_error: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
     original_file_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     template_links: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
@@ -219,8 +221,10 @@ class UploadRecord(db.Model):
         return [line.strip() for line in self.template_links.strip().split("\n") if line.strip()]
 
     def has_template(self) -> bool:
-        """是否有可用的模板（库内文件、本机路径或链接）"""
+        """是否有可用的模板（库内文件、FTP、本机路径或链接）"""
         if self.template_file_blob:
+            return True
+        if (self.ftp_path or "").strip():
             return True
         from pathlib import Path
         if self.storage_path and Path(self.storage_path).exists():
@@ -228,8 +232,10 @@ class UploadRecord(db.Model):
         return bool(self.template_links)
 
     def has_stored_template_file(self) -> bool:
-        """是否有已保存的模板文件（数据库或本机）"""
+        """是否有已保存的模板文件（数据库、FTP 或本机）"""
         if self.template_file_blob:
+            return True
+        if (self.ftp_path or "").strip():
             return True
         if self.storage_path:
             from pathlib import Path
@@ -469,6 +475,65 @@ class ExamGradingJob(db.Model):
     last_upstream_trace_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     last_upstream_payload: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     last_message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class UserLlmCredential(db.Model):
+    """用户初稿 LLM 选择（与 aicheckword 集成联调范围一致）。
+
+    仅 ``deepseek`` / ``cursor`` / ``tongyi``（页面2个人初稿，与 aicheckword 系统管理员配置独立）。
+    ``api_key_encrypted_*``：按提供方分别保存密文；旧版单列 ``api_key_encrypted`` 仅作迁移兼容。
+    ``base_url_*`` / ``model_*``：各提供方独立的 API Base 与模型名；旧版 ``base_url`` / ``model`` 仅作迁移兼容。
+    ``cursor_repository`` / ``cursor_ref`` 保留列，保存时清空。
+    """
+
+    __tablename__ = "user_llm_credentials"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_user_llm_credentials_user_id"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(db.String(32), nullable=False, default="openai")
+    base_url: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    cursor_repository: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    cursor_ref: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    #: 旧版单列密文；新数据写入各 ``api_key_encrypted_*`` 后应置空。
+    api_key_encrypted: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    api_key_encrypted_deepseek: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    api_key_encrypted_cursor: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    api_key_encrypted_tongyi: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    base_url_deepseek: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    base_url_cursor: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    base_url_tongyi: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    model_deepseek: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    model_cursor: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    model_tongyi: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class DraftGenerationJob(db.Model):
+    """初稿生成：本地任务记录 + aicheckword upstream_job_id，供统计与下载。"""
+
+    __tablename__ = "draft_generation_jobs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")  # pending|queued|running|succeeded|failed
+    progress: Mapped[float] = mapped_column(db.Float, default=0.0)
+    message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    error_summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    collection: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    base_case_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    project_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    project_case_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    template_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    input_display_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    local_zip_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 

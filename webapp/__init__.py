@@ -1,4 +1,6 @@
+import logging
 import os
+import sys
 from pathlib import Path
 
 from flask import Flask
@@ -7,6 +9,46 @@ from jinja2 import ChoiceLoader, FileSystemLoader
 from sqlalchemy import inspect, text
 
 db = SQLAlchemy()
+
+
+def _configure_console_logging(app: Flask) -> None:
+    """前台启动时把日志打到 stderr，与 run_web.py / 控制台同一窗口实时可见。"""
+    flag = (os.environ.get("AIWORD_CONSOLE_LOG") or "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return
+
+    raw = (os.environ.get("AIWORD_LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, raw, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, logging.StreamHandler) and getattr(h, "_aiword_console", False):
+            break
+    else:
+        class _FlushingStreamHandler(logging.StreamHandler):
+            def emit(self, record):
+                super().emit(record)
+                try:
+                    self.flush()
+                except Exception:
+                    pass
+
+        handler = _FlushingStreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        handler._aiword_console = True  # type: ignore[attr-defined]
+        root.addHandler(handler)
+
+    root.setLevel(level)
+    app.logger.setLevel(level)
+    logging.getLogger("werkzeug").setLevel(level)
+    logging.getLogger("webapp").setLevel(level)
 
 
 def ensure_schema(app: Flask):
@@ -409,6 +451,18 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN template_file_blob MEDIUMBLOB",
     )
     ensure_column(
+        "upload_records",
+        "ftp_path",
+        "ALTER TABLE upload_records ADD COLUMN ftp_path TEXT",
+        "ALTER TABLE upload_records ADD COLUMN ftp_path VARCHAR(768) NULL",
+    )
+    ensure_column(
+        "upload_records",
+        "ftp_last_error",
+        "ALTER TABLE upload_records ADD COLUMN ftp_last_error TEXT",
+        "ALTER TABLE upload_records ADD COLUMN ftp_last_error VARCHAR(512) NULL",
+    )
+    ensure_column(
         "generate_records",
         "output_file_blob",
         "ALTER TABLE generate_records ADD COLUMN output_file_blob BLOB",
@@ -493,6 +547,200 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN exam_category VARCHAR(32)",
         ddl_other="ALTER TABLE exam_bank_ingest_jobs ADD COLUMN exam_category VARCHAR(32) NULL",
     )
+    ensure_column(
+        "user_llm_credentials",
+        "cursor_repository",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN cursor_repository VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN cursor_repository VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "cursor_ref",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN cursor_ref VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN cursor_ref VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "api_key_encrypted_deepseek",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_deepseek BLOB",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_deepseek MEDIUMBLOB NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "api_key_encrypted_cursor",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_cursor BLOB",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_cursor MEDIUMBLOB NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "api_key_encrypted_tongyi",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_tongyi BLOB",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_tongyi MEDIUMBLOB NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "base_url_deepseek",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN base_url_deepseek VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN base_url_deepseek VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "base_url_cursor",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN base_url_cursor VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN base_url_cursor VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "base_url_tongyi",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN base_url_tongyi VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN base_url_tongyi VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "model_deepseek",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_deepseek VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_deepseek VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "model_cursor",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_cursor VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_cursor VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "model_tongyi",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_tongyi VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_tongyi VARCHAR(128) NULL",
+    )
+
+    def migrate_user_llm_legacy_keys_split():
+        """将旧版单列 api_key_encrypted 按 provider 拷入分栏密文（幂等）。"""
+        if "user_llm_credentials" not in existing_tables:
+            return
+        insp2 = inspect(engine)
+        cols2 = {c["name"] for c in insp2.get_columns("user_llm_credentials")}
+        if "api_key_encrypted_deepseek" not in cols2:
+            return
+        pairs = (
+            ("deepseek", "api_key_encrypted_deepseek"),
+            ("cursor", "api_key_encrypted_cursor"),
+            ("tongyi", "api_key_encrypted_tongyi"),
+        )
+        with engine.connect() as conn:
+            for prov, col in pairs:
+                if is_sqlite:
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {col} = api_key_encrypted
+                            WHERE api_key_encrypted IS NOT NULL
+                              AND lower(trim(provider)) = :p
+                              AND ({col} IS NULL OR length({col}) = 0)
+                            """
+                        ),
+                        {"p": prov},
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {col} = api_key_encrypted
+                            WHERE api_key_encrypted IS NOT NULL
+                              AND LOWER(TRIM(provider)) = :p
+                              AND {col} IS NULL
+                            """
+                        ),
+                        {"p": prov},
+                    )
+            conn.commit()
+
+    migrate_user_llm_legacy_keys_split()
+
+    def migrate_user_llm_legacy_base_model_split():
+        """将旧版单列 base_url / model 按 provider 拷入分栏（幂等）。"""
+        if "user_llm_credentials" not in existing_tables:
+            return
+        insp3 = inspect(engine)
+        cols3 = {c["name"] for c in insp3.get_columns("user_llm_credentials")}
+        if "base_url_deepseek" not in cols3:
+            return
+        pairs = (
+            ("deepseek", "base_url_deepseek", "model_deepseek"),
+            ("cursor", "base_url_cursor", "model_cursor"),
+            ("tongyi", "base_url_tongyi", "model_tongyi"),
+        )
+        with engine.connect() as conn:
+            for prov, bcol, mcol in pairs:
+                if is_sqlite:
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {bcol} = base_url
+                            WHERE base_url IS NOT NULL AND trim(base_url) != ''
+                              AND lower(trim(provider)) = :p
+                              AND ({bcol} IS NULL OR trim({bcol}) = '')
+                            """
+                        ),
+                        {"p": prov},
+                    )
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {mcol} = model
+                            WHERE model IS NOT NULL AND trim(model) != ''
+                              AND lower(trim(provider)) = :p
+                              AND ({mcol} IS NULL OR trim({mcol}) = '')
+                            """
+                        ),
+                        {"p": prov},
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {bcol} = base_url
+                            WHERE base_url IS NOT NULL AND TRIM(base_url) != ''
+                              AND LOWER(TRIM(provider)) = :p
+                              AND {bcol} IS NULL
+                            """
+                        ),
+                        {"p": prov},
+                    )
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE user_llm_credentials
+                            SET {mcol} = model
+                            WHERE model IS NOT NULL AND TRIM(model) != ''
+                              AND LOWER(TRIM(provider)) = :p
+                              AND {mcol} IS NULL
+                            """
+                        ),
+                        {"p": prov},
+                    )
+            conn.commit()
+
+    migrate_user_llm_legacy_base_model_split()
+
+    # 用户 LLM 凭据：旧库若缺表则保存失败或退回内存假象；显式建表与初稿任务表一致。
+    insp_llm = inspect(engine)
+    if "user_llm_credentials" not in insp_llm.get_table_names():
+        from .models import UserLlmCredential
+
+        UserLlmCredential.__table__.create(bind=engine, checkfirst=True)
+
+    # 初稿任务历史：旧库若缺表会导致任务无法落库，重启后列表为空。
+    insp_jobs = inspect(engine)
+    if "draft_generation_jobs" not in insp_jobs.get_table_names():
+        from .models import DraftGenerationJob
+
+        DraftGenerationJob.__table__.create(bind=engine, checkfirst=True)
 
 
 def init_default_configs():
@@ -688,7 +936,9 @@ def create_app() -> Flask:
         for rel in (
             "js/app.js",
             "js/exam_center.js",
+            "js/draft_gen.js",
             "css/app.css",
+            "data/iso13485_document_name_pairs.json",
             "vendor/bootstrap-5.3.3/bootstrap.min.css",
             "vendor/bootstrap-5.3.3/bootstrap.bundle.min.js",
         ):
@@ -711,6 +961,7 @@ def create_app() -> Flask:
         if (
             p.endswith("/static/js/app.js")
             or p.endswith("/static/js/exam_center.js")
+            or p.endswith("/static/js/draft_gen.js")
             or p.endswith("/static/css/app.css")
             or (
             "/static/vendor/bootstrap-5.3.3/" in p
@@ -758,6 +1009,10 @@ def create_app() -> Flask:
         from .integration_routes import bp as integration_bp
         app.register_blueprint(integration_bp)
 
+        from .draft_generation_routes import draft_gen_bp
+
+        app.register_blueprint(draft_gen_bp)
+
         db.create_all()
         init_default_configs()
         from .app_settings import ensure_environment_variables_migrated_to_db, apply_system_settings_to_flask
@@ -781,6 +1036,7 @@ def create_app() -> Flask:
     except Exception:
         pass
 
+    _configure_console_logging(app)
     return app
 
 

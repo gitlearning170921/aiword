@@ -1,3 +1,23 @@
+/* 初稿页：必填星号与「已默认」角标 */
+.dg-req {
+    color: var(--bs-danger);
+    font-weight: 700;
+    margin-right: 0.2em;
+}
+.dg-prefill-tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #0f766e;
+    border: 1px solid rgba(15, 118, 110, 0.35);
+    background: rgba(13, 148, 136, 0.1);
+    border-radius: 999px;
+    padding: 0.06rem 0.5rem;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+    line-height: 1.2;
+}
+
 .app-body {
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     background: linear-gradient(140deg, #eef2ff 0%, #fdf9ff 55%, #f0f4ff 100%);
@@ -367,6 +387,24 @@ tr[draggable="true"].dragging {
     white-space: nowrap;
     overflow: visible;
     max-width: none;
+}
+/* 任务列表操作列固定在右侧：横向滚动时不跟随内容移动 */
+.table-responsive .table-compact th.col-op,
+.table-responsive .table-compact td.col-op {
+    position: sticky;
+    right: 0;
+    box-shadow: -1px 0 0 rgba(15, 23, 42, 0.08);
+}
+.table-responsive .table-compact td.col-op {
+    z-index: 2;
+    background: #fff;
+}
+.table-responsive .table-compact thead th.col-op {
+    z-index: 6;
+    background: #eef2ff;
+}
+.table-responsive .table-compact thead.table-light th.col-op {
+    background: #f8f9fa;
 }
 .table-compact .form-control,
 .table-compact .form-select,

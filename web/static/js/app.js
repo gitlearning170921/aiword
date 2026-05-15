@@ -276,6 +276,22 @@ function isValidDocLink(value) {
 
 let projectsMetaCache = []; // [{name, priority, status, ...}]
 
+function _projectSelectOptionCaption(p) {
+    const prio = p.priorityLabel ? `【${p.priorityLabel}】` : "";
+    const nm = (p.name || "").trim() || "未命名";
+    const sid = (p.id || "").trim();
+    const head = sid ? `${prio}${nm} (ID:${sid})` : `${prio}${nm}`;
+    const extras = [];
+    const prod = (p.registeredProductName || "").trim();
+    if (prod) extras.push(`产品:${prod}`);
+    const c = (p.registeredCountry || "").trim();
+    if (c) extras.push(`国家:${c}`);
+    const cat = (p.registeredCategory || "").trim();
+    if (cat) extras.push(`类别:${cat}`);
+    if (!extras.length) return head;
+    return `${head} | ${extras.join(" | ")}`;
+}
+
 function _getProjectOptions(activeOnly) {
     const arr = Array.isArray(projectsMetaCache) ? projectsMetaCache : [];
     return arr
@@ -300,8 +316,7 @@ function _populateProjectNameSelect(selectEl, selectedName) {
     opts.forEach((p) => {
         const opt = document.createElement("option");
         opt.value = p.id || (p.projectKey || p.name);
-        const label = p.priorityLabel ? `【${p.priorityLabel}】${p.projectKey || p.name}` : (p.projectKey || p.name);
-        opt.textContent = label;
+        opt.textContent = _projectSelectOptionCaption(p);
         opt.dataset.registeredCountry = p.registeredCountry || "";
         opt.dataset.registeredCategory = p.registeredCategory || "";
         opt.dataset.baseName = p.name || "";
@@ -449,7 +464,7 @@ function createTaskRowUnderProject(projectBlock) {
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-link" placeholder="链接">
                 <label class="btn btn-outline-secondary btn-sm mb-0">
-                    <input type="file" class="d-none task-file" accept=".docx,.doc">
+                    <input type="file" class="d-none task-file" accept=".docx,.doc,.zip,.tar,.gz,.tgz,.rar">
                     文件
                 </label>
             </div>
@@ -1315,6 +1330,10 @@ function initRecordsTableSort() {
 
 async function openEditRecordModal(r) {
     document.getElementById("editRecordId").value = r.id;
+    const prjIdEl = document.getElementById("editRecordProjectId");
+    if (prjIdEl) prjIdEl.value = (r.projectId != null && r.projectId !== "") ? String(r.projectId) : "";
+    const tplFileEl = document.getElementById("editRecordTemplateFile");
+    if (tplFileEl) tplFileEl.value = "";
     document.getElementById("editRecordProject").value = r.projectName || "";
     const projectCodeEl = document.getElementById("editRecordProjectCode");
     if (projectCodeEl) projectCodeEl.value = r.projectCode || "";
@@ -1533,13 +1552,49 @@ function initEditRecordModal() {
             App.notify("项目名称、文件名称、编写人员不能为空", "danger");
             return;
         }
+        const tplIn = document.getElementById("editRecordTemplateFile");
+        const tplFile = tplIn && tplIn.files && tplIn.files[0];
         try {
-            await App.request(`/api/uploads/${id}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            App.notify("任务已更新");
+            if (tplFile) {
+                const fd = new FormData();
+                fd.append("replace", "true");
+                fd.append("uploadRecordId", id);
+                const pid = (document.getElementById("editRecordProjectId")?.value || "").trim();
+                if (pid) fd.append("projectId", pid);
+                fd.append("projectName", payload.projectName);
+                fd.append("fileName", payload.fileName);
+                fd.append("author", payload.author);
+                fd.append("taskType", payload.taskType || "");
+                fd.append("templateLinks", (document.getElementById("editRecordTemplateLinks").value || "").trim());
+                fd.append("notes", (document.getElementById("editRecordNotes").value || "").trim());
+                fd.append("projectNotes", payload.projectNotes || "");
+                fd.append("assigneeName", payload.assigneeName || "");
+                fd.append("dueDate", payload.dueDate || "");
+                fd.append("businessSide", payload.businessSide || "");
+                fd.append("product", payload.product || "");
+                fd.append("country", payload.country || "");
+                fd.append("registeredProductName", payload.registeredProductName || "");
+                fd.append("model", payload.model || "");
+                fd.append("registrationVersion", payload.registrationVersion || "");
+                if (projectCodeEl) fd.append("projectCode", projectCodeEl.value.trim());
+                if (fileVersionEl) fd.append("fileVersion", fileVersionEl.value.trim());
+                if (docDisplayDateEl) fd.append("documentDisplayDate", docDisplayDateEl.value || "");
+                if (reviewerEl) fd.append("reviewer", reviewerEl.value.trim());
+                if (approverEl) fd.append("approver", approverEl.value.trim());
+                if (displayedAuthorSaveEl) fd.append("displayedAuthor", displayedAuthorSaveEl.value.trim());
+                if (auditStatusEl) fd.append("auditStatus", auditStatusEl.value.trim());
+                fd.append("belongingModule", (document.getElementById("editRecordBelongingModule")?.value || "").trim());
+                fd.append("file", tplFile);
+                const res = await App.request("/api/upload", { method: "POST", body: fd });
+                App.notify(res.message || "任务模板已更新并已尝试同步 FTP");
+            } else {
+                await App.request(`/api/uploads/${id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                App.notify("任务已更新");
+            }
             bootstrap.Modal.getInstance(modalEl)?.hide();
             loadRecordsList();
             if (window.loadMyTasks) window.loadMyTasks();
@@ -1908,6 +1963,38 @@ function updateBatchEditButtonState() {
     btn.disabled = checked === 0;
 }
 
+function showGoSignLoading(message) {
+    const msg = (message || "正在跳转签字页面，请稍候…").trim();
+    let mask = document.getElementById("goSignLoadingMask");
+    if (!mask) {
+        mask = document.createElement("div");
+        mask.id = "goSignLoadingMask";
+        mask.style.position = "fixed";
+        mask.style.left = "0";
+        mask.style.top = "0";
+        mask.style.width = "100vw";
+        mask.style.height = "100vh";
+        mask.style.background = "rgba(15,23,42,.34)";
+        mask.style.backdropFilter = "blur(1px)";
+        mask.style.zIndex = "4000";
+        mask.style.display = "flex";
+        mask.style.alignItems = "center";
+        mask.style.justifyContent = "center";
+        mask.innerHTML = `
+            <div style="background:#fff;padding:16px 20px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.2);display:flex;align-items:center;gap:10px;max-width:70vw;">
+                <span class="spinner-border spinner-border-sm text-primary" aria-hidden="true"></span>
+                <span id="goSignLoadingMaskText" style="font-size:.95rem;color:#0f172a;">${msg}</span>
+            </div>
+        `;
+        document.body.appendChild(mask);
+    } else {
+        const txt = document.getElementById("goSignLoadingMaskText");
+        if (txt) txt.textContent = msg;
+        mask.style.display = "flex";
+    }
+    return mask;
+}
+
 function renderRecordsTable(records) {
     const tbody = document.getElementById("recordsTableBody");
     if (!tbody) return;
@@ -1942,6 +2029,11 @@ function renderRecordsTable(records) {
         const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
+        const canAiprintHandoff = !!(r.hasGenerated || r.hasFile || r.hasLinks);
+        const ahDis = canAiprintHandoff ? "" : " disabled";
+        const ahTitle = canAiprintHandoff
+            ? "跳转 aiprintword（需系统配置 AIPRINTWORD_BASE_URL 与密钥）"
+            : "需先有已保存模板、文档链接或已生成文档";
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
@@ -1971,6 +2063,8 @@ function renderRecordsTable(records) {
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>
                 <button class="btn btn-sm btn-outline-danger btn-delete-task" data-id="${r.id}">删除</button>
             </td>
         `;
@@ -2108,6 +2202,29 @@ function renderRecordsTable(records) {
         btn.addEventListener("click", () => {
             const r = allRecordsCache.find(x => x.id === btn.dataset.id);
             if (r) openEditRecordModal(r);
+        });
+    });
+
+    tbody.querySelectorAll(".btn-go-sign").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            if (btn.disabled) return;
+            tbody.querySelectorAll(".btn-go-sign,.btn-go-print,.btn-edit-task,.btn-delete-task").forEach((b) => {
+                b.disabled = true;
+            });
+            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>跳转中`;
+            showGoSignLoading("正在打开签字页面并载入任务文件…");
+            window.location.href = `/go/sign?upload_id=${encodeURIComponent(btn.dataset.id || "")}`;
+        });
+    });
+    tbody.querySelectorAll(".btn-go-print").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            if (btn.disabled) return;
+            tbody.querySelectorAll(".btn-go-sign,.btn-go-print,.btn-edit-task,.btn-delete-task").forEach((b) => {
+                b.disabled = true;
+            });
+            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>跳转中`;
+            showGoSignLoading("正在打开打印页面并载入任务文件…");
+            window.location.href = `/go/print?upload_id=${encodeURIComponent(btn.dataset.id || "")}`;
         });
     });
     
@@ -2591,6 +2708,21 @@ function initMyTasksTableSort() {
     });
 }
 
+/** 页面2任务行 → 初稿生成页，查询参数供 /draft-gen 预填下拉。 */
+function buildDraftGenUrlFromTask(r) {
+    const root = window.__SCRIPT_ROOT__ || "";
+    const u = new URLSearchParams();
+    u.set("from", "page2");
+    if (r && r.id) u.set("upload_id", r.id);
+    if (r && r.projectName) u.set("project_name", r.projectName);
+    if (r && r.fileName) u.set("file_name", r.fileName);
+    if (r && r.product) u.set("product", r.product);
+    if (r && r.country) u.set("country", r.country);
+    const pid = r && r.projectId != null ? String(r.projectId).trim() : "";
+    if (pid && /^\d+$/.test(pid)) u.set("aicheckword_project_id", pid);
+    return root + "/draft-gen/?" + u.toString();
+}
+
 function renderMyTasksTable(records) {
     const myTasksBody = document.getElementById("myTasksBody");
     const placeholderModal = document.getElementById("placeholderModal");
@@ -2653,6 +2785,7 @@ function renderMyTasksTable(records) {
                 ${r.hasFile || (r.placeholders && r.placeholders.length > 0)
                     ? `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders" data-id="${r.id}">填写</button>`
                     : ''}
+                <button type="button" class="btn btn-sm btn-outline-success btn-draft-gen-page2 ms-1" title="打开初稿生成页并带入本行项目/产品/国家/文件名">初稿生成</button>
             </td>
         `;
         const statusCell = tr.querySelector(".completion-status-cell");
@@ -2712,6 +2845,9 @@ function renderMyTasksTable(records) {
             });
         }
         tr.querySelector(".btn-fill-placeholders")?.addEventListener("click", () => openPlaceholderModal(r, placeholderModal));
+        tr.querySelector(".btn-draft-gen-page2")?.addEventListener("click", () => {
+            window.location.href = buildDraftGenUrlFromTask(r);
+        });
         myTasksBody.appendChild(tr);
     };
     

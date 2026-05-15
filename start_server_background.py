@@ -15,7 +15,12 @@ def start_server_background():
     print("=" * 50)
     print("\n正在后台启动服务器...")
     print(f"访问地址: http://localhost:5000")
-    print(f"日志文件: {log_file}")
+    abs_log = log_file.resolve()
+    print(f"运行日志文件（实时内容写在此文件，非本窗口）:")
+    print(f"  {abs_log}")
+    print("查看方式：用记事本打开上述路径，或在本机 PowerShell 执行：")
+    print(f'  Get-Content -LiteralPath "{abs_log}" -Wait -Tail 50')
+    print("若要在本窗口直接看日志，请关闭本服务后运行 start_server_foreground.bat")
     print("\n要停止服务器，请运行 stop_server.bat")
     print("=" * 50)
 
@@ -38,8 +43,9 @@ def start_server_background():
             )
 
     pid_file.write_text(str(process.pid), encoding="utf-8")
+    abs_log = log_file.resolve()
     print(f"\n服务器已在后台启动，PID: {process.pid}")
-    print(f"日志: {log_file}")
+    print(f"运行日志: {abs_log}")
     print("要停止服务器，请运行 stop_server.bat")
 
 

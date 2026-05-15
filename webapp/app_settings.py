@@ -25,6 +25,39 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("PAGE13_ACCESS_PASSWORD", "页面1/3 访问密码", True),
     ("INTEGRATION_SECRET", "开放接口校验密钥（INTEGRATION_SECRET）", True),
     ("QUIZ_API_BASE_URL", "考试训练中心后端地址（如 http://127.0.0.1:8000）", False),
+    (
+        "AICHECKWORD_DRAFT_API_BASE",
+        "aicheckword 文档初稿 API 根地址（如 http://127.0.0.1:8000；勿以 / 结尾）。"
+        "可与 QUIZ_API_BASE_URL 指向同一实例，也可单独地址/端口以便与考试中心后端独立启停。",
+        False,
+    ),
+    (
+        "AICHECKWORD_DRAFT_TIMEOUT_SECONDS",
+        "初稿任务提交/下载 ZIP 等上游 HTTP 读超时（秒，默认 600；上限 72h=259200；"
+        "状态轮询单次请求仍 capped 在 min(120, 配置值)。与下方「连接超时」分离）",
+        False,
+    ),
+    (
+        "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
+        "初稿对接 aicheckword 的 TCP 连接超时（秒，默认 8；上限 120）。"
+        "上游已停时应尽快失败，避免拖住 aiword 线程或影响本进程与其它服务一并停止。",
+        False,
+    ),
+    (
+        "AICHECKWORD_DRAFT_COLLECTION_IDS",
+        "初稿页「知识库名称」下拉：英文逗号分隔的 collection id（默认仅 regulations；与 aicheckword 侧栏知识库名称一致）",
+        False,
+    ),
+    (
+        "AIPRINTWORD_BASE_URL",
+        "aiprintword 服务根地址（如 http://127.0.0.1:5050，勿以 / 结尾）；页面1「去签字/去打印」服务端交接用",
+        False,
+    ),
+    (
+        "AIPRINTWORD_HANDOFF_SECRET",
+        "与 aiprintword 环境变量 AIWORD_HANDOFF_SECRET 相同的密钥（敏感）；用于服务端一次性文件交接",
+        True,
+    ),
     ("QUIZ_API_BEARER_TOKEN", "考试训练中心后端 Bearer Token（可选）", True),
     ("QUIZ_API_SECRET", "考试训练中心后端集成密钥（X-Integration-Secret，可选）", True),
     (
@@ -90,6 +123,36 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "DINGTALK_APP_SECRET": ("DINGTALK_APP_SECRET", "dingtalk_app_secret"),
     "DINGTALK_AGENT_ID": ("DINGTALK_AGENT_ID", "dingtalk_agent_id"),
     "QUIZ_API_BASE_URL": ("QUIZ_API_BASE_URL", "quiz_api_base_url", "quizApiBaseUrl"),
+    "AICHECKWORD_DRAFT_API_BASE": (
+        "AICHECKWORD_DRAFT_API_BASE",
+        "aicheckword_draft_api_base",
+        "aicheckwordDraftApiBase",
+    ),
+    "AICHECKWORD_DRAFT_TIMEOUT_SECONDS": (
+        "AICHECKWORD_DRAFT_TIMEOUT_SECONDS",
+        "aicheckword_draft_timeout_seconds",
+        "aicheckwordDraftTimeoutSeconds",
+    ),
+    "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS": (
+        "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
+        "aicheckword_draft_connect_timeout_seconds",
+        "aicheckwordDraftConnectTimeoutSeconds",
+    ),
+    "AICHECKWORD_DRAFT_COLLECTION_IDS": (
+        "AICHECKWORD_DRAFT_COLLECTION_IDS",
+        "aicheckword_draft_collection_ids",
+        "aicheckwordDraftCollectionIds",
+    ),
+    "AIPRINTWORD_BASE_URL": (
+        "AIPRINTWORD_BASE_URL",
+        "aiprintword_base_url",
+        "aiprintwordBaseUrl",
+    ),
+    "AIPRINTWORD_HANDOFF_SECRET": (
+        "AIPRINTWORD_HANDOFF_SECRET",
+        "aiprintword_handoff_secret",
+        "aiprintwordHandoffSecret",
+    ),
     "QUIZ_API_BEARER_TOKEN": ("QUIZ_API_BEARER_TOKEN", "quiz_api_bearer_token", "quizApiBearerToken"),
     "QUIZ_API_SECRET": ("QUIZ_API_SECRET", "quiz_api_secret", "quizApiSecret"),
     "QUIZ_API_TIMEOUT_SECONDS": ("QUIZ_API_TIMEOUT_SECONDS", "quiz_api_timeout_seconds", "quizApiTimeoutSeconds"),
@@ -114,6 +177,12 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "QUIZ_API_BEARER_TOKEN": ("QUIZ_API_BEARER_TOKEN",),
     "QUIZ_API_SECRET": ("QUIZ_API_SECRET",),
     "QUIZ_API_TIMEOUT_SECONDS": ("QUIZ_API_TIMEOUT_SECONDS",),
+    "AICHECKWORD_DRAFT_API_BASE": ("AICHECKWORD_DRAFT_API_BASE",),
+    "AICHECKWORD_DRAFT_TIMEOUT_SECONDS": ("AICHECKWORD_DRAFT_TIMEOUT_SECONDS",),
+    "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS": ("AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",),
+    "AICHECKWORD_DRAFT_COLLECTION_IDS": ("AICHECKWORD_DRAFT_COLLECTION_IDS",),
+    "AIPRINTWORD_BASE_URL": ("AIPRINTWORD_BASE_URL",),
+    "AIPRINTWORD_HANDOFF_SECRET": ("AIPRINTWORD_HANDOFF_SECRET", "AIWORD_HANDOFF_SECRET"),
 }
 
 # 这些键在 os.environ 里按「名称大写相等」再扫一遍（解决 Windows 等环境下变量名不一致）
@@ -129,6 +198,8 @@ _ENV_CASEFOLD_KEYS = frozenset(
         "QUIZ_API_BEARER_TOKEN",
         "QUIZ_API_SECRET",
         "QUIZ_API_TIMEOUT_SECONDS",
+        "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
+        "AIPRINTWORD_HANDOFF_SECRET",
     }
 )
 

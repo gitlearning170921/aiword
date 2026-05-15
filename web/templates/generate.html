@@ -8,6 +8,7 @@
     </div>
     <div id="heroBarActions" class="text-end">
         <span id="userInfo" class="badge bg-light text-dark me-2"></span>
+        <a class="btn btn-outline-success btn-sm me-2" href="{{ url_for('draft_gen.draft_gen_page') }}">初稿生成</a>
         <a class="btn btn-outline-primary btn-sm me-2" href="{{ url_for('pages.exam_center_page', role='student') }}">进入考试训练中心</a>
         <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
     </div>
@@ -140,7 +141,7 @@
     <ul class="mb-0">
         <li>此页面仅显示分配给您的任务（根据编写人员或负责人匹配）</li>
         <li>可直接在下拉框中选择完成状态进行标记</li>
-        <li>如需填写占位符生成文档，点击"填写"按钮</li>
+        <li>占位符「填写」生成与初稿不同：初稿请在<strong>操作</strong>列点「初稿生成」跳转（自动带入本行项目/产品/国家/文件名等）。</li>
         <li>如果是链接类型的任务，可以直接访问链接填写后标记状态</li>
     </ul>
 </div>

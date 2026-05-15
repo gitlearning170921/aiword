@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import os
@@ -43,6 +44,7 @@ from .doc_service import (
     extract_placeholders_from_bytes,
     generate_document,
 )
+from .task_template_archive import resolve_task_template_from_saved_path
 from .models import (
     GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
@@ -1902,6 +1904,30 @@ def _project_display_label(p: Project) -> str:
     )
 
 
+def _project_registered_product_name_hints(project_ids: list[str]) -> dict[str, str]:
+    """从上传记录中取各 project_id 下一条非空「注册产品名称」，仅用于下拉展示（不参与 projectKey 匹配）。"""
+    ids = [str(x).strip() for x in (project_ids or []) if str(x).strip()]
+    if not ids:
+        return {}
+    out: dict[str, str] = {}
+    rows = (
+        UploadRecord.query.filter(
+            UploadRecord.project_id.in_(ids),
+            UploadRecord.registered_product_name.isnot(None),
+        )
+        .order_by(UploadRecord.updated_at.desc())
+        .all()
+    )
+    for u in rows:
+        pid = (getattr(u, "project_id", None) or "").strip()
+        if not pid or pid in out:
+            continue
+        pn = (getattr(u, "registered_product_name", None) or "").strip()
+        if pn:
+            out[pid] = pn
+    return out
+
+
 def _filter_nullable_eq(q, col, value):
     """value=None 用 IS NULL；否则用 =。避免 MySQL 生成 `IS 'xxx'` 导致 500。"""
     return q.filter(col.is_(None)) if value is None else q.filter(col == value)
@@ -2050,13 +2076,92 @@ def _prepare_summary(upload: UploadRecord) -> GenerationSummary:
     return summary
 
 
+def _safe_ftp_task_filename(name: str) -> str:
+    """FTP 路径用安全文件名（保留原始名在库字段）。"""
+    base = os.path.basename(name or "document")
+    base = base.strip() or "document"
+    base = re.sub(r"[^0-9A-Za-z._()\-\s]+", "_", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    return (base or "document")[:200]
+
+
+def _unlink_task_template_cache_files(upload_id: str) -> None:
+    """删除本机为某条上传记录缓存的模板副本。"""
+    uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    for suf in (".docx", ".doc"):
+        (uploads_dir / f"_ftptpl_{upload_id}{suf}").unlink(missing_ok=True)
+    (uploads_dir / f"_dbtpl_{upload_id}.docx").unlink(missing_ok=True)
+
+
+def _upload_record_has_task_file(r: UploadRecord) -> bool:
+    """是否有任务模板文件（BLOB、本机路径或 FTP）。"""
+    if r.template_file_blob or r.storage_path:
+        return True
+    return bool((getattr(r, "ftp_path", None) or "").strip())
+
+
+def _apply_task_template_ftp_after_flush(row: UploadRecord, original_display_name: str | None) -> None:
+    """在 row.id 已落库后尝试将 template_file_blob 上传 FTP；成功则清空 BLOB。"""
+    blob = row.template_file_blob
+    if not blob:
+        current_app.logger.debug(
+            "FTP 任务模板跳过 upload_id=%s：无 template_file_blob（可能仅用链接或未上传文件）",
+            getattr(row, "id", None),
+        )
+        return
+    from .ftp_store import try_upload_bytes
+
+    safe = _safe_ftp_task_filename(original_display_name or row.file_name or "document")
+    rel = f"task_assignments/{row.id}/{safe}"
+    pth, err = try_upload_bytes(blob, rel)
+    if pth:
+        current_app.logger.info(
+            "任务模板 FTP 已写入 upload_id=%s rel=%s ftp_path=%s",
+            row.id,
+            rel,
+            pth,
+        )
+        row.ftp_path = pth
+        row.ftp_last_error = None
+        row.template_file_blob = None
+    elif err:
+        current_app.logger.warning(
+            "任务模板 FTP 上传失败 upload_id=%s rel=%s（已写入 ftp_last_error 供前端展示）: %s",
+            row.id,
+            rel,
+            err,
+        )
+        row.ftp_last_error = err[:512] if len(err) > 512 else err
+    else:
+        current_app.logger.info(
+            "任务模板未上传 FTP upload_id=%s rel=%s：未配置 FTP_HOST 等；模板仍保存在数据库 BLOB",
+            row.id,
+            rel,
+        )
+
+
 def _get_template_path_for_upload(upload: UploadRecord, link_index: int = 0) -> str:
-    """返回上传记录对应的模板本地路径：库内模板先落盘，否则 storage_path，链接则下载到 uploads/。"""
+    """返回上传记录对应的模板本地路径：库内模板先落盘，否则 FTP 缓存，否则 storage_path，链接则下载到 uploads/。"""
     if upload.template_file_blob:
         uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
         mat = uploads_dir / f"_dbtpl_{upload.id}.docx"
         if not mat.exists() or mat.stat().st_size != len(upload.template_file_blob):
             mat.write_bytes(upload.template_file_blob)
+        return str(mat)
+    fp = (getattr(upload, "ftp_path", None) or "").strip()
+    if fp:
+        from .ftp_store import download_bytes
+
+        uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+        fn = ((upload.original_file_name or upload.file_name or "document") or "document").lower()
+        ext = ".docx"
+        if fn.endswith(".doc") and not fn.endswith(".docx"):
+            ext = ".doc"
+        elif fn.endswith(".docx"):
+            ext = ".docx"
+        mat = uploads_dir / f"_ftptpl_{upload.id}{ext}"
+        data = download_bytes(fp)
+        mat.write_bytes(data)
         return str(mat)
     if upload.storage_path and Path(upload.storage_path).exists():
         return upload.storage_path
@@ -2068,6 +2173,203 @@ def _get_template_path_for_upload(upload: UploadRecord, link_index: int = 0) -> 
             download_template_from_url(links[link_index], str(save_path))
         return str(save_path)
     raise ValueError("上传记录未关联有效模板（文件或链接）")
+
+
+def _resolve_handoff_doc_for_print_sign(
+    upload_id: str, mode: str = "sign"
+) -> tuple[Optional[bytes], str, Optional[str], Optional[str]]:
+    """为 aiprintword 交接解析任务文档。
+    返回 (bytes, filename, error, reuse_ftp_path)：
+    - 签字模式优先复用 upload.ftp_path（.docx/.xlsx），避免在签字端重复上传 FTP；
+    - 其余场景优先最新成功生成结果，否则回退到模板。"""
+    uid = (upload_id or "").strip()
+    reuse_fp: Optional[str] = None
+    mode_k = (mode or "sign").strip().lower()
+    if mode_k not in ("sign", "print"):
+        mode_k = "sign"
+    if not uid:
+        return None, "", "缺少 upload_id", None
+    upload = UploadRecord.query.get(uid)
+    if not upload:
+        return None, "", "任务不存在", None
+    # 用户从任务列表“去签字”时，优先复用 aiword 记录的模板 FTP 路径，避免重复上传。
+    if mode_k == "sign":
+        fp_tpl = (getattr(upload, "ftp_path", None) or "").strip()
+        if fp_tpl:
+            display = (upload.file_name or "").strip() or "document.docx"
+            ext0 = Path(display).suffix.lower()
+            if not ext0:
+                ext0 = ".docx"
+                display = Path(display).stem + ext0
+            if ext0 in (".docx", ".xlsx"):
+                return None, display, None, fp_tpl
+    rec = (
+        GenerateRecord.query.filter_by(upload_id=uid, success=True)
+        .order_by(GenerateRecord.created_at.desc())
+        .first()
+    )
+    if rec:
+        blob: Optional[bytes] = rec.output_file_blob
+        if not blob and rec.output_path and Path(rec.output_path).is_file():
+            try:
+                blob = Path(rec.output_path).read_bytes()
+            except OSError:
+                blob = None
+        if blob:
+            name = (rec.output_file_name or "").strip()
+            if not name:
+                stem = Path(upload.file_name or "document").stem if upload.file_name else "document"
+                name = f"{stem}_generated.docx"
+            return blob, name, None, None
+    try:
+        path = _get_template_path_for_upload(upload, 0)
+    except Exception as e:
+        return None, "", f"无已生成文档且无法加载模板：{e}", None
+    p = Path(path)
+    if not p.is_file():
+        return None, "", "模板文件不可用", None
+    ext = p.suffix.lower()
+    if ext not in (".doc", ".docx", ".xls", ".xlsx", ".pdf"):
+        return None, "", f"当前任务文件类型不支持签字/批量打印（{ext or '无扩展名'}）", None
+    display = (upload.file_name or "").strip() or p.name
+    if not Path(display).suffix:
+        display = Path(display).stem + ext
+    elif ext in (".docx", ".xlsx") and not display.lower().endswith(ext):
+        display = Path(display).stem + ext
+    fp_tpl = (getattr(upload, "ftp_path", None) or "").strip()
+    if fp_tpl and ext in (".docx", ".xlsx"):
+        # 与 aiprintword 同一套 FTP：交接仅登记路径，避免服务端再读本地/再传一遍字节
+        return None, display, None, fp_tpl
+    try:
+        raw = p.read_bytes()
+    except OSError as e:
+        return None, "", str(e), None
+    return raw, display, None, None
+
+
+def _aiprintword_go_redirect(mode: str):
+    """mode: sign | print"""
+    from .app_settings import get_setting
+
+    uid = (request.args.get("upload_id") or "").strip()
+    raw, fname, err, reuse_ftp = _resolve_handoff_doc_for_print_sign(uid, mode=mode)
+    reuse_ok = (reuse_ftp or "").strip()
+    if err or (raw is None and not reuse_ok):
+        emsg = html.escape(err or "无法读取文档", quote=True)
+        htm = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>跳转失败</title></head><body>"
+            f"<p>{emsg}</p><p><a href=\"javascript:history.back()\">返回</a></p></body></html>"
+        )
+        return make_response(htm, 400)
+
+    base = (get_setting("AIPRINTWORD_BASE_URL") or "").strip().rstrip("/")
+    secret = (get_setting("AIPRINTWORD_HANDOFF_SECRET") or "").strip()
+    if not base or not secret:
+        page_html = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>未配置</title></head><body>"
+            "<p>请在系统配置中填写 AIPRINTWORD_BASE_URL 与 AIPRINTWORD_HANDOFF_SECRET（并与 aiprintword 的 AIWORD_HANDOFF_SECRET 保持一致）。"
+            "</p></body></html>"
+        )
+        return make_response(page_html, 503)
+
+    import requests as _req
+
+    upload_row = UploadRecord.query.get(uid)
+    handoff_ctx: dict[str, str] = {}
+    if upload_row:
+        ed = (getattr(upload_row, "displayed_author", None) or "").strip()
+        auth = (upload_row.author or "").strip()
+        # editor 首选体现编写人员（中文姓名，更易命中签名库）
+        if ed:
+            handoff_ctx["editor"] = ed
+        elif auth:
+            handoff_ctx["editor"] = auth
+        if auth:
+            handoff_ctx["writer"] = auth
+        rv = (getattr(upload_row, "reviewer", None) or "").strip()
+        if rv:
+            handoff_ctx["reviewer"] = rv
+        ap = (getattr(upload_row, "approver", None) or "").strip()
+        if ap:
+            handoff_ctx["approver"] = ap
+        dd = getattr(upload_row, "document_display_date", None)
+        if dd is not None:
+            try:
+                handoff_ctx["doc_date"] = dd.isoformat()
+            except Exception:
+                pass
+        # 国家：优先任务列「国家」字段；若空则回退到项目级「注册国家」
+        reg_country = (getattr(upload_row, "country", None) or "").strip()
+        if not reg_country:
+            try:
+                pid_for_country = (getattr(upload_row, "project_id", None) or "").strip()
+                proj_row = None
+                if pid_for_country:
+                    proj_row = Project.query.get(pid_for_country)
+                if proj_row is None:
+                    pname_for_country = (getattr(upload_row, "project_name", None) or "").strip()
+                    if pname_for_country:
+                        proj_row = Project.query.filter_by(name=pname_for_country).first()
+                if proj_row is not None:
+                    reg_country = (getattr(proj_row, "registered_country", None) or "").strip()
+            except Exception:
+                pass
+        if reg_country:
+            handoff_ctx["country"] = reg_country
+
+    post_data: dict[str, str] = {"purpose": mode, "filename": fname}
+    if handoff_ctx:
+        post_data["handoff_context"] = json.dumps(handoff_ctx, ensure_ascii=False)
+
+    url = f"{base}/api/handoff"
+    try:
+        reuse_fp = (reuse_ftp or "").strip()
+        if reuse_fp:
+            post_data["reuse_ftp_path"] = reuse_fp
+            r = _req.post(
+                url,
+                headers={"X-Aiword-Handoff-Secret": secret},
+                data=post_data,
+                timeout=120,
+            )
+        else:
+            r = _req.post(
+                url,
+                headers={"X-Aiword-Handoff-Secret": secret},
+                files={"file": (fname, raw)},
+                data=post_data,
+                timeout=120,
+            )
+    except _req.RequestException as e:
+        page_html = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>连接失败</title></head><body>"
+            f"<p>无法连接 aiprintword（{e}）。请检查 AIPRINTWORD_BASE_URL 与网络。</p></body></html>"
+        )
+        return make_response(page_html, 502)
+    if r.status_code != 200:
+        snippet = (r.text or "")[:500].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        page_html = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>交接失败</title></head><body>"
+            f"<p>aiprintword 返回 HTTP {r.status_code}：{snippet}</p></body></html>"
+        )
+        return make_response(page_html, 502)
+    try:
+        payload = r.json()
+    except Exception:
+        page_html = "<!DOCTYPE html><html><body><p>aiprintword 返回非 JSON</p></body></html>"
+        return make_response(page_html, 502)
+    if not payload.get("ok"):
+        msg = html.escape(str(payload.get("error") or "unknown"), quote=True)
+        page_html = f"<!DOCTYPE html><html><body><p>交接失败：{msg}</p></body></html>"
+        return make_response(page_html, 400)
+    token = (payload.get("token") or "").strip()
+    if not token:
+        return make_response("<html><body><p>未返回 token</p></body></html>", 502)
+    if mode == "sign":
+        target = f"{base}/sign?from=aiword&handoff_token={_urlquote(token)}"
+    else:
+        target = f"{base}/?from=aiword&handoff_token={_urlquote(token)}"
+    return redirect(target, code=302)
 
 
 def _build_option_tree(records: list[UploadRecord]) -> list[dict[str, Any]]:
@@ -2318,6 +2620,20 @@ def index():
 @page13_access_required
 def upload_page():
     return render_template("upload.html")
+
+
+@bp.route("/go/sign")
+@page13_access_required
+def go_aiprintword_sign():
+    """页面1：交接当前任务文档到 aiprintword 在线签字页。"""
+    return _aiprintword_go_redirect("sign")
+
+
+@bp.route("/go/print")
+@page13_access_required
+def go_aiprintword_print():
+    """页面1：交接当前任务文档到 aiprintword 批量打印页。"""
+    return _aiprintword_go_redirect("print")
 
 
 @bp.route("/login")
@@ -6063,9 +6379,17 @@ def api_upload():
             project_id = None
     _ensure_project_row(project_name)
 
-    existing = UploadRecord.query.filter_by(
-        project_name=project_name, file_name=file_name, task_type=task_type, author=author
-    ).first()
+    upload_record_id = (request.form.get("uploadRecordId") or request.form.get("uploadId") or "").strip()
+    existing: UploadRecord | None = None
+    # 页面1「编辑任务」按记录 ID 替换（可改名后仍更新同一条，并触发 FTP）
+    if upload_record_id and replace:
+        existing = UploadRecord.query.get(upload_record_id)
+        if not existing:
+            return jsonify({"message": "未找到要更新的记录"}), 404
+    if existing is None:
+        existing = UploadRecord.query.filter_by(
+            project_name=project_name, file_name=file_name, task_type=task_type, author=author
+        ).first()
 
     if existing and not replace:
         return (
@@ -6089,8 +6413,9 @@ def api_upload():
         stored_file_name, storage_path = _save_file(file, uploads_dir)
         original_file_name = file.filename
         try:
-            placeholders = extract_placeholders(storage_path)
-            template_file_blob = Path(storage_path).read_bytes()
+            template_file_blob, placeholders = resolve_task_template_from_saved_path(
+                Path(storage_path), file_name_hint=file_name
+            )
         except Exception as exc:
             Path(storage_path).unlink(missing_ok=True)
             return jsonify({"message": f"解析模板失败：{exc}"}), 400
@@ -6130,13 +6455,23 @@ def api_upload():
         def _sent(k: str) -> bool:
             return k in fm
 
-        (uploads_dir / f"_dbtpl_{existing.id}.docx").unlink(missing_ok=True)
+        _unlink_task_template_cache_files(existing.id)
         if existing.storage_path:
             previous_path = Path(existing.storage_path)
             if previous_path.exists():
                 previous_path.unlink()
 
         if file and file.filename:
+            old_ftp = (getattr(existing, "ftp_path", None) or "").strip()
+            if old_ftp:
+                try:
+                    from .ftp_store import delete_path
+
+                    delete_path(old_ftp)
+                except Exception:
+                    pass
+            existing.ftp_path = None
+            existing.ftp_last_error = None
             existing.template_file_blob = template_file_blob
             existing.stored_file_name = stored_file_name
             existing.storage_path = None
@@ -6193,6 +6528,22 @@ def api_upload():
             existing.model = model
         if _sent("registrationVersion"):
             existing.registration_version = registration_version
+        if _sent("auditStatus"):
+            ast = (request.form.get("auditStatus") or "").strip() or None
+            existing.audit_status = ast or None
+            if ast == "审核不通过待修改":
+                existing.audit_reject_count = (getattr(existing, "audit_reject_count", 0) or 0) + 1
+                existing.completion_status = None
+                existing.task_status = "pending"
+                existing.quick_completed = False
+        other = UploadRecord.query.filter(
+            UploadRecord.project_name == existing.project_name,
+            UploadRecord.file_name == existing.file_name,
+            UploadRecord.author == existing.author,
+            UploadRecord.id != existing.id,
+        ).first()
+        if other and (existing.task_type or None) == (other.task_type or None):
+            return jsonify({"message": "更新后会与另一条记录（项目+文件名称+任务类型+编写人员）重复"}), 409
         summary = _prepare_summary(existing)
         summary.project_name = project_name
         summary.project_id = project_id
@@ -6202,6 +6553,11 @@ def api_upload():
         summary.total_generate_clicks = 0
         summary.last_generated_at = None
         db.session.add(existing)
+        db.session.flush()
+        if file and file.filename and existing.template_file_blob:
+            _apply_task_template_ftp_after_flush(
+                existing, existing.original_file_name or file_name
+            )
         db.session.commit()
 
         try:
@@ -6263,9 +6619,12 @@ def api_upload():
         displayed_author=displayed_author,
     )
     db.session.add(upload)
+    db.session.flush()
     summary = _prepare_summary(upload)
     summary.project_id = project_id
     db.session.add(summary)
+    if template_file_blob:
+        _apply_task_template_ftp_after_flush(upload, original_file_name or file_name)
     db.session.commit()
 
     try:
@@ -6304,7 +6663,7 @@ def _send_task_notification(upload: UploadRecord, due_date_str: str):
     secret = _dingtalk_secret_opt()
     template_source = (
         "已上传文件"
-        if (upload.template_file_blob or upload.storage_path)
+        if _upload_record_has_task_file(upload)
         else f"链接({len(upload.get_template_links_list())}个)"
     )
     sent = dingtalk_service.notify_task_assigned(
@@ -6780,7 +7139,10 @@ def api_template_detail(upload_id: str):
         return jsonify({"message": "未找到模板记录"}), 404
     placeholders = upload.placeholders or []
     if not placeholders and (
-        upload.template_file_blob or upload.storage_path or upload.template_links
+        upload.template_file_blob
+        or upload.storage_path
+        or (getattr(upload, "ftp_path", None) or "").strip()
+        or upload.template_links
     ):
         try:
             if upload.template_file_blob:
@@ -6824,11 +7186,22 @@ def api_uploads_list():
         q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
         proj_meta,
     )
+    upload_ids = [str(r.id) for r in records if getattr(r, "id", None)]
+    has_gen: set[str] = set()
+    if upload_ids:
+        rows = (
+            db.session.query(GenerateRecord.upload_id)
+            .filter(GenerateRecord.upload_id.in_(upload_ids), GenerateRecord.success == True)
+            .distinct()
+            .all()
+        )
+        has_gen = {str(x[0]) for x in rows if x and x[0]}
     return jsonify({
         "records": [
             {
                 "seq": idx + 1,
                 "id": r.id,
+                "projectId": (str(r.project_id).strip() if getattr(r, "project_id", None) else None),
                 "projectName": r.project_name,
                 "projectPriority": int((proj_meta.get(r.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
                 "projectPriorityLabel": _project_priority_label((proj_meta.get(r.project_name) or {}).get("priority")),
@@ -6837,10 +7210,14 @@ def api_uploads_list():
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
-                "hasFile": bool(r.template_file_blob or r.storage_path),
+                "hasFile": _upload_record_has_task_file(r),
+                "hasGenerated": str(r.id) in has_gen,
                 "hasLinks": bool(r.template_links),
                 "templateLinks": r.template_links,
                 "linksCount": len(r.get_template_links_list()),
+                "ftpPath": ((getattr(r, "ftp_path", None) or "").strip() or None),
+                "ftpUploaded": bool((getattr(r, "ftp_path", None) or "").strip()),
+                "ftpLastError": ((getattr(r, "ftp_last_error", None) or "").strip() or None),
                 "assigneeName": r.assignee_name,
                 "dueDate": r.due_date.strftime("%Y-%m-%d") if r.due_date else None,
                 "taskStatus": r.task_status,
@@ -6880,7 +7257,15 @@ def api_upload_delete(upload_id: str):
         return jsonify({"message": "未找到该记录"}), 404
     
     uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
-    (uploads_dir / f"_dbtpl_{upload_id}.docx").unlink(missing_ok=True)
+    _unlink_task_template_cache_files(upload_id)
+    old_ftp = (getattr(upload, "ftp_path", None) or "").strip()
+    if old_ftp:
+        try:
+            from .ftp_store import delete_path
+
+            delete_path(old_ftp)
+        except Exception:
+            pass
     if upload.storage_path:
         try:
             Path(upload.storage_path).unlink(missing_ok=True)
@@ -7078,6 +7463,7 @@ def api_my_tasks():
             {
                 "seq": idx + 1,
                 "id": r.id,
+                "projectId": (str(r.project_id).strip() if getattr(r, "project_id", None) else None),
                 "projectName": r.project_name,
                 "projectPriority": int((proj_meta.get(r.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
                 "projectPriorityLabel": _project_priority_label((proj_meta.get(r.project_name) or {}).get("priority")),
@@ -7086,10 +7472,13 @@ def api_my_tasks():
                 "fileName": r.file_name,
                 "taskType": r.task_type,
                 "author": r.author,
-                "hasFile": bool(r.template_file_blob or r.storage_path),
+                "hasFile": _upload_record_has_task_file(r),
                 "hasLinks": bool(r.template_links),
                 "templateLinks": r.template_links,
                 "linksCount": len(r.get_template_links_list()),
+                "ftpPath": ((getattr(r, "ftp_path", None) or "").strip() or None),
+                "ftpUploaded": bool((getattr(r, "ftp_path", None) or "").strip()),
+                "ftpLastError": ((getattr(r, "ftp_last_error", None) or "").strip() or None),
                 "assigneeName": r.assignee_name,
                 "dueDate": r.due_date.strftime("%Y-%m-%d") if r.due_date else None,
                 "taskStatus": r.task_status,
@@ -7406,6 +7795,7 @@ def api_projects_list():
     _project_meta_map(auto_create_from_uploads=True)
     _backfill_project_ids()
     rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
+    prod_hints = _project_registered_product_name_hints([p.id for p in rows])
     return jsonify(
         [
             {
@@ -7413,6 +7803,7 @@ def api_projects_list():
                 "name": p.name,
                 "registeredCountry": getattr(p, "registered_country", None),
                 "registeredCategory": getattr(p, "registered_category", None),
+                "registeredProductName": prod_hints.get(p.id),
                 "projectKey": _project_display_label(p),
                 "priority": int(p.priority or Project.PRIORITY_MEDIUM),
                 "priorityLabel": _project_priority_label(p.priority),

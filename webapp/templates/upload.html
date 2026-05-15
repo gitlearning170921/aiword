@@ -4,7 +4,7 @@
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
         <h1>页面1 · 模板上传与任务管理</h1>
-        <p>批量录入任务信息，支持上传模板文件或输入文档链接，自动发送钉钉通知。</p>
+        <p>批量录入任务信息，支持上传模板文件（含与 aicheckword 一致的 .zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
 </div>
@@ -403,6 +403,7 @@
             </div>
             <div class="modal-body">
                 <input type="hidden" id="editRecordId">
+                <input type="hidden" id="editRecordProjectId" value="">
                 <div class="row g-2">
                     <div class="col-md-6">
                         <label class="form-label small">项目名称 *</label>
@@ -465,6 +466,11 @@
                     <div class="col-12">
                         <label class="form-label small">文档链接（每行一个）</label>
                         <textarea class="form-control form-control-sm" id="editRecordTemplateLinks" rows="2" placeholder="可选，多行"></textarea>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">重新上传任务模板（Word / 压缩包）</label>
+                        <input type="file" class="form-control form-control-sm" id="editRecordTemplateFile" accept=".doc,.docx,.zip,.tar,.gz,.tgz,.rar">
+                        <div class="form-text small">支持单个 .doc/.docx，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。</div>
                     </div>
                     <div class="col-12">
                         <label class="form-label small">下发任务备注</label>
