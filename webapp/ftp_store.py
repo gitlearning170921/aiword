@@ -213,7 +213,10 @@ def _ftp(*, pasv: Optional[bool] = None) -> Iterator["FTP"]:
     host, port, user, pwd, _, cfg_pasv = _cfg()
     if pasv is None:
         pasv = cfg_pasv
-    ftp = FTP()
+    try:
+        ftp = FTP(encoding="utf-8")
+    except TypeError:
+        ftp = FTP()
     ftp.connect(host=host, port=port, timeout=20)
     if pasv is not None:
         try:

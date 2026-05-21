@@ -44,6 +44,16 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         False,
     ),
     (
+        "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
+        "审核任务上游 HTTP 读超时（秒，默认 600；上限 72h=259200）。与初稿超时分离便于独立调整。",
+        False,
+    ),
+    (
+        "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
+        "翻译任务上游 HTTP 读超时（秒，默认 600；上限 72h=259200）。",
+        False,
+    ),
+    (
         "AICHECKWORD_DRAFT_COLLECTION_IDS",
         "初稿页「知识库名称」下拉：英文逗号分隔的 collection id（默认仅 regulations；与 aicheckword 侧栏知识库名称一致）",
         False,
@@ -138,6 +148,16 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "aicheckword_draft_connect_timeout_seconds",
         "aicheckwordDraftConnectTimeoutSeconds",
     ),
+    "AICHECKWORD_AUDIT_TIMEOUT_SECONDS": (
+        "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
+        "aicheckword_audit_timeout_seconds",
+        "aicheckwordAuditTimeoutSeconds",
+    ),
+    "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS": (
+        "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
+        "aicheckword_translation_timeout_seconds",
+        "aicheckwordTranslationTimeoutSeconds",
+    ),
     "AICHECKWORD_DRAFT_COLLECTION_IDS": (
         "AICHECKWORD_DRAFT_COLLECTION_IDS",
         "aicheckword_draft_collection_ids",
@@ -180,6 +200,8 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "AICHECKWORD_DRAFT_API_BASE": ("AICHECKWORD_DRAFT_API_BASE",),
     "AICHECKWORD_DRAFT_TIMEOUT_SECONDS": ("AICHECKWORD_DRAFT_TIMEOUT_SECONDS",),
     "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS": ("AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",),
+    "AICHECKWORD_AUDIT_TIMEOUT_SECONDS": ("AICHECKWORD_AUDIT_TIMEOUT_SECONDS",),
+    "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS": ("AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",),
     "AICHECKWORD_DRAFT_COLLECTION_IDS": ("AICHECKWORD_DRAFT_COLLECTION_IDS",),
     "AIPRINTWORD_BASE_URL": ("AIPRINTWORD_BASE_URL",),
     "AIPRINTWORD_HANDOFF_SECRET": ("AIPRINTWORD_HANDOFF_SECRET", "AIWORD_HANDOFF_SECRET"),

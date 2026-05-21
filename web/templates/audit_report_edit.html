@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}审核报告编辑 · AI Word{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <h2 class="mb-3">审核报告编辑（AI Word 内置）</h2>
+    <p class="text-muted small">
+      对齐 aicheckword 报告点编辑：支持单报告/批量子报告（<code>sub_report_index</code>），
+      可 PATCH 问题描述、修改建议、处理状态、需修改文档列表。
+      仅<strong>处理状态为「立即修改」</strong>的审核点会进入「审核后修改」待办。
+    </p>
+    <div id="are_msg" class="alert d-none"></div>
+
+    <div class="card mb-3">
+      <div class="card-header">报告定位</div>
+      <div class="card-body row g-2">
+        <div class="col-md-4">
+          <label class="form-label">报告 ID</label>
+          <input id="are_report_id" type="number" min="1" class="form-control" />
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">任务 upload_id（可选）</label>
+          <input id="are_upload_id" class="form-control" placeholder="生成审核后修改待办时自动带入 Base" />
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">子报告序号</label>
+          <input id="are_sub_idx" type="number" min="0" class="form-control" value="0" title="批量报告时 0 表示第一份" />
+        </div>
+        <div class="col-12">
+          <button id="are_btn_load" type="button" class="btn btn-outline-secondary">加载报告</button>
+          <button id="are_btn_todo" type="button" class="btn btn-outline-primary ms-2">生成审核后修改待办</button>
+          <span id="are_summary" class="small text-muted ms-2"></span>
+          <span id="are_immediate_hint" class="small text-muted ms-2"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">审核点编辑</div>
+      <div class="card-body row g-2">
+        <div class="col-md-6">
+          <label class="form-label">审核点索引</label>
+          <select id="are_point_sel" class="form-select"></select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">严重程度</label>
+          <input id="are_severity" class="form-control" readonly />
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">类别</label>
+          <input id="are_category" class="form-control" readonly />
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">处理状态</label>
+          <select id="are_action" class="form-select">
+            <option value="立即修改">立即修改</option>
+            <option value="延期修改">延期修改</option>
+            <option value="无需修改">无需修改</option>
+          </select>
+          <div class="form-text">切换审核点或严重程度时会按默认规则自动选中；可手动改。</div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">位置</label>
+          <input id="are_location" class="form-control" readonly />
+        </div>
+        <div class="col-12">
+          <label class="form-label">问题描述</label>
+          <textarea id="are_desc" class="form-control" rows="4"></textarea>
+        </div>
+        <div class="col-12">
+          <label class="form-label">法规依据</label>
+          <textarea id="are_regulation_ref" class="form-control" rows="3"></textarea>
+        </div>
+        <div class="col-12">
+          <label class="form-label">修改建议</label>
+          <textarea id="are_suggestion" class="form-control" rows="4"></textarea>
+        </div>
+        <div class="col-12">
+          <label class="form-label">需修改文档（每行一个文件名）</label>
+          <textarea id="are_modify_docs" class="form-control font-monospace" rows="3"></textarea>
+        </div>
+        <div class="col-12">
+          <button id="are_btn_save" type="button" class="btn btn-success">保存当前审核点（PATCH）</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/audit_report_edit.js', v=static_version) }}"></script>
+{% endblock %}

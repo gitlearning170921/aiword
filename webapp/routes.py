@@ -2077,12 +2077,68 @@ def _prepare_summary(upload: UploadRecord) -> GenerationSummary:
 
 
 def _safe_ftp_task_filename(name: str) -> str:
-    """FTP 路径用安全文件名（保留原始名在库字段）。"""
+    """FTP 远端文件名：保留中文等 Unicode，仅去除路径分隔符与非法文件名字符。"""
     base = os.path.basename(name or "document")
     base = base.strip() or "document"
-    base = re.sub(r"[^0-9A-Za-z._()\-\s]+", "_", base)
+    base = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", base)
     base = re.sub(r"\s+", " ", base).strip()
     return (base or "document")[:200]
+
+
+def _normalize_handoff_display_filename(name: str) -> str:
+    """修复 UTF-8 文件名在部分链路中被误读为 Latin-1 的乱码。"""
+    s = (name or "").strip().replace("\\", "/")
+    s = os.path.basename(s) or s
+    if not s:
+        return "document.docx"
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return s[:512]
+    if not any(ord(c) > 127 for c in s):
+        return s[:512]
+    for enc in ("latin-1", "cp1252"):
+        try:
+            repaired = s.encode(enc).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if repaired and repaired != s and re.search(r"[\u4e00-\u9fff]", repaired):
+            return repaired[:512]
+    return s[:512]
+
+
+def _is_internal_handoff_cache_basename(name: str) -> bool:
+    """本机/FTP 缓存临时名，不可作为用户可见文件名。"""
+    base = os.path.basename((name or "").replace("\\", "/"))
+    low = base.lower()
+    if low.startswith(("_ftptpl_", "_dbtpl_", "link_")):
+        return True
+    if re.match(
+        r"^_ftptpl_[0-9a-f\-]{36}(?:_\d{14})?\.(docx|doc|xlsx|xls|pdf)$",
+        low,
+    ):
+        return True
+    return False
+
+
+def _upload_handoff_display_filename(upload: UploadRecord) -> str:
+    """交接展示名：优先 original_file_name，跳过内部缓存文件名。"""
+    for cand in (
+        (getattr(upload, "original_file_name", None) or "").strip(),
+        (upload.file_name or "").strip(),
+    ):
+        if not cand:
+            continue
+        base = os.path.basename(cand.replace("\\", "/"))
+        if _is_internal_handoff_cache_basename(base):
+            continue
+        return _normalize_handoff_display_filename(base)
+    return "document.docx"
+
+
+def _resolve_handoff_display_name(upload: UploadRecord, fallback: str = "") -> str:
+    fb = (fallback or "").strip()
+    if fb and not _is_internal_handoff_cache_basename(fb):
+        return _normalize_handoff_display_filename(fb)
+    return _upload_handoff_display_filename(upload)
 
 
 def _unlink_task_template_cache_files(upload_id: str) -> None:
@@ -2098,6 +2154,38 @@ def _upload_record_has_task_file(r: UploadRecord) -> bool:
     if r.template_file_blob or r.storage_path:
         return True
     return bool((getattr(r, "ftp_path", None) or "").strip())
+
+
+def _upload_record_visible_to_page2_user(rec: UploadRecord) -> bool:
+    """与页面2「我的任务」/初稿带入一致：负责人或编写人匹配当前登录用户。"""
+    username = (session.get("username") or "").strip()
+    display_name = (session.get("display_name") or "").strip()
+    an = (rec.assignee_name or "").strip()
+    au = (rec.author or "").strip()
+    if username and (an == username or au == username):
+        return True
+    if display_name and (an == display_name or au == display_name):
+        return True
+    return False
+
+
+def _can_access_upload_template(upload: UploadRecord) -> bool:
+    """页面1（访问密码）或页面2（登录且为负责人/编写人）可下载任务模板。"""
+    if not _page13_password_configured():
+        return True
+    if session.get("page13_authenticated"):
+        return True
+    if session.get("user_id"):
+        return _upload_record_visible_to_page2_user(upload)
+    return False
+
+
+def _upload_template_download_filename(upload: UploadRecord) -> str:
+    name = (upload.original_file_name or upload.file_name or "template").strip() or "template"
+    low = name.lower()
+    if not (low.endswith(".doc") or low.endswith(".docx")):
+        name = f"{name}.docx"
+    return name
 
 
 def _apply_task_template_ftp_after_flush(row: UploadRecord, original_display_name: str | None) -> None:
@@ -2192,11 +2280,11 @@ def _resolve_handoff_doc_for_print_sign(
     upload = UploadRecord.query.get(uid)
     if not upload:
         return None, "", "任务不存在", None
-    # 用户从任务列表“去签字”时，优先复用 aiword 记录的模板 FTP 路径，避免重复上传。
-    if mode_k == "sign":
+    # 去签字/去打印：优先复用 aiword 任务模板 FTP，避免重复上传且保留中文展示名。
+    if mode_k in ("sign", "print"):
         fp_tpl = (getattr(upload, "ftp_path", None) or "").strip()
         if fp_tpl:
-            display = (upload.file_name or "").strip() or "document.docx"
+            display = _upload_handoff_display_filename(upload)
             ext0 = Path(display).suffix.lower()
             if not ext0:
                 ext0 = ".docx"
@@ -2217,9 +2305,12 @@ def _resolve_handoff_doc_for_print_sign(
                 blob = None
         if blob:
             name = (rec.output_file_name or "").strip()
-            if not name:
-                stem = Path(upload.file_name or "document").stem if upload.file_name else "document"
-                name = f"{stem}_generated.docx"
+            if not name or _is_internal_handoff_cache_basename(name):
+                name = _upload_handoff_display_filename(upload)
+                if not name.endswith((".docx", ".xlsx")):
+                    name = Path(name).stem + ".docx"
+            else:
+                name = _normalize_handoff_display_filename(name)
             return blob, name, None, None
     try:
         path = _get_template_path_for_upload(upload, 0)
@@ -2231,7 +2322,7 @@ def _resolve_handoff_doc_for_print_sign(
     ext = p.suffix.lower()
     if ext not in (".doc", ".docx", ".xls", ".xlsx", ".pdf"):
         return None, "", f"当前任务文件类型不支持签字/批量打印（{ext or '无扩展名'}）", None
-    display = (upload.file_name or "").strip() or p.name
+    display = _resolve_handoff_display_name(upload, (upload.file_name or "").strip() or p.name)
     if not Path(display).suffix:
         display = Path(display).stem + ext
     elif ext in (".docx", ".xlsx") and not display.lower().endswith(ext):
@@ -2253,6 +2344,7 @@ def _aiprintword_go_redirect(mode: str):
 
     uid = (request.args.get("upload_id") or "").strip()
     raw, fname, err, reuse_ftp = _resolve_handoff_doc_for_print_sign(uid, mode=mode)
+    fname = _normalize_handoff_display_filename(fname or "document.docx")
     reuse_ok = (reuse_ftp or "").strip()
     if err or (raw is None and not reuse_ok):
         emsg = html.escape(err or "无法读取文档", quote=True)
@@ -2275,47 +2367,7 @@ def _aiprintword_go_redirect(mode: str):
     import requests as _req
 
     upload_row = UploadRecord.query.get(uid)
-    handoff_ctx: dict[str, str] = {}
-    if upload_row:
-        ed = (getattr(upload_row, "displayed_author", None) or "").strip()
-        auth = (upload_row.author or "").strip()
-        # editor 首选体现编写人员（中文姓名，更易命中签名库）
-        if ed:
-            handoff_ctx["editor"] = ed
-        elif auth:
-            handoff_ctx["editor"] = auth
-        if auth:
-            handoff_ctx["writer"] = auth
-        rv = (getattr(upload_row, "reviewer", None) or "").strip()
-        if rv:
-            handoff_ctx["reviewer"] = rv
-        ap = (getattr(upload_row, "approver", None) or "").strip()
-        if ap:
-            handoff_ctx["approver"] = ap
-        dd = getattr(upload_row, "document_display_date", None)
-        if dd is not None:
-            try:
-                handoff_ctx["doc_date"] = dd.isoformat()
-            except Exception:
-                pass
-        # 国家：优先任务列「国家」字段；若空则回退到项目级「注册国家」
-        reg_country = (getattr(upload_row, "country", None) or "").strip()
-        if not reg_country:
-            try:
-                pid_for_country = (getattr(upload_row, "project_id", None) or "").strip()
-                proj_row = None
-                if pid_for_country:
-                    proj_row = Project.query.get(pid_for_country)
-                if proj_row is None:
-                    pname_for_country = (getattr(upload_row, "project_name", None) or "").strip()
-                    if pname_for_country:
-                        proj_row = Project.query.filter_by(name=pname_for_country).first()
-                if proj_row is not None:
-                    reg_country = (getattr(proj_row, "registered_country", None) or "").strip()
-            except Exception:
-                pass
-        if reg_country:
-            handoff_ctx["country"] = reg_country
+    handoff_ctx = _build_aiprintword_handoff_context(upload_row)
 
     post_data: dict[str, str] = {"purpose": mode, "filename": fname}
     if handoff_ctx:
@@ -2370,6 +2422,178 @@ def _aiprintword_go_redirect(mode: str):
     else:
         target = f"{base}/?from=aiword&handoff_token={_urlquote(token)}"
     return redirect(target, code=302)
+
+
+def _build_aiprintword_handoff_context(upload_row: UploadRecord | None) -> dict[str, str]:
+    handoff_ctx: dict[str, str] = {}
+    if not upload_row:
+        return handoff_ctx
+    ed = (getattr(upload_row, "displayed_author", None) or "").strip()
+    auth = (upload_row.author or "").strip()
+    if ed:
+        handoff_ctx["editor"] = ed
+    elif auth:
+        handoff_ctx["editor"] = auth
+    if auth:
+        handoff_ctx["writer"] = auth
+    rv = (getattr(upload_row, "reviewer", None) or "").strip()
+    if rv:
+        handoff_ctx["reviewer"] = rv
+    ap = (getattr(upload_row, "approver", None) or "").strip()
+    if ap:
+        handoff_ctx["approver"] = ap
+    dd = getattr(upload_row, "document_display_date", None)
+    if dd is not None:
+        try:
+            handoff_ctx["doc_date"] = dd.isoformat()
+        except Exception:
+            pass
+    # 阶段：优先任务类型，其次所属模块（供签字页按阶段分组）
+    phase = (getattr(upload_row, "task_type", None) or "").strip()
+    if not phase:
+        phase = (getattr(upload_row, "belonging_module", None) or "").strip()
+    if phase:
+        handoff_ctx["phase"] = phase
+    reg_country = (getattr(upload_row, "country", None) or "").strip()
+    if not reg_country:
+        try:
+            pid_for_country = (getattr(upload_row, "project_id", None) or "").strip()
+            proj_row = None
+            if pid_for_country:
+                proj_row = Project.query.get(pid_for_country)
+            if proj_row is None:
+                pname_for_country = (getattr(upload_row, "project_name", None) or "").strip()
+                if pname_for_country:
+                    proj_row = Project.query.filter_by(name=pname_for_country).first()
+            if proj_row is not None:
+                reg_country = (getattr(proj_row, "registered_country", None) or "").strip()
+        except Exception:
+            pass
+    if reg_country:
+        handoff_ctx["country"] = reg_country
+    return handoff_ctx
+
+
+def _aiprintword_batch_handoff_redirect(mode: str, upload_ids: list[str]) -> tuple[dict[str, Any], int]:
+    from .app_settings import get_setting
+    import requests as _req
+
+    mode_k = (mode or "").strip().lower()
+    if mode_k not in ("sign", "print"):
+        mode_k = "sign"
+    ids = []
+    seen: set[str] = set()
+    for x in upload_ids or []:
+        s = (x or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        ids.append(s)
+    if len(ids) < 2:
+        return {"ok": False, "error": "请至少选择 2 条任务"}, 400
+
+    rows: list[UploadRecord] = []
+    projects: set[str] = set()
+    for uid in ids:
+        row = UploadRecord.query.get(uid)
+        if not row:
+            return {"ok": False, "error": f"任务不存在：{uid}"}, 404
+        rows.append(row)
+        projects.add((row.project_name or "").strip())
+    if len(projects) > 1:
+        return {"ok": False, "error": "请只勾选同一项目的任务"}, 400
+
+    base = (get_setting("AIPRINTWORD_BASE_URL") or "").strip().rstrip("/")
+    secret = (get_setting("AIPRINTWORD_HANDOFF_SECRET") or "").strip()
+    if not base or not secret:
+        return {
+            "ok": False,
+            "error": "请在系统配置中填写 AIPRINTWORD_BASE_URL 与 AIPRINTWORD_HANDOFF_SECRET",
+        }, 503
+
+    url = f"{base}/api/handoff/batch"
+    failures: list[dict[str, str]] = []
+    manifest: list[dict[str, Any]] = []
+    files_payload: dict[str, tuple[str, bytes]] = {}
+
+    for idx, row in enumerate(rows):
+        raw, fname, err, reuse_ftp = _resolve_handoff_doc_for_print_sign(row.id, mode=mode_k)
+        reuse_ok = (reuse_ftp or "").strip()
+        if err or (raw is None and not reuse_ok):
+            failures.append(
+                {
+                    "upload_id": row.id,
+                    "file_name": row.file_name or "",
+                    "error": err or "无法读取文档",
+                }
+            )
+            continue
+        fname = _normalize_handoff_display_filename(fname or "document.docx")
+        item: dict[str, Any] = {"purpose": mode_k, "filename": fname}
+        handoff_ctx = _build_aiprintword_handoff_context(row)
+        if handoff_ctx:
+            item["handoff_context"] = handoff_ctx
+        if reuse_ok:
+            item["reuse_ftp_path"] = reuse_ok
+        else:
+            ff = f"file_{idx}"
+            item["file_field"] = ff
+            files_payload[ff] = (fname, raw or b"")
+        manifest.append(item)
+
+    if not manifest:
+        return {"ok": False, "error": "批量交接失败", "failures": failures}, 502
+
+    post_data: dict[str, str] = {
+        "purpose": mode_k,
+        "manifest": json.dumps(manifest, ensure_ascii=False),
+    }
+    try:
+        r = _req.post(
+            url,
+            headers={"X-Aiword-Handoff-Secret": secret},
+            files=files_payload or None,
+            data=post_data,
+            timeout=180,
+        )
+    except _req.RequestException as e:
+        return {"ok": False, "error": f"连接 aiprintword 失败：{e}", "failures": failures}, 502
+    if r.status_code != 200:
+        return {"ok": False, "error": f"aiprintword 返回 HTTP {r.status_code}", "failures": failures}, 502
+    try:
+        payload = r.json()
+    except Exception:
+        return {"ok": False, "error": "aiprintword 返回非 JSON", "failures": failures}, 502
+    if not payload.get("ok"):
+        return {"ok": False, "error": str(payload.get("error") or "unknown"), "failures": failures}, 502
+
+    batch_token = (payload.get("batch_token") or "").strip()
+    if not batch_token:
+        return {"ok": False, "error": "未返回 batch_token", "failures": failures}, 502
+    api_failures = payload.get("failures")
+    if isinstance(api_failures, list):
+        for x in api_failures:
+            if isinstance(x, dict):
+                failures.append(
+                    {
+                        "upload_id": str(x.get("upload_id") or ""),
+                        "file_name": str(x.get("filename") or ""),
+                        "error": str(x.get("error") or "unknown"),
+                    }
+                )
+
+    if mode_k == "sign":
+        redirect_url = f"{base}/sign?from=aiword&handoff_batch_token={_urlquote(batch_token)}"
+    else:
+        redirect_url = f"{base}/?from=aiword&handoff_batch_token={_urlquote(batch_token)}"
+    success_count = int(payload.get("success_count") or 0)
+    return {
+        "ok": True,
+        "redirect_url": redirect_url,
+        "success_count": success_count,
+        "failure_count": len(failures),
+        "failures": failures,
+    }, 200
 
 
 def _build_option_tree(records: list[UploadRecord]) -> list[dict[str, Any]]:
@@ -2634,6 +2858,28 @@ def go_aiprintword_sign():
 def go_aiprintword_print():
     """页面1：交接当前任务文档到 aiprintword 批量打印页。"""
     return _aiprintword_go_redirect("print")
+
+
+@bp.route("/api/go/batch-sign", methods=["POST"])
+@page13_access_required
+def api_go_aiprintword_batch_sign():
+    data = request.get_json(silent=True) or {}
+    ids = data.get("upload_ids")
+    if not isinstance(ids, list):
+        return jsonify({"ok": False, "error": "upload_ids 必须为数组"}), 400
+    payload, status = _aiprintword_batch_handoff_redirect("sign", [str(x or "").strip() for x in ids])
+    return jsonify(payload), status
+
+
+@bp.route("/api/go/batch-print", methods=["POST"])
+@page13_access_required
+def api_go_aiprintword_batch_print():
+    data = request.get_json(silent=True) or {}
+    ids = data.get("upload_ids")
+    if not isinstance(ids, list):
+        return jsonify({"ok": False, "error": "upload_ids 必须为数组"}), 400
+    payload, status = _aiprintword_batch_handoff_redirect("print", [str(x or "").strip() for x in ids])
+    return jsonify(payload), status
 
 
 @bp.route("/login")
@@ -6455,13 +6701,15 @@ def api_upload():
         def _sent(k: str) -> bool:
             return k in fm
 
-        _unlink_task_template_cache_files(existing.id)
-        if existing.storage_path:
-            previous_path = Path(existing.storage_path)
-            if previous_path.exists():
-                previous_path.unlink()
+        replacing_template_file = bool(file and file.filename)
+        if replacing_template_file:
+            _unlink_task_template_cache_files(existing.id)
+            if existing.storage_path:
+                previous_path = Path(existing.storage_path)
+                if previous_path.exists():
+                    previous_path.unlink()
 
-        if file and file.filename:
+        if replacing_template_file:
             old_ftp = (getattr(existing, "ftp_path", None) or "").strip()
             if old_ftp:
                 try:
@@ -6476,13 +6724,14 @@ def api_upload():
             existing.stored_file_name = stored_file_name
             existing.storage_path = None
             existing.original_file_name = original_file_name
+            # 页面1/2：上传文件覆盖时来源改为文件，清空文档链接
+            existing.template_links = None
         else:
             existing.stored_file_name = stored_file_name or existing.stored_file_name
             existing.storage_path = storage_path if storage_path else existing.storage_path
             existing.original_file_name = original_file_name or existing.original_file_name
-
-        if _sent("templateLinks"):
-            existing.template_links = template_links
+            if _sent("templateLinks"):
+                existing.template_links = template_links
         existing.author = author
         if _sent("taskType"):
             existing.task_type = task_type
@@ -6499,9 +6748,11 @@ def api_upload():
             existing.assignee_name = assignee_name
         if _sent("dueDate"):
             existing.due_date = due_date
-        existing.task_status = "pending"
-        existing.completion_status = None
-        existing.quick_completed = False
+        # 仅在上传新模板文件时重置完成状态；页面1 仅改任务类型等元数据时保留原状态
+        if replacing_template_file:
+            existing.task_status = "pending"
+            existing.completion_status = None
+            existing.quick_completed = False
         if _sent("businessSide"):
             existing.business_side = business_side
         if _sent("product"):
@@ -6549,12 +6800,13 @@ def api_upload():
         summary.project_id = project_id
         summary.file_name = file_name
         summary.author = author
-        summary.has_generated = False
-        summary.total_generate_clicks = 0
-        summary.last_generated_at = None
+        if replacing_template_file:
+            summary.has_generated = False
+            summary.total_generate_clicks = 0
+            summary.last_generated_at = None
         db.session.add(existing)
         db.session.flush()
-        if file and file.filename and existing.template_file_blob:
+        if replacing_template_file and existing.template_file_blob:
             _apply_task_template_ftp_after_flush(
                 existing, existing.original_file_name or file_name
             )
@@ -6566,9 +6818,14 @@ def api_upload():
             current_app.logger.warning("替换任务后发送钉钉通知失败（数据已保存）: %s", exc)
 
         ph_out = existing.placeholders if isinstance(existing.placeholders, list) else (placeholders or [])
+        msg = (
+            "已替换现有记录，状态已重置为待办。"
+            if replacing_template_file
+            else "任务已更新。"
+        )
         return jsonify(
             {
-                "message": "已替换现有记录，状态已重置为待办。",
+                "message": msg,
                 "record": {
                     "id": existing.id,
                     "projectName": existing.project_name,
@@ -7298,8 +7555,6 @@ def api_upload_update(upload_id: str):
     product = (data.get("product") or "").strip() or None
     country = (data.get("country") or "").strip() or None
     assignee_name = (data.get("assigneeName") or "").strip() or None
-    completion_status = (data.get("completionStatus") or "").strip() or None
-    audit_status = (data.get("auditStatus") or "").strip() or None
     project_code = (data.get("projectCode") or "").strip() or None
     file_version = (data.get("fileVersion") or "").strip() or None
     document_display_date_str = (data.get("documentDisplayDate") or "").strip() or None
@@ -7373,15 +7628,19 @@ def api_upload_update(upload_id: str):
         upload.model = model
     if has_registration_version:
         upload.registration_version = registration_version
-    if audit_status is not None:
-        upload.audit_status = audit_status or None
+    if "auditStatus" in data:
+        raw_ast = data.get("auditStatus")
+        audit_status = (str(raw_ast).strip() if raw_ast is not None else "") or None
+        upload.audit_status = audit_status
         if audit_status == "审核不通过待修改":
             upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
             upload.completion_status = None
             upload.task_status = "pending"
             upload.quick_completed = False
-    if completion_status is not None:
-        upload.completion_status = completion_status or None
+    if "completionStatus" in data:
+        raw_cs = data.get("completionStatus")
+        completion_status = (str(raw_cs).strip() if raw_cs is not None else "") or None
+        upload.completion_status = completion_status
         if upload.completion_status:
             upload.task_status = "completed"
         else:
@@ -7523,6 +7782,136 @@ def api_update_execution_notes(upload_id: str):
     db.session.add(upload)
     db.session.commit()
     return jsonify({"message": "已更新", "executionNotes": upload.execution_notes})
+
+
+@bp.get("/api/uploads/<upload_id>/template-file")
+@_page13_or_login_required
+def api_download_upload_template_file(upload_id: str):
+    """下载或在线查看任务模板（BLOB / 本机路径 / FTP）。"""
+    upload = UploadRecord.query.get(upload_id)
+    if not upload:
+        return jsonify({"message": "未找到该记录"}), 404
+    if not _can_access_upload_template(upload):
+        return jsonify({"message": "无权查看该任务模板"}), 403
+    if not _upload_record_has_task_file(upload):
+        return jsonify({"message": "该任务无模板文件（仅有链接或未上传）"}), 404
+
+    download_name = _upload_template_download_filename(upload)
+    inline = str(request.args.get("view") or request.args.get("inline") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    mimetype = (
+        "application/msword"
+        if download_name.lower().endswith(".doc")
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+    if upload.template_file_blob:
+        return send_file(
+            io.BytesIO(upload.template_file_blob),
+            mimetype=mimetype,
+            as_attachment=not inline,
+            download_name=download_name,
+        )
+
+    try:
+        path = _get_template_path_for_upload(upload, 0)
+    except Exception as exc:
+        current_app.logger.warning(
+            "下载任务模板失败 upload_id=%s: %s", upload_id, exc
+        )
+        return jsonify({"message": f"获取模板失败：{exc}"}), 500
+
+    if not path or not Path(path).is_file():
+        return jsonify({"message": "模板文件不存在或无法读取"}), 404
+
+    return send_file(
+        path,
+        mimetype=mimetype,
+        as_attachment=not inline,
+        download_name=download_name,
+    )
+
+
+@bp.post("/api/uploads/<upload_id>/template-file")
+@login_required
+def api_upload_replace_template_file(upload_id: str):
+    """页面2：上传模板文件覆盖该任务已有文件或链接，写入 FTP（每条任务仅保留一个文件）。"""
+    upload = UploadRecord.query.get(upload_id)
+    if not upload:
+        return jsonify({"message": "未找到该记录"}), 404
+    if not _upload_record_visible_to_page2_user(upload):
+        return jsonify({"message": "无权修改该任务"}), 403
+
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"message": "请选择要上传的文件"}), 400
+
+    uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    stored_file_name, storage_path = _save_file(file, uploads_dir)
+    original_file_name = file.filename
+    try:
+        template_file_blob, placeholders = resolve_task_template_from_saved_path(
+            Path(storage_path), file_name_hint=upload.file_name
+        )
+    except Exception as exc:
+        Path(storage_path).unlink(missing_ok=True)
+        return jsonify({"message": f"解析模板失败：{exc}"}), 400
+    Path(storage_path).unlink(missing_ok=True)
+
+    had_file = _upload_record_has_task_file(upload)
+    had_links = bool(upload.get_template_links_list())
+
+    _unlink_task_template_cache_files(upload_id)
+    if upload.storage_path:
+        try:
+            Path(upload.storage_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    old_ftp = (getattr(upload, "ftp_path", None) or "").strip()
+    if old_ftp:
+        try:
+            from .ftp_store import delete_path
+
+            delete_path(old_ftp)
+        except Exception:
+            pass
+
+    upload.template_links = None
+    upload.template_file_blob = template_file_blob
+    upload.original_file_name = original_file_name
+    upload.stored_file_name = None
+    upload.storage_path = None
+    upload.ftp_path = None
+    upload.ftp_last_error = None
+    upload.placeholders = placeholders
+
+    db.session.add(upload)
+    db.session.flush()
+    _apply_task_template_ftp_after_flush(
+        upload, upload.original_file_name or upload.file_name
+    )
+    db.session.commit()
+
+    msg = "模板文件已上传"
+    if had_file or had_links:
+        msg = "已覆盖该任务原有模板文件或文档链接，来源已更新为文件"
+    return jsonify(
+        {
+            "message": msg,
+            "uploadId": upload_id,
+            "hasFile": _upload_record_has_task_file(upload),
+            "hasLinks": bool(upload.template_links),
+            "ftpPath": ((getattr(upload, "ftp_path", None) or "").strip() or None),
+            "ftpUploaded": bool((getattr(upload, "ftp_path", None) or "").strip()),
+            "ftpLastError": ((getattr(upload, "ftp_last_error", None) or "").strip() or None),
+            "originalFileName": upload.original_file_name,
+        }
+    )
 
 
 @bp.patch("/api/uploads/<upload_id>/completion-status")

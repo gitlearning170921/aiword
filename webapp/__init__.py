@@ -742,6 +742,53 @@ def ensure_schema(app: Flask):
 
         DraftGenerationJob.__table__.create(bind=engine, checkfirst=True)
 
+    # 审核 / 翻译 集成任务表：与初稿任务同构，缺表则建表。
+    insp_audit = inspect(engine)
+    if "audit_jobs" not in insp_audit.get_table_names():
+        from .models import AuditJob
+
+        AuditJob.__table__.create(bind=engine, checkfirst=True)
+
+    insp_translation = inspect(engine)
+    if "translation_jobs" not in insp_translation.get_table_names():
+        from .models import TranslationJob
+
+        TranslationJob.__table__.create(bind=engine, checkfirst=True)
+
+    # DraftGenerationJob 增量列：source（区分初稿 / 审核后修改）。旧库若无该列会导致 ORM 写入 NULL。
+    ensure_column(
+        "draft_generation_jobs",
+        "source",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN source TEXT",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN source VARCHAR(32)",
+    )
+
+    # UploadRecord 增量列：last_audit_*（aicheckword 审核集成的最近一次报告摘要缓存）。
+    ensure_column(
+        "upload_records",
+        "last_audit_report_id",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_report_id INTEGER",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_report_id INT",
+    )
+    ensure_column(
+        "upload_records",
+        "last_audit_mode",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_mode TEXT",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_mode VARCHAR(16)",
+    )
+    ensure_column(
+        "upload_records",
+        "last_audit_severity_json",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_severity_json TEXT",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_severity_json JSON",
+    )
+    ensure_column(
+        "upload_records",
+        "last_audit_at",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
+        "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
+    )
+
 
 def init_default_configs():
     """初始化默认的配置项数据"""
@@ -1012,6 +1059,18 @@ def create_app() -> Flask:
         from .draft_generation_routes import draft_gen_bp
 
         app.register_blueprint(draft_gen_bp)
+
+        from .audit_routes import audit_bp
+
+        app.register_blueprint(audit_bp)
+
+        from .audit_modify_routes import audit_modify_bp
+
+        app.register_blueprint(audit_modify_bp)
+
+        from .translation_routes import translation_bp
+
+        app.register_blueprint(translation_bp)
 
         db.create_all()
         init_default_configs()

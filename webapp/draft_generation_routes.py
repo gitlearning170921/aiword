@@ -30,10 +30,11 @@ from werkzeug.utils import secure_filename
 
 from . import db
 from .app_settings import get_setting
-from .draft_author_role_infer import (
-    DRAFT_AUTHOR_ROLE_KEYS,
-    DRAFT_AUTHOR_ROLE_LABELS,
-    infer_draft_author_role_key,
+from ._integration_common import (
+    fetch_draft_page_bootstrap,
+    integration_collection_rows,
+    resolve_aicheckword_project_id_for_upload,
+    upstream_get_json,
 )
 from .llm_credential_crypto import decrypt_api_key, encrypt_api_key
 from .models import DraftGenerationJob, UploadRecord, UserLlmCredential, now_local
@@ -140,113 +141,6 @@ def _decrypt_key_for_provider(row: UserLlmCredential, provider: str, sk: str) ->
         return ""
 
 
-# 与 aicheckword ``src/app.py`` 初稿页文案保持一致（侧边栏/训练页同源常量）
-DOC_LANG_VALUE_TO_LABEL: dict[str, str] = {
-    "": "不指定",
-    "zh": "中文版",
-    "en": "英文版",
-    "both": "中英文",
-}
-DRAFT_STRATEGY_OPTIONS_UI: tuple[dict[str, str], ...] = (
-    {
-        "value": "change",
-        "label": "注册变更：对照参考在基础文件上自动识别新增/细化/删除（保留版式与未涉及原文）",
-    },
-    {
-        "value": "reuse",
-        "label": "新项目复用：按参考文件全量更新内容（保留格式章节不变）",
-    },
-)
-def _project_option_label(p: dict[str, Any]) -> str:
-    """与 aicheckword ``format_project_option_label`` 一致。"""
-    try:
-        nm = str((p or {}).get("name") or "").strip() or "未命名"
-    except Exception:
-        nm = "未命名"
-    try:
-        pid = int((p or {}).get("id") or 0)
-    except Exception:
-        pid = 0
-    pc = ""
-    try:
-        pc = str((p or {}).get("project_code") or "").strip()
-    except Exception:
-        pc = ""
-    suf = f" · {pc}" if pc else ""
-    head = f"{nm} (ID:{pid}){suf}"
-
-    prod = ""
-    try:
-        prod = str((p or {}).get("product_name") or "").strip()
-    except Exception:
-        prod = ""
-    if not prod:
-        try:
-            prod = str((p or {}).get("product_name_en") or "").strip()
-        except Exception:
-            prod = ""
-
-    rcn = ""
-    rce = ""
-    try:
-        rcn = str((p or {}).get("registration_country") or "").strip()
-    except Exception:
-        rcn = ""
-    try:
-        rce = str((p or {}).get("registration_country_en") or "").strip()
-    except Exception:
-        rce = ""
-    if rcn and rce and rcn != rce:
-        cshow = f"{rcn} / {rce}"
-    elif rcn:
-        cshow = rcn
-    else:
-        cshow = rce
-
-    reg_type = ""
-    try:
-        reg_type = str((p or {}).get("registration_type") or "").strip()
-    except Exception:
-        reg_type = ""
-
-    extras: list[str] = []
-    if prod:
-        extras.append(f"产品:{prod}")
-    if cshow:
-        extras.append(f"国家:{cshow}")
-    if reg_type:
-        extras.append(f"类别:{reg_type}")
-    if not extras:
-        return head
-    return f"{head} | " + " | ".join(extras)
-
-
-def _format_case_option(c: dict[str, Any]) -> str:
-    """与 aicheckword ``_format_case_option`` 一致。"""
-    name = (str(c.get("case_name") or "").strip()) or "—"
-    product = (str(c.get("product_name") or "").strip()) or "—"
-    country = (str(c.get("registration_country") or "").strip()) or "—"
-    lang_val = str(c.get("document_language") or "").strip()
-    lang_label = DOC_LANG_VALUE_TO_LABEL.get(lang_val, lang_val or "—")
-    return f"{name}（{product} · {country} · {lang_label}）"
-
-
-def _draft_collection_select_rows() -> list[dict[str, str]]:
-    """知识库名称下拉；默认 regulations；可在系统配置增加 AICHECKWORD_DRAFT_COLLECTION_IDS=regulations,custom1。"""
-    raw = (get_setting("AICHECKWORD_DRAFT_COLLECTION_IDS", default="") or "").strip()
-    if raw:
-        ids = [x.strip() for x in raw.split(",") if x.strip()]
-    else:
-        ids = ["regulations"]
-    rows: list[dict[str, str]] = []
-    for cid in ids:
-        if cid == "regulations":
-            lab = "法规/通用知识库（regulations）"
-        else:
-            lab = f"知识库「{cid}」"
-        rows.append({"id": cid, "label": lab})
-    return rows
-
 
 def _normalized_draft_provider(row: Optional[UserLlmCredential]) -> Optional[str]:
     if not row:
@@ -258,6 +152,39 @@ def _normalized_draft_provider(row: Optional[UserLlmCredential]) -> Optional[str
     if allowed and p not in allowed:
         return None
     return p
+
+
+def _normalize_requested_provider(provider: Optional[str]) -> Optional[str]:
+    """校验页面/ payload 请求的 provider（须在白名单与 aiword 支持列表内）。"""
+    p = (provider or "").strip().lower()
+    if p not in AIWORD_DRAFT_LLM_PROVIDERS:
+        return None
+    allowed = _effective_allowed_provider_ids_ordered()
+    if allowed and p not in allowed:
+        return None
+    return p
+
+
+def _resolve_submit_provider(
+    user_id: str, requested: Optional[str] = None
+) -> tuple[Optional[str], str]:
+    """初稿提交实际使用的 provider：优先本次请求的 provider（页面下拉），其次库内已保存项。"""
+    row = _load_user_credential(user_id)
+    saved = _normalized_draft_provider(row) if row else None
+    req = _normalize_requested_provider(requested)
+    p = req or saved
+    if not p:
+        return None, "请先在「个人 LLM 设置」中选择提供方（DeepSeek / Cursor / 通义千问）并保存个人 API Key。"
+    sk = str(current_app.config.get("SECRET_KEY") or "")
+    if row and _has_usable_stored_key_for_provider(row, p, sk=sk):
+        return p, ""
+    labels = {"deepseek": "DeepSeek", "cursor": "Cursor", "tongyi": "通义千问"}
+    if req and saved and req != saved:
+        return None, (
+            f"当前选择为 {labels.get(req, req)}，但该提供方尚未保存可用的 API Key；"
+            f"请填写 Key 并点「保存个人 LLM 设置」，或改回已配置的 {labels.get(saved, saved)}。"
+        )
+    return None, "请先在「个人 LLM 设置」中保存个人 API Key（与 aicheckword 系统管理员配置无关）。"
 
 
 def _login_wall():
@@ -279,6 +206,59 @@ def _upload_record_visible_to_draft_user(rec: UploadRecord) -> bool:
     return False
 
 
+def _auto_bind_base_files_by_target(
+    payload_obj: dict[str, Any], base_multipart_names: list[str]
+) -> None:
+    """
+    模板目标名（如「附件3 …docx」）与 Base 上传名（如「3_A0.docx」）不一致时，
+    上游 base_bound_targets 为空，易导致路由/锚点上下文错位。单 Base 时自动写入绑定。
+    """
+    tpl = payload_obj.get("template_file_names")
+    if not isinstance(tpl, list) or not tpl:
+        return
+    bases = [str(x).strip() for x in (base_multipart_names or []) if str(x).strip()]
+    if len(bases) != 1:
+        return
+    base_fn = bases[0]
+    bfbt = payload_obj.get("base_files_by_target")
+    if not isinstance(bfbt, dict):
+        bfbt = {}
+    changed = False
+    for tn in tpl:
+        tns = str(tn).strip()
+        if not tns:
+            continue
+        if (bfbt.get(tns) or "").strip():
+            continue
+        bfbt[tns] = base_fn
+        changed = True
+    if changed or bfbt:
+        payload_obj["base_files_by_target"] = bfbt
+
+
+def _enforce_stable_single_target_and_base(
+    payload_obj: dict[str, Any], base_multipart_names: list[str]
+) -> Optional[str]:
+    """稳态模式：仅允许单目标模板 + 单 Base，降低锚点漂移与路由歧义。"""
+    tpl_raw = payload_obj.get("template_file_names")
+    tpl = [str(x).strip() for x in (tpl_raw or []) if str(x).strip()] if isinstance(tpl_raw, list) else []
+    if len(tpl) != 1:
+        return "稳态模式要求仅选择 1 个模板文件（当前为 %d 个）。" % len(tpl)
+    payload_obj["template_file_names"] = [tpl[0]]
+
+    bases = [str(x).strip() for x in (base_multipart_names or []) if str(x).strip()]
+    if len(bases) != 1:
+        return "稳态模式要求仅提供 1 个 Base 文件（当前为 %d 个）。" % len(bases)
+
+    bfbt = payload_obj.get("base_files_by_target")
+    if not isinstance(bfbt, dict):
+        bfbt = {}
+    bfbt = {str(k).strip(): str(v).strip() for k, v in bfbt.items() if str(k).strip() and str(v).strip()}
+    bfbt[tpl[0]] = bases[0]
+    payload_obj["base_files_by_target"] = bfbt
+    return None
+
+
 def _collect_base_upload_record_ids(payload: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -296,6 +276,29 @@ def _collect_base_upload_record_ids(payload: dict[str, Any]) -> list[str]:
                 seen.add(s)
                 ordered.append(s)
     return ordered
+
+
+def _template_display_filename(rec: UploadRecord) -> str:
+    """初稿/交接展示用文件名（修复乱码，优先 original_file_name）。"""
+    from .routes import _normalize_handoff_display_filename
+
+    raw = (getattr(rec, "original_file_name", None) or rec.file_name or "").strip()
+    if not raw:
+        return ""
+    return _normalize_handoff_display_filename(raw)
+
+
+def _ftp_path_for_display(ftp_path: str, display_name: str) -> str:
+    """将 FTP 绝对路径末段替换为可读中文名，便于初稿页展示（不影响实际下载路径）。"""
+    fp = (ftp_path or "").strip().replace("\\", "/")
+    dn = (display_name or "").strip()
+    if not fp:
+        return dn
+    if not dn:
+        return fp
+    if "/" in fp:
+        return fp.rsplit("/", 1)[0] + "/" + dn
+    return dn
 
 
 def _base_doc_bytes_from_upload(upload: UploadRecord) -> tuple[Optional[bytes], str]:
@@ -331,13 +334,16 @@ def api_task_base_hint():
         return jsonify({"message": "未找到该任务或无权限"}), 404
     fp = (getattr(rec, "ftp_path", None) or "").strip()
     blob = rec.template_file_blob
+    display_fn = _template_display_filename(rec) or (rec.file_name or "").strip()
     if fp:
         return jsonify(
             {
                 "ok": True,
                 "uploadId": rec.id,
                 "fileName": rec.file_name,
+                "templateFileName": display_fn or None,
                 "ftpPath": fp,
+                "ftpPathDisplay": _ftp_path_for_display(fp, display_fn) if display_fn else fp,
                 "source": "ftp",
             }
         )
@@ -347,7 +353,9 @@ def api_task_base_hint():
                 "ok": True,
                 "uploadId": rec.id,
                 "fileName": rec.file_name,
+                "templateFileName": display_fn or None,
                 "ftpPath": None,
+                "ftpPathDisplay": None,
                 "source": "blob",
             }
         )
@@ -356,7 +364,9 @@ def api_task_base_hint():
             "ok": True,
             "uploadId": rec.id,
             "fileName": rec.file_name,
+            "templateFileName": display_fn or None,
             "ftpPath": None,
+            "ftpPathDisplay": None,
             "source": "none",
         }
     )
@@ -561,12 +571,12 @@ def _load_user_credential(user_id: str) -> Optional[UserLlmCredential]:
     return UserLlmCredential.query.filter_by(user_id=user_id).first()
 
 
-def _client_llm_headers(user_id: str) -> dict[str, str]:
+def _client_llm_headers(user_id: str, provider: Optional[str] = None) -> dict[str, str]:
     """发往 aicheckword 的个人 LLM 头：Key 必填（个人）；Base URL / 模型可选，空则上游用系统默认。"""
     row = _load_user_credential(user_id)
     if not row:
         return {}
-    prov = _normalized_draft_provider(row)
+    prov, _ = _resolve_submit_provider(user_id, provider)
     if not prov:
         return {}
     sk = str(current_app.config.get("SECRET_KEY") or "")
@@ -605,23 +615,13 @@ def _client_llm_headers(user_id: str) -> dict[str, str]:
     )
 
 
-def _personal_key_ready(user_id: str) -> tuple[bool, str]:
+def _personal_key_ready(user_id: str, provider: Optional[str] = None) -> tuple[bool, str]:
     """初稿提交前：上游要求个人 Key 时须已配置并解密出非空 API Key。"""
     if not _upstream_personal_keys_only():
         return True, ""
-    row = _load_user_credential(user_id)
-    p = _normalized_draft_provider(row) if row else None
+    p, err = _resolve_submit_provider(user_id, provider)
     if not p:
-        return False, "请先在「个人 LLM 设置」中选择提供方（DeepSeek / Cursor / 通义千问）并保存个人 API Key。"
-    if not row or not _encrypted_key_blob_for_provider(row, p):
-        return False, "请先在「个人 LLM 设置」中保存个人 API Key（与 aicheckword 系统管理员配置无关）。"
-    sk = str(current_app.config.get("SECRET_KEY") or "")
-    try:
-        plain = _decrypt_key_for_provider(row, p, sk).strip()
-    except Exception:
-        return False, "个人 API Key 解密失败，请重新保存。"
-    if not plain:
-        return False, "个人 API Key 无效或为空，请重新填写并保存。"
+        return False, err
     return True, ""
 
 
@@ -773,10 +773,7 @@ def _fetch_upstream_meta(collection: str, base_case_id: Optional[int]) -> Tuple[
 
 @draft_gen_bp.get("/api/draft-bootstrap")
 def api_draft_bootstrap():
-    """
-    初稿页下拉数据：知识库/项目/案例/模板文件名等与 aicheckword meta 对齐；
-    文档语言、生成策略等文案与 aicheckword 初稿页 selectbox 一致。
-    """
+    """初稿页下拉：透传 aicheckword page-bootstrap；仅合并 aiword 部署侧知识库列表配置。"""
     err = _login_wall()
     if err:
         return err
@@ -791,158 +788,78 @@ def api_draft_bootstrap():
     if base_case_id is not None and base_case_id <= 0:
         base_case_id = None
 
-    body, meta_err = _fetch_upstream_meta(collection, base_case_id)
-    data: dict[str, Any] = {}
-    if isinstance(body, dict) and body.get("ok") and isinstance(body.get("data"), dict):
-        data = body["data"]
+    tpl_names = [str(x).strip() for x in request.args.getlist("templates") if str(x).strip()]
+    bootstrap, boot_err, upstream_body = fetch_draft_page_bootstrap(
+        collection,
+        base_case_id=base_case_id,
+        template_names=tpl_names or None,
+    )
+    meta_body, meta_err = _fetch_upstream_meta(collection, base_case_id)
 
-    projects_raw: List[Any] = list(data.get("projects") or [])
-    cases_raw: List[Any] = list(data.get("cases") or [])
-    templates_raw: List[Any] = list(data.get("template_file_names") or [])
-
-    project_rows: list[dict[str, Any]] = []
-    for p in projects_raw:
-        if not isinstance(p, dict):
-            continue
-        try:
-            pid = int(p.get("id") or 0)
-        except (TypeError, ValueError):
-            continue
-        if pid <= 0:
-            continue
-        project_rows.append(
-            {
-                "id": pid,
-                "label": _project_option_label(p),
-                "name": str(p.get("name") or "").strip(),
-                "productName": str(p.get("product_name") or "").strip(),
-                "productNameEn": str(p.get("product_name_en") or "").strip(),
-                "registrationCountry": str(p.get("registration_country") or "").strip(),
-                "registrationCountryEn": str(p.get("registration_country_en") or "").strip(),
-            }
-        )
-
-    case_rows: list[dict[str, Any]] = []
-    for c in cases_raw:
-        if not isinstance(c, dict):
-            continue
-        try:
-            cid = int(c.get("id") or 0)
-        except (TypeError, ValueError):
-            continue
-        if cid <= 0:
-            continue
-        case_rows.append(
-            {
-                "id": cid,
-                "label": f"ID:{cid} | {_format_case_option(c)}",
-                "productName": str(c.get("product_name") or "").strip(),
-                "productNameEn": str(c.get("product_name_en") or "").strip(),
-                "registrationCountry": str(c.get("registration_country") or "").strip(),
-                "registrationCountryEn": str(c.get("registration_country_en") or "").strip(),
-                "caseName": str(c.get("case_name") or "").strip(),
-                "caseNameEn": str(c.get("case_name_en") or "").strip(),
-                "documentLanguage": str(c.get("document_language") or "").strip().lower(),
-                "registrationType": str(c.get("registration_type") or "").strip(),
-                "projectForm": str(c.get("project_form") or "").strip(),
-            }
-        )
-
-    template_rows: list[dict[str, str]] = []
-    for name in templates_raw:
-        fn = str(name or "").strip()
-        if fn:
-            template_rows.append({"id": fn, "label": fn})
-
-    # 顺序与 aicheckword ``DOC_LANG_OPTIONS`` 一致：不指定、中文版、英文版、中英文
-    _doc_order = ("", "zh", "en", "both")
-    doc_lang_rows = [{"value": k, "label": DOC_LANG_VALUE_TO_LABEL[k]} for k in _doc_order]
-
-    author_role_rows = [
-        {"value": DRAFT_AUTHOR_ROLE_KEYS[i], "label": DRAFT_AUTHOR_ROLE_LABELS[i]}
-        for i in range(min(len(DRAFT_AUTHOR_ROLE_KEYS), len(DRAFT_AUTHOR_ROLE_LABELS)))
-    ]
-
-    suggested_author = ""
-    if base_case_id and template_rows:
-        sel_case: Optional[dict[str, Any]] = None
-        for c in cases_raw:
-            if not isinstance(c, dict):
-                continue
-            try:
-                if int(c.get("id") or 0) == int(base_case_id):
-                    sel_case = c
-                    break
-            except (TypeError, ValueError):
-                continue
-        if sel_case:
-            fnames = [str(t.get("id") or "").strip() for t in template_rows if str(t.get("id") or "").strip()]
-            suggested_author = infer_draft_author_role_key(
-                fnames,
-                registration_type=str(sel_case.get("registration_type") or ""),
-                project_form=str(sel_case.get("project_form") or ""),
-            )
-
-    out: dict[str, Any] = {
-        "ok": True,
-        "metaOk": meta_err is None and isinstance(body, dict) and body.get("ok"),
-        "metaError": meta_err or (None if (isinstance(body, dict) and body.get("ok")) else "meta 异常"),
-        "collection": collection,
-        "collections": _draft_collection_select_rows(),
-        "documentLanguages": doc_lang_rows,
-        "draftStrategies": [{"value": x["value"], "label": x["label"]} for x in DRAFT_STRATEGY_OPTIONS_UI],
-        "projectModes": [
-            {"value": "existing", "label": "使用已有项目（不新建）"},
-            {"value": "new", "label": "新建项目"},
-        ],
-        "projects": project_rows,
-        "cases": case_rows,
-        "templates": template_rows,
-        "authorRoles": author_role_rows,
-        "suggestedAuthorRole": suggested_author,
-        "booleanOptions": [
-            {
-                "id": "inplace_patch",
-                "label": "就地修改（保留基础文件格式，推荐用于注册递交版式）",
-                "default": True,
-            },
-            {
-                "id": "save_as_case",
-                "label": "将本次生成结果写入案例库（project_cases）",
-                "default": True,
-            },
-            {
-                "id": "multi_base_auto_route",
-                "label": "多份基础/多份参考时由 AI 自动分配（推荐：自动匹配改哪几份 Base、参考内容如何拆分）",
-                "default": True,
-            },
-            {
-                "id": "docx_track_changes",
-                "label": "就地修改导出 Word 时使用修订标记（插入/删除，便于在 Word 中审阅修订）",
-                "default": True,
-            },
-        ],
-        "templateScopeModes": [
-            {"value": "selected", "label": "仅生成下方所选模板文件（可多选）"},
-            {"value": "all", "label": "生成该案例下全部模板文件（与 aicheckword「需显式确认全选」等效）"},
-        ],
-    }
-    if isinstance(body, dict):
-        out["upstreamBody"] = body
+    out: dict[str, Any] = {"ok": True}
+    if bootstrap:
+        out.update(bootstrap)
+        out["collection"] = bootstrap.get("collection") or collection
+    else:
+        out["collection"] = collection
+    out["collections"] = integration_collection_rows()
+    out["metaOk"] = boot_err is None and bool(bootstrap)
+    out["metaError"] = boot_err or (None if bootstrap else "page-bootstrap 异常")
+    if isinstance(upstream_body, dict):
+        out["upstreamBody"] = upstream_body
+    elif isinstance(meta_body, dict):
+        out["upstreamBody"] = meta_body
+    if boot_err and not bootstrap:
+        out["metaError"] = boot_err
     return jsonify(out)
 
 
 @draft_gen_bp.get("/api/suggest-author-role")
 def api_suggest_author_role():
-    """按当前模板文件名列表 + 案例注册类别/项目形态推断 author_role（与 aicheckword 初稿页一致）。"""
+    """代理 aicheckword ``GET /api/integration/draft/suggest-author-role``。"""
     err = _login_wall()
     if err:
         return err
-    rt = (request.args.get("registration_type") or "").strip()
-    pf = (request.args.get("project_form") or "").strip()
+    params: dict[str, Any] = {
+        "registration_type": (request.args.get("registration_type") or "").strip(),
+        "project_form": (request.args.get("project_form") or "").strip(),
+    }
     names = [str(x).strip() for x in request.args.getlist("templates") if str(x).strip()]
-    key = infer_draft_author_role_key(names, registration_type=rt, project_form=pf)
-    return jsonify({"ok": True, "authorRole": key})
+    if names:
+        params["templates"] = names
+    base = _draft_api_base()
+    if not base:
+        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
+    try:
+        r = requests.get(
+            f"{base}/api/integration/draft/suggest-author-role",
+            params=params,
+            headers=_upstream_headers(for_multipart=False),
+            timeout=_draft_requests_timeout(read_seconds=30),
+        )
+        body = r.json()
+    except requests.RequestException as e:
+        return jsonify({"ok": False, "message": str(e)[:500]}), 502
+    except Exception:
+        return jsonify({"ok": False, "message": "上游返回非 JSON"}), 502
+    if r.status_code >= 400:
+        return jsonify(body if isinstance(body, dict) else {"message": f"上游 HTTP {r.status_code}"}), r.status_code
+    return jsonify(body)
+
+
+@draft_gen_bp.get("/api/projects/<int:project_id>/draft-defaults")
+def api_project_draft_defaults(project_id: int):
+    """代理 aicheckword 项目初稿维度默认值。"""
+    err = _login_wall()
+    if err:
+        return err
+    data, up_err = upstream_get_json(
+        f"api/integration/draft/projects/{int(project_id)}/draft-defaults",
+        read_timeout_seconds=15,
+    )
+    if up_err:
+        return jsonify({"ok": False, "message": up_err}), 502
+    return jsonify({"ok": True, "data": data or {}})
 
 
 @draft_gen_bp.get("/api/meta")
@@ -983,11 +900,25 @@ def api_jobs_list():
     err = _login_wall()
     if err:
         return err
+    try:
+        page = int((request.args.get("page") or "1").strip())
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int((request.args.get("page_size") or "10").strip())
+    except (TypeError, ValueError):
+        page_size = 10
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+    offset = (page - 1) * page_size
     uid = str(session["user_id"])
+    q = DraftGenerationJob.query.filter_by(user_id=uid)
+    total = q.count()
     rows = (
-        DraftGenerationJob.query.filter_by(user_id=uid)
+        q
         .order_by(desc(DraftGenerationJob.created_at))
-        .limit(100)
+        .offset(offset)
+        .limit(page_size)
         .all()
     )
     out = []
@@ -1033,7 +964,18 @@ def api_jobs_list():
                 "inputFileCount": len(in_list),
             }
         )
-    return jsonify({"jobs": out})
+    total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
+    return jsonify(
+        {
+            "jobs": out,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+            },
+        }
+    )
 
 
 def _apply_upstream_status_to_job(job: DraftGenerationJob, data: dict[str, Any]) -> None:
@@ -1047,6 +989,19 @@ def _apply_upstream_status_to_job(job: DraftGenerationJob, data: dict[str, Any])
         job.error_summary = str(err_msg)[:4000]
     res = data.get("result")
     if st == "succeeded" and isinstance(res, dict):
+        if bool(res.get("docx_unchanged")):
+            top = res.get("patch_skip_reason_histogram")
+            top_msg = ""
+            if isinstance(top, dict) and top:
+                pairs = sorted(top.items(), key=lambda x: (-int(x[1] or 0), str(x[0])))[:3]
+                top_msg = "；".join(f"{k}({v})" for k, v in pairs if str(k).strip())
+            job.status = "failed"
+            job.error_summary = (
+                "PATCH 已生成但未写入文档（applied=0，文档与基底一致）。"
+                + (f" 主因：{top_msg}" if top_msg else "")
+            )[:4000]
+            if not (job.message or "").strip():
+                job.message = "生成失败：patch 未落地"
         try:
             job.project_id = int(res["project_id"]) if res.get("project_id") is not None else job.project_id
         except (TypeError, ValueError, KeyError):
@@ -1062,6 +1017,43 @@ def _apply_upstream_status_to_job(job: DraftGenerationJob, data: dict[str, Any])
             job.duration_ms = int(max(0.0, (now_local() - job.created_at).total_seconds()) * 1000)
         except Exception:
             pass
+
+
+@draft_gen_bp.post("/api/check-input-vector-duplicates")
+def api_check_input_vector_duplicates():
+    """代理 aicheckword：按项目检测参考文件名是否已在向量库。"""
+    err = _login_wall()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    try:
+        pid = int(body.get("project_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"message": "缺少有效的 project_id"}), 400
+    if pid <= 0:
+        return jsonify({"message": "请选择具体项目后再检测"}), 400
+    names = body.get("file_names")
+    if not isinstance(names, list):
+        names = []
+    file_names = [str(x).strip() for x in names if str(x).strip()]
+    base = _draft_api_base()
+    if not base:
+        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
+    url = f"{base}/api/integration/draft/check-input-vector-duplicates"
+    try:
+        r = requests.post(
+            url,
+            json={"project_id": pid, "file_names": file_names},
+            timeout=_draft_requests_timeout(read_seconds=30),
+        )
+        data = r.json() if r.content else {}
+        if r.status_code >= 400:
+            return jsonify(
+                {"ok": False, "message": data.get("detail") or data.get("message") or r.text[:500]}
+            ), r.status_code
+        return jsonify(data)
+    except requests.RequestException as e:
+        return jsonify({"ok": False, "message": f"上游检测失败：{e}"}), 502
 
 
 @draft_gen_bp.post("/api/jobs")
@@ -1105,18 +1097,31 @@ def api_jobs_submit():
     except json.JSONDecodeError as e:
         return jsonify({"message": f"payload 不是有效 JSON: {e}"}), 400
 
-    ok_key, key_msg = _personal_key_ready(uid)
+    requested_prov = (payload_obj.get("provider") or "").strip() or None
+    ok_key, key_msg = _personal_key_ready(uid, provider=requested_prov)
     if not ok_key:
         return jsonify({"message": key_msg}), 400
 
     cred = _load_user_credential(uid)
-    p = _normalized_draft_provider(cred) if cred else None
+    p, prov_err = _resolve_submit_provider(uid, requested_prov)
+    if not p:
+        return jsonify({"message": prov_err or "无法确定 LLM 提供方"}), 400
     if p:
         payload_obj["provider"] = p
+        if cred and (cred.provider or "").strip().lower() != p:
+            cred.provider = p
 
     payload_obj["aiword_user_id"] = uid
 
     base_ids_ordered = _collect_base_upload_record_ids(payload_obj)
+    if base_ids_ordered:
+        pid_guess = resolve_aicheckword_project_id_for_upload(base_ids_ordered[0], user_id=uid)
+        try:
+            pid_cur = int(payload_obj.get("project_id") or 0)
+        except (TypeError, ValueError):
+            pid_cur = 0
+        if pid_guess and int(pid_guess) > 0 and pid_cur != int(pid_guess):
+            payload_obj["project_id"] = int(pid_guess)
     base_from_uploads: list[tuple[str, bytes]] = []
     for bid in base_ids_ordered:
         ur = UploadRecord.query.get(bid)
@@ -1127,6 +1132,13 @@ def api_jobs_submit():
             return jsonify({"message": f"任务 {bid} 无可用模板文件作 Base（可能仅为链接）"}), 400
         fn0 = secure_filename(suggested_fn) or "base.docx"
         base_from_uploads.append((fn0, bdata))
+
+    base_multipart_names = [fn for fn, _ in base_from_uploads]
+    for f in request.files.getlist("base_files") or []:
+        fn = secure_filename(f.filename or "unnamed.bin")
+        if fn and fn not in base_multipart_names:
+            base_multipart_names.append(fn)
+    _auto_bind_base_files_by_target(payload_obj, base_multipart_names)
 
     payload_for_upstream = {
         k: v for k, v in payload_obj.items() if k not in ("base_upload_id", "base_upload_ids")
@@ -1153,6 +1165,9 @@ def api_jobs_submit():
         snap["base_upload_id"] = payload_obj.get("base_upload_id")
     if "base_upload_ids" in payload_obj:
         snap["base_upload_ids"] = payload_obj.get("base_upload_ids")
+    _uap_snap = (payload_obj.get("user_prompt_append") or "").strip()
+    if _uap_snap:
+        snap["user_prompt_append_preview"] = _uap_snap[:500] + ("…" if len(_uap_snap) > 500 else "")
 
     job = DraftGenerationJob(
         user_id=uid,
@@ -1179,7 +1194,7 @@ def api_jobs_submit():
     hdr = {
         **_upstream_headers(for_multipart=True),
         **_draft_personal_key_headers(),
-        **_client_llm_headers(uid),
+        **_client_llm_headers(uid, provider=p),
     }
     url = f"{base}/api/integration/draft/jobs"
     try:

@@ -47,7 +47,7 @@
                 </div>
             </div>
         </div>
-        <p class="text-muted small">以下为分配给您的任务，可以直接标记完成状态或展开填写占位符。支持拖动排序。</p>
+        <p class="text-muted small">以下为分配给您的任务，可直接标记完成状态、填写占位符，或通过「上传/替换」上传模板文件（存 FTP，会覆盖已有文件或链接；原来源为链接时上传后改为文件）。支持拖动排序。</p>
         <div class="d-flex align-items-center mb-2">
             <span class="me-2">分组：</span>
             <div class="btn-group btn-group-sm" role="group">
@@ -63,7 +63,7 @@
             </div>
         </div>
         <div class="table-responsive" style="max-height: 420px; overflow: auto;">
-            <table class="table table-bordered table-hover align-middle table-selectable table-compact" id="myTasksTable" data-col-store-key="colVis_page2_v2">
+            <table class="table table-bordered table-hover align-middle table-selectable table-compact table-sticky-name-cols" id="myTasksTable" data-col-store-key="colVis_page2_v2">
                 <thead class="table-light">
                     <tr>
                         <th data-col="seq">序号</th>

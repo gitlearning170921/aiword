@@ -406,6 +406,61 @@ tr[draggable="true"].dragging {
 .table-responsive .table-compact thead.table-light th.col-op {
     background: #f8f9fa;
 }
+
+/* 任务列表：项目名称、文件名称横向滚动时固定在左侧 */
+.table-sticky-name-cols.table-compact th[data-col="projectName"],
+.table-sticky-name-cols.table-compact td[data-col="projectName"] {
+    width: 150px;
+    min-width: 150px;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.table-sticky-name-cols.table-compact th[data-col="fileName"],
+.table-sticky-name-cols.table-compact td[data-col="fileName"] {
+    width: 170px;
+    min-width: 170px;
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.table-responsive .table-sticky-name-cols.table-compact th[data-col="projectName"],
+.table-responsive .table-sticky-name-cols.table-compact td[data-col="projectName"] {
+    position: sticky;
+    left: var(--sticky-project-left, 0);
+    z-index: 4;
+    background-color: #fff;
+    box-shadow: 2px 0 4px -2px rgba(15, 23, 42, 0.1);
+}
+.table-responsive .table-sticky-name-cols.table-compact th[data-col="fileName"],
+.table-responsive .table-sticky-name-cols.table-compact td[data-col="fileName"] {
+    position: sticky;
+    left: var(--sticky-file-left, 150px);
+    z-index: 3;
+    background-color: #fff;
+    box-shadow: 2px 0 4px -2px rgba(15, 23, 42, 0.08);
+}
+.table-responsive .table-sticky-name-cols.table-compact thead th[data-col="projectName"] {
+    z-index: 8;
+    background-color: #eef2ff;
+}
+.table-responsive .table-sticky-name-cols.table-compact thead.table-light th[data-col="projectName"] {
+    background-color: #f8f9fa;
+}
+.table-responsive .table-sticky-name-cols.table-compact thead th[data-col="fileName"] {
+    z-index: 7;
+    background-color: #eef2ff;
+}
+.table-responsive .table-sticky-name-cols.table-compact thead.table-light th[data-col="fileName"] {
+    background-color: #f8f9fa;
+}
+.table-hover.table-sticky-name-cols.table-compact > tbody > tr:hover > td[data-col="projectName"],
+.table-hover.table-sticky-name-cols.table-compact > tbody > tr:hover > td[data-col="fileName"] {
+    background-color: var(--bs-table-hover-bg, rgba(0, 0, 0, 0.075));
+}
+
 .table-compact .form-control,
 .table-compact .form-select,
 .table-compact .input-group {

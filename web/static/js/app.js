@@ -612,15 +612,7 @@ async function initUploadPage() {
         loadRecordsList();
     });
 
-    // bfcache 场景：回退/前进时也复位并重新加载（确保默认仍隐藏历史）
-    if (!window._page1HistoryToggleBound) {
-        window._page1HistoryToggleBound = true;
-        window.addEventListener("pageshow", () => {
-            const el = document.getElementById("showHistoryProjectsPage1");
-            if (el) el.checked = false;
-            if (typeof loadRecordsList === "function") loadRecordsList();
-        });
-    }
+    // bfcache / 浏览器返回：由 resetGoHandoffPage1Ui（pageshow 全局监听）关闭遮罩并刷新列表
 
     // 页面1：项目元数据管理（优先级/状态）
     const projectsManageBody = document.getElementById("projectsManageBody");
@@ -1165,10 +1157,15 @@ async function initUploadPage() {
                         const msg = error && error.message ? error.message : "";
                         const is409Replace = error && error.is409Replace === true;
                         if (is409Replace) {
-                            const replaceOk = window.confirm(
+                            const uploadingFile = fileInput && fileInput.files.length > 0;
+                            let replaceMsg =
                                 (msg || "存在重复记录，是否替换？") +
-                                    "\n\n提示：选「确定」将用本行内容覆盖库里已有同一条（同项目+文件名称+任务类型+编写人员）；选「取消」则跳过本行，可继续保存其余行。"
-                            );
+                                "\n\n提示：选「确定」将用本行内容覆盖库里已有同一条（同项目+文件名称+任务类型+编写人员）；选「取消」则跳过本行，可继续保存其余行。";
+                            if (uploadingFile) {
+                                replaceMsg +=
+                                    "\n\n若上传了模板文件，将覆盖已有文件或链接，且来源将改为「文件」。";
+                            }
+                            const replaceOk = window.confirm(replaceMsg);
                             if (replaceOk) {
                                 const formDataReplace = new FormData();
                                 formDataReplace.append("projectId", projectId);
@@ -1194,10 +1191,10 @@ async function initUploadPage() {
                                 if (displayedAuthor) formDataReplace.append("displayedAuthor", displayedAuthor);
                                 if (belongingModule) formDataReplace.append("belongingModule", belongingModule);
                                 formDataReplace.set("replace", "true");
-                                if (link) {
-                                    formDataReplace.append("templateLinks", normalizeDocLink(link));
-                                } else if (fileInput && fileInput.files.length > 0) {
+                                if (fileInput && fileInput.files.length > 0) {
                                     formDataReplace.append("file", fileInput.files[0]);
+                                } else if (link) {
+                                    formDataReplace.append("templateLinks", normalizeDocLink(link));
                                 }
                                 try {
                                     const resultReplace = await App.request("/api/upload", { method: "POST", body: formDataReplace });
@@ -1370,6 +1367,12 @@ async function openEditRecordModal(r) {
     const regVerEl = document.getElementById("editRecordRegistrationVersion");
     if (regVerEl) regVerEl.value = r.registrationVersion || "";
     document.getElementById("editRecordTemplateLinks").value = r.templateLinks || "";
+    window.__editRecordTemplateState = {
+        hasFile: !!r.hasFile,
+        hasLinks: !!r.hasLinks,
+    };
+    const editTplFile = document.getElementById("editRecordTemplateFile");
+    if (editTplFile) editTplFile.value = "";
     document.getElementById("editRecordNotes").value = r.notes || "";
     const editNoteFilesList = document.getElementById("editNoteFilesList");
     if (editNoteFilesList) {
@@ -1556,6 +1559,8 @@ function initEditRecordModal() {
         const tplFile = tplIn && tplIn.files && tplIn.files[0];
         try {
             if (tplFile) {
+                const prevTpl = window.__editRecordTemplateState || {};
+                if (!confirmTemplateFileOverwrite(prevTpl)) return;
                 const fd = new FormData();
                 fd.append("replace", "true");
                 fd.append("uploadRecordId", id);
@@ -1565,7 +1570,6 @@ function initEditRecordModal() {
                 fd.append("fileName", payload.fileName);
                 fd.append("author", payload.author);
                 fd.append("taskType", payload.taskType || "");
-                fd.append("templateLinks", (document.getElementById("editRecordTemplateLinks").value || "").trim());
                 fd.append("notes", (document.getElementById("editRecordNotes").value || "").trim());
                 fd.append("projectNotes", payload.projectNotes || "");
                 fd.append("assigneeName", payload.assigneeName || "");
@@ -1586,6 +1590,8 @@ function initEditRecordModal() {
                 fd.append("belongingModule", (document.getElementById("editRecordBelongingModule")?.value || "").trim());
                 fd.append("file", tplFile);
                 const res = await App.request("/api/upload", { method: "POST", body: fd });
+                document.getElementById("editRecordTemplateLinks").value = "";
+                window.__editRecordTemplateState = { hasFile: true, hasLinks: false };
                 App.notify(res.message || "任务模板已更新并已尝试同步 FTP");
             } else {
                 await App.request(`/api/uploads/${id}`, {
@@ -1609,6 +1615,8 @@ function initBatchEditRecords() {
     const table = document.getElementById("recordsTable");
     const selectAll = document.getElementById("recordSelectAll");
     const batchEditBtn = document.getElementById("batchEditRecordsBtn");
+    const batchGoSignBtn = document.getElementById("batchGoSignBtn");
+    const batchGoPrintBtn = document.getElementById("batchGoPrintBtn");
     const batchEditModal = document.getElementById("batchEditRecordModal");
     const batchEditSaveBtn = document.getElementById("batchEditSaveBtn");
     if (!table || !batchEditBtn) return;
@@ -1826,6 +1834,67 @@ function initBatchEditRecords() {
         }
     });
 
+    async function runBatchAiprintword(mode) {
+        const tbody = document.getElementById("recordsTableBody");
+        if (!tbody) return;
+        const ids = [];
+        tbody.querySelectorAll(".record-checkbox:checked").forEach((cb) => {
+            const id = cb.dataset.id;
+            if (id) ids.push(id);
+        });
+        if (ids.length < 2) {
+            App.notify("请至少勾选 2 条任务", "warning");
+            return;
+        }
+        const records = ids
+            .map((id) => allRecordsCache.find((x) => String(x.id) === String(id)))
+            .filter(Boolean);
+        const projects = new Set(records.map((r) => String((r && r.projectName) || "").trim()));
+        if (projects.size > 1) {
+            App.notify("请只勾选同一项目的任务", "warning");
+            return;
+        }
+        const canHandoff = records.every((r) => !!(r.hasGenerated || r.hasFile || r.hasLinks));
+        if (!canHandoff) {
+            App.notify("勾选项中存在不可交接任务（需先有模板/链接/已生成文档）", "warning");
+            return;
+        }
+        const btn = mode === "sign" ? batchGoSignBtn : batchGoPrintBtn;
+        const original = btn ? btn.innerHTML : "";
+        try {
+            if (btn) {
+                btn.dataset.originalHtml = original;
+                btn.disabled = true;
+                btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>跳转中`;
+            }
+            showGoSignLoading(mode === "sign" ? "正在批量打开签字页面并载入任务文件…" : "正在批量打开打印页面并载入任务文件…");
+            const url = mode === "sign" ? "/api/go/batch-sign" : "/api/go/batch-print";
+            const res = await App.request(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ upload_ids: ids }),
+            });
+            if (!res || !res.ok || !res.redirect_url) {
+                throw new Error((res && res.error) || "批量跳转失败");
+            }
+            window.location.href = res.redirect_url;
+        } catch (e) {
+            App.notify(e.message || "批量跳转失败", "danger");
+            hideGoSignLoading();
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = original || (mode === "sign" ? "批量去签字" : "批量去打印");
+            }
+        }
+    }
+
+    if (batchGoSignBtn) {
+        batchGoSignBtn.addEventListener("click", () => runBatchAiprintword("sign"));
+    }
+    if (batchGoPrintBtn) {
+        batchGoPrintBtn.addEventListener("click", () => runBatchAiprintword("print"));
+    }
+
     batchEditSaveBtn?.addEventListener("click", async () => {
         const idsStr = batchEditModal?.dataset.batchEditIds;
         if (!idsStr) return;
@@ -1958,9 +2027,151 @@ function initRecordsFilter() {
 function updateBatchEditButtonState() {
     const tbody = document.getElementById("recordsTableBody");
     const btn = document.getElementById("batchEditRecordsBtn");
+    const btnGoSign = document.getElementById("batchGoSignBtn");
+    const btnGoPrint = document.getElementById("batchGoPrintBtn");
     if (!tbody || !btn) return;
     const checked = tbody.querySelectorAll(".record-checkbox:checked").length;
     btn.disabled = checked === 0;
+    if (btnGoSign) btnGoSign.disabled = checked < 2;
+    if (btnGoPrint) btnGoPrint.disabled = checked < 2;
+    const btnBatchAudit = document.getElementById("batchAuditBtn");
+    if (btnBatchAudit) btnBatchAudit.disabled = checked === 0;
+}
+
+function _collectSelectedRecordIdsForAudit() {
+    const tbody = document.getElementById("recordsTableBody");
+    if (!tbody) return [];
+    const out = [];
+    tbody.querySelectorAll(".record-checkbox:checked").forEach((cb) => {
+        const id = (cb.dataset && cb.dataset.id) || cb.value || "";
+        if (id) out.push(String(id));
+    });
+    return out;
+}
+
+function _findUploadRecordById(id) {
+    const rid = String(id || "").trim();
+    if (!rid) return null;
+    const pools = [].concat(allRecordsCache || [], lastRenderedMyTasks || []);
+    for (let i = 0; i < pools.length; i++) {
+        if (String(pools[i].id) === rid) return pools[i];
+    }
+    return null;
+}
+
+/** 页面1/2 任务行 → 审核/翻译/审核后修改 URL（与初稿页 query 一致，供默认选中项目与维度）。 */
+function buildIntegrationUrlFromRecord(r, basePath, extraParams) {
+    const root = (window.__SCRIPT_ROOT__ || "").replace(/\/$/, "");
+    const u = new URLSearchParams();
+    u.set("from", "page2");
+    if (r && r.id) u.set("upload_id", r.id);
+    if (r && r.projectName) u.set("project_name", r.projectName);
+    if (r && r.fileName) u.set("file_name", r.fileName);
+    const prod = (r && r.product) || (r && r.registeredProductName) || "";
+    if (prod) u.set("product", String(prod).trim());
+    if (r && r.country) u.set("country", r.country);
+    const pid = r && r.projectId != null ? String(r.projectId).trim() : "";
+    if (pid && /^\d+$/.test(pid)) u.set("aicheckword_project_id", pid);
+    if (extraParams && typeof extraParams === "object") {
+        Object.keys(extraParams).forEach((k) => {
+            const v = extraParams[k];
+            if (v != null && String(v).trim() !== "") u.set(k, String(v));
+        });
+    }
+    return root + basePath + "?" + u.toString();
+}
+
+function gotoAuditPage(mode) {
+    const ids = _collectSelectedRecordIdsForAudit();
+    if (!ids.length) {
+        alert("请先勾选至少 1 条任务再发起审核");
+        return;
+    }
+    const m = (mode || "single").toString().toLowerCase();
+    if ((m === "multi" || m === "traceability") && ids.length < 2) {
+        alert(m + " 模式至少需要 2 条任务，当前选中 " + ids.length + " 条。");
+        return;
+    }
+    if (m === "single" && ids.length > 50) {
+        alert("single 模式单次最多 50 条任务，当前选中 " + ids.length + " 条，请分批。");
+        return;
+    }
+    const firstRec = _findUploadRecordById(ids[0]);
+    const url = buildIntegrationUrlFromRecord(firstRec, "/audit/", {
+        upload_ids: ids.join(","),
+        mode: m,
+    });
+    window.open(url, "_blank", "noopener");
+}
+
+(function _wireBatchAuditMenuOnce() {
+    if (window._batchAuditMenuBound) return;
+    window._batchAuditMenuBound = true;
+    document.addEventListener("DOMContentLoaded", () => {
+        const mainBtn = document.getElementById("batchAuditBtn");
+        if (mainBtn) {
+            mainBtn.addEventListener("click", (e) => {
+                e.preventDefault();
+                gotoAuditPage("single");
+            });
+        }
+        document.querySelectorAll("[data-audit-mode]").forEach((a) => {
+            a.addEventListener("click", (e) => {
+                e.preventDefault();
+                gotoAuditPage(a.getAttribute("data-audit-mode") || "single");
+            });
+        });
+    });
+})();
+
+function hideGoSignLoading() {
+    const mask = document.getElementById("goSignLoadingMask");
+    if (mask) mask.style.display = "none";
+}
+
+/** 从签字/打印页返回（含 bfcache）时恢复页面 1 可操作状态 */
+function resetGoHandoffPage1Ui() {
+    hideGoSignLoading();
+    const showHistoryEl = document.getElementById("showHistoryProjectsPage1");
+    if (showHistoryEl) showHistoryEl.checked = false;
+    const batchGoSignBtn = document.getElementById("batchGoSignBtn");
+    const batchGoPrintBtn = document.getElementById("batchGoPrintBtn");
+    if (batchGoSignBtn) {
+        batchGoSignBtn.disabled = false;
+        if (batchGoSignBtn.dataset.originalHtml) {
+            batchGoSignBtn.innerHTML = batchGoSignBtn.dataset.originalHtml;
+        }
+    }
+    if (batchGoPrintBtn) {
+        batchGoPrintBtn.disabled = false;
+        if (batchGoPrintBtn.dataset.originalHtml) {
+            batchGoPrintBtn.innerHTML = batchGoPrintBtn.dataset.originalHtml;
+        }
+    }
+    if (typeof loadRecordsList === "function") {
+        loadRecordsList();
+    } else if (
+        typeof renderRecordsTable === "function" &&
+        Array.isArray(allRecordsCache) &&
+        allRecordsCache.length
+    ) {
+        renderRecordsTable(allRecordsCache);
+    }
+}
+
+if (!window._goHandoffPageLifecycleBound) {
+    window._goHandoffPageLifecycleBound = true;
+    window.addEventListener("pageshow", () => {
+        resetGoHandoffPage1Ui();
+    });
+    window.addEventListener("pagehide", () => {
+        hideGoSignLoading();
+    });
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+            hideGoSignLoading();
+        }
+    });
 }
 
 function showGoSignLoading(message) {
@@ -1995,6 +2206,22 @@ function showGoSignLoading(message) {
     return mask;
 }
 
+function buildUploadTemplateFileUrl(uploadId) {
+    const root = (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
+    return (root || "") + "/api/uploads/" + encodeURIComponent(uploadId) + "/template-file";
+}
+
+/** 来源为「文件」时：左侧文字「文件」，右侧下载按钮 */
+function buildTaskFileSourceHtml(uploadId) {
+    const base = buildUploadTemplateFileUrl(uploadId);
+    return (
+        '<span class="d-inline-flex align-items-center justify-content-between gap-1" style="min-width:4.5rem">' +
+        '<span>文件</span>' +
+        '<a href="' + base + '" class="btn btn-sm btn-outline-primary py-0 px-2" title="下载 Word 模板">下载</a>' +
+        '</span>'
+    );
+}
+
 function renderRecordsTable(records) {
     const tbody = document.getElementById("recordsTableBody");
     if (!tbody) return;
@@ -2007,7 +2234,7 @@ function renderRecordsTable(records) {
         tr.dataset.projectName = (r.projectName != null && r.projectName !== "") ? String(r.projectName).trim() : "";
         let sourceHtml;
         if (r.hasFile) {
-            sourceHtml = "文件";
+            sourceHtml = buildTaskFileSourceHtml(r.id);
         } else if (r.hasLinks && r.templateLinks) {
             const firstLink = r.templateLinks.split('\n')[0].trim();
             sourceHtml = `<a href="${firstLink}" target="_blank" class="text-primary">链接(${r.linksCount})</a>`;
@@ -2037,8 +2264,8 @@ function renderRecordsTable(records) {
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
-            <td title="${_escTitle(r.projectName)}">${r.projectName}</td>
-            <td title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
+            <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceHtml}</td>
@@ -2063,6 +2290,7 @@ function renderRecordsTable(records) {
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
+                <button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="aicheckword 单文档审核">单审</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>
                 <button class="btn btn-sm btn-outline-danger btn-delete-task" data-id="${r.id}">删除</button>
@@ -2240,6 +2468,16 @@ function renderRecordsTable(records) {
             }
         });
     });
+
+    tbody.querySelectorAll(".btn-audit-task").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const id = btn.dataset.id || "";
+            if (!id) return;
+            const rec = _findUploadRecordById(id);
+            const url = buildIntegrationUrlFromRecord(rec, "/audit/", { upload_ids: id, mode: "single" });
+            window.open(url, "_blank", "noopener");
+        });
+    });
     
     initDragSort(tbody, async (orders) => {
         try {
@@ -2256,6 +2494,7 @@ function renderRecordsTable(records) {
     const selectAllEl = document.getElementById("recordSelectAll");
     if (selectAllEl) selectAllEl.checked = false;
     updateBatchEditButtonState();
+    scheduleSyncStickyNameColumns(document.getElementById("recordsTable"));
 }
 
 function loadRecordsList() {
@@ -2708,6 +2947,56 @@ function initMyTasksTableSort() {
     });
 }
 
+const PAGE2_TEMPLATE_FILE_ACCEPT = ".docx,.doc,.zip,.tar,.gz,.tgz,.rar";
+
+function confirmTemplateFileOverwrite(r) {
+    if (!r || (!r.hasFile && !r.hasLinks)) return true;
+    return window.confirm(
+        "上传将覆盖该任务已有的模板文件或文档链接。\n" +
+            "若当前来源为链接，上传后将改为「文件」来源。\n" +
+            "每条任务仅保留一个文件，再次上传会继续覆盖。\n\n是否继续？"
+    );
+}
+
+function page2ConfirmTemplateFileOverwrite(r) {
+    return confirmTemplateFileOverwrite(r);
+}
+
+async function uploadPage2TemplateFile(uploadId, file, btn) {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (btn) btn.disabled = true;
+    try {
+        const res = await App.request(`/api/uploads/${uploadId}/template-file`, {
+            method: "POST",
+            body: fd,
+        });
+        App.notify(res.message || "模板文件已上传");
+        if (typeof loadMyTasks === "function") loadMyTasks();
+        return res;
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function bindPage2TemplateFileUpload(tr, r) {
+    const input = tr.querySelector(".task-template-file-input");
+    const btn = tr.querySelector(".btn-replace-template-file");
+    if (!input || !btn) return;
+    btn.addEventListener("click", () => input.click());
+    input.addEventListener("change", async () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (!file) return;
+        if (!page2ConfirmTemplateFileOverwrite(r)) return;
+        try {
+            await uploadPage2TemplateFile(r.id, file, btn);
+        } catch (e) {
+            App.notify(e.message || "上传失败", "danger");
+        }
+    });
+}
+
 /** 页面2任务行 → 初稿生成页，查询参数供 /draft-gen 预填下拉。 */
 function buildDraftGenUrlFromTask(r) {
     const root = window.__SCRIPT_ROOT__ || "";
@@ -2739,9 +3028,15 @@ function renderMyTasksTable(records) {
             tr.dataset.groupIndex = String(groupIndex);
             if (collapsed) tr.classList.add("d-none");
         }
-        const source = r.hasFile ? "文件" : (r.hasLinks ? `链接` : "-");
         const firstLink = r.templateLinks ? (r.templateLinks.split("\n")[0] || "").trim() : "";
-        const sourceTd = r.hasLinks && firstLink ? `<a href="${firstLink}" target="_blank" class="text-primary">${source}</a>` : source;
+        let sourceTd;
+        if (r.hasFile) {
+            sourceTd = buildTaskFileSourceHtml(r.id);
+        } else if (r.hasLinks && firstLink) {
+            sourceTd = `<a href="${firstLink}" target="_blank" class="text-primary">链接</a>`;
+        } else {
+            sourceTd = "-";
+        }
         const linkCellHtml = r.hasLinks && firstLink
             ? `<a href="${firstLink}" target="_blank" class="text-primary small">打开</a>`
             : `<input type="text" class="form-control form-control-sm task-link-input" placeholder="填入链接" data-id="${r.id}" value="">`;
@@ -2758,8 +3053,8 @@ function renderMyTasksTable(records) {
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         tr.innerHTML = `
             <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>
-            <td title="${_escTitle(r.projectName)}">${r.projectName}</td>
-            <td title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
+            <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceTd}</td>
@@ -2782,10 +3077,14 @@ function renderMyTasksTable(records) {
             <td title="${_escTitle(r.model)}">${(r.model != null && r.model !== "") ? r.model : "-"}</td>
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
+                <input type="file" class="d-none task-template-file-input" accept="${PAGE2_TEMPLATE_FILE_ACCEPT}" data-id="${r.id}">
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-replace-template-file" title="上传模板到 FTP；覆盖已有文件或链接">上传/替换</button>
                 ${r.hasFile || (r.placeholders && r.placeholders.length > 0)
-                    ? `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders" data-id="${r.id}">填写</button>`
+                    ? `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders ms-1" data-id="${r.id}">填写</button>`
                     : ''}
                 <button type="button" class="btn btn-sm btn-outline-success btn-draft-gen-page2 ms-1" title="打开初稿生成页并带入本行项目/产品/国家/文件名">初稿生成</button>
+                <button type="button" class="btn btn-sm btn-outline-info btn-audit-modify-page2 ms-1" title="基于历史审核报告对本任务做就地修改">审核后修改</button>
+                <button type="button" class="btn btn-sm btn-outline-warning btn-translate-page2 ms-1" title="对本任务的模板文件做翻译">翻译</button>
             </td>
         `;
         const statusCell = tr.querySelector(".completion-status-cell");
@@ -2844,9 +3143,21 @@ function renderMyTasksTable(records) {
                 } catch (err) { App.notify(err.message || "保存失败", "danger"); }
             });
         }
+        bindPage2TemplateFileUpload(tr, r);
         tr.querySelector(".btn-fill-placeholders")?.addEventListener("click", () => openPlaceholderModal(r, placeholderModal));
         tr.querySelector(".btn-draft-gen-page2")?.addEventListener("click", () => {
             window.location.href = buildDraftGenUrlFromTask(r);
+        });
+        tr.querySelector(".btn-audit-modify-page2")?.addEventListener("click", () => {
+            const url = buildIntegrationUrlFromRecord(r, "/audit-modify/", {
+                base_upload_id: r.id,
+                template_file_name: r.fileName || "",
+            });
+            window.open(url, "_blank", "noopener");
+        });
+        tr.querySelector(".btn-translate-page2")?.addEventListener("click", () => {
+            const url = buildIntegrationUrlFromRecord(r, "/translate/", { upload_id: r.id });
+            window.open(url, "_blank", "noopener");
         });
         myTasksBody.appendChild(tr);
     };
@@ -2949,6 +3260,7 @@ function renderMyTasksTable(records) {
             App.notify(e.message, "danger");
         }
     });
+    scheduleSyncStickyNameColumns(document.getElementById("myTasksTable"));
 }
 
 function openPlaceholderModal(record, placeholderModal) {
@@ -3970,6 +4282,47 @@ function initNotifyTemplateModal() {
     });
 }
 
+/** 根据表头可见列宽，更新项目名称/文件名称 sticky 的 left 偏移 */
+function syncStickyNameColumns(table) {
+    if (!table || !table.classList.contains("table-sticky-name-cols")) return;
+    const thProject = table.querySelector('thead th[data-col="projectName"]');
+    const thFile = table.querySelector('thead th[data-col="fileName"]');
+    const row = (thProject || thFile)?.parentElement;
+    if (!row) return;
+
+    const prefixWidth = (beforeTh) => {
+        let left = 0;
+        for (const cell of row.children) {
+            if (cell === beforeTh) break;
+            if (cell.style.display === "none") continue;
+            left += cell.offsetWidth;
+        }
+        return left;
+    };
+
+    if (thProject && thProject.style.display !== "none") {
+        const left = prefixWidth(thProject);
+        const pw = thProject.offsetWidth || 150;
+        table.style.setProperty("--sticky-project-left", `${left}px`);
+        if (thFile && thFile.style.display !== "none") {
+            table.style.setProperty("--sticky-file-left", `${left + pw}px`);
+        } else {
+            table.style.removeProperty("--sticky-file-left");
+        }
+    } else if (thFile && thFile.style.display !== "none") {
+        table.style.removeProperty("--sticky-project-left");
+        table.style.setProperty("--sticky-file-left", `${prefixWidth(thFile)}px`);
+    } else {
+        table.style.removeProperty("--sticky-project-left");
+        table.style.removeProperty("--sticky-file-left");
+    }
+}
+
+function scheduleSyncStickyNameColumns(table) {
+    if (!table) return;
+    requestAnimationFrame(() => syncStickyNameColumns(table));
+}
+
 function initColumnToggle(btnId, menuId, tableId) {
     const btn = document.getElementById(btnId);
     const menu = document.getElementById(menuId);
@@ -4025,6 +4378,9 @@ function initColumnToggle(btnId, menuId, tableId) {
         const state = {};
         colList.forEach(c => { state[c.col] = c.visible; });
         try { localStorage.setItem(storeKey, JSON.stringify(state)); } catch (e) {}
+        if (table.classList.contains("table-sticky-name-cols")) {
+            scheduleSyncStickyNameColumns(table);
+        }
     }
 
     function syncCheckboxes() {
@@ -4090,9 +4446,22 @@ function initColumnToggle(btnId, menuId, tableId) {
         }
     });
 
-    const observer = new MutationObserver(() => applyVisibility());
+    const observer = new MutationObserver(() => {
+        applyVisibility();
+    });
     const tbody = table.querySelector("tbody");
     if (tbody) observer.observe(tbody, { childList: true });
+
+    if (table.classList.contains("table-sticky-name-cols")) {
+        scheduleSyncStickyNameColumns(table);
+        if (!window._stickyNameColsResizeBound) {
+            window._stickyNameColsResizeBound = true;
+            window.addEventListener("resize", () => {
+                scheduleSyncStickyNameColumns(document.getElementById("recordsTable"));
+                scheduleSyncStickyNameColumns(document.getElementById("myTasksTable"));
+            });
+        }
+    }
 }
 
 document.addEventListener("DOMContentLoaded", async () => {

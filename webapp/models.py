@@ -202,6 +202,11 @@ class UploadRecord(db.Model):
     quick_completed: Mapped[bool] = mapped_column(default=False)
     sort_order: Mapped[int] = mapped_column(default=0)
     dingtalk_notified_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    # aicheckword 审核集成：最近一次成功审核的 report_id 与摘要（用于页面1 展示与"审核后修改"自动取报告）
+    last_audit_report_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    last_audit_mode: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True)
+    last_audit_severity_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    last_audit_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime, default=now_local, onupdate=now_local
@@ -532,6 +537,57 @@ class DraftGenerationJob(db.Model):
     template_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     input_display_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    local_zip_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    # 区分初稿 / 审核后修改：draft（默认） | audit_modify
+    source: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True, default="draft", index=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class AuditJob(db.Model):
+    """aicheckword 审核集成的本地镜像 job 表（单/多/追溯三模式共用）。"""
+
+    __tablename__ = "audit_jobs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")
+    progress: Mapped[float] = mapped_column(db.Float, default=0.0)
+    message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    error_summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    mode: Mapped[str] = mapped_column(db.String(16), default="single")  # single|multi|traceability
+    collection: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True, default="task")  # task|manual
+    upload_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    report_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    reports_summary_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    local_zip_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+
+class TranslationJob(db.Model):
+    """aicheckword 翻译集成的本地镜像 job 表。"""
+
+    __tablename__ = "translation_jobs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(db.String(32), default="pending")
+    progress: Mapped[float] = mapped_column(db.Float, default=0.0)
+    message: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    error_summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    target_lang: Mapped[str] = mapped_column(db.String(8), default="en")  # en|de|zh
+    collection: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True, default="manual")  # task|manual
+    upload_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    out_file_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
     local_zip_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)

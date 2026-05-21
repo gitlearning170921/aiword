@@ -30,6 +30,8 @@
   var __iso13485DocPairs = null;
   /** @type {Promise<any[]> | null} */
   var __iso13485DocPairsPromise = null;
+  var _dgJobsPage = 1;
+  var _dgJobsTotalPages = 1;
 
   var _dgAuthorRoleUserTouched = false;
   var _dgAuthorRoleAutoSig = "";
@@ -694,6 +696,16 @@
     if (inp) inp.value = "";
   }
 
+  function formatTaskBaseFtpDisplay(j) {
+    if (!j) return "";
+    var name = (j.templateFileName || j.fileName || "").trim();
+    var ftpShown = (j.ftpPathDisplay || j.ftpPath || "").trim();
+    if (name && ftpShown) {
+      return "文件：" + name + "\n\nFTP：" + ftpShown;
+    }
+    return ftpShown || name || "";
+  }
+
   function loadTaskBaseForPage2Prefill(uploadId) {
     var w = el("dg_task_base_hint_wrap");
     var inp = el("dg_task_base_ftp_display");
@@ -708,10 +720,13 @@
       }
       var j = x.json;
       if (j.source === "ftp" && j.ftpPath) {
-        inp.value = j.ftpPath;
+        inp.value = formatTaskBaseFtpDisplay(j);
         _dgBaseUploadId = uploadId;
       } else if (j.source === "blob") {
-        inp.value = "（库内模板文件，提交时由服务端读取作 Base）";
+        var blobName = (j.templateFileName || j.fileName || "").trim();
+        inp.value = blobName
+          ? "文件：" + blobName + "\n（库内模板，提交时由服务端读取作 Base）"
+          : "（库内模板文件，提交时由服务端读取作 Base）";
         _dgBaseUploadId = uploadId;
       } else {
         inp.value = "";
@@ -1057,7 +1072,7 @@
       if (hint) hint.textContent = hasThis ? "已加密落库，重启后仍有效；输入框不留存明文（留空则不修改）" : "当前提供方尚未保存 Key，须填写并保存";
       if (sub) {
         sub.textContent =
-          "个人 Key 独立；下方 API Base / 模型可空。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。";
+          "个人 Key 独立；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。";
       }
     } else if (prov === "tongyi") {
       if (keyInp) keyInp.disabled = false;
@@ -1073,7 +1088,7 @@
       if (hint) hint.textContent = hasThis ? "已加密落库，重启后仍有效；输入框不留存明文（留空则不修改）" : "当前提供方尚未保存 Key，须填写并保存";
       if (sub) {
         sub.textContent =
-          "个人 Key 独立；下方 API Base URL、模型可空，则用 aicheckword 系统默认。";
+          "个人 Key 独立；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用上游默认。";
       }
     }
   }
@@ -1728,9 +1743,11 @@
       throw new Error("请至少勾选一个模板文件，或改为「该案例下全部模板文件」。");
     }
 
+    var providerVal = ((el("dg_provider") && el("dg_provider").value) || "").trim();
     const payload = {
       collection: coll,
       base_case_id: bc,
+      provider: providerVal || null,
       document_language: el("dg_doc_lang").value,
       inplace_patch: el("dg_inplace").value === "1",
       save_as_case: el("dg_save_case").value === "1",
@@ -1760,6 +1777,9 @@
         throw new Error("附加 JSON 无效: " + e);
       }
     }
+    var uapEl = el("dg_user_prompt_append");
+    var uap = uapEl ? String(uapEl.value || "").trim() : "";
+    if (uap) payload.user_prompt_append = uap.slice(0, 8000);
     return payload;
   }
 
@@ -1836,22 +1856,7 @@
     tick();
   }
 
-  function submitJob() {
-    let payload;
-    try {
-      payload = buildPayload();
-    } catch (e) {
-      showMsg(String(e.message || e), true);
-      return;
-    }
-    if (!payload.base_case_id) {
-      showMsg("请选择「模板项目案例」后再提交。", true);
-      return;
-    }
-    if (!_dgInputFilesAccum.length) {
-      showMsg("请先添加至少一个输入/参考文件（与 aicheckword 一致；可多次点「选择文件」追加，或在对话框内 Ctrl/Shift 多选）。", true);
-      return;
-    }
+  function postDraftJob(payload) {
     if (_dgBaseUploadId && String(_dgBaseUploadId).trim()) {
       payload.base_upload_id = String(_dgBaseUploadId).trim();
     }
@@ -1906,15 +1911,15 @@
           }
           const st = (finalJson.status || "").toLowerCase();
           if (st === "succeeded") {
-            _dgInputFilesAccum.length = 0;
-            _dgBaseFilesAccum.length = 0;
-            clearTaskBaseHintUi();
-            draftRenderFileList(_dgInputFilesAccum, "dg_input_files_list", "dg_input_files_count");
-            draftRenderFileList(_dgBaseFilesAccum, "dg_base_files_list", "dg_base_files_count");
-            showMsg("生成成功，可下载 ZIP", false);
+            // 保留输入/参考与 Base 列表，便于改参数后直接再次「提交生成」（勿清空，否则二次点击会因无文件而看似无反应）
+            showMsg(
+              "生成成功，可下载 ZIP。可修改选项后再次点击「提交生成」（已保留本次上传的文件列表）。",
+              false
+            );
             el("dg_btn_download").disabled = false;
           } else {
-            showMsg("任务结束: " + dgStatusZh(st) + " " + (finalJson.error || finalJson.errorSummary || ""), true);
+            var failDetail = finalJson.message || finalJson.error || finalJson.errorSummary || "";
+            showMsg("任务结束: " + dgStatusZh(st) + (failDetail ? " · " + failDetail : ""), true);
           }
           loadJobList();
         });
@@ -1929,6 +1934,101 @@
       });
   }
 
+  function submitJob() {
+    let payload;
+    try {
+      payload = buildPayload();
+    } catch (e) {
+      showMsg(String(e.message || e), true);
+      return;
+    }
+    if (!payload.base_case_id) {
+      showMsg("请选择「模板项目案例」后再提交。", true);
+      return;
+    }
+    if (!_dgInputFilesAccum.length) {
+      showMsg(
+        "请先添加至少一个输入/参考文件（与 aicheckword 一致；可多次点「选择文件」追加，或在对话框内 Ctrl/Shift 多选）。",
+        true
+      );
+      var msgBox = el("dg_msg");
+      if (msgBox && msgBox.scrollIntoView) {
+        msgBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+      return;
+    }
+    var hasTaskBase = !!(_dgBaseUploadId && String(_dgBaseUploadId).trim());
+    var hasUploadBase = _dgBaseFilesAccum.length > 0;
+    if (!hasTaskBase && !hasUploadBase) {
+      showMsg("请至少提供 1 个 Base 文件（可用页面2带入 Base，或手动上传 Base）。", true);
+      return;
+    }
+    if (hasTaskBase && hasUploadBase) {
+      showMsg("Base 来源唯一：请在“页面2带入 Base”与“手动上传 Base”二选一。", true);
+      return;
+    }
+    var provUse = ((el("dg_provider") && el("dg_provider").value) || "").trim();
+    var keyMap = lastHasApiKeyByProvider || {};
+    if (provUse && Object.prototype.hasOwnProperty.call(keyMap, provUse) && !keyMap[provUse]) {
+      showMsg(
+        "当前选择的是「" +
+          provUse +
+          "」，但该提供方尚未保存可用的 API Key。请填写 Key 并点「保存个人 LLM 设置」。",
+        true
+      );
+      return;
+    }
+    if (!payload.input_vector_on_duplicate) {
+      payload.input_vector_on_duplicate = "skip";
+    }
+    var pid = payload.project_id;
+    if (pid && _dgInputFilesAccum.length) {
+      var names = _dgInputFilesAccum.map(function (f) {
+        return f.name || "file";
+      });
+      fetch(root + "/draft-gen/api/check-input-vector-duplicates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ project_id: pid, file_names: names }),
+      })
+        .then(function (r) {
+          return r.json().then(function (j) {
+            return { ok: r.ok, json: j };
+          });
+        })
+        .then(function (x) {
+          if (!x.ok || !x.json || x.json.ok === false) {
+            var em =
+              (x.json && (x.json.message || x.json.detail)) ||
+              "检测参考文件是否已向量化失败";
+            showMsg(em, true);
+            return;
+          }
+          var dups = x.json.duplicates || [];
+          if (dups.length) {
+            var lines = dups.slice(0, 15).join("\n");
+            if (dups.length > 15) lines += "\n…等 " + dups.length + " 个";
+            var ask =
+              "以下参考/输入文件在当前项目中已向量化：\n\n" +
+              lines +
+              "\n\n点击「确定」= 重新向量化并覆盖已有数据；\n点击「取消」= 不重复向量化，优先使用库内已有向量。";
+            if (window.confirm(ask)) {
+              payload.input_vector_on_duplicate = "overwrite";
+            } else {
+              payload.input_vector_on_duplicate = "skip";
+            }
+          }
+          postDraftJob(payload);
+        })
+        .catch(function (e) {
+          showMsg(String(e.message || e), true);
+        });
+      return;
+    }
+    postDraftJob(payload);
+  }
+
   function downloadZip() {
     const localId = el("dg_local_job_id").value.trim();
     if (!localId) return;
@@ -1936,7 +2036,7 @@
   }
 
   function loadJobList() {
-    api("/draft-gen/api/jobs", { method: "GET" }).then(function (x) {
+    api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10", { method: "GET" }).then(function (x) {
       const tb = el("dg_job_rows");
       if (!tb) return;
       if (!x.ok) {
@@ -1984,6 +2084,15 @@
         tr.appendChild(tdOp);
         tb.appendChild(tr);
       });
+      var pg = (x.json && x.json.pagination) || {};
+      _dgJobsPage = parseInt(pg.page || _dgJobsPage || 1, 10) || 1;
+      _dgJobsTotalPages = parseInt(pg.total_pages || 1, 10) || 1;
+      var info = el("dg_job_pager_info");
+      if (info) info.textContent = "第 " + _dgJobsPage + "/" + _dgJobsTotalPages + " 页（共 " + (pg.total || 0) + " 条）";
+      var prev = el("dg_job_prev");
+      var next = el("dg_job_next");
+      if (prev) prev.disabled = _dgJobsPage <= 1;
+      if (next) next.disabled = _dgJobsPage >= _dgJobsTotalPages;
     });
   }
 
@@ -2055,6 +2164,18 @@
     if (b3) b3.addEventListener("click", submitJob);
     var b4 = el("dg_btn_download");
     if (b4) b4.addEventListener("click", downloadZip);
+    var pPrev = el("dg_job_prev");
+    if (pPrev) pPrev.addEventListener("click", function () {
+      if (_dgJobsPage <= 1) return;
+      _dgJobsPage -= 1;
+      loadJobList();
+    });
+    var pNext = el("dg_job_next");
+    if (pNext) pNext.addEventListener("click", function () {
+      if (_dgJobsPage >= _dgJobsTotalPages) return;
+      _dgJobsPage += 1;
+      loadJobList();
+    });
     var c0 = el("dg_collection");
     if (c0) c0.addEventListener("change", function () {
       if (el("dg_base_case")) el("dg_base_case").value = "";
@@ -2064,6 +2185,26 @@
     if (c1) c1.addEventListener("change", loadDraftBootstrap);
     var pm = el("dg_project_mode");
     if (pm) pm.addEventListener("change", syncProjectUi);
+    var pidSel = el("dg_project_id");
+    if (pidSel && pidSel.getAttribute("data-dg-proj-defaults") !== "1") {
+      pidSel.setAttribute("data-dg-proj-defaults", "1");
+      pidSel.addEventListener("change", function () {
+        var pid = parseInt(String(pidSel.value || "").trim(), 10) || 0;
+        if (pid <= 0) return;
+        api("/draft-gen/api/projects/" + pid + "/draft-defaults", { method: "GET" }).then(function (x) {
+          if (!x.ok || !x.json || !x.json.data) return;
+          var d = x.json.data;
+          var dl = el("dg_doc_lang");
+          if (dl && d.document_language_value !== undefined && d.document_language_value !== null) {
+            var vals = Array.prototype.map.call(dl.options, function (o) { return o.value; });
+            if (vals.indexOf(String(d.document_language_value)) >= 0) {
+              dl.value = String(d.document_language_value);
+              setPrefillBadge("doc_lang", true);
+            }
+          }
+        });
+      });
+    }
     FILTER_SELECT_IDS.forEach(wireSelectFilter);
     wireTemplateFilterInput();
     wireDraftFilePickers();

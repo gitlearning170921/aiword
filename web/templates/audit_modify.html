@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}审核后修改 · AI Word{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <h2 class="mb-3">审核后修改（aicheckword）</h2>
+    <p class="text-muted small">
+      与 aicheckword「审核后修改」同源：仅落实报告中<strong>立即修改</strong>审核点（高/中风险在未单独标记 <code>action</code> 时默认视为立即修改）。
+      默认<strong>不使用案例库模板</strong>、开启 <strong>Word 修订标记</strong>；PATCH 须带 <code>audit_point_refs</code>。
+      稳态模式：1 个目标文件 + 1 个 Base；请先「预览修改清单」核对后再提交。
+    </p>
+    <div id="amod_msg" class="alert d-none" role="alert"></div>
+
+    <div class="card mb-3">
+      <div class="card-header">审核报告来源</div>
+      <div class="card-body row g-2">
+        <div class="col-md-4">
+          <label class="form-label">aiword 任务（upload_id）</label>
+          <input id="amod_upload_id" class="form-control" placeholder="从页面2 任务行带入"/>
+          <div id="amod_upload_name" class="small text-muted mt-1"></div>
+          <div class="form-text">命中本地 <code>last_audit_report_id</code> 时自动取报告。</div>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">或直接指定 report_id</label>
+          <input id="amod_report_id" type="number" min="0" class="form-control" placeholder="aicheckword audit_reports.id"/>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">或上传 report.json（最终兜底）</label>
+          <input type="file" id="amod_report_file" class="form-control" accept=".json,application/json"/>
+        </div>
+        <div class="col-12 mt-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="amod_btn_preview">预览将注入的修改清单</button>
+          <span id="amod_preview_summary" class="ms-2 small text-muted"></span>
+        </div>
+        <div class="col-12">
+          <pre id="amod_preview_box" class="bg-light p-2 small d-none" style="max-height: 16rem; overflow-y: auto;"></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">Base 文件（原始 Word，需要被修改的那份）</div>
+      <div class="card-body row g-2">
+        <div class="col-md-6">
+          <label class="form-label">从页面2 任务带入 Base（base_upload_id）</label>
+          <input id="amod_base_upload_id" class="form-control" placeholder="留空则使用手动上传"/>
+          <div id="amod_base_upload_name" class="small text-muted mt-1"></div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">或手动上传 1 个 Base 文件</label>
+          <input type="file" id="amod_base_files" class="form-control" accept=".docx,.doc,.xlsx,.xls,.txt,.md"/>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">生成参数</div>
+      <div class="card-body row g-2">
+        <div class="col-md-4">
+          <label class="form-label">知识库（collection）</label>
+          <select id="amod_collection" class="form-select"></select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">模板项目案例（审核后修改默认不用）</label>
+          <select id="amod_base_case_id" class="form-select" disabled title="已固定 skip_case_template，不读取案例库正文">
+            <option value="">不读取案例模板（与 Streamlit 勾选一致）</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">aicheckword 项目</span><span id="amod_pf_project" class="dg-prefill-tag d-none">已匹配</span></label>
+          <input type="search" id="amod_project_sel_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目（名称/产品/ID）…" autocomplete="off"/>
+          <select id="amod_project_sel" class="form-select" required>
+            <option value="">请选择 aicheckword 项目（必选）</option>
+          </select>
+          <input type="hidden" id="amod_project_id" value=""/>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">目标文件名（须与 Base 展示名一致）</label>
+          <input id="amod_template_file_name" class="form-control" placeholder="留空则用 Base 文件名；用于对齐 audit_remediation 注入键"/>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">文档语言</label>
+          <select id="amod_document_language" class="form-select"></select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">LLM 提供方（可选）</label>
+          <select id="amod_provider" class="form-select">
+            <option value="">沿用初稿页保存的提供方</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="cursor">Cursor</option>
+            <option value="tongyi">通义千问</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">提交</div>
+      <div class="card-body">
+        <div class="form-check mb-1">
+          <input class="form-check-input" type="checkbox" id="amod_inplace_patch" checked disabled>
+          <label class="form-check-label" for="amod_inplace_patch">就地修改（固定开启）</label>
+        </div>
+        <div class="form-check mb-1">
+          <input class="form-check-input" type="checkbox" id="amod_skip_case_template">
+          <label class="form-check-label" for="amod_skip_case_template">不使用案例库模板（默认关，与 aicheckword 一致；勾选后仅 Base+审核点）</label>
+        </div>
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="amod_docx_track" checked>
+          <label class="form-check-label" for="amod_docx_track">Word 修订标记（默认开，与 aicheckword 一致）</label>
+        </div>
+        <button id="amod_btn_submit" type="button" class="btn btn-success">提交审核后修改</button>
+        <button id="amod_btn_download" type="button" class="btn btn-outline-primary ms-2" disabled>下载 ZIP（修改后文档 + patch 日志）</button>
+        <div class="mt-3 d-none" id="amod_progress_wrap" role="status" aria-live="polite">
+          <div id="amod_progress_headline" class="small text-muted mb-1">任务进度</div>
+          <div class="progress" style="height: 1.25rem;">
+            <div id="amod_progress_bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%;">0%</div>
+          </div>
+          <div id="amod_progress_caption" class="small text-muted mt-1">准备中…</div>
+        </div>
+        <div class="mt-2 small text-muted">当前本地任务编号：<code id="amod_local_job_id">—</code></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">我的审核后修改历史</div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm table-striped align-middle">
+            <thead>
+              <tr><th>时间</th><th>状态</th><th>目标文件</th><th>本地编号</th><th>消息</th><th>操作</th></tr>
+            </thead>
+            <tbody id="amod_history_rows"></tbody>
+          </table>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-2">
+          <div class="small text-muted" id="amod_history_pager_info">第 1/1 页</div>
+          <div class="btn-group btn-group-sm" role="group" aria-label="审核后修改历史分页">
+            <button type="button" class="btn btn-outline-secondary" id="amod_history_prev">上一页</button>
+            <button type="button" class="btn btn-outline-secondary" id="amod_history_next">下一页</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/_async_job.js', v=static_version) }}"></script>
+<script src="{{ url_for('static', filename='js/_integration_prefill.js', v=static_version) }}"></script>
+<script src="{{ url_for('static', filename='js/audit_modify.js', v=static_version) }}"></script>
+{% endblock %}

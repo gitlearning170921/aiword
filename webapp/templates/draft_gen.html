@@ -171,7 +171,7 @@
           </div>
           <div class="col-md-6">
             <label class="form-label">基础文件 Base（可选，可多批追加）</label>
-            <p class="text-muted small mb-1">与 aicheckword 就地修改用基底一致；可多次追加多份 Base。</p>
+            <p class="text-muted small mb-1">与 aicheckword 就地修改用基底一致；可多次追加多份 Base。<strong>建议 Base 文件名与模板目标文件名一致</strong>（或与压缩包内叶子名一致），以便与上游自动绑定；否则请在「附加 JSON」中传 <code>base_files_by_target</code>。</p>
             <div class="d-flex flex-wrap gap-2 mb-2">
               <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_pick_base">选择 Base…</button>
               <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_clear_base">清空列表</button>
@@ -182,12 +182,17 @@
             <div class="form-text" id="dg_base_files_count"></div>
             <div class="mt-2 d-none" id="dg_task_base_hint_wrap">
               <label class="form-label small mb-1" for="dg_task_base_ftp_display">页面2任务 Base（FTP 路径或服务端读取库内文件）</label>
-              <div class="input-group input-group-sm">
-                <input type="text" class="form-control font-monospace" id="dg_task_base_ftp_display" readonly placeholder="从页面2「初稿生成」带入后自动加载"/>
+              <div class="input-group input-group-sm align-items-start">
+                <textarea class="form-control form-control-sm" id="dg_task_base_ftp_display" rows="2" readonly placeholder="从页面2「初稿生成」带入后自动加载"></textarea>
                 <button type="button" class="btn btn-outline-secondary" id="dg_btn_clear_task_base" title="不再使用当前任务的模板作 Base">清除</button>
               </div>
-              <div class="form-text">提交时由服务端从 FTP 下载或从数据库读取，再作为 Base 转发上游（无需再手动选择同一文件）。</div>
+              <div class="form-text">提交时按任务 ID 由服务端读取 FTP 真实路径并下载，此处仅展示；无需再手动选择同一文件。</div>
             </div>
+          </div>
+          <div class="col-12">
+            <label class="form-label" for="dg_user_prompt_append">自定义提示（追加到每文件生成提示词末尾，可选）</label>
+            <textarea id="dg_user_prompt_append" class="form-control" rows="4" maxlength="8000" placeholder="例如：必须根据参考文件更新「第4章 软件需求」中所有表格；不得删减模板中的法规引用段落编号；输出 PATCH_JSON 时须带段落锚点。"></textarea>
+            <div class="form-text">与 aicheckword 内置提示词、skills/rules 叠加；单任务最多 8000 字。若正文几乎无变化，请优先确认已选「就地修改」且已上传对应 Base，并在此写清须改范围。</div>
           </div>
           <div class="col-12">
             <label class="form-label">附加高级参数（JSON，可选）</label>
@@ -237,6 +242,13 @@
           </thead>
           <tbody id="dg_job_rows"></tbody>
         </table>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-2">
+          <div class="small text-muted" id="dg_job_pager_info">第 1/1 页</div>
+          <div class="btn-group btn-group-sm" role="group" aria-label="初稿历史分页">
+            <button type="button" class="btn btn-outline-secondary" id="dg_job_prev">上一页</button>
+            <button type="button" class="btn btn-outline-secondary" id="dg_job_next">下一页</button>
+          </div>
         </div>
       </div>
     </div>

@@ -249,6 +249,19 @@
                 <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
             </div>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchGoSignBtn" disabled>批量去签字</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="batchGoPrintBtn" disabled>批量去打印</button>
+            <div class="btn-group ms-2" role="group" aria-label="aicheckword 集成">
+                <button type="button" class="btn btn-sm btn-outline-primary" id="batchAuditBtn" disabled title="对所选任务调用 aicheckword 单文档审核">批量审核（aicheckword）</button>
+                <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">
+                    <span class="visually-hidden">更多审核模式</span>
+                </button>
+                <ul class="dropdown-menu">
+                    <li><a class="dropdown-item" href="#" data-audit-mode="single">单文档审核（single）</a></li>
+                    <li><a class="dropdown-item" href="#" data-audit-mode="multi">多文档一致性（multi · ≥2）</a></li>
+                    <li><a class="dropdown-item" href="#" data-audit-mode="traceability">跨文档可追溯性（traceability · ≥2）</a></li>
+                </ul>
+            </div>
             <div class="btn-group ms-2">
                 <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle" id="selectByProjectBtn" data-bs-toggle="dropdown" aria-expanded="false">按项目选择</button>
                 <ul class="dropdown-menu dropdown-menu-end" id="selectByProjectMenu" aria-labelledby="selectByProjectBtn"></ul>
@@ -260,7 +273,7 @@
             </div>
         </div>
         <div class="table-responsive" style="max-height: 420px; overflow: auto;">
-            <table class="table table-bordered table-hover align-middle table-sm table-selectable table-compact" id="recordsTable" data-col-store-key="colVis_page1_v2">
+            <table class="table table-bordered table-hover align-middle table-sm table-selectable table-compact table-sticky-name-cols" id="recordsTable" data-col-store-key="colVis_page1_v2">
                 <thead class="table-light sticky-top">
                     <tr>
                         <th style="width:50px"><input type="checkbox" class="form-check-input" id="recordSelectAll" title="全选"></th>
@@ -470,7 +483,7 @@
                     <div class="col-12">
                         <label class="form-label small">重新上传任务模板（Word / 压缩包）</label>
                         <input type="file" class="form-control form-control-sm" id="editRecordTemplateFile" accept=".doc,.docx,.zip,.tar,.gz,.tgz,.rar">
-                        <div class="form-text small">支持单个 .doc/.docx，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。</div>
+                        <div class="form-text small">支持单个 .doc/.docx，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。上传后将覆盖已有文件或链接，且来源改为「文件」。</div>
                     </div>
                     <div class="col-12">
                         <label class="form-label small">下发任务备注</label>
