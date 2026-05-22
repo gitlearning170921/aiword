@@ -311,7 +311,19 @@
                 prog.setHeadline("翻译已完成");
                 prog.setTerminal(true);
                 prog.update(1, "翻译完成，可下载 ZIP");
-                showMsg("翻译完成", false);
+                var warns = (((finalJson || {}).result || {}).residual_cjk_warnings) || [];
+                if (Array.isArray(warns) && warns.length) {
+                  var total = 0;
+                  for (var wi = 0; wi < warns.length; wi++) {
+                    total += parseInt((warns[wi] && warns[wi].count) || 0, 10) || 0;
+                  }
+                  showMsg(
+                    "翻译完成，但检测到残留中文片段（文件 " + warns.length + " 个，片段约 " + total + " 处），建议执行“翻译校正”复核。",
+                    true
+                  );
+                } else {
+                  showMsg("翻译完成", false);
+                }
                 if (dlBtn) dlBtn.disabled = false;
               } else {
                 prog.setHeadline("翻译失败");
@@ -421,7 +433,19 @@
                 prog.setHeadline("校正已完成");
                 prog.setTerminal(true);
                 prog.update(1, "翻译校正完成，可下载 ZIP");
-                showMsg("翻译校正完成", false);
+                var warns = (((finalJson || {}).result || {}).residual_cjk_warnings) || [];
+                if (Array.isArray(warns) && warns.length) {
+                  var total = 0;
+                  for (var wi = 0; wi < warns.length; wi++) {
+                    total += parseInt((warns[wi] && warns[wi].count) || 0, 10) || 0;
+                  }
+                  showMsg(
+                    "翻译校正完成，但仍检测到残留中文片段（文件 " + warns.length + " 个，片段约 " + total + " 处）。",
+                    true
+                  );
+                } else {
+                  showMsg("翻译校正完成", false);
+                }
                 if (dlBtn) dlBtn.disabled = false;
               } else {
                 prog.setHeadline("校正失败");
