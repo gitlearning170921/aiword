@@ -2954,21 +2954,29 @@ def exam_center_page():
 def api_login():
     data = request.get_json(force=True) or {}
     username = (data.get("username") or "").strip()
-    password = (data.get("password") or "").strip()
+    password = data.get("password")
+    if password is None:
+        password = ""
+    else:
+        password = str(password)
     if not username or not password:
         return jsonify({"message": "用户名和密码不能为空"}), 400
     user = User.query.filter_by(username=username).first()
     if not user or not user.check_password(password):
-        return jsonify({"message": "用户名或密码错误"}), 401
+        return jsonify({
+            "message": "用户名或密码错误（页面2 账号须在页面1「用户管理」创建；与页面1/3 访问密码不是同一套）",
+        }), 401
     session["user_id"] = user.id
     session["username"] = user.username
     session["display_name"] = user.display_name or user.username
+    session["is_admin"] = bool(getattr(user, "is_admin", False))
     return jsonify({
         "message": "登录成功",
         "user": {
             "id": user.id,
             "username": user.username,
             "displayName": user.display_name,
+            "isAdmin": bool(getattr(user, "is_admin", False)),
         },
     })
 
@@ -2983,13 +2991,23 @@ def api_logout():
 def api_me():
     if not session.get("user_id"):
         return jsonify({"loggedIn": False})
+    is_admin = bool(session.get("is_admin"))
+    if not is_admin and session.get("user_id"):
+        u = User.query.get(session.get("user_id"))
+        is_admin = bool(u and getattr(u, "is_admin", False))
+        session["is_admin"] = is_admin
+    from .app_settings import effective_feature_flags_for_request
+
     return jsonify({
         "loggedIn": True,
         "user": {
             "id": session.get("user_id"),
             "username": session.get("username"),
             "displayName": session.get("display_name"),
+            "isAdmin": is_admin,
         },
+        "featureAdminViewer": bool(session.get("page13_authenticated")) or is_admin,
+        "featureFlags": effective_feature_flags_for_request(),
     })
 
 
@@ -6386,6 +6404,7 @@ def api_users_list():
                 "username": u.username,
                 "displayName": u.display_name,
                 "mobile": getattr(u, "mobile", None) or None,
+                "isAdmin": bool(getattr(u, "is_admin", False)),
                 "createdAt": u.created_at.isoformat() if u.created_at else None,
             }
             for u in users
@@ -6401,12 +6420,13 @@ def api_users_create():
     password = (data.get("password") or "").strip()
     display_name = (data.get("displayName") or "").strip() or None
     mobile = (data.get("mobile") or "").strip() or None
+    is_admin = bool(data.get("isAdmin"))
     if not username or not password:
         return jsonify({"message": "用户名和密码不能为空"}), 400
     existing = User.query.filter_by(username=username).first()
     if existing:
         return jsonify({"message": "用户名已存在"}), 409
-    user = User(username=username, display_name=display_name, mobile=mobile)
+    user = User(username=username, display_name=display_name, mobile=mobile, is_admin=is_admin)
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
@@ -6417,6 +6437,7 @@ def api_users_create():
             "username": user.username,
             "displayName": user.display_name,
             "mobile": user.mobile,
+            "isAdmin": bool(getattr(user, "is_admin", False)),
         },
     })
 
@@ -6424,7 +6445,7 @@ def api_users_create():
 @bp.patch("/api/users/<user_id>")
 @page13_access_required
 def api_users_update(user_id: str):
-    """更新用户显示名称、手机号（钉钉 @ 用）"""
+    """更新用户显示名称、手机号（钉钉 @ 用）、管理员标记"""
     user = User.query.get(user_id)
     if not user:
         return jsonify({"message": "用户不存在"}), 404
@@ -6433,9 +6454,20 @@ def api_users_update(user_id: str):
         user.display_name = (data["displayName"] or "").strip() or None
     if "mobile" in data:
         user.mobile = (data["mobile"] or "").strip() or None
+    if "isAdmin" in data:
+        user.is_admin = bool(data.get("isAdmin"))
     db.session.add(user)
     db.session.commit()
-    return jsonify({"message": "已更新", "user": {"id": user.id, "username": user.username, "displayName": user.display_name, "mobile": user.mobile}})
+    return jsonify({
+        "message": "已更新",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "displayName": user.display_name,
+            "mobile": user.mobile,
+            "isAdmin": bool(getattr(user, "is_admin", False)),
+        },
+    })
 
 
 @bp.delete("/api/users/<user_id>")
@@ -6451,32 +6483,70 @@ def api_users_delete(user_id: str):
 
 # ---------- 配置项 API ----------
 
+def _normalize_task_type_category(raw) -> str:
+    """归一化任务类型一级分类：仅 file/matter；未识别值回退为 file。"""
+    from .models import TASK_TYPE_CATEGORIES, TASK_TYPE_CATEGORY_FILE
+
+    v = (str(raw or "").strip().lower())
+    if v in TASK_TYPE_CATEGORIES:
+        return v
+    return TASK_TYPE_CATEGORY_FILE
+
+
 @bp.get("/api/configs/task-types")
 @_page13_or_login_required
 def api_task_types():
-    """获取任务类型配置列表"""
+    """获取任务类型配置列表（含一级分类 category：file=文件型；matter=事项型）。"""
     items = TaskTypeConfig.query.filter_by(is_active=True).order_by(TaskTypeConfig.sort_order).all()
     return jsonify({
-        "taskTypes": [{"id": t.id, "name": t.name} for t in items]
+        "taskTypes": [
+            {
+                "id": t.id,
+                "name": t.name,
+                "category": _normalize_task_type_category(getattr(t, "category", None)),
+            }
+            for t in items
+        ]
     })
 
 
 @bp.post("/api/configs/task-types")
 @page13_access_required
 def api_task_types_create():
-    """新增任务类型"""
+    """新增任务类型；可选 category 字段（file/matter，默认 file）。"""
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"message": "名称不能为空"}), 400
+    category = _normalize_task_type_category(data.get("category"))
     existing = TaskTypeConfig.query.filter_by(name=name).first()
     if existing:
         return jsonify({"message": "该类型已存在"}), 409
     max_order = db.session.query(db.func.max(TaskTypeConfig.sort_order)).scalar() or 0
-    item = TaskTypeConfig(name=name, sort_order=max_order + 1)
+    item = TaskTypeConfig(name=name, sort_order=max_order + 1, category=category)
     db.session.add(item)
     db.session.commit()
-    return jsonify({"message": "创建成功", "id": item.id, "name": item.name})
+    return jsonify({
+        "message": "创建成功",
+        "id": item.id,
+        "name": item.name,
+        "category": item.category,
+    })
+
+
+@bp.patch("/api/configs/task-types/<item_id>")
+@page13_access_required
+def api_task_types_update(item_id: str):
+    """更新任务类型分类（用于把已有类型在「文件型/事项型」间切换）。"""
+    item = TaskTypeConfig.query.get(item_id)
+    if not item:
+        return jsonify({"message": "不存在"}), 404
+    data = request.get_json(force=True) or {}
+    if "category" in data:
+        item.category = _normalize_task_type_category(data.get("category"))
+    db.session.add(item)
+    db.session.commit()
+    return jsonify({"message": "已更新", "id": item.id, "name": item.name, "category": item.category})
 
 
 @bp.delete("/api/configs/task-types/<item_id>")
@@ -7772,12 +7842,20 @@ def api_my_tasks():
 @login_required
 def api_update_execution_notes(upload_id: str):
     """更新执行任务备注（仅页面2可编辑）。"""
+    from .notify_content import (
+        MATTER_COMPLETE_NOTES_INVALID_MSG,
+        is_matter_task_upload,
+        is_meaningful_matter_execution_notes,
+    )
+
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
     data = request.get_json(force=True) or {}
     val = data.get("executionNotes")
     s = (val if isinstance(val, str) else "").strip() or None
+    if s and is_matter_task_upload(upload) and not is_meaningful_matter_execution_notes(s):
+        return jsonify({"message": MATTER_COMPLETE_NOTES_INVALID_MSG}), 400
     upload.execution_notes = s
     db.session.add(upload)
     db.session.commit()
@@ -7917,7 +7995,14 @@ def api_upload_replace_template_file(upload_id: str):
 @bp.patch("/api/uploads/<upload_id>/completion-status")
 @login_required
 def api_update_completion_status(upload_id: str):
-    """更新任务的完成状态（页面2使用）。可仅更新文档链接；标记完成时需已填写文档链接。"""
+    """更新任务的完成状态（页面2使用）。可仅更新文档链接；文件型标记完成需文档；事项型需执行任务备注。"""
+    from .notify_content import (
+        MATTER_COMPLETE_NOTES_INVALID_MSG,
+        MATTER_COMPLETE_NOTES_MSG,
+        is_matter_task_upload,
+        is_meaningful_matter_execution_notes,
+    )
+
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
@@ -7930,10 +8015,21 @@ def api_update_completion_status(upload_id: str):
         if template_links and not _is_valid_doc_link(template_links):
             return jsonify({"message": "请填写有效的文档链接（需以 http:// 或 https:// 开头）"}), 400
         upload.template_links = _normalize_template_links(template_links) or None
+
+    if "executionNotes" in data:
+        upload.execution_notes = (str(data.get("executionNotes") or "").strip()) or None
     
     if completion_status is not None:
         if completion_status:
-            if not upload.has_template():
+            if is_matter_task_upload(upload):
+                if not is_meaningful_matter_execution_notes(upload.execution_notes):
+                    msg = (
+                        MATTER_COMPLETE_NOTES_INVALID_MSG
+                        if (upload.execution_notes or "").strip()
+                        else MATTER_COMPLETE_NOTES_MSG
+                    )
+                    return jsonify({"message": msg}), 400
+            elif not upload.has_template():
                 return jsonify({"message": "请先填写文档链接后再标记完成状态"}), 400
             upload.completion_status = completion_status
             upload.task_status = "completed"
@@ -8730,21 +8826,16 @@ def api_notify_by_project():
         proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
         header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
         lines.append(header)
+        from .notify_content import notify_doc_link_suffix_md
+
         for u in uploads_in_group:
-            links = u.get_template_links_list() or []
-            link = links[0] if links else None
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
             due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
             file_label = u.file_name or "-"
             if u.task_type:
                 file_label += f" ({u.task_type})"
-            fv = getattr(u, "file_version", None) or "-"
-            ddd = (u.document_display_date.strftime("%Y-%m-%d") if u.document_display_date else "-") if getattr(u, "document_display_date", None) else "-"
-            rev = getattr(u, "reviewer", None) or "-"
-            appr = getattr(u, "approver", None) or "-"
-            line = f" - 文件名称：{file_label}  文件版本号：{fv}  截止日期：{due_red}  文档体现日期：{ddd}  审核：{rev}  批准：{appr}"
-            if link:
-                line += f"  文档地址：[点击打开]({link})"
+            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
+            line += notify_doc_link_suffix_md(u)
             lines.append(line)
         return "\n".join(lines)
     
@@ -8823,9 +8914,9 @@ def api_notify_by_author():
         proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
         header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
         lines.append(header)
+        from .notify_content import notify_doc_link_suffix_md
+
         for u in uploads_in_group:
-            links = u.get_template_links_list() or []
-            link = links[0] if links else None
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
             due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
             file_label = u.file_name or "-"
@@ -8836,8 +8927,7 @@ def api_notify_by_author():
             rev = getattr(u, "reviewer", None) or "-"
             appr = getattr(u, "approver", None) or "-"
             line = f" - 文件名称：{file_label}  文件版本号：{fv}  截止日期：{due_red}  文档体现日期：{ddd}  审核：{rev}  批准：{appr}"
-            if link:
-                line += f"  文档地址：[点击打开]({link})"
+            line += notify_doc_link_suffix_md(u)
             lines.append(line)
         return "\n".join(lines)
     
@@ -8906,11 +8996,8 @@ def api_notify_single_task():
     if upload.completion_status:
         return jsonify({"message": "该任务已完成，无需催办"})
     
-    doc_link = ""
-    if upload.template_links:
-        links = upload.get_template_links_list()
-        if links:
-            doc_link = links[0]
+    from .notify_content import notify_doc_link_md_for_template
+
     due_date_str = upload.due_date.strftime("%Y-%m-%d") if upload.due_date else "-"
     due_red = f'<font color="red">{due_date_str}</font>' if due_date_str != "-" else "-"
     business_side = upload.business_side or "-"
@@ -8923,7 +9010,7 @@ def api_notify_single_task():
     approver = getattr(upload, "approver", None) or "-"
     project_notes = getattr(upload, "project_notes", None) or "-"
     title = f"{upload.project_name}/{upload.file_name}" + (f" ({upload.task_type})" if upload.task_type else "")
-    doc_link_md = f"[点击打开]({doc_link})" if doc_link else "（无链接）"
+    doc_link_md = notify_doc_link_md_for_template(upload)
 
     template = _get_notify_template("single_task_reminder")
     if not template:
@@ -9064,6 +9151,7 @@ def api_get_system_settings():
         SYSTEM_CONFIG_KEYS,
         persist_config_json_into_empty_db_keys,
         sync_authoritative_sources_into_db,
+        system_config_sections_for_api,
         system_settings_for_api_get,
     )
 
@@ -9073,7 +9161,11 @@ def api_get_system_settings():
     persist_config_json_into_empty_db_keys(project_root, app)
     keys_meta = [{"key": k, "label": lbl, "sensitive": sens} for k, lbl, sens in SYSTEM_CONFIG_KEYS]
     return jsonify(
-        {"settings": system_settings_for_api_get(app, project_root), "keys": keys_meta}
+        {
+            "settings": system_settings_for_api_get(app, project_root),
+            "keys": keys_meta,
+            "sections": system_config_sections_for_api(),
+        }
     )
 
 
@@ -9085,8 +9177,16 @@ def api_put_system_settings():
     project_root = Path(current_app.root_path).resolve().parent
     from .app_settings import apply_system_settings_to_flask, save_system_settings
 
-    save_system_settings({str(k): ("" if v is None else str(v)) for k, v in body.items()}, project_root)
-    apply_system_settings_to_flask(current_app._get_current_object(), project_root)
+    try:
+        save_system_settings(
+            {str(k): ("" if v is None else str(v)) for k, v in body.items()},
+            project_root,
+        )
+        apply_system_settings_to_flask(current_app._get_current_object(), project_root)
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("保存系统配置失败")
+        return jsonify({"message": f"保存失败：{e}"}), 500
     return jsonify({"success": True, "message": "已保存。若修改了数据库连接 URI，请重启服务后生效。"})
 
 

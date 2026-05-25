@@ -6,7 +6,9 @@
         <h1>页面1 · 模板上传与任务管理</h1>
         <p>批量录入任务信息，支持上传模板文件（含与 aicheckword 一致的 .zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
+    {% if feature_flags.FEATURE_EXAM_CENTER %}
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
+    {% endif %}
 </div>
 
 <div class="card mb-4">
@@ -162,9 +164,19 @@
                 <input type="file" id="importTasksFile" accept=".csv,.xlsx" class="d-none">
                 <button type="button" class="btn btn-outline-primary btn-sm ms-2" id="addProjectBtn">+ 添加录入块</button>
                 <button type="button" class="btn btn-success btn-sm ms-2" id="saveAllBtn">保存全部</button>
+                <span id="saveAllProgressHint" class="small text-primary ms-2 d-none" aria-live="polite"></span>
             </div>
         </div>
         <p class="text-muted small mb-3">第一层：项目信息；第二层：该项目下的文件/事项任务。重复校验基于：项目名称 + 文件名称 + 任务类型 + 编写人。可先下载「空模板」或「示例模板」填写后导入，或导入另一工具导出的待办（CSV/Excel，表头需含：项目名称、文件名称、编写人员等）。</p>
+
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3 py-2 px-2 rounded border bg-light">
+            <span class="small text-muted text-nowrap">从已保存任务选项目：</span>
+            <select class="form-select form-select-sm" id="pickSavedProjectForEntry" style="max-width:min(360px, 100%)">
+                <option value="">— 请选择已有项目 —</option>
+            </select>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="createEntryBlockFromSavedProjectBtn">新建录入块并带入项目信息</button>
+            <span class="small text-muted">也可在下方「已保存的任务列表」中<strong>双击项目名称</strong>快速新建</span>
+        </div>
 
         <div id="projectBlocksContainer">
             <!-- 项目块由 JS 动态插入 -->
@@ -235,7 +247,7 @@
                 </div>
             </div>
         </div>
-        <p class="text-muted small">支持拖动调整排序。</p>
+        <p class="text-muted small">支持拖动调整排序；<strong>双击项目名称</strong>可在上方任务录入区新建该项目录入块并自动带入项目信息。</p>
         <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
             <span class="me-2">分组：</span>
             <div class="btn-group btn-group-sm" role="group">
@@ -312,32 +324,37 @@
 </div>
 
 <div class="row g-4">
-    <div class="col-md-6">
-        <div class="card mb-3">
+    <div class="col-lg-7">
+        <div class="card mb-3 users-management-card">
             <div class="card-body">
-                <h5 class="card-title">账号管理（页面2登录）</h5>
-                <form id="userForm" class="mb-3">
-                    <div class="mb-2">
-                        <input type="text" class="form-control form-control-sm" id="newUsername" placeholder="用户名 *" required>
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                    <h5 class="card-title mb-0">账号管理（页面2登录）</h5>
+                    <button type="button" class="btn btn-success btn-sm" id="btnOpenCreateUserModal">创建账号</button>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-5">
+                        <input type="text" class="form-control form-control-sm" id="filterUserKeyword" placeholder="筛选：用户名 / 显示名称">
                     </div>
-                    <div class="mb-2">
-                        <input type="password" class="form-control form-control-sm" id="newPassword" placeholder="密码 *" required>
+                    <div class="col-md-4">
+                        <input type="text" class="form-control form-control-sm" id="filterUserMobile" placeholder="筛选：手机号">
                     </div>
-                    <div class="mb-2">
-                        <input type="text" class="form-control form-control-sm" id="newDisplayName" placeholder="显示名称（可选）">
+                    <div class="col-md-3">
+                        <select class="form-select form-select-sm" id="filterUserAdmin">
+                            <option value="">全部账号</option>
+                            <option value="yes">仅管理员</option>
+                            <option value="no">仅普通账号</option>
+                        </select>
                     </div>
-                    <div class="mb-2">
-                        <input type="text" class="form-control form-control-sm" id="newMobile" placeholder="手机号（钉钉@用，可选）">
-                    </div>
-                    <button type="submit" class="btn btn-success btn-sm w-100">创建账号</button>
-                </form>
-                <hr>
-                <div class="table-responsive" style="max-height: 150px; overflow-y: auto;">
-                    <table class="table table-sm table-bordered align-middle mb-0">
+                </div>
+                <p class="small text-muted mb-2" id="usersListCountHint">共 0 个账号</p>
+                <div class="table-responsive users-list-panel">
+                    <table class="table table-sm table-bordered table-hover align-middle mb-0">
                         <thead class="table-light">
                             <tr>
                                 <th>用户名</th>
+                                <th>显示名称</th>
                                 <th>手机号</th>
+                                <th>管理员</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
@@ -347,17 +364,22 @@
             </div>
         </div>
     </div>
-    <div class="col-md-6">
+    <div class="col-lg-5">
         <div class="card">
             <div class="card-body">
                 <h5 class="card-title">配置管理</h5>
                 <div class="mb-3">
                     <label class="form-label small fw-bold">任务类型</label>
                     <div class="input-group input-group-sm mb-2">
+                        <select class="form-select" id="newTaskCategory" style="max-width:96px" title="任务类别">
+                            <option value="file" selected>文件型</option>
+                            <option value="matter">事项型</option>
+                        </select>
                         <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
                         <button class="btn btn-outline-success" type="button" id="addTaskTypeBtn">+</button>
                     </div>
                     <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
+                    <p class="small text-muted mb-0">点击徽章可在「文件型 ↔ 事项型」间切换。事项型任务在页面2 仅做事项跟进，不出现「上传/替换/初稿生成/审核后修改/翻译」等文档相关按钮。</p>
                 </div>
                 <hr>
                 <div>
@@ -426,7 +448,14 @@
                         <label class="form-label small">文件名称 *</label>
                         <input type="text" class="form-control form-control-sm" id="editRecordFile" required>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-3">
+                        <label class="form-label small">任务类别</label>
+                        <select class="form-select form-select-sm" id="editRecordTaskCategory">
+                            <option value="file">文件型</option>
+                            <option value="matter">事项型</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
                         <label class="form-label small">任务类型</label>
                         <select class="form-select form-select-sm" id="editRecordTaskType">
                             <option value="">选择类型</option>
@@ -444,7 +473,7 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">编写人员 *</label>
-                        <input type="text" class="form-control form-control-sm" id="editRecordAuthor" required>
+                        <div id="editRecordAuthorPicker"></div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">截止日期</label>
@@ -560,7 +589,15 @@
             <div class="modal-body">
                 <p class="text-muted small">以下字段将统一应用到所选任务，留空则不修改该字段。</p>
                 <div class="row g-2">
-                    <div class="col-md-6">
+                    <div class="col-md-3">
+                        <label class="form-label small">任务类别</label>
+                        <select class="form-select form-select-sm" id="batchEditTaskCategory">
+                            <option value="">— 不修改 —</option>
+                            <option value="file">文件型</option>
+                            <option value="matter">事项型</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
                         <label class="form-label small">任务类型</label>
                         <select class="form-select form-select-sm" id="batchEditTaskType">
                             <option value="">— 不修改 —</option>
@@ -578,7 +615,7 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">编写人员</label>
-                        <input type="text" class="form-control form-control-sm" id="batchEditAuthor" placeholder="留空不修改">
+                        <div id="batchEditAuthorPicker"></div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">负责人</label>
@@ -670,7 +707,47 @@
     </div>
 </div>
 
-<!-- 创建账号弹窗（置于编辑任务弹窗之后，避免被遮挡） -->
+<!-- 页面1 账号管理：创建账号 -->
+<div class="modal fade" id="createUserModal" tabindex="-1" data-bs-backdrop="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">创建账号</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="createUserForm">
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">用户名 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control form-control-sm" id="newUsername" placeholder="登录用户名" required autocomplete="off">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">密码 <span class="text-danger">*</span></label>
+                        <input type="password" class="form-control form-control-sm" id="newPassword" placeholder="登录密码" required autocomplete="new-password">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">显示名称</label>
+                        <input type="text" class="form-control form-control-sm" id="newDisplayName" placeholder="可选，默认同用户名" autocomplete="off">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">手机号</label>
+                        <input type="text" class="form-control form-control-sm" id="newMobile" placeholder="钉钉 @ 用，可选" autocomplete="off">
+                    </div>
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="newUserIsAdmin" value="1">
+                        <label class="form-check-label small" for="newUserIsAdmin">管理员（页面2 不受功能开关限制）</label>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success btn-sm" id="createUserSubmitBtn">创建</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑任务等场景：快速创建账号（置于编辑任务弹窗之后，避免被遮挡） -->
 <div class="modal fade" id="quickUserModal" tabindex="-1" data-bs-backdrop="true">
     <div class="modal-dialog modal-sm">
         <div class="modal-content">

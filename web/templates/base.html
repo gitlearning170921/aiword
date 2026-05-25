@@ -60,6 +60,8 @@
 <script>
     // 兼容反向代理/子路径部署（SCRIPT_NAME），用于前端拼接 API 路径
     window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
+    // 页面2/考试训练中心入口开关：由后端 app_configs 控制，关闭时前端不渲染对应按钮。
+    window.__FEATURE_FLAGS__ = {{ (feature_flags or {})|tojson }};
 </script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>

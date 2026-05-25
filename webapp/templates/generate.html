@@ -4,12 +4,16 @@
 <div class="hero-bar d-flex justify-content-between align-items-center">
     <div>
         <h1>页面2 · 我的任务</h1>
-        <p class="mb-0">查看分配给您的任务列表，更新完成状态或填写占位符生成文档。</p>
+        <p class="mb-0">查看分配给您的任务列表，<span class="page2-completion-hint">请及时更新完成状态</span>或填写占位符生成文档。</p>
     </div>
     <div id="heroBarActions" class="text-end">
         <span id="userInfo" class="badge bg-light text-dark me-2"></span>
+        {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
         <a class="btn btn-outline-success btn-sm me-2" href="{{ url_for('draft_gen.draft_gen_page') }}">初稿生成</a>
+        {% endif %}
+        {% if feature_flags.FEATURE_EXAM_CENTER %}
         <a class="btn btn-outline-primary btn-sm me-2" href="{{ url_for('pages.exam_center_page', role='student') }}">进入考试训练中心</a>
+        {% endif %}
         <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
     </div>
 </div>
@@ -47,7 +51,7 @@
                 </div>
             </div>
         </div>
-        <p class="text-muted small">以下为分配给您的任务，可直接标记完成状态、填写占位符，或通过「上传/替换」上传模板文件（存 FTP，会覆盖已有文件或链接；原来源为链接时上传后改为文件）。支持拖动排序。</p>
+        <p class="text-muted small">以下为分配给您的任务，可直接<span class="page2-completion-hint">标记完成状态</span>{% if feature_flags.FEATURE_PAGE2_UPLOAD_REPLACE %}、填写占位符，或通过「上传/替换」上传模板文件（存 FTP，会覆盖已有文件或链接；原来源为链接时上传后改为文件）{% else %}、填写占位符{% endif %}。支持拖动排序。</p>
         <div class="d-flex align-items-center mb-2">
             <span class="me-2">分组：</span>
             <div class="btn-group btn-group-sm" role="group">
@@ -79,7 +83,7 @@
                         <th class="th-sortable col-narrow" data-sort-key="country" data-col="country">国家 <span class="sort-indicator"></span></th>
                         <th data-col="notes">下发任务备注</th>
                         <th data-col="executionNotes">执行任务备注</th>
-                        <th data-col="completionStatus">完成状态</th>
+                        <th data-col="completionStatus" class="page2-completion-hint">完成状态</th>
                         <th class="th-sortable col-narrow" data-sort-key="projectCode" data-col="projectCode">项目编号 <span class="sort-indicator"></span></th>
                         <th class="th-sortable col-narrow" data-sort-key="fileVersion" data-col="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
                         <th class="th-sortable" data-sort-key="documentDisplayDate" data-col="docDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
@@ -140,8 +144,10 @@
     <strong>说明：</strong> 
     <ul class="mb-0">
         <li>此页面仅显示分配给您的任务（根据编写人员或负责人匹配）</li>
-        <li>可直接在下拉框中选择完成状态进行标记</li>
+        <li>可直接在下拉框中<span class="page2-completion-hint">选择完成状态进行标记</span>（事项型任务须先在「执行任务备注」填写有效完成情况）</li>
+        {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
         <li>占位符「填写」生成与初稿不同：初稿请在<strong>操作</strong>列点「初稿生成」跳转（自动带入本行项目/产品/国家/文件名等）。</li>
+        {% endif %}
         <li>如果是链接类型的任务，可以直接访问链接填写后标记状态</li>
     </ul>
 </div>

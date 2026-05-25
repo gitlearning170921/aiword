@@ -433,6 +433,12 @@ def ensure_schema(app: Flask):
         "ALTER TABLE users ADD COLUMN mobile VARCHAR(32)",
     )
     ensure_column(
+        "users",
+        "is_admin",
+        "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0",
+    )
+    ensure_column(
         "generate_records",
         "output_file_name",
         "ALTER TABLE generate_records ADD COLUMN output_file_name TEXT",
@@ -789,11 +795,29 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
     )
 
+    # 任务类型一级分类（文件型/事项型）：历史行回填为 file
+    ensure_column(
+        "task_type_configs",
+        "category",
+        "ALTER TABLE task_type_configs ADD COLUMN category VARCHAR(16) NOT NULL DEFAULT 'file'",
+        "ALTER TABLE task_type_configs ADD COLUMN category VARCHAR(16) NOT NULL DEFAULT 'file'",
+    )
+    if "task_type_configs" in existing_tables:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "UPDATE task_type_configs SET category='file' "
+                    "WHERE category IS NULL OR TRIM(category)=''"
+                ))
+                conn.commit()
+        except Exception:
+            pass
+
 
 def init_default_configs():
     """初始化默认的配置项数据"""
-    from .models import TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig
-    
+    from .models import TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig, TASK_TYPE_CATEGORY_FILE
+
     default_task_types = [
         ("初稿待编写", 1),
         ("初稿审核待修改", 2),
@@ -825,7 +849,10 @@ def init_default_configs():
     for name, order in default_task_types:
         existing = TaskTypeConfig.query.filter_by(name=name).first()
         if not existing:
-            db.session.add(TaskTypeConfig(name=name, sort_order=order))
+            db.session.add(TaskTypeConfig(name=name, sort_order=order, category=TASK_TYPE_CATEGORY_FILE))
+        elif not (existing.category or "").strip():
+            existing.category = TASK_TYPE_CATEGORY_FILE
+            db.session.add(existing)
     
     for name, order in default_completion_statuses:
         existing = CompletionStatusConfig.query.filter_by(name=name).first()
@@ -863,8 +890,14 @@ def init_default_configs():
         db.session.add(AppConfig(config_key="MODULE_CASCADE_DELAY_MINUTES", config_value="5"))
 
     from .app_settings import SYSTEM_CONFIG_KEYS
+
+    existing_cfg_keys = {
+        row[0]
+        for row in db.session.query(AppConfig.config_key).all()
+        if row and row[0]
+    }
     for sk, _, _ in SYSTEM_CONFIG_KEYS:
-        if not AppConfig.query.filter_by(config_key=sk).first():
+        if sk not in existing_cfg_keys:
             db.session.add(AppConfig(config_key=sk, config_value=""))
 
     db.session.commit()
@@ -929,8 +962,12 @@ def create_app() -> Flask:
     # 已注释 SQLite 入口，避免搞混当前连接的数据库。当前仅使用 MySQL。
     # default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")
     default_db_uri = "mysql+pymysql://root:mysql170921@10.26.1.221:13306/aiword?charset=utf8mb4"
-    from .app_settings import resolve_database_uri
-    db_uri = resolve_database_uri(project_root, os.getenv("DATABASE_URL", default_db_uri))
+    from .app_settings import normalize_database_uri_for_engine, resolve_database_uri
+
+    # 数据库 URI：以页面3 系统配置 (app_configs) 为准；不读取环境变量 DATABASE_URL
+    db_uri = normalize_database_uri_for_engine(
+        resolve_database_uri(project_root, default_db_uri)
+    )
 
     if db_uri.startswith("mysql"):
         try:
@@ -952,9 +989,6 @@ def create_app() -> Flask:
         "pool_recycle": 300,
         "pool_pre_ping": True,
     }
-    if db_uri.startswith("mysql"):
-        _sep = "&" if "?" in db_uri else "?"
-        db_uri = db_uri + _sep + "connect_timeout=10"
 
     app.config.update(
         SQLALCHEMY_DATABASE_URI=db_uri,
@@ -999,6 +1033,17 @@ def create_app() -> Flask:
     @app.context_processor
     def _inject_static_version():
         return {"static_version": _static_assets_version()}
+
+    @app.context_processor
+    def _inject_feature_flags():
+        """注入页面2功能开关（管理员视角全开），供模板 {% if feature_flags.xxx %} 使用。"""
+        try:
+            from .app_settings import effective_feature_flags_for_request
+
+            flags = effective_feature_flags_for_request(app)
+        except Exception:
+            flags = {}
+        return {"feature_flags": flags}
 
     @app.after_request
     def _no_store_for_app_js_css(response):
@@ -1074,10 +1119,15 @@ def create_app() -> Flask:
 
         db.create_all()
         init_default_configs()
-        from .app_settings import ensure_environment_variables_migrated_to_db, apply_system_settings_to_flask
+        from .app_settings import (
+            apply_system_settings_to_flask,
+            ensure_environment_variables_migrated_to_db,
+            sync_database_url_bootstrap_from_app_configs,
+        )
         ensure_environment_variables_migrated_to_db(
             project_root, startup_database_uri=db_uri, flask_app=app
         )
+        sync_database_url_bootstrap_from_app_configs(app, project_root)
         from .app_settings import sync_authoritative_sources_into_db
 
         sync_authoritative_sources_into_db(project_root, app)

@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 
 # 与历史环境变量名一致，便于迁移
 SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
-    ("DATABASE_URL", "数据库连接 URI（保存后写入 instance/database_url.txt，重启后生效；也可继续用环境变量 DATABASE_URL）", True),
+    (
+        "DATABASE_URL",
+        "数据库连接 URI（仅在页面3「系统配置」维护，存入 app_configs；保存时同步 instance/database_url.txt 供冷启动；修改后需重启服务）",
+        True,
+    ),
     ("SECRET_KEY", "Flask Session 密钥", True),
     ("BASE_URL", "对外访问根地址（催办链接等，勿以 / 结尾）", False),
     ("DINGTALK_WEBHOOK", "钉钉群机器人 Webhook", True),
@@ -95,7 +99,215 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "定时任务实例标识（多套部署共库时填不同值则各发一条钉钉；单套部署留空）",
         False,
     ),
+    # 功能开关：1=开启入口；0/空=隐藏入口。
+    # 默认全部关闭（首次升级后入口隐藏），管理员在页面3「系统配置」中按需启用。
+    # 「上传/替换」「初稿生成」「审核后修改」「翻译」对应页面2 任务列表中的功能按钮；
+    # 「考试训练中心」对应页面1/2/3 顶部「进入考试训练中心」按钮。
+    (
+        "FEATURE_PAGE2_UPLOAD_REPLACE",
+        "页面2功能开关 · 上传/替换（1=显示按钮；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE2_DRAFT_GEN",
+        "页面2功能开关 · 初稿生成（同时控制顶部「初稿生成」入口；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE2_AUDIT_MODIFY",
+        "页面2功能开关 · 审核后修改（1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE2_TRANSLATE",
+        "页面2功能开关 · 翻译（1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_EXAM_CENTER",
+        "考试训练中心入口开关（页面1/2/3 顶部「进入考试训练中心」按钮；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
 ]
+
+
+# 功能开关键集合（前端 feature_flags 注入用）。顺序与含义同 SYSTEM_CONFIG_KEYS 中的注释。
+FEATURE_FLAG_KEYS: tuple[str, ...] = (
+    "FEATURE_PAGE2_UPLOAD_REPLACE",
+    "FEATURE_PAGE2_DRAFT_GEN",
+    "FEATURE_PAGE2_AUDIT_MODIFY",
+    "FEATURE_PAGE2_TRANSLATE",
+    "FEATURE_EXAM_CENTER",
+)
+
+# 页面3「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
+# defaultExpanded=True 的分区默认展开，其余折叠（details 无 open 属性）。
+SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
+    {
+        "id": "feature_flags",
+        "title": "功能开关",
+        "hint": "控制页面2 操作按钮与考试训练中心入口；填 1 开启，留空或 0 关闭。",
+        "defaultExpanded": True,
+        "keys": FEATURE_FLAG_KEYS,
+    },
+    {
+        "id": "core",
+        "title": "基础与安全",
+        "hint": "部署、访问控制与对外地址；修改数据库连接后需重启服务。",
+        "defaultExpanded": True,
+        "keys": (
+            "DATABASE_URL",
+            "SECRET_KEY",
+            "BASE_URL",
+            "PAGE13_ACCESS_PASSWORD",
+            "INTEGRATION_SECRET",
+            "UPLOAD_FOLDER",
+            "OUTPUT_FOLDER",
+            "SCHEDULER_INSTANCE_ID",
+        ),
+    },
+    {
+        "id": "dingtalk",
+        "title": "钉钉通知",
+        "hint": "群机器人与工作通知；敏感项留空表示不修改已有值。",
+        "defaultExpanded": True,
+        "keys": (
+            "DINGTALK_WEBHOOK",
+            "DINGTALK_SECRET",
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_AGENT_ID",
+        ),
+    },
+    {
+        "id": "exam_center",
+        "title": "考试训练中心",
+        "hint": "考试中心后端地址、鉴权与录题/及格线等业务参数。",
+        "defaultExpanded": False,
+        "keys": (
+            "QUIZ_API_BASE_URL",
+            "QUIZ_API_BEARER_TOKEN",
+            "QUIZ_API_SECRET",
+            "QUIZ_API_TIMEOUT_SECONDS",
+            "EXAM_PASS_SCORE",
+            "EXAM_INGEST_TARGET_COUNT",
+            "EXAM_INGEST_KNOWLEDGE_WEIGHTS",
+            "EXAM_INGEST_QUESTION_TYPE_WEIGHTS",
+            "EXAM_INGEST_MAX_SIMILAR_FRAC",
+        ),
+    },
+    {
+        "id": "aicheckword",
+        "title": "aicheckword 集成",
+        "hint": "初稿、审核、翻译等对接地址与超时；可与考试中心使用不同端口。",
+        "defaultExpanded": False,
+        "keys": (
+            "AICHECKWORD_DRAFT_API_BASE",
+            "AICHECKWORD_DRAFT_TIMEOUT_SECONDS",
+            "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
+            "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
+            "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
+            "AICHECKWORD_DRAFT_COLLECTION_IDS",
+        ),
+    },
+    {
+        "id": "aiprintword",
+        "title": "aiprintword 签字/打印",
+        "hint": "页面1「去签字/去打印」服务端交接用。",
+        "defaultExpanded": False,
+        "keys": (
+            "AIPRINTWORD_BASE_URL",
+            "AIPRINTWORD_HANDOFF_SECRET",
+        ),
+    },
+]
+
+_sections_validated = False
+
+
+def _validate_system_config_sections() -> None:
+    """开发期校验：分区键与 SYSTEM_CONFIG_KEYS 一致，避免漏配或重复。"""
+    global _sections_validated
+    if _sections_validated:
+        return
+    all_keys = {k for k, _, _ in SYSTEM_CONFIG_KEYS}
+    seen: set[str] = set()
+    for sec in SYSTEM_CONFIG_SECTIONS:
+        for key in sec.get("keys") or ():
+            if key in seen:
+                raise ValueError(f"系统配置分区重复键: {key}")
+            seen.add(key)
+    missing = all_keys - seen
+    extra = seen - all_keys
+    if missing or extra:
+        raise ValueError(
+            f"系统配置分区与 SYSTEM_CONFIG_KEYS 不一致: missing={sorted(missing)} extra={sorted(extra)}"
+        )
+    _sections_validated = True
+
+
+def system_config_sections_for_api() -> list[dict[str, Any]]:
+    """供 GET /api/system-settings 返回的分区元数据。"""
+    _validate_system_config_sections()
+    out: list[dict[str, Any]] = []
+    for sec in SYSTEM_CONFIG_SECTIONS:
+        keys = sec.get("keys") or ()
+        out.append(
+            {
+                "id": str(sec["id"]),
+                "title": str(sec["title"]),
+                "hint": str(sec.get("hint") or ""),
+                "defaultExpanded": bool(sec.get("defaultExpanded", False)),
+                "keys": list(keys),
+            }
+        )
+    return out
+
+
+def _parse_flag(raw: Optional[str]) -> bool:
+    """解析功能开关字符串：仅当值为 1/true/yes/on（忽略大小写）时视为开启。"""
+    if raw is None:
+        return False
+    s = str(raw).replace("\ufeff", "").replace("\u200b", "").strip().lower()
+    return s in {"1", "true", "yes", "on", "y", "t"}
+
+
+def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]:
+    """返回当前数据库内 5 个功能开关的布尔值，便于注入 Jinja / 前端。"""
+    out: dict[str, bool] = {}
+    for key in FEATURE_FLAG_KEYS:
+        out[key] = _parse_flag(get_setting(key, default="", app=app))
+    return out
+
+
+def is_feature_admin_viewer() -> bool:
+    """页面2 功能开关管理员视角：页面1/3 已验证，或当前登录用户标记为管理员。"""
+    try:
+        from flask import has_request_context, session
+    except Exception:
+        return False
+    if not has_request_context():
+        return False
+    if session.get("page13_authenticated"):
+        return True
+    uid = session.get("user_id")
+    if not uid:
+        return False
+    try:
+        from .models import User
+
+        u = User.query.get(uid)
+        return bool(u and getattr(u, "is_admin", False))
+    except Exception:
+        return False
+
+
+def effective_feature_flags_for_request(app: Optional["Flask"] = None) -> dict[str, bool]:
+    """当前请求生效的功能开关（管理员始终视为全开）。"""
+    if is_feature_admin_viewer():
+        return {k: True for k in FEATURE_FLAG_KEYS}
+    return feature_flags_for_template(app)
+
 
 SENSITIVE_KEYS = {k for k, _, sens in SYSTEM_CONFIG_KEYS if sens}
 
@@ -390,15 +602,106 @@ def _bootstrap_database_url_file(project_root: Path) -> Optional[str]:
         return None
 
 
+def normalize_database_uri_for_engine(uri: str, connect_timeout: int = 10) -> str:
+    """
+    规范 MySQL 连接 URI 的查询参数。
+    重复 connect_timeout（如页面3 已带 + 启动代码再拼）会被解析为 tuple，导致 db.init_app 失败。
+    """
+    u = (uri or "").strip()
+    if not u.startswith("mysql"):
+        return u
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+    parsed = urlparse(u)
+    q: dict[str, str] = {}
+    for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+        q[k] = v
+    q["connect_timeout"] = str(max(1, int(connect_timeout)))
+    return urlunparse(parsed._replace(query=urlencode(q)))
+
+
+def _persist_database_url_bootstrap_file(project_root: Path, uri: str) -> None:
+    """将页面3 保存的 URI 写入启动缓存（仅由 save_system_settings / resolve 同步，非环境变量）。"""
+    val = (uri or "").strip()
+    if not val or "****" in val:
+        return
+    inst = project_root / "instance"
+    inst.mkdir(parents=True, exist_ok=True)
+    (inst / "database_url.txt").write_text(val + "\n", encoding="utf-8")
+
+
+def _fetch_database_url_from_config_table(database_uri: str) -> Optional[str]:
+    """
+    从指定库连接读取 app_configs.DATABASE_URL（页面3 系统配置落库值）。
+    用于冷启动：先用启动缓存 URI 连库，再以库内配置为准。
+    """
+    uri = (database_uri or "").strip()
+    if not uri:
+        return None
+    try:
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine(normalize_database_uri_for_engine(uri))
+        try:
+            with eng.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT config_value FROM app_configs "
+                        "WHERE config_key = :k LIMIT 1"
+                    ),
+                    {"k": "DATABASE_URL"},
+                ).fetchone()
+        finally:
+            eng.dispose()
+        if not row or row[0] is None:
+            return None
+        v = str(row[0]).replace("\ufeff", "").strip()
+        if not v or "****" in v:
+            return None
+        return v
+    except Exception:
+        return None
+
+
 def resolve_database_uri(project_root: Path, default_uri: str) -> str:
-    """启动时解析数据库 URI：环境变量 > instance/database_url.txt > 默认值"""
-    env = (os.environ.get("DATABASE_URL") or "").strip()
-    if env:
-        return env
+    """
+    冷启动解析数据库 URI：以页面3 写入 app_configs 的 DATABASE_URL 为唯一业务来源。
+
+    顺序：先「内置默认 URI」、再「启动缓存 database_url.txt」尝试连库并读 app_configs
+    （避免启动缓存指向测试库时，抢先读到测试库内错误配置而永远连不上正式库）；
+    读到则采用并回写启动缓存；否则用启动缓存；再否则用内置默认（仅首次无配置）。
+    不读取环境变量 DATABASE_URL。
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
     boot = _bootstrap_database_url_file(project_root)
+    default_uri = (default_uri or "").strip()
+    tried: list[str] = []
+    for uri in (default_uri, boot):
+        u = (uri or "").strip()
+        if not u or u in tried:
+            continue
+        tried.append(u)
+        from_db = _fetch_database_url_from_config_table(u)
+        if from_db:
+            from_db = normalize_database_uri_for_engine(from_db)
+            _persist_database_url_bootstrap_file(project_root, from_db)
+            log.info("数据库 URI 来自页面3 系统配置 (app_configs)")
+            return from_db
     if boot:
-        return boot
-    return default_uri
+        log.warning(
+            "启动缓存 database_url.txt 指向的库中未找到 DATABASE_URL 配置项，"
+            "暂用该缓存连接；请在页面3 系统配置保存正确 URI 后重启"
+        )
+        return normalize_database_uri_for_engine(boot)
+    if default_uri:
+        log.warning(
+            "未在 app_configs 中找到 DATABASE_URL，使用内置默认连接；"
+            "请在页面3 系统配置填写并保存数据库连接 URI"
+        )
+        return normalize_database_uri_for_engine(default_uri)
+    return ""
 
 
 def get_setting(key: str, default: str = "", app: Optional["Flask"] = None) -> str:
@@ -415,31 +718,17 @@ def get_setting(key: str, default: str = "", app: Optional["Flask"] = None) -> s
             flask_app = None
 
     if key == "DATABASE_URL":
+        # 仅页面3 系统配置（app_configs）；不回落环境变量或启动缓存文件
         if flask_app is not None:
             try:
                 with flask_app.app_context():
                     row = AppConfig.query.filter_by(config_key=key).first()
                     if row and row.config_value is not None:
                         v = str(row.config_value).replace("\ufeff", "").strip()
-                        if v:
+                        if v and "****" not in v:
                             return v
             except Exception:
                 pass
-        ev = (os.environ.get("DATABASE_URL") or "").strip()
-        if ev:
-            return ev
-        pr = _project_root_from_app(flask_app)
-        if pr is None and flask_app is None:
-            try:
-                from flask import current_app as ca
-
-                pr = _project_root_from_app(ca._get_current_object())
-            except RuntimeError:
-                pass
-        if pr:
-            boot = _bootstrap_database_url_file(pr)
-            if boot:
-                return boot
         return default
 
     if flask_app is not None:
@@ -507,11 +796,10 @@ def save_system_settings(
             # 表单展示为脱敏串，勿写回库
             if "****" in val:
                 continue
+            val = normalize_database_uri_for_engine(val)
             _upsert_config(key, val)
             written.append(key)
-            inst = project_root / "instance"
-            inst.mkdir(parents=True, exist_ok=True)
-            (inst / "database_url.txt").write_text(val + "\n", encoding="utf-8")
+            _persist_database_url_bootstrap_file(project_root, val)
             continue
         if key in SENSITIVE_KEYS and skip_unchanged_sensitive and (
             val == "***" or val == "(不变)" or val == "******"
@@ -519,6 +807,11 @@ def save_system_settings(
             continue
         # 允许清空，便于从「多实例」恢复为默认全库去重
         if key == "SCHEDULER_INSTANCE_ID":
+            _upsert_config(key, val)
+            written.append(key)
+            continue
+        # 功能开关：允许清空以关闭功能（默认即关闭），不能因「非敏感空串不覆盖」而锁住
+        if key in FEATURE_FLAG_KEYS:
             _upsert_config(key, val)
             written.append(key)
             continue
@@ -583,8 +876,7 @@ def seed_system_settings_from_environment(
         if _db_value_blocks_fallback(raw):
             continue
         if key == "DATABASE_URL":
-            env_v = (os.environ.get("DATABASE_URL") or "").strip()
-            val = env_v or (startup_database_uri or "").strip()
+            val = (startup_database_uri or "").strip()
         else:
             val = _first_env_value(key)
         if not val:
@@ -617,9 +909,7 @@ def ensure_environment_variables_migrated_to_db(
 
     for key, _, _ in SYSTEM_CONFIG_KEYS:
         if key == "DATABASE_URL":
-            val = (os.environ.get("DATABASE_URL") or "").strip()
-            if not val:
-                val = (startup_database_uri or "").strip()
+            val = (startup_database_uri or "").strip()
         else:
             val = _first_env_value(key)
         if val:
@@ -630,11 +920,18 @@ def ensure_environment_variables_migrated_to_db(
     _upsert_config(MIGRATION_FLAG_KEY, "1")
     db.session.commit()
 
-    env_db = (os.environ.get("DATABASE_URL") or "").strip()
-    if env_db:
-        inst = project_root / "instance"
-        inst.mkdir(parents=True, exist_ok=True)
-        (inst / "database_url.txt").write_text(env_db + "\n", encoding="utf-8")
+    db_v = (startup_database_uri or "").strip()
+    if db_v:
+        _persist_database_url_bootstrap_file(project_root, db_v)
+
+
+def sync_database_url_bootstrap_from_app_configs(
+    app: "Flask", project_root: Path
+) -> None:
+    """运行期：将 app_configs 中的 DATABASE_URL 同步到启动缓存文件（与页面3 保存一致）。"""
+    v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()
+    if v:
+        _persist_database_url_bootstrap_file(project_root, v)
 
 
 def apply_system_settings_to_flask(app: "Flask", project_root: Path) -> None:
@@ -704,11 +1001,28 @@ def persist_config_json_into_empty_db_keys(
 
 
 def _effective_database_url(app: "Flask", project_root: Path) -> str:
-    """当前实际使用的数据库 URI（库配置 > instance/database_url.txt）。"""
+    """页面3 系统配置中的 DATABASE_URL；未配置时展示当前进程实际连接 URI。"""
     v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()
     if v:
         return v
+    running = (app.config.get("SQLALCHEMY_DATABASE_URI") or "").strip()
+    if running:
+        return running
     return (_bootstrap_database_url_file(project_root) or "").strip()
+
+
+def get_database_uri(app: Optional["Flask"] = None, project_root: Optional[Path] = None) -> str:
+    """
+    供业务/脚本读取：优先 app_configs（页面3），无 Flask 上下文时用 resolve_database_uri。
+    """
+    if app is not None:
+        v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()
+        if v:
+            return v
+    pr = project_root or _project_root_from_app(app)
+    if pr is not None:
+        return resolve_database_uri(pr, (app.config.get("SQLALCHEMY_DATABASE_URI") if app else "") or "")
+    return ""
 
 
 def system_settings_for_api_get(app: "Flask", project_root: Path) -> dict[str, Any]:

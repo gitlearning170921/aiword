@@ -45,6 +45,8 @@ class User(db.Model):
     password_hash: Mapped[str] = mapped_column(db.String(128), nullable=False)
     display_name: Mapped[Optional[str]] = mapped_column(db.String(128))
     mobile: Mapped[Optional[str]] = mapped_column(db.String(32))
+    #: 页面2 管理员：不受系统配置功能开关限制，始终显示全部操作入口与说明文案。
+    is_admin: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime, default=now_local, onupdate=now_local
@@ -57,12 +59,21 @@ class User(db.Model):
         return verify_password(password, self.password_hash)
 
 
+#: 任务类型一级分类：file=文件型任务（携带模板/链接，参与初稿、审核、翻译等文档流转）；
+#: matter=事项型任务（仅做事项跟进，不进入文档相关操作入口）。历史数据默认按 file 处理。
+TASK_TYPE_CATEGORY_FILE = "file"
+TASK_TYPE_CATEGORY_MATTER = "matter"
+TASK_TYPE_CATEGORIES = (TASK_TYPE_CATEGORY_FILE, TASK_TYPE_CATEGORY_MATTER)
+
+
 class TaskTypeConfig(db.Model):
     """任务类型配置表（页面1使用）"""
     __tablename__ = "task_type_configs"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(db.String(64), unique=True, nullable=False)
+    #: 一级分类：file=文件型；matter=事项型。历史行迁移时回填为 file。
+    category: Mapped[str] = mapped_column(db.String(16), nullable=False, default=TASK_TYPE_CATEGORY_FILE)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)

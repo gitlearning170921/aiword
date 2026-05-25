@@ -7,11 +7,26 @@ const App = {
                 url = root + url;
             }
         }
+        const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 0;
+        const fetchOpts = { ...options };
+        delete fetchOpts.timeoutMs;
+        let timer = null;
+        let controller = null;
+        if (timeoutMs > 0) {
+            controller = new AbortController();
+            fetchOpts.signal = controller.signal;
+            timer = setTimeout(() => controller.abort(), timeoutMs);
+        }
         let response;
         try {
-            response = await fetch(url, { credentials: "include", ...options });
+            response = await fetch(url, { credentials: "include", ...fetchOpts });
         } catch (networkError) {
+            if (networkError && networkError.name === "AbortError") {
+                throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请稍后重试`);
+            }
             throw new Error("网络错误，请检查网络连接");
+        } finally {
+            if (timer) clearTimeout(timer);
         }
         
         if (!response.ok) {
@@ -95,6 +110,34 @@ const App = {
     },
 };
 
+/** 子路径部署（SCRIPT_NAME）下拼接站内路径，与 App.request 前缀规则一致。 */
+function _appPath(path) {
+    const root = (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
+    const p = path && path.charAt(0) === "/" ? path : "/" + (path || "");
+    return (root || "") + p;
+}
+
+function _isLoginPath() {
+    const p = window.location.pathname || "";
+    return p === "/login" || p === _appPath("/login") || p.endsWith("/login");
+}
+
+/** 按钮忙碌态：finally 中传 busy=false 确保「保存中…」不会一直卡住。 */
+function _setButtonBusy(btn, busy, busyText) {
+    if (!btn) return;
+    if (busy) {
+        if (btn.dataset.origBtnText == null) btn.dataset.origBtnText = btn.textContent || "";
+        btn.disabled = true;
+        btn.textContent = busyText || "保存中…";
+    } else {
+        btn.disabled = false;
+        if (btn.dataset.origBtnText != null) {
+            btn.textContent = btn.dataset.origBtnText;
+            delete btn.dataset.origBtnText;
+        }
+    }
+}
+
 function renderPlaceholderChips(container, values = []) {
     if (!container) return;
     container.innerHTML = "";
@@ -157,10 +200,45 @@ let recordsSortDir = "asc";
 let recordsGroupBy = "none";
 let recordsCollapsedGroups = new Set();
 
+/** 任务类型一级分类：file=文件型；matter=事项型。历史/未识别值按 file 处理。 */
+const TASK_TYPE_CATEGORY_FILE = "file";
+const TASK_TYPE_CATEGORY_MATTER = "matter";
+const TASK_TYPE_CATEGORY_OPTIONS = [
+    { value: TASK_TYPE_CATEGORY_FILE, label: "文件型" },
+    { value: TASK_TYPE_CATEGORY_MATTER, label: "事项型" },
+];
+
+function _normalizeTaskTypeCategory(raw) {
+    const v = String(raw == null ? "" : raw).trim().toLowerCase();
+    return v === TASK_TYPE_CATEGORY_MATTER ? TASK_TYPE_CATEGORY_MATTER : TASK_TYPE_CATEGORY_FILE;
+}
+
+/** 通过任务类型名查所属一级分类（未在配置中的历史/外部值默认按 file 处理）。 */
+function taskTypeCategoryOf(name) {
+    if (!name) return TASK_TYPE_CATEGORY_FILE;
+    const hit = (taskTypesCache || []).find((t) => String(t.name) === String(name));
+    return _normalizeTaskTypeCategory(hit ? hit.category : TASK_TYPE_CATEGORY_FILE);
+}
+
+const MATTER_EXEC_NOTES_MSG = "请在备注中填写事项完成情况";
+const MATTER_EXEC_NOTES_INVALID_MSG = "请在备注中填写有效的事项完成情况，不可仅填空格或符号";
+
+/** 事项型备注：去空白后须含中文/字母/数字，拒绝纯空格或纯符号。 */
+function isMeaningfulMatterExecutionNotes(raw) {
+    const s = String(raw ?? "").trim();
+    if (!s) return false;
+    const core = s.replace(/\s+/g, "");
+    if (!core) return false;
+    return /[\u4e00-\u9fffA-Za-z0-9]/.test(core);
+}
+
 async function loadTaskTypes() {
     try {
         const res = await App.request("/api/configs/task-types");
-        taskTypesCache = res.taskTypes || [];
+        taskTypesCache = (res.taskTypes || []).map((t) => ({
+            ...t,
+            category: _normalizeTaskTypeCategory(t && t.category),
+        }));
     } catch (e) {
         taskTypesCache = [];
     }
@@ -187,17 +265,89 @@ async function loadAuditStatuses() {
     return auditStatusesCache;
 }
 
-function createTaskTypeSelect() {
+/**
+ * 渲染「任务类型」下拉。
+ * @param {string} category 仅展示该分类（file/matter）下的类型；空/null 表示全部。
+ */
+function createTaskTypeSelect(category) {
     const select = document.createElement("select");
     select.className = "form-select form-select-sm task-type";
     select.innerHTML = '<option value="">选择类型</option>';
-    taskTypesCache.forEach(t => {
+    const wantCat = category ? _normalizeTaskTypeCategory(category) : "";
+    (taskTypesCache || []).forEach((t) => {
+        if (wantCat && _normalizeTaskTypeCategory(t.category) !== wantCat) return;
         const opt = document.createElement("option");
         opt.value = t.name;
         opt.textContent = t.name;
         select.appendChild(opt);
     });
     return select;
+}
+
+/** 渲染「任务类别」下拉（文件型/事项型）。 */
+function createTaskCategorySelect(currentCategory) {
+    const select = document.createElement("select");
+    select.className = "form-select form-select-sm task-category";
+    TASK_TYPE_CATEGORY_OPTIONS.forEach((opt) => {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label;
+        select.appendChild(o);
+    });
+    select.value = _normalizeTaskTypeCategory(currentCategory);
+    return select;
+}
+
+/**
+ * 用当前 category 重填 task type 下拉，并尽量保持原值；如原值不属于该 category 则置空。
+ * 当 currentValue 不在新选项中（比如老数据/已删除类型）时，附加 option 以保留原值。
+ */
+function refillTaskTypeOptions(typeSelect, category, currentValue) {
+    if (!typeSelect) return;
+    const cat = _normalizeTaskTypeCategory(category);
+    const keep = (currentValue || "").trim();
+    typeSelect.innerHTML = '<option value="">选择类型</option>';
+    let matched = false;
+    (taskTypesCache || []).forEach((t) => {
+        if (_normalizeTaskTypeCategory(t.category) !== cat) return;
+        const opt = document.createElement("option");
+        opt.value = t.name;
+        opt.textContent = t.name;
+        if (keep && String(t.name) === keep) matched = true;
+        typeSelect.appendChild(opt);
+    });
+    if (keep && !matched) {
+        // 原值不在新类别下：保留为 disabled 提示，让用户重新选择
+        const opt = document.createElement("option");
+        opt.value = keep;
+        opt.textContent = keep + "（不在当前类别）";
+        opt.disabled = true;
+        typeSelect.appendChild(opt);
+        typeSelect.value = "";
+    } else if (matched) {
+        typeSelect.value = keep;
+    } else {
+        typeSelect.value = "";
+    }
+}
+
+/** 联动两个下拉：类别变 → 重填类型；类型变 → 同步反推类别（已在 cache 时）。 */
+function bindTaskCategoryAndTypeSelects(categorySelect, typeSelect, initialType) {
+    if (!categorySelect || !typeSelect) return;
+    const initType = (initialType || "").trim();
+    const initCat = initType ? taskTypeCategoryOf(initType) : _normalizeTaskTypeCategory(categorySelect.value);
+    categorySelect.value = initCat;
+    refillTaskTypeOptions(typeSelect, initCat, initType);
+    categorySelect.addEventListener("change", () => {
+        const cat = _normalizeTaskTypeCategory(categorySelect.value);
+        refillTaskTypeOptions(typeSelect, cat, "");
+    });
+    typeSelect.addEventListener("change", () => {
+        const v = (typeSelect.value || "").trim();
+        if (!v) return;
+        const realCat = taskTypeCategoryOf(v);
+        if (categorySelect.value !== realCat) categorySelect.value = realCat;
+    });
 }
 
 /** 若下拉中不存在该 value，则追加 option，避免赋 .value 失败导致保存时 taskType 为空。 */
@@ -338,35 +488,383 @@ function _populateProjectNameSelect(selectEl, selectedName) {
     }
 }
 
+const PROJECT_ENTRY_META_LS_PREFIX = "aiword_project_entry_meta_";
+
+function _projectEntryMetaStorageKey(projectSelectValue) {
+    return PROJECT_ENTRY_META_LS_PREFIX + String(projectSelectValue || "").trim();
+}
+
+function _captureProjectMetaFromBlock(block) {
+    if (!block) return {};
+    const g = (sel) => (block.querySelector(sel)?.value || "").trim();
+    return {
+        projectCode: g(".project-code"),
+        projectNotes: g(".project-notes"),
+        businessSide: g(".project-business-side"),
+        product: g(".project-product"),
+        country: g(".project-country"),
+        registeredProductName: g(".project-registered-product-name"),
+        model: g(".project-model"),
+        registrationVersion: g(".project-registration-version"),
+    };
+}
+
+function _applyProjectMetaToBlock(block, meta) {
+    if (!block || !meta) return;
+    const set = (sel, key) => {
+        const el = block.querySelector(sel);
+        const v = meta[key];
+        if (el && v != null && String(v).trim() !== "") el.value = String(v).trim();
+    };
+    set(".project-code", "projectCode");
+    set(".project-notes", "projectNotes");
+    set(".project-business-side", "businessSide");
+    set(".project-product", "product");
+    set(".project-country", "country");
+    set(".project-registered-product-name", "registeredProductName");
+    set(".project-model", "model");
+    set(".project-registration-version", "registrationVersion");
+}
+
+function _loadProjectMetaForEntry(projectSelectValue, projectKey) {
+    let meta = null;
+    const key = _projectEntryMetaStorageKey(projectSelectValue);
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw) meta = JSON.parse(raw);
+    } catch (_) {}
+    if (!meta || typeof meta !== "object") meta = {};
+    const fromRecords = _loadProjectMetaFromSavedRecords(projectKey);
+    if (fromRecords) {
+        Object.keys(fromRecords).forEach((k) => {
+            if (!meta[k] && fromRecords[k]) meta[k] = fromRecords[k];
+        });
+    }
+    return meta;
+}
+
+function _loadProjectMetaFromSavedRecords(projectKey) {
+    const name = String(projectKey || "").trim();
+    if (!name) return null;
+    const canon = _canonicalProjectKeyForPick(name, "");
+    const hits = (allRecordsCache || []).filter(
+        (r) =>
+            _canonicalProjectKeyForPick(r.projectName, r.projectId) === canon ||
+            String(r.projectName || "").trim() === name
+    );
+    if (!hits.length) return null;
+    const r = hits.slice().sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
+    return {
+        projectCode: r.projectCode || "",
+        projectNotes: r.projectNotes || "",
+        businessSide: r.businessSide || "",
+        product: r.product || "",
+        country: r.country || "",
+        registeredProductName: r.registeredProductName || "",
+        model: r.model || "",
+        registrationVersion: r.registrationVersion || "",
+    };
+}
+
+function _persistProjectMetaFromBlock(block) {
+    const sel = block?.querySelector(".project-name");
+    const pid = (sel?.value || "").trim();
+    if (!pid) return;
+    try {
+        localStorage.setItem(_projectEntryMetaStorageKey(pid), JSON.stringify(_captureProjectMetaFromBlock(block)));
+    } catch (_) {}
+}
+
+function _countTaskRowsInBlock(block) {
+    return block ? block.querySelectorAll(".project-task-tbody tr").length : 0;
+}
+
+function _countSavableTaskRowsInBlock(block) {
+    if (!block) return 0;
+    const projectSelect = block.querySelector(".project-name");
+    const projectId = (projectSelect?.value || "").trim();
+    const projectKey = (projectSelect?.options?.[projectSelect.selectedIndex]?.dataset?.projectKey || "").trim();
+    if (!projectId || !projectKey) return 0;
+    let n = 0;
+    block.querySelectorAll(".project-task-tbody tr").forEach((row) => {
+        const fileName = (row.querySelector(".task-filename")?.value || "").trim();
+        const author = (row.querySelector(".task-author")?.value || "").trim();
+        if (fileName && author) n++;
+    });
+    return n;
+}
+
+function _updateProjectBlockTaskRowCount(block) {
+    if (!block) return;
+    const el = block.querySelector(".project-entry-task-row-count");
+    if (!el) return;
+    const total = _countTaskRowsInBlock(block);
+    const savable = _countSavableTaskRowsInBlock(block);
+    el.textContent =
+        total > 0
+            ? `已添加 ${total} 行` + (savable !== total ? `（其中 ${savable} 行可保存）` : "（均可保存）")
+            : "已添加 0 行";
+}
+
+function _copyPrevTaskRowFields(prevRow, newRowEl, newCatSelect) {
+    newRowEl.querySelector(".task-filename").value = prevRow.querySelector(".task-filename")?.value ?? "";
+    const prevCatSelect = prevRow.querySelector(".task-type-cell .task-category");
+    const prevTypeSelect = prevRow.querySelector(".task-type-cell .task-type");
+    const newTypeSelect = newRowEl.querySelector(".task-type-cell .task-type");
+    if (newCatSelect && prevCatSelect) {
+        newCatSelect.value = _normalizeTaskTypeCategory(prevCatSelect.value);
+    }
+    if (prevTypeSelect && newTypeSelect) {
+        const pv = (prevTypeSelect.value || "").trim();
+        const pc = newCatSelect ? _normalizeTaskTypeCategory(newCatSelect.value) : TASK_TYPE_CATEGORY_FILE;
+        refillTaskTypeOptions(newTypeSelect, pc, pv);
+        if (pv) ensureSelectHasOption(newTypeSelect, pv, "（沿用上行）");
+        newTypeSelect.value = pv;
+    }
+    const prevModuleSelect = prevRow.querySelector(".task-module-cell select");
+    const newModuleSelect = newRowEl.querySelector(".task-module-cell select");
+    if (prevModuleSelect && newModuleSelect) newModuleSelect.value = prevModuleSelect.value || "";
+    newRowEl.querySelector(".task-link").value = prevRow.querySelector(".task-link")?.value ?? "";
+    newRowEl.querySelector(".task-file-version").value = prevRow.querySelector(".task-file-version")?.value ?? "";
+    newRowEl.querySelector(".task-author").value = prevRow.querySelector(".task-author")?.value ?? "";
+    newRowEl.querySelector(".task-duedate").value = prevRow.querySelector(".task-duedate")?.value ?? "";
+    newRowEl.querySelector(".task-notes").value = prevRow.querySelector(".task-notes")?.value ?? "";
+    newRowEl.querySelector(".task-doc-display-date").value = prevRow.querySelector(".task-doc-display-date")?.value ?? "";
+    newRowEl.querySelector(".task-reviewer").value = prevRow.querySelector(".task-reviewer")?.value ?? "";
+    newRowEl.querySelector(".task-approver").value = prevRow.querySelector(".task-approver")?.value ?? "";
+    newRowEl.querySelector(".task-displayed-author").value = prevRow.querySelector(".task-displayed-author")?.value ?? "";
+}
+
+/** 将任务记录里的项目名规范为项目库中的标准名称（避免「短名 + 带注册类别全名」在下拉中重复两项）。 */
+function _canonicalProjectKeyForPick(rawName, projectId) {
+    const id = String(projectId || "").trim();
+    if (id) {
+        const byId = (projectsMetaCache || []).find((p) => String(p.id || "").trim() === id);
+        if (byId) return String(byId.name || "").trim();
+    }
+    const s = String(rawName || "").trim();
+    if (!s) return "";
+    const byName = (projectsMetaCache || []).find((p) => {
+        const nm = String(p.name || "").trim();
+        if (!nm) return false;
+        return s === nm || s.startsWith(nm + " (") || s.startsWith(nm + "(");
+    });
+    if (byName) return String(byName.name || "").trim();
+    const m = s.match(/^(.+?)\s*\([^)]*\)\s*$/);
+    return m && m[1] ? m[1].trim() : s;
+}
+
+function _getSavedProjectPickEntries() {
+    const map = new Map();
+    (allRecordsCache || []).forEach((r) => {
+        const raw = String(r.projectName || "").trim();
+        if (!raw) return;
+        const canon = _canonicalProjectKeyForPick(raw, r.projectId);
+        const key = canon || raw;
+        const prev = map.get(key);
+        if (prev) prev.count += 1;
+        else map.set(key, { canonical: key, count: 1 });
+    });
+    return [...map.values()].sort((a, b) => a.canonical.localeCompare(b.canonical, "zh"));
+}
+
+function refreshSavedProjectPickSelect() {
+    const sel = document.getElementById("pickSavedProjectForEntry");
+    if (!sel) return;
+    const cur = (sel.value || "").trim();
+    const curCanon = cur ? _canonicalProjectKeyForPick(cur, "") : "";
+    const entries = _getSavedProjectPickEntries();
+    sel.innerHTML = '<option value="">— 请选择已有项目 —</option>';
+    entries.forEach((ent) => {
+        const opt = document.createElement("option");
+        opt.value = ent.canonical;
+        const meta = (projectsMetaCache || []).find((p) => String(p.name || "").trim() === ent.canonical);
+        let label = ent.canonical;
+        if (meta && (meta.registeredCategory || meta.registeredCountry)) {
+            const bits = [meta.registeredCategory, meta.registeredCountry].filter(Boolean);
+            if (bits.length) label += `（${bits.join(" / ")}）`;
+        }
+        if (ent.count > 0) label += ` · 已保存 ${ent.count} 条`;
+        opt.textContent = label;
+        sel.appendChild(opt);
+    });
+    if (curCanon) {
+        const hit = entries.find((e) => e.canonical === curCanon);
+        if (hit) sel.value = hit.canonical;
+    }
+}
+
+function _resolveProjectSelectValueForProjectName(projectName) {
+    const name = String(projectName || "").trim();
+    if (!name) return "";
+    const lookup = _canonicalProjectKeyForPick(name, "") || name;
+    const hit = (projectsMetaCache || []).find((p) => String(p.name || "").trim() === lookup);
+    if (hit && (hit.id || "").trim()) return String(hit.id).trim();
+    if (hit) return String(hit.name || "").trim();
+    return name;
+}
+
+function _selectProjectOnEntryBlock(block, projectName) {
+    const sel = block?.querySelector(".project-name");
+    const name = String(projectName || "").trim();
+    if (!sel || !name) return "";
+    const lookup = _canonicalProjectKeyForPick(name, "") || name;
+    _populateProjectNameSelect(sel, "");
+    let matched = "";
+    for (const o of sel.options) {
+        const pk = String(o.dataset.projectKey || o.dataset.baseName || "").trim();
+        if (pk === lookup || pk === name) {
+            sel.value = o.value;
+            matched = o.value;
+            break;
+        }
+    }
+    if (!matched) {
+        const vid = _resolveProjectSelectValueForProjectName(name);
+        _populateProjectNameSelect(sel, vid);
+        matched = (sel.value || "").trim();
+    }
+    if (!matched) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        opt.dataset.projectKey = name;
+        opt.dataset.baseName = name;
+        opt.dataset.registeredCountry = "";
+        sel.appendChild(opt);
+        sel.value = name;
+        matched = name;
+    }
+    return matched;
+}
+
+function appendProjectEntryBlockFromSavedProject(projectName, options) {
+    const opts = options || {};
+    const container = document.getElementById("projectBlocksContainer");
+    const name = String(projectName || "").trim();
+    if (!container) return null;
+    if (!name) {
+        App.notify("请先选择或指定已有项目名称", "warning");
+        return null;
+    }
+    const block = createProjectBlock();
+    container.appendChild(block);
+    const selectValue = _selectProjectOnEntryBlock(block, name);
+    const sel = block.querySelector(".project-name");
+    const opt = sel?.options?.[sel.selectedIndex];
+    const pk = (opt?.dataset?.projectKey || opt?.dataset?.baseName || name).trim();
+    _applyProjectMetaToBlock(block, _loadProjectMetaForEntry(selectValue || name, pk));
+    _updateProjectBlockTaskRowCount(block);
+    if (opts.scroll !== false) {
+        block.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (opts.notify !== false) {
+        App.notify(`已为项目「${name}」新建录入块，项目信息已带入`, "success");
+    }
+    return block;
+}
+
+function _bindProjectEntryBlock(block) {
+    const tbody = block.querySelector(".project-task-tbody");
+    const projectSelectEl = block.querySelector(".project-name");
+    const countryInputEl = block.querySelector(".project-country");
+
+    projectSelectEl?.addEventListener("change", () => {
+        const opt = projectSelectEl.options[projectSelectEl.selectedIndex];
+        const projectKey = (opt?.dataset?.projectKey || opt?.dataset?.baseName || "").trim();
+        const pid = (projectSelectEl.value || "").trim();
+        if (pid) {
+            _applyProjectMetaToBlock(block, _loadProjectMetaForEntry(pid, projectKey));
+        }
+        const regCountry = opt?.dataset?.registeredCountry || "";
+        if (countryInputEl && regCountry && !(countryInputEl.value || "").trim()) {
+            countryInputEl.value = regCountry;
+        }
+        _updateProjectBlockTaskRowCount(block);
+    });
+
+    block.querySelectorAll(
+        ".project-code, .project-notes, .project-business-side, .project-product, .project-country, .project-registered-product-name, .project-model, .project-registration-version"
+    ).forEach((inp) => {
+        inp.addEventListener("change", () => _persistProjectMetaFromBlock(block));
+        inp.addEventListener("blur", () => _persistProjectMetaFromBlock(block));
+    });
+
+    block.querySelector(".add-task-row-btn")?.addEventListener("click", () => {
+        const newRow = createTaskRowUnderProject(block);
+        tbody.appendChild(newRow);
+        const rows = tbody.querySelectorAll("tr");
+        if (rows.length >= 2) {
+            _copyPrevTaskRowFields(rows[rows.length - 2], rows[rows.length - 1], rows[rows.length - 1].querySelector(".task-type-cell .task-category"));
+        }
+        _updateProjectBlockTaskRowCount(block);
+    });
+
+    block.querySelector(".task-row-select-all")?.addEventListener("change", (e) => {
+        const on = !!e.target.checked;
+        tbody.querySelectorAll(".task-row-select").forEach((cb) => {
+            cb.checked = on;
+        });
+    });
+
+    block.querySelector(".btn-delete-selected-tasks")?.addEventListener("click", () => {
+        const checked = tbody.querySelectorAll(".task-row-select:checked");
+        if (!checked.length) {
+            App.notify("请先勾选要删除的任务行", "warning");
+            return;
+        }
+        if (!window.confirm(`确定删除所选 ${checked.length} 条任务行吗？`)) return;
+        checked.forEach((cb) => cb.closest("tr")?.remove());
+        if (!tbody.querySelectorAll("tr").length) {
+            tbody.appendChild(createTaskRowUnderProject(block));
+        }
+        const allCb = block.querySelector(".task-row-select-all");
+        if (allCb) allCb.checked = false;
+        _updateProjectBlockTaskRowCount(block);
+    });
+
+    block.querySelector(".remove-project-btn")?.addEventListener("click", () => block.remove());
+}
+
 function createProjectBlock() {
     const block = document.createElement("div");
     block.className = "project-block card border mb-3";
     block.innerHTML = `
-        <div class="card-body">
-            <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
-            <div class="row g-2 mb-2">
-                <div class="col-md-3"><label class="form-label small">项目名称 *</label><select class="form-select form-select-sm project-name" required></select></div>
-                <div class="col-md-3"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
-                <div class="col-md-3"><label class="form-label small">影响产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="影响产品"></div>
-                <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
+        <div class="card-body p-3">
+            <div class="project-entry-meta-panel">
+                <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-3"><label class="form-label small">项目名称 *</label><select class="form-select form-select-sm project-name" required></select></div>
+                    <div class="col-md-3"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
+                    <div class="col-md-3"><label class="form-label small">影响产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="影响产品"></div>
+                    <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
+                </div>
+                <p class="text-muted small fw-bold mb-2">以下为文档通用及签审批信息</p>
+                <div class="row g-2 mb-2">
+                    <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
+                    <div class="col-md-2"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
+                    <div class="col-md-2"><label class="form-label small">注册产品名称</label><input type="text" class="form-control form-control-sm project-registered-product-name" placeholder="注册产品名称"></div>
+                    <div class="col-md-2"><label class="form-label small">型号</label><input type="text" class="form-control form-control-sm project-model" placeholder="型号"></div>
+                    <div class="col-md-2"><label class="form-label small">注册版本号</label><input type="text" class="form-control form-control-sm project-registration-version" placeholder="注册版本号"></div>
+                    <div class="col-md-2 d-flex align-items-end justify-content-end">
+                        <button type="button" class="btn btn-outline-danger btn-sm remove-project-btn w-100">删除本项目块</button>
+                    </div>
+                </div>
             </div>
-            <div class="mb-2">
+            <h6 class="card-subtitle text-muted mb-1">第二层 · 文件/事项任务</h6>
+            <div class="project-entry-task-toolbar">
+                <span class="project-entry-task-row-count">已添加 0 行</span>
                 <button type="button" class="btn btn-outline-secondary btn-sm add-task-row-btn">+ 添加任务行</button>
-                <button type="button" class="btn btn-outline-danger btn-sm float-end remove-project-btn">删除项目</button>
+                <label class="btn btn-outline-secondary btn-sm mb-0">
+                    <input type="checkbox" class="form-check-input task-row-select-all me-1">全选
+                </label>
+                <button type="button" class="btn btn-outline-danger btn-sm btn-delete-selected-tasks">删除所选</button>
             </div>
-            <p class="text-muted small fw-bold mb-2 mt-2">以下为文档通用及签审批信息</p>
-            <div class="row g-2 mb-2">
-                <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
-                <div class="col-md-2"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
-                <div class="col-md-2"><label class="form-label small">注册产品名称</label><input type="text" class="form-control form-control-sm project-registered-product-name" placeholder="注册产品名称"></div>
-                <div class="col-md-2"><label class="form-label small">型号</label><input type="text" class="form-control form-control-sm project-model" placeholder="型号"></div>
-                <div class="col-md-2"><label class="form-label small">注册版本号</label><input type="text" class="form-control form-control-sm project-registration-version" placeholder="注册版本号"></div>
-            </div>
-            <h6 class="card-subtitle text-muted mb-2 mt-3">第二层 · 文件/事项任务</h6>
-            <div class="table-responsive">
-                <table class="table table-bordered table-sm align-middle">
+            <div class="project-entry-table-viewport">
+                <table class="table table-bordered table-sm align-middle project-entry-task-table mb-0">
                     <thead class="table-light">
-                        <tr>
+                        <tr class="project-entry-head-row1">
+                            <th class="task-row-select-col"></th>
                             <th>文件名称 *</th>
                             <th>任务类型</th>
                             <th>所属模块</th>
@@ -377,14 +875,9 @@ function createProjectBlock() {
                             <th colspan="5" class="text-center">以下为文档通用及签审批信息</th>
                             <th style="width:50px">操作</th>
                         </tr>
-                        <tr>
-                            <th></th>
-                            <th></th>
-                            <th></th>
-                            <th></th>
-                            <th></th>
-                            <th></th>
-                            <th></th>
+                        <tr class="project-entry-head-row2">
+                            <th class="task-row-select-col"></th>
+                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                             <th>文件版本号</th>
                             <th>文档体现日期</th>
                             <th>审核人员</th>
@@ -399,49 +892,34 @@ function createProjectBlock() {
         </div>
     `;
     const tbody = block.querySelector(".project-task-tbody");
-
-    // 根据下拉选择自动填充“国家”，避免任务记录中的国家与项目元数据不一致
-    const projectSelectEl = block.querySelector(".project-name");
-    const countryInputEl = block.querySelector(".project-country");
-    projectSelectEl?.addEventListener("change", () => {
-        const opt = projectSelectEl.options[projectSelectEl.selectedIndex];
-        const v = opt?.dataset?.registeredCountry || "";
-        if (countryInputEl) countryInputEl.value = v;
-    });
-
     _populateProjectNameSelect(block.querySelector(".project-name"));
-    block.querySelector(".add-task-row-btn").addEventListener("click", () => {
-        const newRow = createTaskRowUnderProject(block);
-        tbody.appendChild(newRow);
-        const rows = tbody.querySelectorAll("tr");
-        if (rows.length >= 2) {
-            const prevRow = rows[rows.length - 2];
-            const newRowEl = rows[rows.length - 1];
-            newRowEl.querySelector(".task-filename").value = prevRow.querySelector(".task-filename")?.value ?? "";
-            const prevTypeSelect = prevRow.querySelector(".task-type-cell select");
-            const newTypeSelect = newRowEl.querySelector(".task-type-cell select");
-            if (prevTypeSelect && newTypeSelect) {
-                const pv = (prevTypeSelect.value || "").trim();
-                if (pv) ensureSelectHasOption(newTypeSelect, pv, "（沿用上行）");
-                newTypeSelect.value = pv;
-            }
-            const prevModuleSelect = prevRow.querySelector(".task-module-cell select");
-            const newModuleSelect = newRowEl.querySelector(".task-module-cell select");
-            if (prevModuleSelect && newModuleSelect) newModuleSelect.value = prevModuleSelect.value || "";
-            newRowEl.querySelector(".task-link").value = prevRow.querySelector(".task-link")?.value ?? "";
-            newRowEl.querySelector(".task-file-version").value = prevRow.querySelector(".task-file-version")?.value ?? "";
-            newRowEl.querySelector(".task-author").value = prevRow.querySelector(".task-author")?.value ?? "";
-            newRowEl.querySelector(".task-duedate").value = prevRow.querySelector(".task-duedate")?.value ?? "";
-            newRowEl.querySelector(".task-notes").value = prevRow.querySelector(".task-notes")?.value ?? "";
-            newRowEl.querySelector(".task-doc-display-date").value = prevRow.querySelector(".task-doc-display-date")?.value ?? "";
-            newRowEl.querySelector(".task-reviewer").value = prevRow.querySelector(".task-reviewer")?.value ?? "";
-            newRowEl.querySelector(".task-approver").value = prevRow.querySelector(".task-approver")?.value ?? "";
-            newRowEl.querySelector(".task-displayed-author").value = prevRow.querySelector(".task-displayed-author")?.value ?? "";
-        }
-    });
-    block.querySelector(".remove-project-btn").addEventListener("click", () => block.remove());
+    _bindProjectEntryBlock(block);
     tbody.appendChild(createTaskRowUnderProject(block));
+    _updateProjectBlockTaskRowCount(block);
     return block;
+}
+
+function _setSaveAllProgress(btn, hintEl, current, total, fileName, projectKey) {
+    const idx = Math.max(0, Number(current) || 0);
+    const tot = Math.max(0, Number(total) || 0);
+    const file = String(fileName || "").trim();
+    const proj = String(projectKey || "").trim();
+    const shortBtn = tot > 0 ? `保存中 ${idx}/${tot}` : "保存中…";
+    let detail = tot > 0 ? `正在保存第 ${idx}/${tot} 条` : "正在保存…";
+    if (proj) detail += ` · 项目：${proj}`;
+    if (file) detail += ` · 文件：${file}`;
+    if (btn) btn.textContent = shortBtn;
+    if (hintEl) {
+        hintEl.textContent = detail;
+        hintEl.classList.remove("d-none");
+    }
+}
+
+function _hideSaveAllProgress(hintEl) {
+    if (hintEl) {
+        hintEl.textContent = "";
+        hintEl.classList.add("d-none");
+    }
 }
 
 function createTaskRowUnderProject(projectBlock) {
@@ -449,8 +927,11 @@ function createTaskRowUnderProject(projectBlock) {
     const tr = document.createElement("tr");
     tr.dataset.rowId = rowCounter;
     tr.innerHTML = `
+        <td class="task-row-select-col"><input type="checkbox" class="form-check-input task-row-select" title="勾选后可批量删除"></td>
         <td><input type="text" class="form-control form-control-sm task-filename" placeholder="文件名称"></td>
-        <td class="task-type-cell"></td>
+        <td class="task-type-cell">
+            <div class="d-flex flex-column gap-1 task-type-cell-inner"></div>
+        </td>
         <td class="task-module-cell">
             <select class="form-select form-select-sm task-module">
                 <option value="">—</option>
@@ -470,12 +951,7 @@ function createTaskRowUnderProject(projectBlock) {
             </div>
             <small class="task-file-name text-muted d-none"></small>
         </td>
-        <td>
-            <div class="input-group input-group-sm">
-                <input type="text" class="form-control task-author" placeholder="编写人员">
-                <button type="button" class="btn btn-outline-success btn-create-user" title="快速创建账号">+</button>
-            </div>
-        </td>
+        <td class="task-author-cell"><div class="task-author-picker-host"></div></td>
         <td><input type="date" class="form-control form-control-sm task-duedate"></td>
         <td>
             <div class="input-group input-group-sm">
@@ -492,7 +968,12 @@ function createTaskRowUnderProject(projectBlock) {
         <td><input type="text" class="form-control form-control-sm task-displayed-author" placeholder="体现编写人员"></td>
         <td><button type="button" class="btn btn-sm btn-outline-danger btn-remove-row">×</button></td>
     `;
-    tr.querySelector(".task-type-cell").appendChild(createTaskTypeSelect());
+    const _typeCellInner = tr.querySelector(".task-type-cell-inner");
+    const _catSel = createTaskCategorySelect(TASK_TYPE_CATEGORY_FILE);
+    const _typeSel = createTaskTypeSelect(TASK_TYPE_CATEGORY_FILE);
+    _typeCellInner.appendChild(_catSel);
+    _typeCellInner.appendChild(_typeSel);
+    bindTaskCategoryAndTypeSelects(_catSel, _typeSel, "");
     const fileInput = tr.querySelector(".task-file");
     const fileNameDisplay = tr.querySelector(".task-file-name");
     const linkInput = tr.querySelector(".task-link");
@@ -533,13 +1014,34 @@ function createTaskRowUnderProject(projectBlock) {
             App.notify(e.message || "上传失败", "danger");
         }
     });
-    tr.querySelector(".btn-remove-row").addEventListener("click", () => tr.remove());
-    tr.querySelector(".btn-create-user").addEventListener("click", () => {
-        const authorInput = tr.querySelector(".task-author");
-        const username = authorInput.value.trim();
-        if (username) document.getElementById("quickUsername").value = username;
-        const modal = new bootstrap.Modal(document.getElementById("quickUserModal"));
-        modal.show();
+    tr.querySelector(".btn-remove-row").addEventListener("click", () => {
+        const pb = tr.closest(".project-block");
+        tr.remove();
+        if (pb) {
+            const tb = pb.querySelector(".project-task-tbody");
+            if (tb && !tb.querySelectorAll("tr").length) {
+                tb.appendChild(createTaskRowUnderProject(pb));
+            }
+            _updateProjectBlockTaskRowCount(pb);
+        }
+    });
+    tr.querySelector(".task-row-select")?.addEventListener("change", () => {
+        const pb = tr.closest(".project-block");
+        if (pb) _updateProjectBlockTaskRowCount(pb);
+    });
+    tr.querySelector(".task-filename")?.addEventListener("input", () => {
+        const pb = tr.closest(".project-block");
+        if (pb) _updateProjectBlockTaskRowCount(pb);
+    });
+    const authorHost = tr.querySelector(".task-author-picker-host");
+    mountAuthorPicker(authorHost, {
+        showQuickAdd: true,
+        hooks: {
+            onChange: () => {
+                const pb = tr.closest(".project-block");
+                if (pb) _updateProjectBlockTaskRowCount(pb);
+            },
+        },
     });
     return tr;
 }
@@ -604,6 +1106,9 @@ async function initUploadPage() {
     const showHistoryEl = document.getElementById("showHistoryProjectsPage1");
 
     if (!projectBlocksContainer) return;
+
+    // 尽早拉取列表，避免 await loadTaskTypes() 阻塞或失败时「已保存任务列表」一直空白
+    loadRecordsList();
 
     // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
     if (showHistoryEl) showHistoryEl.checked = false;
@@ -779,6 +1284,7 @@ async function initUploadPage() {
             });
             // 同步刷新“任务录入”里的项目下拉（只展示进行中项目）
             document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
+            refreshSavedProjectPickSelect();
             updateBatchProjectsBtnState();
             applyProjectsFilter();
         } catch (e) {
@@ -923,9 +1429,17 @@ async function initUploadPage() {
     });
     loadProjectsManage();
 
-    await loadTaskTypes();
-    projectBlocksContainer.appendChild(createProjectBlock());
-    _populateProjectNameSelect(projectBlocksContainer.querySelector(".project-block .project-name"));
+    try {
+        await loadTaskTypes();
+        projectBlocksContainer.appendChild(createProjectBlock());
+        _populateProjectNameSelect(projectBlocksContainer.querySelector(".project-block .project-name"));
+    } catch (e) {
+        console.error("initUploadPage task types / project block:", e);
+        App.notify(
+            "任务类型或录入区初始化失败：" + (e && e.message ? e.message : String(e)) + "；任务列表仍会尝试加载。",
+            "warning"
+        );
+    }
 
     addProjectBtn?.addEventListener("click", () => {
         projectBlocksContainer.appendChild(createProjectBlock());
@@ -933,14 +1447,39 @@ async function initUploadPage() {
         if (blocks.length >= 2) {
             const prev = blocks[blocks.length - 2];
             const curr = blocks[blocks.length - 1];
-            _populateProjectNameSelect(curr.querySelector(".project-name"), prev.querySelector(".project-name")?.value ?? "");
-            curr.querySelector(".project-code").value = prev.querySelector(".project-code")?.value ?? "";
-            curr.querySelector(".project-business-side").value = prev.querySelector(".project-business-side")?.value ?? "";
-            curr.querySelector(".project-product").value = prev.querySelector(".project-product")?.value ?? "";
-            curr.querySelector(".project-country").value = prev.querySelector(".project-country")?.value ?? "";
-            curr.querySelector(".project-notes").value = prev.querySelector(".project-notes")?.value ?? "";
+            const prevSel = prev.querySelector(".project-name");
+            const prevVal = (prevSel?.value || "").trim();
+            _populateProjectNameSelect(curr.querySelector(".project-name"), prevVal);
+            if (prevVal) {
+                const opt = prevSel?.options?.[prevSel.selectedIndex];
+                const pk = (opt?.dataset?.projectKey || opt?.dataset?.baseName || "").trim();
+                _applyProjectMetaToBlock(curr, _loadProjectMetaForEntry(prevVal, pk));
+            }
+            _updateProjectBlockTaskRowCount(curr);
         }
     });
+
+    document.getElementById("createEntryBlockFromSavedProjectBtn")?.addEventListener("click", () => {
+        const pick = (document.getElementById("pickSavedProjectForEntry")?.value || "").trim();
+        appendProjectEntryBlockFromSavedProject(pick);
+    });
+
+    const recordsTableBody = document.getElementById("recordsTableBody");
+    if (recordsTableBody && !recordsTableBody.dataset.entryDblBound) {
+        recordsTableBody.dataset.entryDblBound = "1";
+        recordsTableBody.addEventListener("dblclick", (e) => {
+            const td = e.target.closest("td.project-name-pick-entry, td[data-col='projectName']");
+            if (!td || td.closest(".group-header-row")) return;
+            const tr = td.closest("tr[data-id]");
+            if (!tr || !tr.dataset.id) return;
+            const rec = (allRecordsCache || []).find((x) => String(x.id) === String(tr.dataset.id));
+            if (!rec || !(rec.projectName || "").trim()) return;
+            const canon = _canonicalProjectKeyForPick(rec.projectName, rec.projectId);
+            appendProjectEntryBlockFromSavedProject(canon || String(rec.projectName).trim());
+            const pickSel = document.getElementById("pickSavedProjectForEntry");
+            if (pickSel && canon) pickSel.value = canon;
+        });
+    }
 
     const _CSV_HEADERS = [
         "项目名称","项目编号","影响业务方","影响产品","国家","项目备注","注册产品名称","型号","注册版本号",
@@ -1053,17 +1592,43 @@ async function initUploadPage() {
         }
     });
 
+    const saveAllProgressHint = document.getElementById("saveAllProgressHint");
+
     saveAllBtn?.addEventListener("click", async () => {
         const blocks = projectBlocksContainer.querySelectorAll(".project-block");
         let successCount = 0;
         let skippedIncomplete = 0;
         let plannedSaveCount = 0;
+        let saveProgressIndex = 0;
         let lastPlaceholders = [];
         const btn = saveAllBtn;
-        const origText = btn?.textContent || "保存全部";
         try {
-            if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
-            App.notify("正在保存…", "info");
+            for (const block of blocks) {
+                const projectSelect = block.querySelector(".project-name");
+                const projectId = (projectSelect?.value || "").trim();
+                const projectKey = (projectSelect?.options?.[projectSelect.selectedIndex]?.dataset?.projectKey || "").trim();
+                if (!projectId || !projectKey) continue;
+                const rows = block.querySelectorAll(".project-task-tbody tr");
+                const dupSeen = new Set();
+                rows.forEach((row) => {
+                    const fileName = (row.querySelector(".task-filename")?.value || "").trim();
+                    const author = (row.querySelector(".task-author")?.value || "").trim();
+                    if (!fileName || !author) return;
+                    const taskType = (row.querySelector(".task-type-cell .task-type")?.value || "").trim();
+                    const dupKey = `${fileName}\t${taskType || ""}\t${author}`;
+                    if (dupSeen.has(dupKey)) return;
+                    dupSeen.add(dupKey);
+                    plannedSaveCount++;
+                });
+            }
+            if (btn) {
+                if (btn.dataset.origBtnText == null) btn.dataset.origBtnText = btn.textContent || "";
+                btn.disabled = true;
+            }
+            _setSaveAllProgress(btn, saveAllProgressHint, 0, plannedSaveCount, "", "");
+            if (plannedSaveCount > 0) {
+                App.notify(`开始保存，共 ${plannedSaveCount} 条`, "info");
+            }
 
             for (const block of blocks) {
                 const projectSelect = block.querySelector(".project-name");
@@ -1080,7 +1645,7 @@ async function initUploadPage() {
                 const dupSeen = new Set();
                 for (const row of rows) {
                     const fileName = (row.querySelector(".task-filename")?.value || "").trim();
-                    const taskTypeSelect = row.querySelector(".task-type-cell select");
+                    const taskTypeSelect = row.querySelector(".task-type-cell .task-type");
                     const taskType = taskTypeSelect ? (taskTypeSelect.value || "").trim() : "";
                     const link = (row.querySelector(".task-link")?.value || "").trim();
                     const fileInput = row.querySelector(".task-file");
@@ -1106,14 +1671,13 @@ async function initUploadPage() {
                             `本项目中存在多行「文件名称 + 任务类型 + 编写人员」完全相同（${fileName}）。数据库只允许保留一条，请修改后再保存；若多行共用同一模板文件，请为每行填写不同的文件名称。`,
                             "warning"
                         );
-                        if (btn) {
-                            btn.disabled = false;
-                            btn.textContent = origText;
-                        }
+                        _setButtonBusy(btn, false);
                         return;
                     }
                     dupSeen.add(dupKey);
-                    plannedSaveCount++;
+                    saveProgressIndex++;
+                    _setSaveAllProgress(btn, saveAllProgressHint, saveProgressIndex, plannedSaveCount, fileName, projectKey);
+                    _persistProjectMetaFromBlock(block);
 
                     const formData = new FormData();
                     formData.append("projectId", projectId);
@@ -1148,6 +1712,7 @@ async function initUploadPage() {
                         const result = await App.request("/api/upload", {
                             method: "POST",
                             body: formData,
+                            timeoutMs: 120000,
                         });
                         successCount++;
                         if (result.record && result.record.placeholders) {
@@ -1165,48 +1730,58 @@ async function initUploadPage() {
                                 replaceMsg +=
                                     "\n\n若上传了模板文件，将覆盖已有文件或链接，且来源将改为「文件」。";
                             }
+                            _setButtonBusy(btn, false);
                             const replaceOk = window.confirm(replaceMsg);
-                            if (replaceOk) {
-                                const formDataReplace = new FormData();
-                                formDataReplace.append("projectId", projectId);
-                                formDataReplace.append("projectName", projectKey);
-                                formDataReplace.append("fileName", fileName);
-                                formDataReplace.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
-                                formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
-                                if (taskType) formDataReplace.append("taskType", taskType);
-                                formDataReplace.append("author", author);
-                                formDataReplace.append("assigneeName", author);
-                                if (notes) formDataReplace.append("notes", notes);
-                                if (dueDate) formDataReplace.append("dueDate", dueDate);
-                                if (businessSide) formDataReplace.append("businessSide", businessSide);
-                                if (product) formDataReplace.append("product", product);
-                                if (country) formDataReplace.append("country", country);
-                                if (registeredProductName) formDataReplace.append("registeredProductName", registeredProductName);
-                                if (model) formDataReplace.append("model", model);
-                                if (registrationVersion) formDataReplace.append("registrationVersion", registrationVersion);
-                                if (fileVersion) formDataReplace.append("fileVersion", fileVersion);
-                                if (docDisplayDate) formDataReplace.append("documentDisplayDate", docDisplayDate);
-                                if (reviewer) formDataReplace.append("reviewer", reviewer);
-                                if (approver) formDataReplace.append("approver", approver);
-                                if (displayedAuthor) formDataReplace.append("displayedAuthor", displayedAuthor);
-                                if (belongingModule) formDataReplace.append("belongingModule", belongingModule);
-                                formDataReplace.set("replace", "true");
-                                if (fileInput && fileInput.files.length > 0) {
-                                    formDataReplace.append("file", fileInput.files[0]);
-                                } else if (link) {
-                                    formDataReplace.append("templateLinks", normalizeDocLink(link));
-                                }
-                                try {
-                                    const resultReplace = await App.request("/api/upload", { method: "POST", body: formDataReplace });
-                                    successCount++;
-                                    if (resultReplace.record && resultReplace.record.placeholders) {
-                                        lastPlaceholders = resultReplace.record.placeholders;
-                                    }
-                                } catch (e2) {
-                                    App.notify(`保存失败 (${projectKey}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
-                                }
-                            } else {
+                            if (!replaceOk) {
                                 App.notify(`已跳过：${fileName}（与已有记录重复，您选择了不替换）`, "info");
+                                continue;
+                            }
+                            if (btn) {
+                                if (btn.dataset.origBtnText == null) btn.dataset.origBtnText = btn.textContent || "";
+                                btn.disabled = true;
+                            }
+                            _setSaveAllProgress(btn, saveAllProgressHint, saveProgressIndex, plannedSaveCount, fileName, projectKey);
+                            const formDataReplace = new FormData();
+                            formDataReplace.append("projectId", projectId);
+                            formDataReplace.append("projectName", projectKey);
+                            formDataReplace.append("fileName", fileName);
+                            formDataReplace.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
+                            formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
+                            if (taskType) formDataReplace.append("taskType", taskType);
+                            formDataReplace.append("author", author);
+                            formDataReplace.append("assigneeName", author);
+                            if (notes) formDataReplace.append("notes", notes);
+                            if (dueDate) formDataReplace.append("dueDate", dueDate);
+                            if (businessSide) formDataReplace.append("businessSide", businessSide);
+                            if (product) formDataReplace.append("product", product);
+                            if (country) formDataReplace.append("country", country);
+                            if (registeredProductName) formDataReplace.append("registeredProductName", registeredProductName);
+                            if (model) formDataReplace.append("model", model);
+                            if (registrationVersion) formDataReplace.append("registrationVersion", registrationVersion);
+                            if (fileVersion) formDataReplace.append("fileVersion", fileVersion);
+                            if (docDisplayDate) formDataReplace.append("documentDisplayDate", docDisplayDate);
+                            if (reviewer) formDataReplace.append("reviewer", reviewer);
+                            if (approver) formDataReplace.append("approver", approver);
+                            if (displayedAuthor) formDataReplace.append("displayedAuthor", displayedAuthor);
+                            if (belongingModule) formDataReplace.append("belongingModule", belongingModule);
+                            formDataReplace.set("replace", "true");
+                            if (fileInput && fileInput.files.length > 0) {
+                                formDataReplace.append("file", fileInput.files[0]);
+                            } else if (link) {
+                                formDataReplace.append("templateLinks", normalizeDocLink(link));
+                            }
+                            try {
+                                const resultReplace = await App.request("/api/upload", {
+                                    method: "POST",
+                                    body: formDataReplace,
+                                    timeoutMs: 120000,
+                                });
+                                successCount++;
+                                if (resultReplace.record && resultReplace.record.placeholders) {
+                                    lastPlaceholders = resultReplace.record.placeholders;
+                                }
+                            } catch (e2) {
+                                App.notify(`保存失败 (${projectKey}-${fileName}): ${e2 && e2.message ? e2.message : "请重试"}`, "danger");
                             }
                         } else {
                         App.notify(`保存失败 (${projectKey}-${fileName}): ${msg}`, "danger");
@@ -1264,14 +1839,17 @@ async function initUploadPage() {
         } catch (err) {
             App.notify("保存过程出错: " + (err && err.message ? err.message : String(err)), "danger");
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = origText; }
+            _setButtonBusy(btn, false);
+            _hideSaveAllProgress(saveAllProgressHint);
         }
     });
 
-    initUserForm();
+    initCreateUserModal();
+    initUsersListFilter();
     initQuickUserForm();
     initConfigManagement();
     loadRecordsList();
+    refreshSavedProjectPickSelect();
     loadUsersList();
     initRecordsFilter();
     initRecordsTableSort();
@@ -1326,6 +1904,8 @@ function initRecordsTableSort() {
 }
 
 async function openEditRecordModal(r) {
+    if (!usersListCache.length) await loadUsersList();
+    ensureEditRecordAuthorPicker();
     document.getElementById("editRecordId").value = r.id;
     const prjIdEl = document.getElementById("editRecordProjectId");
     if (prjIdEl) prjIdEl.value = (r.projectId != null && r.projectId !== "") ? String(r.projectId) : "";
@@ -1336,25 +1916,36 @@ async function openEditRecordModal(r) {
     if (projectCodeEl) projectCodeEl.value = r.projectCode || "";
     document.getElementById("editRecordFile").value = r.fileName || "";
     const taskTypeEl = document.getElementById("editRecordTaskType");
+    const taskCategoryEl = document.getElementById("editRecordTaskCategory");
     if (taskTypeEl) {
         await loadTaskTypes();
-        taskTypeEl.innerHTML = '<option value="">选择类型</option>';
-        (taskTypesCache || []).forEach(t => {
-            const opt = document.createElement("option");
-            opt.value = t.name;
-            opt.textContent = t.name;
-            taskTypeEl.appendChild(opt);
-        });
+        const initType = (r.taskType || "").trim();
+        const initCat = initType ? taskTypeCategoryOf(initType) : TASK_TYPE_CATEGORY_FILE;
+        if (taskCategoryEl) taskCategoryEl.value = initCat;
+        refillTaskTypeOptions(taskTypeEl, initCat, initType);
         ensureSelectHasOption(
             taskTypeEl,
-            r.taskType || "",
+            initType,
             "（当前记录中的类型；若已不在「任务类型」配置中，请补回配置以免保存丢失）"
         );
-        taskTypeEl.value = r.taskType || "";
+        if (initType) taskTypeEl.value = initType;
+        if (taskCategoryEl && !taskCategoryEl.dataset.bound) {
+            taskCategoryEl.addEventListener("change", () => {
+                const cat = _normalizeTaskTypeCategory(taskCategoryEl.value);
+                refillTaskTypeOptions(taskTypeEl, cat, "");
+            });
+            taskTypeEl.addEventListener("change", () => {
+                const v = (taskTypeEl.value || "").trim();
+                if (!v) return;
+                const realCat = taskTypeCategoryOf(v);
+                if (taskCategoryEl.value !== realCat) taskCategoryEl.value = realCat;
+            });
+            taskCategoryEl.dataset.bound = "1";
+        }
     }
     const editRecordBelongingModuleEl = document.getElementById("editRecordBelongingModule");
     if (editRecordBelongingModuleEl) editRecordBelongingModuleEl.value = r.belongingModule || "";
-    document.getElementById("editRecordAuthor").value = r.author || "";
+    setAuthorPickerValue("editRecordAuthorPicker", r.author || "");
     document.getElementById("editRecordDueDate").value = r.dueDate || "";
     document.getElementById("editRecordAssignee").value = r.assigneeName || r.author || "";
     document.getElementById("editRecordBusinessSide").value = r.businessSide || "";
@@ -1457,22 +2048,7 @@ function initEditRecordModal() {
             if (modalEl.classList.contains("show")) updateEditRecordAssigneeMobileHint(assigneeInput.value || "");
         });
     }
-    const authorInput = document.getElementById("editRecordAuthor");
-    if (authorInput && assigneeInput) {
-        authorInput.addEventListener("blur", () => {
-            if (modalEl.classList.contains("show")) {
-                const authorVal = authorInput.value.trim();
-                if (authorVal) assigneeInput.value = authorVal;
-                updateEditRecordAssigneeMobileHint(assigneeInput.value || "");
-            }
-        });
-        authorInput.addEventListener("change", () => {
-            if (modalEl.classList.contains("show")) {
-                const authorVal = authorInput.value.trim();
-                if (authorVal) assigneeInput.value = authorVal;
-            }
-        });
-    }
+    ensureEditRecordAuthorPicker();
     const quickUserBtn = document.getElementById("editRecordQuickUserBtn");
     if (quickUserBtn) {
         quickUserBtn.addEventListener("click", () => {
@@ -1520,7 +2096,7 @@ function initEditRecordModal() {
             projectName: document.getElementById("editRecordProject").value.trim(),
             fileName: document.getElementById("editRecordFile").value.trim(),
             taskType: document.getElementById("editRecordTaskType").value.trim() || null,
-            author: document.getElementById("editRecordAuthor").value.trim(),
+            author: (document.querySelector("#editRecordAuthorPicker .task-author")?.value || "").trim(),
             dueDate: document.getElementById("editRecordDueDate").value || null,
             assigneeName: document.getElementById("editRecordAssignee").value.trim() || null,
             businessSide: document.getElementById("editRecordBusinessSide").value.trim() || null,
@@ -1772,21 +2348,47 @@ function initBatchEditRecords() {
             });
             sel.value = sameAudit ? auditVal : "";
         }
+        const batchTaskCategorySel = document.getElementById("batchEditTaskCategory");
         const batchTaskTypeSel = document.getElementById("batchEditTaskType");
         if (batchTaskTypeSel) {
             await loadTaskTypes();
-            batchTaskTypeSel.innerHTML = '<option value="">— 不修改 —</option>';
-            (taskTypesCache || []).forEach((t) => {
-                const opt = document.createElement("option");
-                opt.value = t.name;
-                opt.textContent = t.name;
-                batchTaskTypeSel.appendChild(opt);
-            });
-            batchTaskTypeSel.value = sameTaskType ? taskTypeVal : "";
+            const initType = sameTaskType ? taskTypeVal : "";
+            const initCat = initType ? taskTypeCategoryOf(initType) : "";
+            if (batchTaskCategorySel) batchTaskCategorySel.value = initCat;
+            const fillTypeOptions = (cat) => {
+                batchTaskTypeSel.innerHTML = '<option value="">— 不修改 —</option>';
+                (taskTypesCache || []).forEach((t) => {
+                    if (cat && _normalizeTaskTypeCategory(t.category) !== cat) return;
+                    const opt = document.createElement("option");
+                    opt.value = t.name;
+                    opt.textContent = t.name;
+                    batchTaskTypeSel.appendChild(opt);
+                });
+            };
+            fillTypeOptions(initCat);
+            if (initType) {
+                ensureSelectHasOption(batchTaskTypeSel, initType, "");
+                batchTaskTypeSel.value = initType;
+            }
+            if (batchTaskCategorySel && !batchTaskCategorySel.dataset.bound) {
+                batchTaskCategorySel.addEventListener("change", () => {
+                    const cat = String(batchTaskCategorySel.value || "");
+                    fillTypeOptions(cat ? _normalizeTaskTypeCategory(cat) : "");
+                });
+                batchTaskTypeSel.addEventListener("change", () => {
+                    const v = (batchTaskTypeSel.value || "").trim();
+                    if (!v) return;
+                    const realCat = taskTypeCategoryOf(v);
+                    if (batchTaskCategorySel.value !== realCat) batchTaskCategorySel.value = realCat;
+                });
+                batchTaskCategorySel.dataset.bound = "1";
+            }
         }
         const batchEditProjectCodeEl = document.getElementById("batchEditProjectCode");
         if (batchEditProjectCodeEl) batchEditProjectCodeEl.value = sameProjectCode ? projectCodeVal : "";
-        document.getElementById("batchEditAuthor").value = sameAuthor ? authorVal : "";
+        if (!usersListCache.length) await loadUsersList();
+        ensureBatchEditAuthorPicker();
+        setAuthorPickerValue("batchEditAuthorPicker", sameAuthor ? authorVal : "");
         document.getElementById("batchEditAssignee").value = sameAssignee ? assigneeVal : "";
         document.getElementById("batchEditDueDate").value = sameDueDate ? dueDateVal : "";
         document.getElementById("batchEditBusinessSide").value = sameBusinessSide ? businessSideVal : "";
@@ -1895,13 +2497,15 @@ function initBatchEditRecords() {
         batchGoPrintBtn.addEventListener("click", () => runBatchAiprintword("print"));
     }
 
+    ensureBatchEditAuthorPicker();
+
     batchEditSaveBtn?.addEventListener("click", async () => {
         const idsStr = batchEditModal?.dataset.batchEditIds;
         if (!idsStr) return;
         const ids = idsStr.split(",").filter(Boolean);
         const projectCode = (document.getElementById("batchEditProjectCode")?.value || "").trim();
         const taskType = (document.getElementById("batchEditTaskType")?.value || "").trim();
-        const author = (document.getElementById("batchEditAuthor")?.value || "").trim();
+        const author = (document.querySelector("#batchEditAuthorPicker .task-author")?.value || "").trim();
         const assignee = (document.getElementById("batchEditAssignee")?.value || "").trim();
         const dueDate = (document.getElementById("batchEditDueDate")?.value || "").trim();
         const businessSide = (document.getElementById("batchEditBusinessSide")?.value || "").trim();
@@ -2227,7 +2831,19 @@ function renderRecordsTable(records) {
     if (!tbody) return;
     lastRenderedRecords = records || [];
     const groupBy = (document.querySelector('input[name="recordsGroupBy"]:checked') || {}).value || "none";
-    
+
+    try {
+        _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy);
+    } catch (e) {
+        console.error("renderRecordsTable:", e);
+        tbody.innerHTML =
+            '<tr><td colspan="27" class="text-danger small">任务列表渲染失败：' +
+            _escTitle(e && e.message ? e.message : String(e)) +
+            "。请刷新页面或查看浏览器控制台。</td></tr>";
+    }
+}
+
+function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
     const makeRow = (r, idx) => {
         const tr = document.createElement("tr");
         tr.dataset.id = r.id;
@@ -2261,10 +2877,14 @@ function renderRecordsTable(records) {
         const ahTitle = canAiprintHandoff
             ? "跳转 aiprintword（需系统配置 AIPRINTWORD_BASE_URL 与密钥）"
             : "需先有已保存模板、文档链接或已生成文档";
+        // 事项型任务：隐藏文档流转相关按钮（去签字/去打印）。
+        const _isMatterRow = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
+        const goSignBtnHtml = _isMatterRow ? "" : `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>`;
+        const goPrintBtnHtml = _isMatterRow ? "" : `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>`;
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
-            <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
+            <td data-col="projectName" class="col-wide project-name-pick-entry" title="${_escTitle(r.projectName)}（双击：新建录入块并带入该项目）">${r.projectName}</td>
             <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
@@ -2291,8 +2911,8 @@ function renderRecordsTable(records) {
             <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
                 <button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="aicheckword 单文档审核">单审</button>
-                <button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>
-                <button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>
+                ${goSignBtnHtml}
+                ${goPrintBtnHtml}
                 <button class="btn btn-sm btn-outline-danger btn-delete-task" data-id="${r.id}">删除</button>
             </td>
         `;
@@ -2507,90 +3127,369 @@ function loadRecordsList() {
         .then((res) => {
             allRecordsCache = res.records || [];
             renderRecordsTable(allRecordsCache);
+            refreshSavedProjectPickSelect();
         })
         .catch((e) => App.notify(e.message || "加载记录失败", "danger"));
 }
 
-function loadUsersList() {
+let usersListCache = [];
+
+function _escUserCell(s) {
+    return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function _getUsersFilterValues() {
+    return {
+        keyword: (document.getElementById("filterUserKeyword")?.value || "").trim().toLowerCase(),
+        mobile: (document.getElementById("filterUserMobile")?.value || "").trim(),
+        admin: (document.getElementById("filterUserAdmin")?.value || "").trim(),
+    };
+}
+
+function _filterUsersList(users) {
+    const f = _getUsersFilterValues();
+    return (users || []).filter((u) => {
+        if (f.keyword) {
+            const hay = `${u.username || ""} ${u.displayName || ""}`.toLowerCase();
+            if (!hay.includes(f.keyword)) return false;
+        }
+        if (f.mobile && !(u.mobile || "").includes(f.mobile)) return false;
+        if (f.admin === "yes" && !u.isAdmin) return false;
+        if (f.admin === "no" && u.isAdmin) return false;
+        return true;
+    });
+}
+
+function _updateUsersListCountHint(total, shown) {
+    const el = document.getElementById("usersListCountHint");
+    if (!el) return;
+    if (total === shown) {
+        el.textContent = `共 ${total} 个账号`;
+    } else {
+        el.textContent = `共 ${total} 个账号，当前筛选显示 ${shown} 个`;
+    }
+}
+
+function renderUsersList() {
     const tbody = document.getElementById("usersTableBody");
     if (!tbody) return;
+    const filtered = _filterUsersList(usersListCache);
+    _updateUsersListCountHint(usersListCache.length, filtered.length);
+    tbody.innerHTML = "";
+    if (!filtered.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
+        tbody.appendChild(tr);
+        return;
+    }
+    filtered.forEach((u) => {
+        const tr = document.createElement("tr");
+        const adminBadge = u.isAdmin
+            ? '<span class="badge bg-primary">是</span>'
+            : '<span class="text-muted">否</span>';
+        const displayName = (u.displayName || "").trim() || "-";
+        tr.innerHTML = `
+            <td>${_escUserCell(u.username)}</td>
+            <td>${_escUserCell(displayName)}</td>
+            <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
+            <td>${adminBadge}</td>
+            <td class="text-nowrap">
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-mobile="${_escUserCell(u.mobile || "")}">编辑手机号</button>
+                <button type="button" class="btn btn-sm btn-outline-primary btn-toggle-admin me-1" data-id="${u.id}" data-admin="${u.isAdmin ? "1" : "0"}">${u.isAdmin ? "取消管理员" : "设为管理员"}</button>
+                <button type="button" class="btn btn-sm btn-outline-danger btn-delete-user" data-id="${u.id}">删除</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll(".btn-toggle-admin").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const next = btn.dataset.admin !== "1";
+            try {
+                await App.request(`/api/users/${btn.dataset.id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ isAdmin: next }),
+                });
+                App.notify(next ? "已设为管理员" : "已取消管理员");
+                loadUsersList();
+            } catch (e) {
+                App.notify(e.message || "更新失败", "danger");
+            }
+        });
+    });
+    tbody.querySelectorAll(".btn-delete-user").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            if (!confirm("确定要删除此用户吗？")) return;
+            try {
+                await App.request(`/api/users/${btn.dataset.id}`, { method: "DELETE" });
+                App.notify("用户已删除");
+                loadUsersList();
+            } catch (e) {
+                App.notify(e.message || "删除失败", "danger");
+            }
+        });
+    });
+    tbody.querySelectorAll(".btn-edit-mobile").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            document.getElementById("editUserMobileId").value = btn.dataset.id;
+            document.getElementById("editUserMobileUsername").value = btn.dataset.username || "";
+            document.getElementById("editUserMobileValue").value = btn.dataset.mobile || "";
+            const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
+            modal.show();
+        });
+    });
+}
 
-    App.request("/api/users")
+function loadUsersList() {
+    const tbody = document.getElementById("usersTableBody");
+    if (!tbody) return Promise.resolve();
+
+    return App.request("/api/users")
         .then((res) => {
-            tbody.innerHTML = "";
-            (res.users || []).forEach((u) => {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `
-                    <td>${u.username}</td>
-                    <td class="user-mobile-cell">${u.mobile || "-"}</td>
-                    <td>
-                        <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${u.username}" data-mobile="${u.mobile || ""}">编辑手机号</button>
-                        <button type="button" class="btn btn-sm btn-outline-danger btn-delete-user" data-id="${u.id}">删除</button>
-                    </td>
-                `;
-                tbody.appendChild(tr);
-            });
-            tbody.querySelectorAll(".btn-delete-user").forEach((btn) => {
-                btn.addEventListener("click", async () => {
-                    if (!confirm("确定要删除此用户吗？")) return;
-                    try {
-                        await App.request(`/api/users/${btn.dataset.id}`, { method: "DELETE" });
-                        App.notify("用户已删除");
-                        loadUsersList();
-                    } catch (e) {
-                        App.notify(e.message || "删除失败", "danger");
-                    }
-                });
-            });
-            tbody.querySelectorAll(".btn-edit-mobile").forEach((btn) => {
-                btn.addEventListener("click", () => {
-                    document.getElementById("editUserMobileId").value = btn.dataset.id;
-                    document.getElementById("editUserMobileUsername").value = btn.dataset.username || "";
-                    document.getElementById("editUserMobileValue").value = btn.dataset.mobile || "";
-                    const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
-                    modal.show();
-                });
-            });
+            usersListCache = res.users || [];
+            renderUsersList();
+            refreshAllAuthorPickers();
         })
         .catch((e) => App.notify(e.message || "加载用户失败", "danger"));
 }
 
-function initUserForm() {
-    const form = document.getElementById("userForm");
-    if (!form) return;
-
-    form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const usernameInput = document.getElementById("newUsername");
-        const passwordInput = document.getElementById("newPassword");
-        const displayNameInput = document.getElementById("newDisplayName");
-        const mobileInput = document.getElementById("newMobile");
-        
-        const payload = {
-            username: usernameInput.value.trim(),
-            password: passwordInput.value.trim(),
-            displayName: displayNameInput ? displayNameInput.value.trim() || null : null,
-            mobile: mobileInput ? mobileInput.value.trim() || null : null,
-        };
-        
-        if (!payload.username || !payload.password) {
-            App.notify("用户名和密码不能为空", "warning");
-            return;
-        }
-        
-        try {
-            const result = await App.request("/api/users", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            App.notify(result.message || "用户创建成功");
-            form.reset();
-            loadUsersList();
-        } catch (error) {
-            App.notify(error.message, "danger");
-        }
+function initUsersListFilter() {
+    ["filterUserKeyword", "filterUserMobile", "filterUserAdmin"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener("input", renderUsersList);
+        el.addEventListener("change", renderUsersList);
     });
+}
+
+function userAuthorPickLabel(u) {
+    const dn = (u.displayName || "").trim();
+    const un = (u.username || "").trim();
+    return dn || un;
+}
+
+function userAuthorPickHaystack(u) {
+    const dn = (u.displayName || "").trim();
+    const un = (u.username || "").trim();
+    return `${un} ${dn}`.toLowerCase();
+}
+
+function filterUsersForAuthorPick(keyword) {
+    const k = (keyword || "").trim().toLowerCase();
+    const list = Array.isArray(usersListCache) ? usersListCache : [];
+    if (!k) return list.slice();
+    return list.filter((u) => userAuthorPickHaystack(u).includes(k));
+}
+
+function fillAuthorSelectOptions(selectEl, opts) {
+    if (!selectEl) return;
+    const options = opts || {};
+    const filter = options.filter || "";
+    const selected = (options.selected != null ? String(options.selected) : selectEl.value || "").trim();
+    const placeholder = options.placeholder || "— 请选择编写人 —";
+    const allowLegacy = options.allowLegacy !== false;
+    const list = filterUsersForAuthorPick(filter);
+    selectEl.innerHTML = "";
+    const emptyOpt = document.createElement("option");
+    emptyOpt.value = "";
+    emptyOpt.textContent = placeholder;
+    selectEl.appendChild(emptyOpt);
+    const seen = new Set();
+    list.forEach((u) => {
+        const lab = userAuthorPickLabel(u);
+        if (!lab || seen.has(lab)) return;
+        seen.add(lab);
+        const opt = document.createElement("option");
+        opt.value = lab;
+        const un = (u.username || "").trim();
+        opt.textContent =
+            u.displayName && un && u.displayName !== un ? `${u.displayName}（${un}）` : lab;
+        selectEl.appendChild(opt);
+    });
+    if (selected && !seen.has(selected) && allowLegacy) {
+        ensureSelectHasOption(selectEl, selected, "（当前记录）");
+    }
+    if (selected) selectEl.value = selected;
+}
+
+function bindAuthorPickerWrapper(wrapper, hooks) {
+    const filterEl = wrapper.querySelector(".author-picker-filter");
+    const selectEl = wrapper.querySelector(".task-author");
+    if (!selectEl) return null;
+    const refresh = () => {
+        fillAuthorSelectOptions(selectEl, {
+            filter: filterEl ? filterEl.value : "",
+            selected: selectEl.value,
+        });
+    };
+    if (filterEl && !filterEl.dataset.authorPickerBound) {
+        filterEl.dataset.authorPickerBound = "1";
+        filterEl.addEventListener("input", refresh);
+    }
+    if (!selectEl.dataset.authorPickerBound) {
+        selectEl.dataset.authorPickerBound = "1";
+        selectEl.addEventListener("change", () => {
+            hooks?.onChange?.(selectEl.value.trim(), selectEl);
+        });
+    }
+    refresh();
+    return { selectEl, refresh };
+}
+
+function mountAuthorPicker(host, opts) {
+    if (!host) return null;
+    const options = opts || {};
+    const selected = (options.selected || "").trim();
+    const showQuickAdd = !!options.showQuickAdd;
+    host.innerHTML = "";
+    host.classList.add("author-picker");
+    const filterEl = document.createElement("input");
+    filterEl.type = "search";
+    filterEl.className = "form-control form-control-sm author-picker-filter";
+    filterEl.placeholder = "筛选编写人…";
+    filterEl.autocomplete = "off";
+    const rowEl = document.createElement("div");
+    rowEl.className = showQuickAdd ? "input-group input-group-sm author-picker-select-row" : "author-picker-select-row";
+    const selectEl = document.createElement("select");
+    selectEl.className = "form-select form-select-sm task-author";
+    if (options.required) selectEl.required = true;
+    rowEl.appendChild(selectEl);
+    if (showQuickAdd) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-outline-success btn-create-user";
+        btn.title = "快速创建账号";
+        btn.textContent = "+";
+        btn.addEventListener("click", () => {
+            const lab = selectEl.value.trim();
+            const hit = (usersListCache || []).find((u) => userAuthorPickLabel(u) === lab);
+            window.__authorPickerPendingSelect = selectEl;
+            const quickUsername = document.getElementById("quickUsername");
+            if (quickUsername) quickUsername.value = hit?.username || lab;
+            const qm = document.getElementById("quickUserModal");
+            if (qm) bootstrap.Modal.getOrCreateInstance(qm).show();
+        });
+        rowEl.appendChild(btn);
+    }
+    host.appendChild(filterEl);
+    host.appendChild(rowEl);
+    return bindAuthorPickerWrapper(host, options.hooks);
+}
+
+function refreshAllAuthorPickers() {
+    document.querySelectorAll(".author-picker").forEach((wrapper) => {
+        const selectEl = wrapper.querySelector(".task-author");
+        const filterEl = wrapper.querySelector(".author-picker-filter");
+        if (!selectEl) return;
+        fillAuthorSelectOptions(selectEl, {
+            filter: filterEl ? filterEl.value : "",
+            selected: selectEl.value,
+        });
+    });
+}
+
+function ensureEditRecordAuthorPicker() {
+    const host = document.getElementById("editRecordAuthorPicker");
+    if (!host) return null;
+    if (!host.dataset.mounted) {
+        mountAuthorPicker(host, {
+            required: true,
+            hooks: {
+                onChange: (authorVal) => {
+                    const assigneeInput = document.getElementById("editRecordAssignee");
+                    if (assigneeInput && authorVal) assigneeInput.value = authorVal;
+                    updateEditRecordAssigneeMobileHint(assigneeInput?.value || authorVal || "");
+                },
+            },
+        });
+        host.dataset.mounted = "1";
+    }
+    return host.querySelector(".task-author");
+}
+
+function ensureBatchEditAuthorPicker() {
+    const host = document.getElementById("batchEditAuthorPicker");
+    if (!host) return null;
+    if (!host.dataset.mounted) {
+        mountAuthorPicker(host, { placeholder: "— 不修改 —" });
+        host.dataset.mounted = "1";
+    }
+    return host.querySelector(".task-author");
+}
+
+function setAuthorPickerValue(hostOrId, value) {
+    const host =
+        typeof hostOrId === "string" ? document.getElementById(hostOrId) : hostOrId;
+    const selectEl = host?.classList?.contains("author-picker")
+        ? host.querySelector(".task-author")
+        : host?.classList?.contains("task-author")
+          ? host
+          : host?.querySelector?.(".task-author");
+    if (!selectEl) return;
+    const filterEl = host?.querySelector?.(".author-picker-filter");
+    fillAuthorSelectOptions(selectEl, {
+        filter: filterEl ? filterEl.value : "",
+        selected: value || "",
+    });
+}
+
+async function submitCreateUserForm() {
+    const usernameInput = document.getElementById("newUsername");
+    const passwordInput = document.getElementById("newPassword");
+    const displayNameInput = document.getElementById("newDisplayName");
+    const mobileInput = document.getElementById("newMobile");
+    const isAdminInput = document.getElementById("newUserIsAdmin");
+    const payload = {
+        username: (usernameInput?.value || "").trim(),
+        password: (passwordInput?.value || "").trim(),
+        displayName: displayNameInput ? (displayNameInput.value || "").trim() || null : null,
+        mobile: mobileInput ? (mobileInput.value || "").trim() || null : null,
+        isAdmin: !!(isAdminInput && isAdminInput.checked),
+    };
+    if (!payload.username || !payload.password) {
+        App.notify("用户名和密码不能为空", "warning");
+        return false;
+    }
+    const result = await App.request("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+    App.notify(result.message || "用户创建成功");
+    document.getElementById("createUserForm")?.reset();
+    bootstrap.Modal.getInstance(document.getElementById("createUserModal"))?.hide();
+    loadUsersList();
+    return true;
+}
+
+function initCreateUserModal() {
+    const openBtn = document.getElementById("btnOpenCreateUserModal");
+    const modalEl = document.getElementById("createUserModal");
+    const form = document.getElementById("createUserForm");
+    const submitBtn = document.getElementById("createUserSubmitBtn");
+    if (!modalEl) return;
+
+    openBtn?.addEventListener("click", () => {
+        form?.reset();
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        setTimeout(() => document.getElementById("newUsername")?.focus(), 200);
+    });
+
+    const onSubmit = async (e) => {
+        e?.preventDefault();
+        try {
+            await submitCreateUserForm();
+        } catch (error) {
+            App.notify(error.message || "创建失败", "danger");
+        }
+    };
+
+    form?.addEventListener("submit", onSubmit);
+    submitBtn?.addEventListener("click", onSubmit);
 }
 
 function initQuickUserForm() {
@@ -2623,14 +3522,21 @@ function initQuickUserForm() {
             });
             App.notify(result.message || "用户创建成功");
             form.reset();
-            loadUsersList();
+            const newLabel =
+                result.user?.displayName || result.user?.username || payload.username || "";
+            await loadUsersList();
+            if (window.__authorPickerPendingSelect) {
+                fillAuthorSelectOptions(window.__authorPickerPendingSelect, { selected: newLabel });
+                window.__authorPickerPendingSelect = null;
+            }
             bootstrap.Modal.getInstance(document.getElementById("quickUserModal"))?.hide();
             const editId = document.getElementById("editRecordId")?.value;
             const editModal = document.getElementById("editRecordModal");
             if (editId && editModal?.classList.contains("show")) {
+                setAuthorPickerValue("editRecordAuthorPicker", newLabel);
                 const assigneeInput = document.getElementById("editRecordAssignee");
                 if (assigneeInput) {
-                    assigneeInput.value = result.user?.displayName || result.user?.username || payload.username || "";
+                    assigneeInput.value = newLabel;
                     updateEditRecordAssigneeMobileHint(assigneeInput.value);
                 }
             }
@@ -2655,14 +3561,33 @@ function initConfigManagement() {
 
     const loadTaskTypesList = async () => {
         try {
-            const res = await App.request("/api/configs/task-types");
-            taskTypesCache = res.taskTypes || [];
+            await loadTaskTypes();
             taskTypesList.innerHTML = "";
-            taskTypesCache.forEach(t => {
+            taskTypesCache.forEach((t) => {
+                const cat = _normalizeTaskTypeCategory(t.category);
+                const catLabel = cat === TASK_TYPE_CATEGORY_MATTER ? "事项型" : "文件型";
                 const badge = document.createElement("span");
-                badge.className = "badge bg-secondary d-flex align-items-center";
-                badge.innerHTML = `${t.name} <button class="btn-close btn-close-white ms-1" style="font-size:0.6rem;" data-id="${t.id}"></button>`;
-                badge.querySelector("button").addEventListener("click", async () => {
+                badge.className = "badge d-flex align-items-center " + (cat === TASK_TYPE_CATEGORY_MATTER ? "bg-warning text-dark" : "bg-secondary");
+                badge.innerHTML = `
+                    <button type="button" class="btn btn-sm py-0 px-1 me-1 task-type-cat-btn ${cat === TASK_TYPE_CATEGORY_MATTER ? "btn-outline-light" : "btn-outline-light"}" title="点击在「文件型 ↔ 事项型」间切换" style="font-size:0.65rem;line-height:1;">${catLabel}</button>
+                    <span class="me-1">${t.name}</span>
+                    <button type="button" class="btn-close ${cat === TASK_TYPE_CATEGORY_MATTER ? "" : "btn-close-white"}" style="font-size:0.6rem;" data-id="${t.id}" title="删除"></button>
+                `;
+                const catBtn = badge.querySelector(".task-type-cat-btn");
+                catBtn?.addEventListener("click", async () => {
+                    const next = cat === TASK_TYPE_CATEGORY_MATTER ? TASK_TYPE_CATEGORY_FILE : TASK_TYPE_CATEGORY_MATTER;
+                    try {
+                        await App.request(`/api/configs/task-types/${t.id}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ category: next }),
+                        });
+                        loadTaskTypesList();
+                    } catch (e) {
+                        App.notify(e.message || "切换失败", "danger");
+                    }
+                });
+                badge.querySelector(".btn-close").addEventListener("click", async () => {
                     try {
                         await App.request(`/api/configs/task-types/${t.id}`, { method: "DELETE" });
                         loadTaskTypesList();
@@ -2704,11 +3629,13 @@ function initConfigManagement() {
     addTaskTypeBtn?.addEventListener("click", async () => {
         const name = newTaskTypeInput.value.trim();
         if (!name) return;
+        const newCatSel = document.getElementById("newTaskCategory");
+        const category = _normalizeTaskTypeCategory(newCatSel ? newCatSel.value : TASK_TYPE_CATEGORY_FILE);
         try {
             await App.request("/api/configs/task-types", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name }),
+                body: JSON.stringify({ name, category }),
             });
             newTaskTypeInput.value = "";
             loadTaskTypesList();
@@ -2787,7 +3714,7 @@ function initLoginPage() {
         event.preventDefault();
         const payload = {
             username: document.getElementById("loginUsername").value.trim(),
-            password: document.getElementById("loginPassword").value.trim(),
+            password: document.getElementById("loginPassword").value,
         };
         try {
             await App.request("/api/login", {
@@ -2795,7 +3722,7 @@ function initLoginPage() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-            window.location.href = "/generate";
+            window.location.href = _appPath("/generate");
         } catch (error) {
             App.notify(error.message, "danger");
         }
@@ -2826,13 +3753,20 @@ async function initGeneratePage() {
 
     App.request("/api/me").then((res) => {
         if (res.loggedIn && userInfo) {
-            userInfo.textContent = `欢迎，${res.user.displayName || res.user.username}`;
+            let label = `欢迎，${res.user.displayName || res.user.username}`;
+            if (res.user.isAdmin || res.featureAdminViewer) {
+                label += "（管理员）";
+            }
+            userInfo.textContent = label;
+        }
+        if (res.featureFlags && typeof res.featureFlags === "object") {
+            window.__FEATURE_FLAGS__ = res.featureFlags;
         }
     });
 
     logoutBtn?.addEventListener("click", async () => {
         await App.request("/api/logout", { method: "POST" });
-        window.location.href = "/login";
+        window.location.href = _appPath("/login");
     });
 
     const loadMyTasks = async () => {
@@ -2997,6 +3931,54 @@ function bindPage2TemplateFileUpload(tr, r) {
     });
 }
 
+/** 读取页面2 功能开关：与系统配置「FEATURE_PAGE2_*」一致；未注入时按关闭处理。 */
+function _page2Feature(name) {
+    const flags = window.__FEATURE_FLAGS__ || {};
+    return !!flags[name];
+}
+
+/**
+ * 渲染页面2「我的任务」每行的操作按钮。
+ * 事项型任务隐藏全部文档相关按钮；文件型任务按 FEATURE_PAGE2_* 开关决定每个按钮是否显示。
+ */
+function _buildPage2ActionButtonsHtml(r) {
+    const isMatter = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
+    if (isMatter) {
+        // 事项型任务：仅做事项跟进；隐藏「上传/替换、填写、初稿生成、审核后修改、翻译」
+        return '<span class="small text-muted">事项型任务</span>';
+    }
+    const parts = [];
+    if (_page2Feature("FEATURE_PAGE2_UPLOAD_REPLACE")) {
+        parts.push(
+            `<input type="file" class="d-none task-template-file-input" accept="${PAGE2_TEMPLATE_FILE_ACCEPT}" data-id="${r.id}">`
+        );
+        parts.push(
+            `<button type="button" class="btn btn-sm btn-outline-secondary btn-replace-template-file" title="上传模板到 FTP；覆盖已有文件或链接">上传/替换</button>`
+        );
+    }
+    if (r.hasFile || (r.placeholders && r.placeholders.length > 0)) {
+        parts.push(
+            `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders ms-1" data-id="${r.id}">填写</button>`
+        );
+    }
+    if (_page2Feature("FEATURE_PAGE2_DRAFT_GEN")) {
+        parts.push(
+            `<button type="button" class="btn btn-sm btn-outline-success btn-draft-gen-page2 ms-1" title="打开初稿生成页并带入本行项目/产品/国家/文件名">初稿生成</button>`
+        );
+    }
+    if (_page2Feature("FEATURE_PAGE2_AUDIT_MODIFY")) {
+        parts.push(
+            `<button type="button" class="btn btn-sm btn-outline-info btn-audit-modify-page2 ms-1" title="基于历史审核报告对本任务做就地修改">审核后修改</button>`
+        );
+    }
+    if (_page2Feature("FEATURE_PAGE2_TRANSLATE")) {
+        parts.push(
+            `<button type="button" class="btn btn-sm btn-outline-warning btn-translate-page2 ms-1" title="对本任务的模板文件做翻译">翻译</button>`
+        );
+    }
+    return parts.join("\n");
+}
+
 /** 页面2任务行 → 初稿生成页，查询参数供 /draft-gen 预填下拉。 */
 function buildDraftGenUrlFromTask(r) {
     const root = window.__SCRIPT_ROOT__ || "";
@@ -3051,6 +4033,8 @@ function renderMyTasksTable(records) {
         const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
+        const isMatterRow = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
+        const execNotesPlaceholder = isMatterRow ? "请填写事项完成情况" : "执行备注";
         tr.innerHTML = `
             <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>
             <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
@@ -3064,7 +4048,7 @@ function renderMyTasksTable(records) {
             <td title="${_escTitle(r.product)}">${(r.product != null && r.product !== "") ? r.product : "-"}</td>
             <td title="${_escTitle(r.country)}">${(r.country != null && r.country !== "") ? r.country : "-"}</td>
             <td data-wrap style="max-width:180px" title="${_escTitle(r.notes)}">${_renderNotesHtml(r.notes)}</td>
-            <td><input type="text" class="form-control form-control-sm execution-notes-input" placeholder="执行备注" data-id="${r.id}" value="${(r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes).replace(/"/g, "&quot;") : ""}"></td>
+            <td><input type="text" class="form-control form-control-sm execution-notes-input" placeholder="${execNotesPlaceholder}" data-id="${r.id}" value="${(r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes).replace(/"/g, "&quot;") : ""}"></td>
             <td class="completion-status-cell"></td>
             <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
             <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
@@ -3077,14 +4061,7 @@ function renderMyTasksTable(records) {
             <td title="${_escTitle(r.model)}">${(r.model != null && r.model !== "") ? r.model : "-"}</td>
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
-                <input type="file" class="d-none task-template-file-input" accept="${PAGE2_TEMPLATE_FILE_ACCEPT}" data-id="${r.id}">
-                <button type="button" class="btn btn-sm btn-outline-secondary btn-replace-template-file" title="上传模板到 FTP；覆盖已有文件或链接">上传/替换</button>
-                ${r.hasFile || (r.placeholders && r.placeholders.length > 0)
-                    ? `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders ms-1" data-id="${r.id}">填写</button>`
-                    : ''}
-                <button type="button" class="btn btn-sm btn-outline-success btn-draft-gen-page2 ms-1" title="打开初稿生成页并带入本行项目/产品/国家/文件名">初稿生成</button>
-                <button type="button" class="btn btn-sm btn-outline-info btn-audit-modify-page2 ms-1" title="基于历史审核报告对本任务做就地修改">审核后修改</button>
-                <button type="button" class="btn btn-sm btn-outline-warning btn-translate-page2 ms-1" title="对本任务的模板文件做翻译">翻译</button>
+                ${_buildPage2ActionButtonsHtml(r)}
             </td>
         `;
         const statusCell = tr.querySelector(".completion-status-cell");
@@ -3096,7 +4073,20 @@ function renderMyTasksTable(records) {
             const hasTemplate = r.hasFile || r.hasLinks || !!linkVal;
             const newStatus = statusSelect.value;
             const isCompleted = newStatus && newStatus !== "未完成";
-            if (isCompleted && !hasTemplate) {
+            const isMatterComplete = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
+            if (isCompleted && isMatterComplete) {
+                const execNotesInput = tr.querySelector(".execution-notes-input");
+                const execVal = (execNotesInput?.value || r.executionNotes || "").trim();
+                if (!isMeaningfulMatterExecutionNotes(execVal)) {
+                    statusSelect.value = r.completionStatus || "";
+                    App.notify(
+                        execVal ? MATTER_EXEC_NOTES_INVALID_MSG : MATTER_EXEC_NOTES_MSG,
+                        "danger"
+                    );
+                    execNotesInput?.focus();
+                    return;
+                }
+            } else if (isCompleted && !hasTemplate) {
                 statusSelect.value = r.completionStatus || "";
                 App.notify("请先填写文档链接后再标记完成状态", "danger");
                 return;
@@ -3108,9 +4098,14 @@ function renderMyTasksTable(records) {
             }
             const payload = { completionStatus: newStatus };
             if (linkVal) payload.templateLinks = linkVal;
+            if (isCompleted && isMatterComplete) {
+                const execNotesInput = tr.querySelector(".execution-notes-input");
+                payload.executionNotes = (execNotesInput?.value || r.executionNotes || "").trim();
+            }
             try {
                 await App.request(`/api/uploads/${r.id}/completion-status`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
                 App.notify("状态已更新");
+                if (payload.executionNotes != null) r.executionNotes = payload.executionNotes;
                 if (linkVal) { r.templateLinks = linkVal; r.hasLinks = true; loadMyTasks(); }
             } catch (e) {
                 statusSelect.value = r.completionStatus || "";
@@ -3136,10 +4131,23 @@ function renderMyTasksTable(records) {
         if (execNotesInput) {
             execNotesInput.addEventListener("blur", async () => {
                 const val = execNotesInput.value.trim();
+                const prev = (r.executionNotes || "").trim();
+                if (isMatterRow) {
+                    if (!val) {
+                        execNotesInput.value = r.executionNotes || "";
+                        return;
+                    }
+                    if (!isMeaningfulMatterExecutionNotes(val)) {
+                        execNotesInput.value = r.executionNotes || "";
+                        App.notify(MATTER_EXEC_NOTES_INVALID_MSG, "danger");
+                        return;
+                    }
+                }
+                if (val === prev) return;
                 try {
                     await App.request(`/api/uploads/${r.id}/execution-notes`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionNotes: val || null }) });
                     r.executionNotes = val || null;
-                    App.notify("执行任务备注已保存");
+                    if (val) App.notify("执行任务备注已保存");
                 } catch (err) { App.notify(err.message || "保存失败", "danger"); }
             });
         }
@@ -3331,6 +4339,159 @@ let detailCollapsedGroups = new Set();
 let detailSortKey = "";
 let detailSortDir = "asc";
 
+function _escHtmlSysCfg(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;");
+}
+
+/** 后端未返回 sections 时的前端分区（与 app_settings.SYSTEM_CONFIG_SECTIONS 一致） */
+const CLIENT_SYSTEM_CONFIG_SECTIONS = [
+    {
+        id: "feature_flags",
+        title: "功能开关",
+        hint: "控制页面2 操作按钮与考试训练中心入口；填 1 开启，留空或 0 关闭。",
+        defaultExpanded: true,
+        keys: [
+            "FEATURE_PAGE2_UPLOAD_REPLACE",
+            "FEATURE_PAGE2_DRAFT_GEN",
+            "FEATURE_PAGE2_AUDIT_MODIFY",
+            "FEATURE_PAGE2_TRANSLATE",
+            "FEATURE_EXAM_CENTER",
+        ],
+    },
+    {
+        id: "core",
+        title: "基础与安全",
+        hint: "部署、访问控制与对外地址；修改数据库连接后需重启服务。",
+        defaultExpanded: true,
+        keys: [
+            "DATABASE_URL",
+            "SECRET_KEY",
+            "BASE_URL",
+            "PAGE13_ACCESS_PASSWORD",
+            "INTEGRATION_SECRET",
+            "UPLOAD_FOLDER",
+            "OUTPUT_FOLDER",
+            "SCHEDULER_INSTANCE_ID",
+        ],
+    },
+    {
+        id: "dingtalk",
+        title: "钉钉通知",
+        hint: "群机器人与工作通知；敏感项留空表示不修改已有值。",
+        defaultExpanded: true,
+        keys: [
+            "DINGTALK_WEBHOOK",
+            "DINGTALK_SECRET",
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_AGENT_ID",
+        ],
+    },
+    {
+        id: "exam_center",
+        title: "考试训练中心",
+        hint: "考试中心后端地址、鉴权与录题/及格线等业务参数。",
+        defaultExpanded: false,
+        keys: [
+            "QUIZ_API_BASE_URL",
+            "QUIZ_API_BEARER_TOKEN",
+            "QUIZ_API_SECRET",
+            "QUIZ_API_TIMEOUT_SECONDS",
+            "EXAM_PASS_SCORE",
+            "EXAM_INGEST_TARGET_COUNT",
+            "EXAM_INGEST_KNOWLEDGE_WEIGHTS",
+            "EXAM_INGEST_QUESTION_TYPE_WEIGHTS",
+            "EXAM_INGEST_MAX_SIMILAR_FRAC",
+        ],
+    },
+    {
+        id: "aicheckword",
+        title: "aicheckword 集成",
+        hint: "初稿、审核、翻译等对接地址与超时。",
+        defaultExpanded: false,
+        keys: [
+            "AICHECKWORD_DRAFT_API_BASE",
+            "AICHECKWORD_DRAFT_TIMEOUT_SECONDS",
+            "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
+            "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
+            "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
+            "AICHECKWORD_DRAFT_COLLECTION_IDS",
+        ],
+    },
+    {
+        id: "aiprintword",
+        title: "aiprintword 签字/打印",
+        hint: "页面1「去签字/去打印」服务端交接用。",
+        defaultExpanded: false,
+        keys: ["AIPRINTWORD_BASE_URL", "AIPRINTWORD_HANDOFF_SECRET"],
+    },
+];
+
+/** 单条系统配置输入框 HTML */
+function _renderSystemSettingFieldHtml(k, settings) {
+    const raw = settings[k.key] != null ? String(settings[k.key]) : "";
+    const showVal = _escHtmlSysCfg(raw);
+    const isDb = k.key === "DATABASE_URL";
+    const unchanged = raw === "(不变)" || raw === "******";
+    const webhookLike = k.key === "DINGTALK_WEBHOOK";
+    const typ =
+        k.sensitive && !unchanged && raw && !webhookLike
+            ? "password"
+            : "text";
+    let ph = "";
+    if (isDb) {
+        ph = raw
+            ? "当前已连接（脱敏）；修改请填写完整 URI"
+            : "填写 MySQL/SQLite 连接串";
+    } else if (k.sensitive && !raw) {
+        ph = "未配置";
+    }
+    return `<div class="col-md-6"><label class="form-label small mb-0">${_escHtmlSysCfg(k.label)}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${_escHtmlSysCfg(ph)}" autocomplete="off"></div>`;
+}
+
+/** 按后端 sections 分区渲染；无 sections 时回退为平铺列表 */
+function _renderSystemSettingsFormHtml(keys, settings, sections) {
+    const keyMap = Object.fromEntries((keys || []).map((k) => [k.key, k]));
+    const esc = _escHtmlSysCfg;
+    const secs =
+        Array.isArray(sections) && sections.length ? sections : CLIENT_SYSTEM_CONFIG_SECTIONS;
+    const intro =
+        '<p class="small text-muted mb-2 sys-cfg-form-intro">以下按分区折叠展示，点击分区标题可展开或收起；带「项数」标签的为配置分组。</p>';
+    if (secs && secs.length) {
+        return (
+            intro +
+            secs
+            .map((sec) => {
+                const fieldKeys = sec.keys || [];
+                const fields = fieldKeys.map((name) => keyMap[name]).filter(Boolean);
+                if (!fields.length) return "";
+                const openAttr = sec.defaultExpanded ? " open" : "";
+                const hintHtml = sec.hint
+                    ? `<p class="sys-cfg-section-hint small text-muted mb-2">${esc(sec.hint)}</p>`
+                    : "";
+                const fieldsHtml = fields
+                    .map((k) => _renderSystemSettingFieldHtml(k, settings))
+                    .join("");
+                return `<details class="sys-cfg-section"${openAttr} data-section-id="${esc(sec.id || "")}">
+<summary class="sys-cfg-section-summary">
+<span class="sys-cfg-section-title">${esc(sec.title || "未命名")}</span>
+<span class="sys-cfg-section-count">${fields.length} 项</span>
+</summary>
+${hintHtml}
+<div class="row g-2 sys-cfg-section-fields">${fieldsHtml}</div>
+</details>`;
+            })
+            .join("")
+        );
+    }
+    return `<div class="row g-2">${(keys || [])
+        .map((k) => _renderSystemSettingFieldHtml(k, settings))
+        .join("")}</div>`;
+}
+
 function initDashboardPage() {
     const loadSystemSettings = async () => {
         const container = document.getElementById("systemSettingsForm");
@@ -3339,33 +4500,13 @@ function initDashboardPage() {
             const res = await App.request("/api/system-settings");
             const keys = res.keys || [];
             const settings = res.settings || {};
+            const sections = res.sections || [];
             if (!keys.length) {
                 container.innerHTML =
-                    '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项列表，请刷新页面。</div></div>';
+                    '<div class="alert alert-warning mb-0 small">未获取到配置项列表，请刷新页面。</div>';
                 return;
             }
-            container.innerHTML = keys.map((k) => {
-                const raw = settings[k.key] != null ? String(settings[k.key]) : "";
-                const esc = (s) =>
-                    String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-                const showVal = esc(raw);
-                const isDb = k.key === "DATABASE_URL";
-                const unchanged = raw === "(不变)" || raw === "******";
-                const webhookLike = k.key === "DINGTALK_WEBHOOK";
-                const typ =
-                    k.sensitive && !unchanged && raw && !webhookLike
-                        ? "password"
-                        : "text";
-                let ph = "";
-                if (isDb) {
-                    ph = raw
-                        ? "当前已连接（脱敏）；修改请填写完整 URI"
-                        : "填写 MySQL/SQLite 连接串";
-                } else if (k.sensitive && !raw) {
-                    ph = "未配置";
-                }
-                return `<div class="col-md-6"><label class="form-label small mb-0">${k.label.replace(/</g, "&lt;")}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${esc(ph)}" autocomplete="off"></div>`;
-            }).join("");
+            container.innerHTML = _renderSystemSettingsFormHtml(keys, settings, sections);
         } catch (e) {
             console.error(e);
             const escE = (s) =>
@@ -3373,9 +4514,9 @@ function initDashboardPage() {
                     .replace(/&/g, "&amp;")
                     .replace(/"/g, "&quot;")
                     .replace(/</g, "&lt;");
-            container.innerHTML = `<div class="col-12"><div class="alert alert-danger mb-0 small">系统配置加载失败：${escE(
+            container.innerHTML = `<div class="alert alert-danger mb-0 small">系统配置加载失败：${escE(
                 (e && e.message) || String(e)
-            )}。若提示需要访问密码，请先完成页面验证后再试。</div></div>`;
+            )}。若提示需要访问密码，请先完成页面验证后再试。</div>`;
         }
     };
 
@@ -3417,7 +4558,7 @@ function initDashboardPage() {
                 const container = document.getElementById("systemSettingsForm");
                 if (container) {
                     container.innerHTML =
-                        '<div class="col-12"><div class="alert alert-info mb-0 small">加载中…</div></div>';
+                        '<div class="alert alert-info mb-0 small">加载中…</div>';
                 }
                 try {
                     await loadSystemSettings();
@@ -3446,6 +4587,7 @@ function initDashboardPage() {
 
     document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
         const container = document.getElementById("systemSettingsForm");
+        const saveBtn = document.getElementById("saveSystemSettingsBtn");
         if (!container) return;
         const payload = {};
         container.querySelectorAll(".sys-cfg-input").forEach((inp) => {
@@ -3463,10 +4605,12 @@ function initDashboardPage() {
             }
         });
         try {
+            _setButtonBusy(saveBtn, true, "保存中…");
             await App.request("/api/system-settings", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
+                timeoutMs: 60000,
             });
             App.notify("系统配置已保存", "success");
             await loadSystemSettings();
@@ -3475,6 +4619,8 @@ function initDashboardPage() {
             }
         } catch (e) {
             App.notify((e.data && e.data.message) || e.message || "保存失败", "danger");
+        } finally {
+            _setButtonBusy(saveBtn, false);
         }
     });
     // 默认不加载：等用户点击打开弹窗后拉取
@@ -4465,12 +5611,13 @@ function initColumnToggle(btnId, menuId, tableId) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-    try {
-        await loadCompletionStatuses();
-    } catch (e) {
-        if (window.location.pathname !== "/login") throw e;
-    }
-    initUploadPage();
+    await loadCompletionStatuses().catch((e) => {
+        console.warn("loadCompletionStatuses:", e);
+    });
+    Promise.resolve(initUploadPage()).catch((e) => {
+        console.error("initUploadPage:", e);
+        if (document.getElementById("recordsTableBody")) loadRecordsList();
+    });
     initLoginPage();
     initGeneratePage();
     initDashboardPage();

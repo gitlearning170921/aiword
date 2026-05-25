@@ -267,10 +267,40 @@ form .row .form-select {
     line-height: 1;
 }
 
-/* 账号管理卡片内表格 */
+/* 页面1 账号管理：列表区域加高 */
+.users-management-card .users-list-panel {
+    max-height: min(480px, 55vh);
+    min-height: 300px;
+    overflow: auto;
+}
+#usersListCountHint {
+    min-height: 1.25rem;
+}
 #usersTableBody .btn-outline-danger {
     padding: 2px 8px;
     font-size: 0.75rem;
+}
+#createUserModal.modal.show {
+    z-index: 1060;
+}
+
+/* 页面1 编写人下拉（可筛选） */
+.author-picker .author-picker-filter {
+    margin-bottom: 0.25rem;
+}
+.project-entry-task-table .task-author-cell {
+    min-width: 11rem;
+    vertical-align: top;
+}
+.project-entry-task-table .task-author-cell .author-picker-filter {
+    font-size: 0.75rem;
+}
+.project-entry-task-table .task-author-cell .task-author {
+    min-width: 8rem;
+}
+#editRecordAuthorPicker .author-picker-filter,
+#batchEditAuthorPicker .author-picker-filter {
+    margin-bottom: 0.35rem;
 }
 
 /* 拖动排序样式 */
@@ -596,5 +626,142 @@ tr[draggable="true"].dragging {
     border-top: 1px solid rgba(0, 0, 0, 0.08);
     display: flex;
     justify-content: flex-end;
+}
+
+/* 系统配置：分区折叠 */
+#systemSettingsForm.sys-cfg-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.sys-cfg-section {
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    border-radius: 10px;
+    background: #f8fafc;
+    overflow: hidden;
+}
+.sys-cfg-section[open] {
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+}
+.sys-cfg-section-summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: #0f172a;
+    user-select: none;
+}
+.sys-cfg-section-summary::-webkit-details-marker {
+    display: none;
+}
+.sys-cfg-section-summary::before {
+    content: "▶";
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 0.7rem;
+    color: #64748b;
+    transition: transform 0.15s ease;
+}
+.sys-cfg-section[open] > .sys-cfg-section-summary::before {
+    transform: rotate(90deg);
+}
+.sys-cfg-section-title {
+    flex: 1;
+    min-width: 0;
+}
+.sys-cfg-section-count {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #64748b;
+    white-space: nowrap;
+}
+.sys-cfg-section-hint {
+    margin: 0 14px 8px;
+    padding-left: 1.35rem;
+}
+.sys-cfg-section-fields {
+    padding: 0 14px 14px;
+}
+
+/* 页面1 · 任务录入：项目信息固定、任务表区域可滚动且表头固定 */
+.project-block .project-entry-meta-panel {
+    position: sticky;
+    top: 0;
+    z-index: 24;
+    background: #fff;
+    padding-bottom: 0.35rem;
+    margin-bottom: 0.35rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+}
+.project-block .project-entry-task-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+}
+.project-block .project-entry-task-row-count {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #0f172a;
+    margin-right: auto;
+}
+.project-block .project-entry-table-viewport {
+    max-height: min(52vh, 520px);
+    overflow: auto;
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    border-radius: 8px;
+    background: #fff;
+}
+.project-block .project-entry-task-table {
+    margin-bottom: 0;
+}
+.project-block .project-entry-task-table thead tr.project-entry-head-row1 th {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    background: #f8f9fa;
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
+}
+.project-block .project-entry-task-table thead tr.project-entry-head-row2 th {
+    position: sticky;
+    top: 2.4rem;
+    z-index: 11;
+    background: #f8f9fa;
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
+}
+.project-block .project-entry-task-table .task-row-select-col {
+    width: 2rem;
+    text-align: center;
+    vertical-align: middle;
+}
+#saveAllProgressHint {
+    max-width: 42vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#recordsTable td.project-name-pick-entry {
+    cursor: pointer;
+    color: #0d6efd;
+}
+#recordsTable td.project-name-pick-entry:hover {
+    text-decoration: underline;
+}
+
+/* 页面2：完成状态提示文案与表头强调 */
+.page2-completion-hint {
+    color: var(--bs-danger);
+    font-weight: 700;
+}
+#myTasksTable thead th[data-col="completionStatus"] {
+    color: var(--bs-danger);
+    font-weight: 700;
 }
 

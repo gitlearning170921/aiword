@@ -1,0 +1,1 @@
+mysql+pymysql://root:mysql170921@10.26.1.221:13306/aiword?charset=utf8mb4&connect_timeout=10

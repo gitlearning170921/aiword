@@ -279,17 +279,16 @@ def _task_block_md(key, uploads_in_group, project_name: str = None):
     else:
         header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
     lines = [header]
+    from .notify_content import notify_doc_link_suffix_md
+
     for u in uploads_in_group:
-        links = u.get_template_links_list() or []
-        link = links[0] if links else None
         due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
         due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
         file_label = u.file_name or "-"
         if u.task_type:
             file_label += f" ({u.task_type})"
         line = f" - 文件名称：{file_label}  截止日期：{due_red}"
-        if link:
-            line += f"  文档地址：[点击打开]({link})"
+        line += notify_doc_link_suffix_md(u)
         lines.append(line)
     return "\n".join(lines)
 
@@ -837,7 +836,8 @@ def _run_project_stats(skip_dedupe: bool = False):
                         name = (u.assignee_name or u.author or "").strip() or "（未指定）"
                         by_person[name] = by_person.get(name, 0) + 1
                     person_stats = "、".join(f"{name} {cnt} 项" for name, cnt in sorted(by_person.items()))
-                    lines.append(f"项目：{project_name or '（空）'}")
+                    pn = project_name or "（空）"
+                    lines.append(f"项目：**{pn}**")
                     lines.append("")
                     lines.append(f"未完成任务（按人统计）：{person_stats}")
                     # 只要项目下存在已过期任务就提示；多个过期日期以最后一个（最晚的过期日）为准计算延期天数
@@ -919,17 +919,16 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
         proj, bs, pr = key
         header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
         lines = [header]
+        from .notify_content import notify_doc_link_suffix_md
+
         for u in uploads_in_group:
-            links = u.get_template_links_list() or []
-            link = links[0] if links else None
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
             due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
             file_label = u.file_name or "-"
             if u.task_type:
                 file_label += f" ({u.task_type})"
             line = f" - 文件名称：{file_label}  截止日期：{due_red}"
-            if link:
-                line += f"  文档地址：[点击打开]({link})"
+            line += notify_doc_link_suffix_md(u)
             lines.append(line)
         return "\n".join(lines)
 
