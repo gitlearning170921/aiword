@@ -2958,14 +2958,13 @@ def api_login():
     if password is None:
         password = ""
     else:
-        password = str(password)
+        # 与创建账号时 strip 保持一致，避免复制密码带首尾空格导致误判
+        password = str(password).strip()
     if not username or not password:
         return jsonify({"message": "用户名和密码不能为空"}), 400
     user = User.query.filter_by(username=username).first()
     if not user or not user.check_password(password):
-        return jsonify({
-            "message": "用户名或密码错误（页面2 账号须在页面1「用户管理」创建；与页面1/3 访问密码不是同一套）",
-        }), 401
+        return jsonify({"message": "用户名或密码错误，请核对账号与密码后重试"}), 401
     session["user_id"] = user.id
     session["username"] = user.username
     session["display_name"] = user.display_name or user.username
@@ -8853,7 +8852,7 @@ def api_notify_by_project():
         f"请以下人员尽快完成：{'、'.join(assignees)}\n\n\n"
         "未完成列表：\n\n"
         f"{task_list_with_links_md}\n\n"
-        f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）\n\n"
+        f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n"
         "### **编写完成后请在页面2中标记完成状态。**\n\n"
         "请抓紧处理！"
     )
@@ -8952,7 +8951,7 @@ def api_notify_by_author():
     message = message.rstrip()
     if not message.endswith("请抓紧处理！"):
         message += "\n\n请抓紧处理！"
-    message += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）\n\n### **编写完成后请在页面2中标记完成状态。**"
+    message += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n### **编写完成后请在页面2中标记完成状态。**"
     
     at_mobiles = _resolve_mobiles_for_authors([author])
     result = dingtalk_service.send_markdown_message(
@@ -9052,7 +9051,7 @@ def api_notify_single_task():
     message_plain = message_plain.rstrip()
     if not message_plain.endswith("请抓紧处理！"):
         message_plain += "\n\n请抓紧处理！"
-    message_plain += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）\n\n### **编写完成后请在页面2中标记完成状态。**"
+    message_plain += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n### **编写完成后请在页面2中标记完成状态。**"
     
     at_mobiles = _resolve_mobiles_for_authors([upload.author])
     result = dingtalk_service.send_markdown_message(

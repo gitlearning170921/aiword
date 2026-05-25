@@ -839,7 +839,7 @@ def init_default_configs():
     
     default_notify_templates = [
         ("project_reminder", "按项目催办通知", 
-         "【项目任务催办】\n\n项目：{project_name}\n\n未完成任务数：{pending_count}\n\n请以下人员尽快完成：{assignees}\n\n\n未完成列表（按字段换行，含文档地址、截止日期、影响业务方、产品、国家）：\n{task_list_with_links}\n\n页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）\n\n请抓紧处理！"),
+         "【项目任务催办】\n\n项目：{project_name}\n\n未完成任务数：{pending_count}\n\n请以下人员尽快完成：{assignees}\n\n\n未完成列表（按字段换行，含文档地址、截止日期、影响业务方、产品、国家）：\n{task_list_with_links}\n\n页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n请抓紧处理！"),
         ("author_reminder", "按人员催办通知",
          "【个人任务催办】\n致：{author}\n您有 {pending_count} 个任务待完成：\n{task_list}\n\n请抓紧处理！"),
         ("single_task_reminder", "单条任务催办通知",

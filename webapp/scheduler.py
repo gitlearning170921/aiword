@@ -561,7 +561,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 lines.append("当前无未完成任务。")
                 if page2_url:
                     lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
                 lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 lines.append("")
@@ -593,7 +593,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                     lines.append("")
                     lines.append("")
                 if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
                     lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 lines.append("")
@@ -726,7 +726,7 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
                     ]
                     if page2_url:
                         lines.append("")
-                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
                     lines.append("")
                     lines.append("## **编写完成后请在页面2中标记完成状态。**")
                     content = "\n".join(lines)
@@ -813,7 +813,7 @@ def _run_project_stats(skip_dedupe: bool = False):
                 lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
                 if page2_url:
                     lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
                 lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 at_names = None
@@ -851,7 +851,7 @@ def _run_project_stats(skip_dedupe: bool = False):
                     lines.append("")
                     lines.append("")
                 if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
                     lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 at_names = sorted(all_assignees) if all_assignees else None
@@ -968,7 +968,7 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
         ]
         if page2_url:
             lines.append("")
-            lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+            lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
         lines.append("")
         lines.append("## **编写完成后请在页面2中标记完成状态。**")
         content = "\n".join(lines)
