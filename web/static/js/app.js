@@ -1870,11 +1870,15 @@ function initEditUserMobile() {
     saveBtn.addEventListener("click", async () => {
         const id = document.getElementById("editUserMobileId").value;
         const mobile = document.getElementById("editUserMobileValue").value.trim();
+        const displayName = (document.getElementById("editUserDisplayName")?.value || "").trim();
         try {
             await App.request(`/api/users/${id}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ mobile: mobile || null }),
+                body: JSON.stringify({
+                    mobile: mobile || null,
+                    displayName: displayName || null,
+                }),
             });
             App.notify("手机号已更新");
             bootstrap.Modal.getInstance(modalEl)?.hide();
@@ -2009,6 +2013,17 @@ async function openEditRecordModal(r) {
     updateEditRecordAssigneeMobileHint(r.assigneeName || r.author || "");
 }
 
+function findUserForAuthorLabel(users, label) {
+    const name = (label || "").trim();
+    if (!name) return null;
+    return (users || []).find((u) => {
+        const dn = (u.displayName || "").trim();
+        const un = (u.username || "").trim();
+        const pick = dn || un;
+        return name === dn || name === un || name === pick;
+    }) || null;
+}
+
 function updateEditRecordAssigneeMobileHint(assigneeName) {
     const hintEl = document.getElementById("editRecordAssigneeMobileHint");
     if (!hintEl) return;
@@ -2021,7 +2036,7 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
         .then((res) => {
             const users = res.users || [];
             const name = assigneeName.trim();
-            const user = users.find(u => (u.username && u.username.trim() === name) || (u.displayName && u.displayName.trim() === name));
+            const user = findUserForAuthorLabel(users, name);
             if (user && user.mobile && String(user.mobile).trim()) {
                 const mobile = String(user.mobile).trim();
                 const masked = mobile.length > 4 ? mobile.slice(0, 3) + "****" + mobile.slice(-4) : mobile;
@@ -3198,7 +3213,8 @@ function renderUsersList() {
             <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
             <td>${adminBadge}</td>
             <td class="text-nowrap">
-                <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-mobile="${_escUserCell(u.mobile || "")}">编辑手机号</button>
+                <button type="button" class="btn btn-sm btn-outline-info btn-check-at me-1" data-username="${_escUserCell(u.username)}">检查@</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-display-name="${_escUserCell(u.displayName || "")}" data-mobile="${_escUserCell(u.mobile || "")}">编辑</button>
                 <button type="button" class="btn btn-sm btn-outline-primary btn-toggle-admin me-1" data-id="${u.id}" data-admin="${u.isAdmin ? "1" : "0"}">${u.isAdmin ? "取消管理员" : "设为管理员"}</button>
                 <button type="button" class="btn btn-sm btn-outline-danger btn-delete-user" data-id="${u.id}">删除</button>
             </td>
@@ -3233,10 +3249,24 @@ function renderUsersList() {
             }
         });
     });
+    tbody.querySelectorAll(".btn-check-at").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const name = (btn.dataset.username || "").trim();
+            if (!name) return;
+            try {
+                const r = await App.request(`/api/notify/at-resolve?author=${encodeURIComponent(name)}`);
+                App.notify(r.message || (r.canAt ? "可@" : "无法@"), r.canAt ? "success" : "warning");
+            } catch (e) {
+                App.notify(e.message || "检查失败", "danger");
+            }
+        });
+    });
     tbody.querySelectorAll(".btn-edit-mobile").forEach((btn) => {
         btn.addEventListener("click", () => {
             document.getElementById("editUserMobileId").value = btn.dataset.id;
             document.getElementById("editUserMobileUsername").value = btn.dataset.username || "";
+            const dnEl = document.getElementById("editUserDisplayName");
+            if (dnEl) dnEl.value = btn.dataset.displayName || "";
             document.getElementById("editUserMobileValue").value = btn.dataset.mobile || "";
             const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
             modal.show();
@@ -4874,6 +4904,8 @@ function initDashboardPage() {
         rows.forEach((row, idx) => {
             const tr = document.createElement("tr");
             const projectName = (row.projectName != null && row.projectName !== "") ? row.projectName : "";
+            const author = (row.author != null && row.author !== "") ? row.author : "";
+            const esc = (s) => String(s || "").replace(/"/g, "&quot;");
             tr.innerHTML = `
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
@@ -4881,34 +4913,17 @@ function initDashboardPage() {
                 <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
-                <td>
-                    <button class="btn btn-sm btn-outline-warning btn-module-cascade" data-project="${(projectName || "").replace(/"/g, "&quot;")}" title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">
-                        模块级联催办
-                    </button>
+                <td class="text-nowrap">
+                    <button type="button" class="btn btn-sm btn-outline-warning btn-notify-project-author me-1"
+                        data-project="${esc(projectName)}" data-author="${esc(author)}"
+                        ${row.pending === 0 ? "disabled" : ""} title="仅催办该项目下该编写人员的未完成任务">催办</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary btn-module-cascade"
+                        data-project="${esc(projectName)}" title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">级联</button>
                 </td>
             `;
             projectAuthorBody.appendChild(tr);
         });
-        projectAuthorBody.querySelectorAll(".btn-module-cascade").forEach(btn => {
-            btn.addEventListener("click", async () => {
-                const projectName = btn.dataset.project || "";
-                if (!projectName) return;
-                if (!confirm(`确定要对「${projectName}」执行模块级联催办吗？\n（产品全部完成→催办开发；开发全部完成→催办测试）`)) return;
-                try {
-                    const result = await App.request("/api/notify/module-cascade-manual", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ projectName }),
-                    });
-                    const ok = result && result.success === true;
-                    App.notify(result?.message || (ok ? "已发送" : "发送失败"), ok ? "success" : "danger");
-                    loadModuleCascadeStatus && loadModuleCascadeStatus();
-                } catch (e) {
-                    const data = e.data || {};
-                    App.notify(data.message || e.message || "请求失败", "danger");
-                }
-            });
-        });
+        bindProjectAuthorStatsActions(projectAuthorBody);
     };
     
     const renderDetailTable = (rows) => {
@@ -5235,7 +5250,14 @@ function renderFilteredStats(tbody, rows, type) {
             actionHtml = `<td class="${auditCellClass}">${auditCount}</td><td><button class="btn btn-sm btn-outline-warning btn-notify-author" data-author="${row.label}" ${row.pending === 0 ? 'disabled' : ''}>催办</button></td>`;
         } else if (type === "projectAuthor") {
             const pn = (row.projectName != null && row.projectName !== "") ? String(row.projectName).replace(/"/g, "&quot;") : "";
-            actionHtml = `<td><button class="btn btn-sm btn-outline-warning btn-module-cascade" data-project="${pn}" title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">模块级联催办</button></td>`;
+            const au = (row.author != null && row.author !== "") ? String(row.author).replace(/"/g, "&quot;") : "";
+            actionHtml = `<td class="text-nowrap">
+                <button type="button" class="btn btn-sm btn-outline-warning btn-notify-project-author me-1"
+                    data-project="${pn}" data-author="${au}" ${row.pending === 0 ? "disabled" : ""}
+                    title="仅催办该项目下该编写人员的未完成任务">催办</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-module-cascade" data-project="${pn}"
+                    title="该项目：产品全部完成→催办开发；开发全部完成→催办测试">级联</button>
+            </td>`;
         }
         
         tr.innerHTML = `
@@ -5287,26 +5309,55 @@ function renderFilteredStats(tbody, rows, type) {
             });
         });
     } else if (type === "projectAuthor") {
-        tbody.querySelectorAll(".btn-module-cascade").forEach(btn => {
-            btn.addEventListener("click", async () => {
-                const projectName = btn.dataset.project || "";
-                if (!projectName) return;
-                if (!confirm(`确定要对「${projectName}」执行模块级联催办吗？\n（产品全部完成→催办开发；开发全部完成→催办测试）`)) return;
-                try {
-                    const result = await App.request("/api/notify/module-cascade-manual", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ projectName }),
-                    });
-                    const ok = result && result.success === true;
-                    App.notify(result?.message || (ok ? "已发送" : "发送失败"), ok ? "success" : "danger");
-                } catch (e) {
-                    const data = e.data || {};
-                    App.notify(data.message || e.message || "请求失败", "danger");
-                }
-            });
-        });
+        bindProjectAuthorStatsActions(tbody);
     }
+}
+
+/** 页面3「按项目+编写人员」表格：个人催办 + 模块级联按钮 */
+function bindProjectAuthorStatsActions(container) {
+    if (!container) return;
+    container.querySelectorAll(".btn-notify-project-author").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const projectName = btn.dataset.project || "";
+            const author = btn.dataset.author || "";
+            if (!projectName || !author) return;
+            if (!confirm(`确定向「${author}」发送项目「${projectName}」下的个人任务催办吗？`)) return;
+            try {
+                const result = await App.request("/api/notify/by-project-author", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ projectName, author }),
+                });
+                const ok = result && result.success === true;
+                App.notify(
+                    ok ? result.message || "通知发送成功" : result.message || "通知发送失败",
+                    ok ? "success" : "danger"
+                );
+            } catch (e) {
+                App.notify(e.message, "danger");
+            }
+        });
+    });
+    container.querySelectorAll(".btn-module-cascade").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const projectName = btn.dataset.project || "";
+            if (!projectName) return;
+            if (!confirm(`确定要对「${projectName}」执行模块级联催办吗？\n（产品全部完成→催办开发；开发全部完成→催办测试）`)) return;
+            try {
+                const result = await App.request("/api/notify/module-cascade-manual", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ projectName }),
+                });
+                const ok = result && result.success === true;
+                App.notify(result?.message || (ok ? "已发送" : "发送失败"), ok ? "success" : "danger");
+                if (typeof loadModuleCascadeStatus === "function") loadModuleCascadeStatus();
+            } catch (e) {
+                const data = e.data || {};
+                App.notify(data.message || e.message || "请求失败", "danger");
+            }
+        });
+    });
 }
 
 function renderFilteredDetailTable(rows) {

@@ -404,23 +404,27 @@
     </div>
 </div>
 
-<!-- 编辑用户手机号弹窗 -->
+<!-- 编辑用户账号弹窗（显示名、手机号） -->
 <div class="modal fade" id="editUserMobileModal" tabindex="-1">
     <div class="modal-dialog modal-sm">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">编辑手机号（钉钉@）</h5>
+                <h5 class="modal-title">编辑账号</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="editUserMobileId">
                 <div class="mb-2">
-                    <label class="form-label small">用户名</label>
+                    <label class="form-label small">用户名（登录用，不可改）</label>
                     <input type="text" class="form-control form-control-sm" id="editUserMobileUsername" readonly>
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small">手机号</label>
-                    <input type="text" class="form-control form-control-sm" id="editUserMobileValue" placeholder="用于钉钉@提醒">
+                    <label class="form-label small">显示名称</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserDisplayName" placeholder="与任务「编写人」一致时便于催办@">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">手机号（钉钉@）</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserMobileValue" placeholder="11位或 +86-1xx…，保存时自动规范">
                 </div>
                 <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
             </div>

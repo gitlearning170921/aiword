@@ -6418,7 +6418,9 @@ def api_users_create():
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     display_name = (data.get("displayName") or "").strip() or None
-    mobile = (data.get("mobile") or "").strip() or None
+    from .notify_content import format_mobile_for_storage
+
+    mobile = format_mobile_for_storage(data.get("mobile"))
     is_admin = bool(data.get("isAdmin"))
     if not username or not password:
         return jsonify({"message": "用户名和密码不能为空"}), 400
@@ -6449,10 +6451,12 @@ def api_users_update(user_id: str):
     if not user:
         return jsonify({"message": "用户不存在"}), 404
     data = request.get_json(force=True) or {}
+    from .notify_content import format_mobile_for_storage
+
     if "displayName" in data:
         user.display_name = (data["displayName"] or "").strip() or None
     if "mobile" in data:
-        user.mobile = (data["mobile"] or "").strip() or None
+        user.mobile = format_mobile_for_storage(data.get("mobile"))
     if "isAdmin" in data:
         user.is_admin = bool(data.get("isAdmin"))
     db.session.add(user)
@@ -8698,23 +8702,44 @@ def _get_notify_template(key: str) -> str:
 
 
 def _resolve_mobiles_for_authors(author_names: list) -> list:
-    """根据编写人员姓名解析钉钉 @ 用的手机号（从 User 表）"""
-    if not author_names:
-        return []
-    from .models import User
-    mobiles = []
-    for name in author_names:
-        if not name:
-            continue
-        user = User.query.filter(
-            db.or_(
-                User.username == name,
-                User.display_name == name,
-            )
-        ).first()
-        if user and getattr(user, "mobile", None) and str(user.mobile).strip():
-            mobiles.append(str(user.mobile).strip())
+    """根据编写人员姓名解析钉钉 @ 用的手机号（从 User 表）。"""
+    from .notify_content import resolve_mobiles_for_author_labels
+
+    mobiles, _, _ = resolve_mobiles_for_author_labels(author_names)
     return mobiles
+
+
+def _notify_at_result_suffix(
+    unmatched: list,
+    no_mobile: list,
+    at_mobiles: Optional[list] = None,
+) -> str:
+    parts = []
+    if at_mobiles:
+        masked = []
+        for m in at_mobiles:
+            s = str(m)
+            masked.append(f"{s[:3]}****{s[-4:]}" if len(s) >= 7 else s)
+        parts.append(f"已传钉钉@手机号：{'、'.join(masked)}")
+    if unmatched:
+        parts.append(f"未匹配账号无法@：{'、'.join(unmatched)}")
+    if no_mobile:
+        parts.append(f"已匹配但无手机号无法@：{'、'.join(no_mobile)}")
+    if not parts:
+        return ""
+    return "（" + "；".join(parts) + "）"
+
+
+@bp.get("/api/notify/at-resolve")
+@page13_access_required
+def api_notify_at_resolve():
+    """诊断：编写人/负责人姓名能否解析到钉钉 @ 用手机号（排查某人 @ 不到）。"""
+    label = (request.args.get("author") or request.args.get("label") or "").strip()
+    if not label:
+        return jsonify({"message": "请提供 author 或 label 参数"}), 400
+    from .notify_content import at_resolve_report
+
+    return jsonify(at_resolve_report(label))
 
 
 def _get_base_url() -> str:
@@ -8785,6 +8810,51 @@ def _send_notify_to_individuals(
     dingtalk_service.send_work_notification_to_mobiles(title, message_markdown, mobiles)
 
 
+def _notify_pending_task_list_md(pending_uploads: list) -> str:
+    """将未完成任务列表格式化为钉钉 Markdown（按项目/业务方/产品分组）。"""
+    if not pending_uploads:
+        return ""
+
+    def _group_key(u):
+        return (u.project_name or "", u.business_side or "", u.product or "")
+
+    groups: dict = {}
+    for u in pending_uploads:
+        groups.setdefault(_group_key(u), []).append(u)
+
+    def _task_block_md(key, uploads_in_group):
+        proj, bs, pr = key
+        lines = []
+        proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
+        header = (
+            f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  "
+            f"影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        )
+        lines.append(header)
+        from .notify_content import notify_doc_link_suffix_md
+
+        for u in uploads_in_group:
+            due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
+            due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
+            file_label = u.file_name or "-"
+            if u.task_type:
+                file_label += f" ({u.task_type})"
+            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
+            line += notify_doc_link_suffix_md(u)
+            lines.append(line)
+        return "\n".join(lines)
+
+    return "\n\n".join(_task_block_md(k, grp) for k, grp in groups.items())
+
+
+def _page2_url_for_notify() -> str:
+    base_url = _get_base_url()
+    page2_path = url_for("pages.generate_page", _external=False)
+    if base_url:
+        return f"{base_url}{page2_path}"
+    return url_for("pages.generate_page", _external=True)
+
+
 @bp.post("/api/notify/by-project")
 @page13_access_required
 def api_notify_by_project():
@@ -8809,42 +8879,17 @@ def api_notify_by_project():
     if not pending_uploads:
         return jsonify({"message": f"项目 {project_name} 没有未完成的任务"})
     
-    assignees = list(set(u.author for u in pending_uploads if u.author))
-    
-    def _group_key(u):
-        return (u.project_name or "", u.business_side or "", u.product or "")
-    
-    groups = {}
-    for u in pending_uploads:
-        k = _group_key(u)
-        groups.setdefault(k, []).append(u)
-    
-    def _task_block_md(key, uploads_in_group):
-        proj, bs, pr = key
-        lines = []
-        proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
-        header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
-        lines.append(header)
-        from .notify_content import notify_doc_link_suffix_md
+    from .notify_content import page2_my_tasks_link_md
 
-        for u in uploads_in_group:
-            due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
-            due_red = f'<font color="red">{due}</font>' if due != "-" else "-"
-            file_label = u.file_name or "-"
-            if u.task_type:
-                file_label += f" ({u.task_type})"
-            line = f" - 文件名称：{file_label}  截止日期：{due_red}"
-            line += notify_doc_link_suffix_md(u)
-            lines.append(line)
-        return "\n".join(lines)
-    
-    task_list_with_links_md = "\n\n".join(
-        _task_block_md(k, grp) for k, grp in groups.items()
+    from .notify_content import (
+        collect_notify_person_names_from_uploads,
+        resolve_mobiles_for_author_labels,
     )
-    
-    base_url = _get_base_url()
-    page2_path = url_for("pages.generate_page", _external=False)
-    page2_url = f"{base_url}{page2_path}" if base_url else url_for("pages.generate_page", _external=True)
+
+    assignees = collect_notify_person_names_from_uploads(pending_uploads)
+    task_list_with_links_md = _notify_pending_task_list_md(pending_uploads)
+    page2_url = _page2_url_for_notify()
+    at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels(assignees)
     message_plain = (
         "【项目任务催办】\n\n"
         f"项目：{project_name}\n\n"
@@ -8852,11 +8897,10 @@ def api_notify_by_project():
         f"请以下人员尽快完成：{'、'.join(assignees)}\n\n\n"
         "未完成列表：\n\n"
         f"{task_list_with_links_md}\n\n"
-        f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n"
+        f"{page2_my_tasks_link_md(page2_url)}\n\n"
         "### **编写完成后请在页面2中标记完成状态。**\n\n"
         "请抓紧处理！"
     )
-    at_mobiles = _resolve_mobiles_for_authors(assignees)
     result = dingtalk_service.send_markdown_message(
         "项目任务催办",
         message_plain,
@@ -8868,7 +8912,15 @@ def api_notify_by_project():
     )
     ok = result is not None and result.get("success") is True
     if ok:
-        return jsonify({"success": True, "message": "通知发送成功", "atNames": list(assignees)}), 200
+        msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "atNames": list(assignees),
+            "atMobiles": at_mobiles,
+            "unmatchedAuthors": unmatched,
+            "authorsWithoutMobile": no_mobile,
+        }), 200
     err = result.get("error", "未知错误") if result else "未知错误"
     if isinstance(err, dict):
         err = "未知错误"
@@ -8951,9 +9003,100 @@ def api_notify_by_author():
     message = message.rstrip()
     if not message.endswith("请抓紧处理！"):
         message += "\n\n请抓紧处理！"
-    message += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n### **编写完成后请在页面2中标记完成状态。**"
-    
-    at_mobiles = _resolve_mobiles_for_authors([author])
+    from .notify_content import (
+        normalize_person_name,
+        page2_my_tasks_link_md,
+        resolve_mobiles_for_author_labels,
+    )
+
+    author_key = normalize_person_name(author)
+    message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
+
+    at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels([author_key])
+    result = dingtalk_service.send_markdown_message(
+        "个人任务催办",
+        message,
+        at_all=False,
+        at_mobiles=at_mobiles,
+        at_names=[author_key],
+        webhook=webhook,
+        secret=secret,
+    )
+    ok = result is not None and result.get("success") is True
+    if ok:
+        msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "atNames": [author_key],
+            "atMobiles": at_mobiles,
+            "unmatchedAuthors": unmatched,
+            "authorsWithoutMobile": no_mobile,
+        }), 200
+    err = result.get("error", "未知错误") if result else "未知错误"
+    if isinstance(err, dict):
+        err = "未知错误"
+    return jsonify({"success": False, "message": f"通知发送失败: {err}"}), 200
+
+
+@bp.post("/api/notify/by-project-author")
+@page13_access_required
+def api_notify_by_project_author():
+    """按项目 + 编写人员推送个人任务催办（仅该项目下该人员的未完成任务）。"""
+    data = request.get_json(force=True) or {}
+    project_name = (data.get("projectName") or "").strip()
+    author = (data.get("author") or "").strip()
+
+    if not project_name or not author:
+        return jsonify({"message": "请提供项目名称与编写人员"}), 400
+
+    webhook = _dingtalk_webhook_str()
+    secret = _dingtalk_secret_opt()
+    if not webhook:
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
+
+    pending_uploads = UploadRecord.query.filter(
+        UploadRecord.project_name == project_name,
+        UploadRecord.author == author,
+        UploadRecord.completion_status.is_(None),
+    ).all()
+
+    if not pending_uploads:
+        return jsonify({
+            "message": f"项目「{project_name}」下 {author} 没有未完成的任务",
+        })
+
+    task_list = _notify_pending_task_list_md(pending_uploads)
+    page2_url = _page2_url_for_notify()
+
+    template = _get_notify_template("project_author_reminder")
+    if not template:
+        template = (
+            "【个人任务催办】\n致：{author}\n\n"
+            "项目：{project_name}\n\n"
+            "您在该项目下有 {pending_count} 个任务待完成：\n\n"
+            "{task_list}\n\n"
+            "请抓紧处理！"
+        )
+
+    message = template.format(
+        author=author,
+        project_name=project_name,
+        pending_count=len(pending_uploads),
+        task_list=task_list,
+        page2_url=page2_url,
+    )
+    message = message.rstrip()
+    from .notify_content import page2_my_tasks_link_md
+
+    if "页面2" not in message and page2_url:
+        message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
+    if not message.endswith("请抓紧处理！"):
+        message += "\n\n请抓紧处理！"
+
+    from .notify_content import resolve_mobiles_for_author_labels
+
+    at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels([author])
     result = dingtalk_service.send_markdown_message(
         "个人任务催办",
         message,
@@ -8965,7 +9108,16 @@ def api_notify_by_author():
     )
     ok = result is not None and result.get("success") is True
     if ok:
-        return jsonify({"success": True, "message": "通知发送成功", "atNames": [str(author)]}), 200
+        msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "atNames": [author],
+            "atMobiles": at_mobiles,
+            "unmatchedAuthors": unmatched,
+            "authorsWithoutMobile": no_mobile,
+            "projectName": project_name,
+        }), 200
     err = result.get("error", "未知错误") if result else "未知错误"
     if isinstance(err, dict):
         err = "未知错误"
@@ -9051,21 +9203,32 @@ def api_notify_single_task():
     message_plain = message_plain.rstrip()
     if not message_plain.endswith("请抓紧处理！"):
         message_plain += "\n\n请抓紧处理！"
-    message_plain += f"\n\n页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）\n\n### **编写完成后请在页面2中标记完成状态。**"
-    
-    at_mobiles = _resolve_mobiles_for_authors([upload.author])
+    from .notify_content import page2_my_tasks_link_md, resolve_mobiles_for_author_labels
+
+    message_plain += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
+
+    author_key = (upload.author or "").strip()
+    at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels([author_key])
     result = dingtalk_service.send_markdown_message(
         "任务催办",
         message_plain,
         at_all=False,
         at_mobiles=at_mobiles,
-        at_names=[upload.author],
+        at_names=[author_key] if author_key else None,
         webhook=webhook,
         secret=secret,
     )
     ok = result is not None and result.get("success") is True
     if ok:
-        return jsonify({"success": True, "message": "通知发送成功", "atNames": [str(upload.author)]}), 200
+        msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "atNames": [author_key] if author_key else [],
+            "atMobiles": at_mobiles,
+            "unmatchedAuthors": unmatched,
+            "authorsWithoutMobile": no_mobile,
+        }), 200
     err = result.get("error", "未知错误") if result else "未知错误"
     if isinstance(err, dict):
         err = "未知错误"

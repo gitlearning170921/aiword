@@ -228,24 +228,10 @@ def _project_meta_for_scheduler() -> tuple[dict[str, dict], set[str]]:
 
 
 def _resolve_mobiles_for_authors(author_names: list) -> list:
-    """根据编写人员姓名解析钉钉 @ 用的手机号（从 User 表），与 routes 中逻辑一致。"""
-    if not author_names:
-        return []
-    from . import db
-    from .models import User
-    mobiles = []
-    for name in author_names:
-        if not name or not str(name).strip():
-            continue
-        name = str(name).strip()
-        user = User.query.filter(
-            db.or_(
-                User.username == name,
-                User.display_name == name,
-            )
-        ).first()
-        if user and getattr(user, "mobile", None) and str(user.mobile).strip():
-            mobiles.append(str(user.mobile).strip())
+    """根据编写人员姓名解析钉钉 @ 用的手机号（与 routes / notify_content 一致）。"""
+    from .notify_content import resolve_mobiles_for_author_labels
+
+    mobiles, _, _ = resolve_mobiles_for_author_labels(author_names)
     return mobiles
 
 
@@ -561,7 +547,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 lines.append("当前无未完成任务。")
                 if page2_url:
                     lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                 lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 lines.append("")
@@ -593,7 +579,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                     lines.append("")
                     lines.append("")
                 if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                     lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 lines.append("")
@@ -726,7 +712,7 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
                     ]
                     if page2_url:
                         lines.append("")
-                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                     lines.append("")
                     lines.append("## **编写完成后请在页面2中标记完成状态。**")
                     content = "\n".join(lines)
@@ -813,7 +799,7 @@ def _run_project_stats(skip_dedupe: bool = False):
                 lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
                 if page2_url:
                     lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                 lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 at_names = None
@@ -851,7 +837,7 @@ def _run_project_stats(skip_dedupe: bool = False):
                     lines.append("")
                     lines.append("")
                 if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
                     lines.append("")
                 lines.append("## **编写完成后请在页面2中标记完成状态。**")
                 at_names = sorted(all_assignees) if all_assignees else None
@@ -968,7 +954,7 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
         ]
         if page2_url:
             lines.append("")
-            lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（使用任务下发方提供的用户名与密码登录）")
+            lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
         lines.append("")
         lines.append("## **编写完成后请在页面2中标记完成状态。**")
         content = "\n".join(lines)
