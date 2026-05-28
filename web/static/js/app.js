@@ -4410,11 +4410,17 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
     {
         id: "dingtalk",
         title: "钉钉通知",
-        hint: "群机器人与工作通知；敏感项留空表示不修改已有值。",
+        hint: "群机器人与工作通知；体系记录自动回复见 CHATBOT_* 与 AICHECKWORD_CHAT_*。配置后可在「钉钉机器人联调」页本地验收（页面3 系统配置区快捷入口）。敏感项留空表示不修改已有值。",
         defaultExpanded: true,
         keys: [
             "DINGTALK_WEBHOOK",
             "DINGTALK_SECRET",
+            "DINGTALK_TRIGGER_KEYWORDS",
+            "CHATBOT_ENABLED_GROUPS",
+            "CHATBOT_REPLY_COOLDOWN_SECONDS",
+            "CHATBOT_CONFIDENCE_THRESHOLD",
+            "CHATBOT_ENABLE",
+            "CHATBOT_LLM_PROVIDER",
             "DINGTALK_APP_KEY",
             "DINGTALK_APP_SECRET",
             "DINGTALK_AGENT_ID",
@@ -4449,6 +4455,9 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
             "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
             "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
             "AICHECKWORD_DRAFT_COLLECTION_IDS",
+            "AICHECKWORD_CHAT_API_BASE",
+            "AICHECKWORD_CHAT_API_KEY",
+            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ],
     },
     {
@@ -4497,7 +4506,16 @@ function _renderSystemSettingsFormHtml(keys, settings, sections) {
             .map((sec) => {
                 const fieldKeys = sec.keys || [];
                 const fields = fieldKeys.map((name) => keyMap[name]).filter(Boolean);
-                if (!fields.length) return "";
+                const root = String(window.__SCRIPT_ROOT__ || "").replace(/\/$/, "");
+                const chatbotTestHref = `${root}/chatbot-test`;
+                const sectionToolsHtml =
+                    sec.id === "dingtalk"
+                        ? `<div class="sys-cfg-section-tools mb-2">
+<a class="btn btn-sm btn-outline-primary" href="${esc(chatbotTestHref)}">打开钉钉机器人联调页</a>
+<span class="small text-muted ms-2">本地模拟 @/关键词触发，验证 aicheckword 回复</span>
+</div>`
+                        : "";
+                if (!fields.length && !sectionToolsHtml) return "";
                 const openAttr = sec.defaultExpanded ? " open" : "";
                 const hintHtml = sec.hint
                     ? `<p class="sys-cfg-section-hint small text-muted mb-2">${esc(sec.hint)}</p>`
@@ -4511,6 +4529,7 @@ function _renderSystemSettingsFormHtml(keys, settings, sections) {
 <span class="sys-cfg-section-count">${fields.length} 项</span>
 </summary>
 ${hintHtml}
+${sectionToolsHtml}
 <div class="row g-2 sys-cfg-section-fields">${fieldsHtml}</div>
 </details>`;
             })

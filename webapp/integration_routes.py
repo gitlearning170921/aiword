@@ -37,6 +37,37 @@ def health():
     return jsonify({"status": "ok", "service": "aiword"})
 
 
+@bp.get("/projects")
+@_check_integration_secret
+def integration_projects_list():
+    """供 aiprintword 同步项目列表（轻量只读，避免扫描全库上传记录）。"""
+    from .models import Project
+    from .routes import (
+        _project_display_label,
+        _project_priority_label,
+        _project_status_label,
+    )
+
+    # 集成拉取仅读 projects 表；勿在此做 upload 扫描/自动建项/历史回填（会导致每次同步数十秒）。
+    rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
+    items = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "registeredCountry": getattr(p, "registered_country", None),
+            "registeredCategory": getattr(p, "registered_category", None),
+            "projectKey": _project_display_label(p),
+            "priority": int(p.priority or Project.PRIORITY_MEDIUM),
+            "priorityLabel": _project_priority_label(p.priority),
+            "status": p.status or Project.STATUS_ACTIVE,
+            "statusLabel": _project_status_label(p.status),
+            "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
+        }
+        for p in rows
+    ]
+    return jsonify({"ok": True, "projects": items})
+
+
 @bp.get("/tasks")
 @_check_integration_secret
 def list_tasks():

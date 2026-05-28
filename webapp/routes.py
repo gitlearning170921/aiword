@@ -11,6 +11,7 @@ import secrets
 import hashlib
 import uuid
 import socket
+import time as pytime
 from datetime import date, datetime, time
 from functools import wraps
 from pathlib import Path
@@ -21,6 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import requests
 
 from flask import (
     Blueprint,
@@ -63,6 +65,7 @@ from .models import (
 from . import dingtalk_service
 
 bp = Blueprint("pages", __name__)
+_chatbot_group_last_reply_at: dict[str, float] = {}
 
 
 def _dingtalk_webhook_str() -> str:
@@ -74,6 +77,230 @@ def _dingtalk_secret_opt() -> Optional[str]:
     from .app_settings import get_setting
     s = (get_setting("DINGTALK_SECRET") or "").strip()
     return s or None
+
+
+def _chatbot_enabled() -> bool:
+    from .app_settings import get_setting
+    raw = (get_setting("CHATBOT_ENABLE", default="") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on", "y")
+
+
+def _chatbot_keywords() -> list[str]:
+    from .app_settings import get_setting
+    raw = (get_setting("DINGTALK_TRIGGER_KEYWORDS", default="") or "").strip()
+    if not raw:
+        return []
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
+def _chatbot_enabled_groups() -> set[str]:
+    from .app_settings import get_setting
+    raw = (get_setting("CHATBOT_ENABLED_GROUPS", default="") or "").strip()
+    if not raw:
+        return set()
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _chatbot_cooldown_seconds() -> int:
+    from .app_settings import get_setting
+    raw = (get_setting("CHATBOT_REPLY_COOLDOWN_SECONDS", default="10") or "10").strip()
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 10
+    return max(1, min(300, val))
+
+
+def _chatbot_confidence_threshold() -> float:
+    from .app_settings import get_setting
+    raw = (get_setting("CHATBOT_CONFIDENCE_THRESHOLD", default="0.65") or "0.65").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        val = 0.65
+    return max(0.0, min(1.0, val))
+
+
+def _chatbot_api_base() -> str:
+    """聊天回复 API 根地址：未单独配置时与考试训练中心（QUIZ_API_BASE_URL）复用同一 aicheckword 实例。"""
+    from .app_settings import get_setting
+    raw = (
+        get_setting("AICHECKWORD_CHAT_API_BASE", default="")
+        or get_setting("QUIZ_API_BASE_URL", default="")
+        or get_setting("AICHECKWORD_DRAFT_API_BASE", default="")
+        or str(current_app.config.get("QUIZ_API_BASE_URL") or "")
+    ).strip()
+    return raw.rstrip("/")
+
+
+def _chatbot_api_key() -> str:
+    from .app_settings import get_setting
+    return (get_setting("AICHECKWORD_CHAT_API_KEY", default="") or "").strip()
+
+
+def _chatbot_api_timeout_seconds() -> int:
+    """聊天接口含两次 LLM + 向量检索，读超时独立于 QUIZ_API（后者常被压到 20～30s）。"""
+    from .app_settings import get_setting
+
+    raw = (get_setting("AICHECKWORD_CHAT_TIMEOUT_SECONDS", default="") or "").strip()
+    if raw:
+        try:
+            val = int(raw)
+        except ValueError:
+            val = 120
+    else:
+        val = max(120, _quiz_api_timeout_seconds())
+    if val < 30:
+        return 30
+    if val > 600:
+        return 600
+    return val
+
+
+def _chatbot_requests_timeout() -> tuple[int, int]:
+    from ._integration_common import integration_requests_timeout
+
+    return integration_requests_timeout(read_seconds=_chatbot_api_timeout_seconds())
+
+
+_AIWORD_CHATBOT_LLM_PROVIDERS: tuple[str, ...] = ("deepseek", "tongyi", "ollama", "openai", "lingyi")
+
+
+def _chatbot_llm_provider_from_settings() -> str:
+    from .app_settings import get_setting
+
+    raw = (get_setting("CHATBOT_LLM_PROVIDER", default="") or "").strip().lower()
+    if raw in _AIWORD_CHATBOT_LLM_PROVIDERS:
+        return raw
+    return "deepseek"
+
+
+def _chatbot_normalize_provider(requested: Optional[str]) -> tuple[str, Optional[str]]:
+    p = (requested or "").strip().lower()
+    if not p:
+        p = _chatbot_llm_provider_from_settings()
+    if p in _AIWORD_CHATBOT_LLM_PROVIDERS:
+        return p, None
+    fb = _chatbot_llm_provider_from_settings()
+    return fb, f"不支持的 provider={p}，已改用 {fb}"
+
+
+def _chatbot_client_headers(provider: str) -> dict[str, str]:
+    """页面2 个人 LLM 凭据透传（与初稿/翻译一致）；未登录页面2 时仅用 aicheckword 系统配置。"""
+    uid = session.get("user_id")
+    if not uid:
+        return {}
+    try:
+        from .draft_generation_routes import _client_llm_headers, _normalize_requested_provider
+
+        prov = _normalize_requested_provider(provider) or provider
+        if prov in ("deepseek", "tongyi", "cursor"):
+            return _client_llm_headers(str(uid), provider=prov) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _chatbot_extract_text(payload: dict[str, Any]) -> str:
+    candidates = [
+        payload.get("text", {}).get("content") if isinstance(payload.get("text"), dict) else None,
+        payload.get("content"),
+        payload.get("msg"),
+        payload.get("msgContent"),
+        payload.get("conversationText"),
+    ]
+    for c in candidates:
+        if isinstance(c, str) and c.strip():
+            return c.strip()
+    return ""
+
+
+def _chatbot_extract_group_id(payload: dict[str, Any]) -> str:
+    for k in ("conversationId", "openConversationId", "chatbotConversationId", "groupId"):
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _chatbot_should_trigger(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if "@" in t:
+        return True
+    for kw in _chatbot_keywords():
+        if kw and kw in t:
+            return True
+    return False
+
+
+def _chatbot_is_cooldown(group_id: str) -> bool:
+    gid = (group_id or "").strip() or "__default__"
+    now = pytime.time()
+    last = _chatbot_group_last_reply_at.get(gid) or 0.0
+    if now - last < _chatbot_cooldown_seconds():
+        return True
+    _chatbot_group_last_reply_at[gid] = now
+    return False
+
+
+def _chatbot_call_aicheckword(
+    *,
+    query: str,
+    group_id: str,
+    message_id: str,
+    trigger_type: str,
+    recent_messages: list[str],
+    provider: Optional[str] = None,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    base = _chatbot_api_base()
+    if not base:
+        return None, "未配置 aicheckword 地址：请填写 QUIZ_API_BASE_URL 或 AICHECKWORD_CHAT_API_BASE"
+    eff_provider, _prov_note = _chatbot_normalize_provider(provider)
+    url = f"{base}/api/chat/reply/generate"
+    headers = {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"}
+    token = _chatbot_api_key()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(_chatbot_client_headers(eff_provider))
+    payload = {
+        "query": query,
+        "group_id": group_id,
+        "message_id": message_id,
+        "trigger_type": trigger_type,
+        "current_provider": eff_provider,
+        "context": {"recent_messages": recent_messages},
+        "options": {
+            "domain": "system_record_writing",
+            "knowledge_category": "program",
+            "top_k": 6,
+            "min_similarity": 0.55,
+            "max_reply_chars": 220,
+        },
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=_chatbot_requests_timeout())
+    except requests.Timeout as e:
+        sec = _chatbot_api_timeout_seconds()
+        return (
+            None,
+            f"调用 aicheckword 超时（已等待约 {sec} 秒）：{e}。"
+            f"可在系统配置调大 AICHECKWORD_CHAT_TIMEOUT_SECONDS（建议 120～300），"
+            f"并确认 aicheckword 已启动且 LLM 可连通。",
+        )
+    except requests.RequestException as e:
+        return None, f"调用 aicheckword 失败: {e}"
+    if r.status_code != 200:
+        txt = (r.text or "")[:300]
+        return None, f"aicheckword HTTP {r.status_code}: {txt}"
+    try:
+        data = r.json()
+    except Exception:
+        return None, "aicheckword 返回非 JSON"
+    if not isinstance(data, dict):
+        return None, "aicheckword 返回格式异常"
+    return data, None
 
 
 def _quiz_api_base_url() -> str:
@@ -2471,6 +2698,15 @@ def _build_aiprintword_handoff_context(upload_row: UploadRecord | None) -> dict[
             pass
     if reg_country:
         handoff_ctx["country"] = reg_country
+    pid = (getattr(upload_row, "project_id", None) or "").strip()
+    if pid:
+        handoff_ctx["project_id"] = pid
+    pname = (getattr(upload_row, "project_name", None) or "").strip()
+    if pname:
+        handoff_ctx["project_name"] = pname
+    pcode = (getattr(upload_row, "project_code", None) or "").strip()
+    if pcode:
+        handoff_ctx["project_code"] = pcode
     return handoff_ctx
 
 
@@ -8692,6 +8928,250 @@ def api_reorder_uploads():
 
 
 # ---------- 钉钉通知推送 API ----------
+
+@bp.get("/chatbot-test")
+@page13_access_required
+def chatbot_test_page():
+    """钉钉机器人本地联调页：输入问题→调用 aicheckword→展示生成结果（不发真实钉钉消息）。"""
+    return render_template("chatbot_test.html")
+
+
+@bp.get("/api/dingtalk/chatbot/llm-settings")
+@page13_access_required
+def api_dingtalk_chatbot_llm_settings():
+    """联调页 LLM 提供方选项（与初稿页白名单对齐；钉钉回调用系统配置 CHATBOT_LLM_PROVIDER）。"""
+    from .draft_generation_routes import (
+        AIWORD_DRAFT_LLM_PROVIDERS,
+        _has_usable_stored_key_for_provider,
+        _load_user_credential,
+        _merged_allowed_providers_for_client,
+        _refresh_upstream_interop_if_stale,
+    )
+
+    try:
+        _refresh_upstream_interop_if_stale()
+    except Exception:
+        pass
+    allowed: list[dict[str, Any]] = []
+    for row in _merged_allowed_providers_for_client():
+        pid = str(row.get("id") or "").strip().lower()
+        if pid and pid != "cursor" and pid in _AIWORD_CHATBOT_LLM_PROVIDERS:
+            allowed.append(row)
+    if not allowed:
+        allowed = [
+            {"id": "deepseek", "label": "DeepSeek", "status": "ok"},
+            {"id": "tongyi", "label": "通义千问", "status": "ok"},
+            {"id": "ollama", "label": "Ollama（本机）", "status": "ok"},
+        ]
+    prov = _chatbot_llm_provider_from_settings()
+    has_personal = False
+    uid = session.get("user_id")
+    if uid:
+        row = _load_user_credential(str(uid))
+        sk = str(current_app.config.get("SECRET_KEY") or "")
+        for p in AIWORD_DRAFT_LLM_PROVIDERS:
+            if p == "cursor":
+                continue
+            if _has_usable_stored_key_for_provider(row, p, sk=sk):
+                has_personal = True
+                break
+    return jsonify(
+        {
+            "provider": prov,
+            "systemProvider": prov,
+            "allowedProviders": allowed,
+            "hasPersonalKey": has_personal,
+            "hint": (
+                "联调页下拉优先于系统配置；钉钉群真实回调固定使用 CHATBOT_LLM_PROVIDER。"
+                "若已登录页面2并在「文档初稿」保存个人 API Key，将透传 X-Client-Llm-* 头（deepseek/通义）。"
+            ),
+        }
+    )
+
+
+@bp.post("/api/dingtalk/chatbot/test")
+@page13_access_required
+def api_dingtalk_chatbot_test():
+    """
+    本地联调入口：模拟一次钉钉触发。
+    Body：
+      - text: 问题文本（必填）
+      - group_id: 群 ID（可选）
+      - send: true=同时发到群机器人 webhook；false=仅返回结果（默认 false）
+      - session_webhook: 钉钉本会话回执 webhook（可选，优先级最高）
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "message": "payload 必须是 JSON 对象"}), 400
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"success": False, "message": "text 不能为空"}), 400
+
+    group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip() or "__test__"
+    send_real = bool(payload.get("send"))
+    session_webhook = str(payload.get("session_webhook") or payload.get("sessionWebhook") or "").strip()
+    req_provider = str(payload.get("provider") or payload.get("current_provider") or "").strip() or None
+    eff_provider, provider_note = _chatbot_normalize_provider(req_provider)
+
+    diagnostics = {
+        "chatbot_enabled": _chatbot_enabled(),
+        "trigger_keywords": _chatbot_keywords(),
+        "enabled_groups": sorted(list(_chatbot_enabled_groups())),
+        "confidence_threshold": _chatbot_confidence_threshold(),
+        "cooldown_seconds": _chatbot_cooldown_seconds(),
+        "api_base": _chatbot_api_base(),
+        "api_base_configured": bool(_chatbot_api_base()),
+        "chat_timeout_seconds": _chatbot_api_timeout_seconds(),
+        "llm_provider": eff_provider,
+        "has_personal_llm_key": bool(session.get("user_id")),
+    }
+    if provider_note:
+        diagnostics["provider_note"] = provider_note
+
+    trigger_type = "at_bot" if "@" in text else ("keyword" if _chatbot_should_trigger(text) else "manual")
+    reply_data, err = _chatbot_call_aicheckword(
+        query=text,
+        group_id=group_id,
+        message_id=uuid.uuid4().hex,
+        trigger_type=trigger_type,
+        recent_messages=[],
+        provider=eff_provider,
+    )
+    if err:
+        return jsonify({"success": False, "message": err, "diagnostics": diagnostics}), 200
+
+    need_human = bool(reply_data.get("need_human"))
+    answer = (reply_data.get("answer") or "").strip()
+    confidence = float(reply_data.get("confidence") or 0.0)
+    conf_threshold = _chatbot_confidence_threshold()
+    delivered_answer = answer
+    if need_human or confidence < conf_threshold or not answer:
+        delivered_answer = "这个问题我先帮你转人工确认，稍后给你准确答复。"
+
+    sent_result: Optional[dict[str, Any]] = None
+    if send_real:
+        webhook = session_webhook or _dingtalk_webhook_str()
+        secret = None if session_webhook else _dingtalk_secret_opt()
+        if not webhook:
+            sent_result = {"success": False, "error": "未配置钉钉 Webhook 且未传 session_webhook"}
+        else:
+            res = dingtalk_service.send_text_message(delivered_answer, webhook=webhook, secret=secret)
+            sent_result = res if isinstance(res, dict) else {"success": False, "error": str(res)}
+
+    return jsonify(
+        {
+            "success": True,
+            "trigger_type": trigger_type,
+            "need_human": need_human,
+            "confidence": confidence,
+            "answer_raw": answer,
+            "answer_delivered": delivered_answer,
+            "references": reply_data.get("references") or [],
+            "reason": reply_data.get("reason") or "",
+            "model_used": reply_data.get("model_used") or "",
+            "effective_provider": reply_data.get("effective_provider") or eff_provider,
+            "provider_note": reply_data.get("provider_note") or provider_note,
+            "latency_ms": reply_data.get("latency_ms") or 0,
+            "upstream_request_id": reply_data.get("request_id") or "",
+            "sent_result": sent_result,
+            "diagnostics": diagnostics,
+        }
+    )
+
+
+@bp.post("/api/dingtalk/chatbot/callback")
+def api_dingtalk_chatbot_callback():
+    """
+    钉钉机器人自动回复回调：
+    - 仅处理体系记录「怎么写」类问题
+    - 问题匹配与回复生成交给 aicheckword（程序文件 category=program）
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "message": "payload 必须是 JSON 对象"}), 400
+    if not _chatbot_enabled():
+        return jsonify({"success": True, "ignored": "chatbot disabled"})
+
+    group_id = _chatbot_extract_group_id(payload)
+    groups = _chatbot_enabled_groups()
+    if groups and group_id and group_id not in groups:
+        return jsonify({"success": True, "ignored": "group not enabled"})
+
+    text = _chatbot_extract_text(payload)
+    if not text:
+        return jsonify({"success": True, "ignored": "empty text"})
+    if not _chatbot_should_trigger(text):
+        return jsonify({"success": True, "ignored": "trigger not matched"})
+    if _chatbot_is_cooldown(group_id):
+        return jsonify({"success": True, "ignored": "cooldown"})
+
+    message_id = (
+        str(payload.get("msgId") or payload.get("messageId") or payload.get("eventId") or "").strip()
+        or uuid.uuid4().hex
+    )
+    trigger_type = "at_bot" if "@" in text else "keyword"
+    recent_messages = []
+    hist = payload.get("recentMessages")
+    if isinstance(hist, list):
+        recent_messages = [str(x).strip() for x in hist if str(x).strip()][:6]
+
+    reply_data, err = _chatbot_call_aicheckword(
+        query=text,
+        group_id=group_id,
+        message_id=message_id,
+        trigger_type=trigger_type,
+        recent_messages=recent_messages,
+        provider=_chatbot_llm_provider_from_settings(),
+    )
+    if err:
+        current_app.logger.warning("chatbot 调用 aicheckword 失败: %s", err)
+        return jsonify({"success": False, "message": err}), 200
+
+    need_human = bool(reply_data.get("need_human"))
+    answer = (reply_data.get("answer") or "").strip()
+    confidence = float(reply_data.get("confidence") or 0.0)
+    conf_threshold = _chatbot_confidence_threshold()
+    if need_human or confidence < conf_threshold or not answer:
+        answer = "这个问题我先帮你转人工确认，稍后给你准确答复。"
+
+    session_webhook = str(payload.get("sessionWebhook") or "").strip()
+    if session_webhook:
+        res = dingtalk_service.send_text_message(answer, webhook=session_webhook, secret=None)
+        ok = bool(res and res.get("success"))
+        return jsonify(
+            {
+                "success": ok,
+                "message": "reply sent" if ok else (res.get("error") or "reply failed"),
+                "need_human": need_human,
+                "confidence": confidence,
+            }
+        ), 200
+
+    # 无 sessionWebhook 时尝试走已配置群 webhook 发送（兼容本地联调）
+    webhook = _dingtalk_webhook_str()
+    secret = _dingtalk_secret_opt()
+    if not webhook:
+        return jsonify(
+            {
+                "success": True,
+                "message": "no sessionWebhook and no DINGTALK_WEBHOOK",
+                "reply": answer,
+                "need_human": need_human,
+                "confidence": confidence,
+            }
+        ), 200
+    res = dingtalk_service.send_text_message(answer, webhook=webhook, secret=secret)
+    ok = bool(res and res.get("success"))
+    return jsonify(
+        {
+            "success": ok,
+            "message": "reply sent" if ok else (res.get("error") or "reply failed"),
+            "need_human": need_human,
+            "confidence": confidence,
+        }
+    ), 200
+
 
 def _get_notify_template(key: str) -> str:
     """获取通知文案模板"""

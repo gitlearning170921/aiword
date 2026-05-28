@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}钉钉机器人本地联调{% endblock %}
+
+{% block content %}
+<div class="container py-4" style="max-width: 960px;">
+    <h2 class="mb-3">钉钉机器人 · 本地联调</h2>
+    <p class="text-muted">不走真实钉钉，调用 aicheckword <code>/api/chat/reply/generate</code>（意图分类 + 检索 + 生成，通常 30～120 秒）。<strong>LLM 提供方</strong>与翻译页类似：本页下拉优先；钉钉群真实回复使用系统配置 <code>CHATBOT_LLM_PROVIDER</code>。若已登录页面2并保存个人 Key，将透传个人凭据（deepseek/通义）。</p>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="mb-3">
+                <label class="form-label">问题文本</label>
+                <textarea id="cbText" class="form-control" rows="3" placeholder="例如：仓库入库记录怎么写？"></textarea>
+            </div>
+            <div class="row g-2 mb-3">
+                <div class="col-md-4">
+                    <label class="form-label">LLM 提供方</label>
+                    <select id="cbProvider" class="form-select">
+                        <option value="">加载中…</option>
+                    </select>
+                    <div id="cbProviderHint" class="form-text"></div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">群 ID（可选）</label>
+                    <input type="text" id="cbGroup" class="form-control" placeholder="__test__">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">sessionWebhook（可选）</label>
+                    <input type="text" id="cbSessionWebhook" class="form-control" placeholder="勾选发送时使用">
+                </div>
+            </div>
+            <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" id="cbSend">
+                <label class="form-check-label" for="cbSend">同时发送到钉钉（默认仅本地预览）</label>
+            </div>
+            <button id="cbRun" class="btn btn-primary">运行</button>
+            <span id="cbStatus" class="ms-3 text-muted"></span>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">运行结果</div>
+        <div class="card-body">
+            <pre id="cbResult" class="bg-light p-3 mb-0" style="white-space: pre-wrap; min-height: 100px;">尚未运行</pre>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">诊断信息</div>
+        <div class="card-body">
+            <pre id="cbDiag" class="bg-light p-3 mb-0" style="white-space: pre-wrap; min-height: 60px;">尚未运行</pre>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    const root = (window.__SCRIPT_ROOT__ || "").replace(/\/$/, "");
+    const btn = document.getElementById("cbRun");
+    const elText = document.getElementById("cbText");
+    const elProvider = document.getElementById("cbProvider");
+    const elProviderHint = document.getElementById("cbProviderHint");
+    const elGroup = document.getElementById("cbGroup");
+    const elSendWebhook = document.getElementById("cbSessionWebhook");
+    const elSend = document.getElementById("cbSend");
+    const elStatus = document.getElementById("cbStatus");
+    const elResult = document.getElementById("cbResult");
+    const elDiag = document.getElementById("cbDiag");
+
+    function fillProviderOptions(data) {
+        const allowed = Array.isArray(data.allowedProviders) ? data.allowedProviders : [];
+        const sys = (data.systemProvider || data.provider || "deepseek").trim();
+        elProvider.innerHTML = "";
+        const optSys = document.createElement("option");
+        optSys.value = "";
+        optSys.textContent = "沿用系统配置（CHATBOT_LLM_PROVIDER：" + sys + "）";
+        elProvider.appendChild(optSys);
+        allowed.forEach(function (row) {
+            const id = (row.id || "").trim();
+            if (!id) return;
+            const o = document.createElement("option");
+            o.value = id;
+            o.textContent = (row.label || id) + (row.status && row.status !== "ok" ? " [" + row.status + "]" : "");
+            elProvider.appendChild(o);
+        });
+        const want = (data.provider || sys || "").trim();
+        if (want) {
+            const has = Array.from(elProvider.options).some(function (o) { return o.value === want; });
+            elProvider.value = has ? want : "";
+        }
+        let hint = (data.hint || "").trim();
+        if (data.hasPersonalKey) {
+            hint = (hint ? hint + " " : "") + "检测到页面2个人 API Key，将优先透传。";
+        }
+        elProviderHint.textContent = hint || "钉钉真实回调固定使用系统配置中的 CHATBOT_LLM_PROVIDER。";
+    }
+
+    async function _safeJson(r) {
+        const ct = (r.headers.get("content-type") || "").toLowerCase();
+        const txt = await r.text();
+        if (ct.indexOf("application/json") === -1) {
+            const preview = (txt || "").replace(/<[^>]+>/g, "").trim().slice(0, 160);
+            throw new Error("非 JSON 响应（HTTP " + r.status + "）：" + (preview || "(空)"));
+        }
+        try {
+            return JSON.parse(txt);
+        } catch (e) {
+            throw new Error("响应不是合法 JSON：" + (txt || "").slice(0, 160));
+        }
+    }
+
+    async function loadLlmSettings() {
+        try {
+            const r = await fetch(root + "/api/dingtalk/chatbot/llm-settings", {
+                headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" },
+            });
+            const data = await _safeJson(r);
+            if (!r.ok) throw new Error(data.message || ("HTTP " + r.status));
+            fillProviderOptions(data);
+        } catch (e) {
+            elProvider.innerHTML = "<option value=\"\">deepseek（加载选项失败，仍可使用）</option>";
+            elProviderHint.textContent = String(e) + "（多为 aiword 未重启，新路由 /api/dingtalk/chatbot/llm-settings 尚未生效）";
+        }
+    }
+
+    async function run() {
+        const text = (elText.value || "").trim();
+        if (!text) {
+            elStatus.textContent = "请先输入问题";
+            return;
+        }
+        btn.disabled = true;
+        elStatus.textContent = "调用中（可能需 1～2 分钟）…";
+        elResult.textContent = "";
+        elDiag.textContent = "";
+        const body = {
+            text: text,
+            group_id: (elGroup.value || "").trim() || "__test__",
+            session_webhook: (elSendWebhook.value || "").trim(),
+            send: !!elSend.checked,
+        };
+        const prov = (elProvider.value || "").trim();
+        if (prov) body.provider = prov;
+        try {
+            const r = await fetch(root + "/api/dingtalk/chatbot/test", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                body: JSON.stringify(body),
+            });
+            const data = await _safeJson(r);
+            elStatus.textContent = data.success ? "完成" : (data.message || ("HTTP " + r.status));
+            const diag = data.diagnostics || {};
+            delete data.diagnostics;
+            elResult.textContent = JSON.stringify(data, null, 2);
+            elDiag.textContent = JSON.stringify(diag, null, 2);
+        } catch (e) {
+            elStatus.textContent = "出错";
+            elResult.textContent = String(e);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    btn.addEventListener("click", run);
+    elText.addEventListener("keydown", function (ev) {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") run();
+    });
+    loadLlmSettings();
+})();
+</script>
+{% endblock %}

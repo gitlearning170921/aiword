@@ -23,6 +23,17 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("BASE_URL", "对外访问根地址（催办链接等，勿以 / 结尾）", False),
     ("DINGTALK_WEBHOOK", "钉钉群机器人 Webhook", True),
     ("DINGTALK_SECRET", "钉钉机器人加签 Secret", True),
+    ("DINGTALK_TRIGGER_KEYWORDS", "钉钉自动回复触发关键词（英文逗号分隔）", False),
+    ("CHATBOT_ENABLED_GROUPS", "钉钉自动回复生效群 ID（英文逗号分隔，空=不限制）", False),
+    ("CHATBOT_REPLY_COOLDOWN_SECONDS", "钉钉自动回复单群冷却秒数（默认 10）", False),
+    ("CHATBOT_CONFIDENCE_THRESHOLD", "钉钉自动回复最低置信度阈值（默认 0.65）", False),
+    ("CHATBOT_ENABLE", "钉钉自动回复总开关（1=启用，0/空=关闭）", False),
+    (
+        "CHATBOT_LLM_PROVIDER",
+        "钉钉机器人/联调调用 aicheckword 的 LLM 提供方（deepseek / tongyi / ollama / openai / lingyi；"
+        "留空=deepseek）。若当前浏览器会话已登录页面2并配置个人 Key，将优先透传个人凭据。",
+        False,
+    ),
     ("DINGTALK_APP_KEY", "钉钉工作通知 AppKey", False),
     ("DINGTALK_APP_SECRET", "钉钉工作通知 AppSecret", True),
     ("DINGTALK_AGENT_ID", "钉钉工作通知 AgentId", False),
@@ -60,6 +71,22 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     (
         "AICHECKWORD_DRAFT_COLLECTION_IDS",
         "初稿页「知识库名称」下拉：英文逗号分隔的 collection id（默认仅 regulations；与 aicheckword 侧栏知识库名称一致）",
+        False,
+    ),
+    (
+        "AICHECKWORD_CHAT_API_BASE",
+        "aicheckword 聊天回复 API 根地址（勿以 / 结尾）。留空则默认复用上方「考试训练中心后端地址」QUIZ_API_BASE_URL，与考试中心共用同一 aicheckword 实例。",
+        False,
+    ),
+    (
+        "AICHECKWORD_CHAT_API_KEY",
+        "aicheckword 聊天回复 API Bearer Token（可选）",
+        True,
+    ),
+    (
+        "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
+        "钉钉机器人联调/回调调用 aicheckword 聊天接口的 HTTP 读超时（秒，默认 120；上限 600）。"
+        "含意图分类+检索+生成两次 LLM，勿用考试中心默认 20～30 秒。",
         False,
     ),
     (
@@ -169,11 +196,17 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
     {
         "id": "dingtalk",
         "title": "钉钉通知",
-        "hint": "群机器人与工作通知；敏感项留空表示不修改已有值。",
+        "hint": "群机器人与工作通知；体系记录自动回复见 CHATBOT_* 与 AICHECKWORD_CHAT_*。配置后可在「钉钉机器人联调」页本地验收（页面3 系统配置区快捷入口）。敏感项留空表示不修改已有值。",
         "defaultExpanded": True,
         "keys": (
             "DINGTALK_WEBHOOK",
             "DINGTALK_SECRET",
+            "DINGTALK_TRIGGER_KEYWORDS",
+            "CHATBOT_ENABLED_GROUPS",
+            "CHATBOT_REPLY_COOLDOWN_SECONDS",
+            "CHATBOT_CONFIDENCE_THRESHOLD",
+            "CHATBOT_ENABLE",
+            "CHATBOT_LLM_PROVIDER",
             "DINGTALK_APP_KEY",
             "DINGTALK_APP_SECRET",
             "DINGTALK_AGENT_ID",
@@ -208,6 +241,9 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
             "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
             "AICHECKWORD_DRAFT_COLLECTION_IDS",
+            "AICHECKWORD_CHAT_API_BASE",
+            "AICHECKWORD_CHAT_API_KEY",
+            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ),
     },
     {
@@ -375,6 +411,21 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "aicheckword_draft_collection_ids",
         "aicheckwordDraftCollectionIds",
     ),
+    "AICHECKWORD_CHAT_API_BASE": (
+        "AICHECKWORD_CHAT_API_BASE",
+        "aicheckword_chat_api_base",
+        "aicheckwordChatApiBase",
+    ),
+    "AICHECKWORD_CHAT_TIMEOUT_SECONDS": (
+        "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
+        "aicheckword_chat_timeout_seconds",
+        "aicheckwordChatTimeoutSeconds",
+    ),
+    "AICHECKWORD_CHAT_API_KEY": (
+        "AICHECKWORD_CHAT_API_KEY",
+        "aicheckword_chat_api_key",
+        "aicheckwordChatApiKey",
+    ),
     "AIPRINTWORD_BASE_URL": (
         "AIPRINTWORD_BASE_URL",
         "aiprintword_base_url",
@@ -415,6 +466,9 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "AICHECKWORD_AUDIT_TIMEOUT_SECONDS": ("AICHECKWORD_AUDIT_TIMEOUT_SECONDS",),
     "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS": ("AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",),
     "AICHECKWORD_DRAFT_COLLECTION_IDS": ("AICHECKWORD_DRAFT_COLLECTION_IDS",),
+    "AICHECKWORD_CHAT_API_BASE": ("AICHECKWORD_CHAT_API_BASE",),
+    "AICHECKWORD_CHAT_API_KEY": ("AICHECKWORD_CHAT_API_KEY",),
+    "AICHECKWORD_CHAT_TIMEOUT_SECONDS": ("AICHECKWORD_CHAT_TIMEOUT_SECONDS",),
     "AIPRINTWORD_BASE_URL": ("AIPRINTWORD_BASE_URL",),
     "AIPRINTWORD_HANDOFF_SECRET": ("AIPRINTWORD_HANDOFF_SECRET", "AIWORD_HANDOFF_SECRET"),
 }
