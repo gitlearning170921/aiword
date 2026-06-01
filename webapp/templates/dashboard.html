@@ -36,35 +36,7 @@
                         <button type="button" class="btn btn-sm btn-outline-primary" id="refreshScheduleBtn">刷新</button>
                     </div>
                 </div>
-                <p class="small text-muted mb-0">若钉钉群未收到测试消息，请检查机器人是否设置了关键词且消息内容包含该关键词。</p>
-                <div class="mt-3 p-2 border rounded bg-light">
-                    <h6 class="small fw-bold mb-2">自动通知时间配置</h6>
-                    <div class="row g-2 align-items-end">
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">每周任务完成提醒</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00" title="星期 时间，如 thu 16:00">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label small mb-0">逾期前一日催告</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00" title="每天执行时间">
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">每两天项目统计</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30" title="多日 时间">
-                        </div>
-                        <div class="col-md-1">
-                            <button type="button" class="btn btn-sm btn-primary w-100" id="saveScheduleConfigBtn">保存</button>
-                        </div>
-                        <div class="col-md-2 mt-2">
-                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
-                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5" title="产品/开发最后一份文档完成后多少分钟发送催办">
-                        </div>
-                        <div class="col-md-2 mt-2 d-flex align-items-end">
-                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="立即处理到期的模块级联催办">测试发送</button>
-                        </div>
-                    </div>
-                    <p class="small text-muted mb-0 mt-1">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30（英文缩写）。模块级联：按项目，产品最后一份完成→N分钟后催办开发；开发最后一份完成→N分钟后催办测试。</p>
-                </div>
+                <p class="small text-muted mb-0">若钉钉群未收到测试消息，请检查机器人是否设置了关键词且消息内容包含该关键词。定时规则与钉钉参数请联系管理员处理。</p>
                 <div class="card mb-3">
                     <div class="card-body py-2">
                         <h6 class="mb-2">模块级联催办状态</h6>
@@ -76,31 +48,6 @@
                 </div>
                 <div id="scheduleInfo" class="d-flex flex-wrap gap-3 mt-3">
                     <!-- 动态生成 -->
-                </div>
-                <div class="mt-4 pt-3 border-top">
-                    <h6 class="small fw-bold mb-2">系统配置（原环境变量，存入数据库）</h6>
-                    <p class="small text-muted mb-2">钉钉、对外域名、Session 密钥、页面1/3 密码等均在此维护。<strong>首次启动时</strong>会自动把环境变量（及 <code>.env</code>）里已设置的项写入本库；之后以页面配置为准。敏感项显示为空表示已有值：不修改请留空。修改数据库连接后需<strong>重启服务</strong>。点击「打开系统配置」后，弹窗内按<strong>功能开关 / 基础与安全 / 钉钉</strong>等分区折叠展示（不常用分区默认收起）。</p>
-                    <div class="d-flex flex-wrap gap-2 align-items-center">
-                        <button type="button" class="btn btn-sm btn-primary mt-1" id="openSystemSettingsBtn">打开系统配置</button>
-                        <a class="btn btn-sm btn-outline-secondary mt-1" href="{{ url_for('pages.chatbot_test_page') }}">钉钉机器人联调</a>
-                    </div>
-                </div>
-
-                <!-- 系统配置弹窗：默认不展开，避免影响页面布局 -->
-                <div id="systemSettingsModal" class="system-modal" aria-hidden="true">
-                    <div class="system-modal-backdrop" data-close="1"></div>
-                    <div class="system-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="systemSettingsModalTitle">
-                        <div class="system-modal-header">
-                            <div class="system-modal-title" id="systemSettingsModalTitle">系统配置</div>
-                            <button type="button" class="system-modal-close" id="closeSystemSettingsBtn" aria-label="关闭">×</button>
-                        </div>
-                        <div class="system-modal-body">
-                            <div id="systemSettingsForm" class="sys-cfg-form"></div>
-                        </div>
-                        <div class="system-modal-footer">
-                            <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>

@@ -50,18 +50,36 @@ const App = {
             if (response.status === 401 && data && data.needsLogin) {
                 const loginPath = (root || "") + "/login";
                 if (window.location.pathname !== loginPath) {
-                    window.location.href = loginPath;
+                    const onCompany = (window.location.pathname || "").includes("/company");
+                    window.location.href = onCompany
+                        ? `${loginPath}?next=${encodeURIComponent(window.location.pathname || "/company")}`
+                        : loginPath;
                 }
                 throw new Error("需要登录");
+            }
+
+            if (response.status === 403 && data && data.needsCompanyAdmin) {
+                throw new Error(
+                    data.message || "仅公司管理员账号可访问公司总览"
+                );
             }
             
             if (response.status === 401 && data && data.needsPage13Auth) {
                 const loginPath = (root || "") + "/login";
-                if (window.location.pathname !== loginPath) {
+                const path = window.location.pathname || "";
+                const onGenerate =
+                    path === "/generate" ||
+                    path.endsWith("/generate") ||
+                    path.includes("/generate/");
+                if (!onGenerate && path !== loginPath) {
                     if (!window._page13Redirecting) {
                         window._page13Redirecting = true;
+                        const target =
+                            path && path !== "/"
+                                ? path + (window.location.search || "") + (window.location.hash || "")
+                                : (root || "") + "/upload";
                         setTimeout(function() {
-                            window.location.href = window.location.pathname || ((root || "") + "/upload");
+                            window.location.href = target;
                         }, 50);
                     }
                 }
@@ -109,6 +127,8 @@ const App = {
         setTimeout(() => alert.remove(), 3000);
     },
 };
+// 供独立页面脚本（如 company_registry.js）通过 window.App 调用
+window.App = App;
 
 /** 子路径部署（SCRIPT_NAME）下拼接站内路径，与 App.request 前缀规则一致。 */
 function _appPath(path) {
@@ -1107,6 +1127,9 @@ async function initUploadPage() {
 
     if (!projectBlocksContainer) return;
 
+    await loadRegisteredCountriesDict().catch(() => {});
+    refreshNewProjectCountrySelect();
+
     // 尽早拉取列表，避免 await loadTaskTypes() 阻塞或失败时「已保存任务列表」一直空白
     loadRecordsList();
 
@@ -1169,14 +1192,28 @@ async function initUploadPage() {
                 tr.dataset.projectId = esc(p.id);
                 tr.dataset.projectName = String(p.name || "");
                 tr.dataset.projectStatus = String(p.status || "");
+                const linkHint = p.companyProjectId
+                    ? ' <span class="badge bg-secondary" title="已关联页面0">总览</span>' : "";
                 tr.innerHTML = `
                     <td><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
-                    <td title="${esc(p.name)}">${esc(p.name)}</td>
+                    <td title="${esc(p.name)}">${esc(p.name)}${linkHint}</td>
                     <td>
-                        <input type="text" class="form-control form-control-sm project-registered-country-input" value="${esc(p.registeredCountry || "")}" placeholder="—">
+                        <select class="form-select form-select-sm project-registered-country-select">${buildRegisteredCountryOptionsHtml(p.registeredCountry || "", true)}</select>
                     </td>
                     <td>
                         <input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—">
+                    </td>
+                    <td>
+                        <input type="text" class="form-control form-control-sm project-product-type-input" value="${esc(p.productType || "")}" placeholder="—">
+                    </td>
+                    <td>
+                        <input type="date" class="form-control form-control-sm project-cert-date-input" value="${esc(p.expectedCertificationDate || "")}">
+                    </td>
+                    <td>
+                        <input type="date" class="form-control form-control-sm project-submit-date-input" value="${esc(p.expectedSubmissionDate || "")}">
+                    </td>
+                    <td>
+                        <textarea class="form-control form-control-sm project-progress-input" rows="1" placeholder="进度…">${esc(p.progressDescription || "")}</textarea>
                     </td>
                     <td>
                         <select class="form-select form-select-sm project-priority-select" data-id="${esc(p.id)}">
@@ -1191,7 +1228,6 @@ async function initUploadPage() {
                             <option value="ended" ${st === "ended" ? "selected" : ""}>已结束</option>
                         </select>
                     </td>
-                    <td class="small text-muted">${esc(p.updatedAt || "-")}</td>
                     <td class="text-nowrap">
                         <button type="button" class="btn btn-sm btn-outline-primary btn-save-project" data-id="${esc(p.id)}">保存</button>
                         <button type="button" class="btn btn-sm btn-outline-danger ms-1 btn-delete-project" data-id="${esc(p.id)}">删除</button>
@@ -1211,8 +1247,12 @@ async function initUploadPage() {
                     const prEl = projectsManageBody.querySelector(`.project-priority-select[data-id="${id}"]`);
                     const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
                     const tr = projectsManageBody.querySelector(`.btn-save-project[data-id="${id}"]`)?.closest("tr");
-                    const rcInput = tr ? tr.querySelector(".project-registered-country-input") : null;
+                    const rcInput = tr ? tr.querySelector(".project-registered-country-select") : null;
                     const catInput = tr ? tr.querySelector(".project-registered-category-input") : null;
+                    const ptInput = tr ? tr.querySelector(".project-product-type-input") : null;
+                    const certInput = tr ? tr.querySelector(".project-cert-date-input") : null;
+                    const subInput = tr ? tr.querySelector(".project-submit-date-input") : null;
+                    const progInput = tr ? tr.querySelector(".project-progress-input") : null;
                     try {
                         await App.request(`/api/projects/${id}`, {
                             method: "PATCH",
@@ -1222,9 +1262,13 @@ async function initUploadPage() {
                                 status: stEl ? stEl.value : "active",
                                 registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
                                 registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                                productType: ptInput ? (ptInput.value || "").trim() : null,
+                                expectedCertificationDate: certInput ? certInput.value || null : null,
+                                expectedSubmissionDate: subInput ? subInput.value || null : null,
+                                progressDescription: progInput ? (progInput.value || "").trim() : null,
                             }),
                         });
-                        App.notify("项目已更新", "success");
+                        App.notify("项目已更新（已与页面0 同步）", "success");
                         // 单个保存时不要刷新整张表/任务列表，避免把页面1录入块中已填内容冲掉。
                         // 仅刷新“任务录入”的项目下拉选项（会保持当前已选值）。
                         document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
@@ -1288,12 +1332,18 @@ async function initUploadPage() {
             updateBatchProjectsBtnState();
             applyProjectsFilter();
         } catch (e) {
-            projectsManageBody.innerHTML = '<tr><td colspan="6" class="text-danger small">加载失败</td></tr>';
+            projectsManageBody.innerHTML = '<tr><td colspan="11" class="text-danger small">加载失败</td></tr>';
         }
     };
     document.getElementById("refreshProjectsBtn")?.addEventListener("click", loadProjectsManage);
-    openNewProjectModalBtn?.addEventListener("click", () => {
+    openNewProjectModalBtn?.addEventListener("click", async () => {
         if (!newProjectModalEl) return;
+        await loadRegisteredCountriesDict(true).catch(() => {});
+        refreshNewProjectCountrySelect();
+        const incWrap = document.getElementById("newProjectIncludeCompanyWrap");
+        if (incWrap && window.__COMPANY_REGISTRY_ENABLED__) {
+            incWrap.style.display = "";
+        }
         new bootstrap.Modal(newProjectModalEl).show();
     });
     document.getElementById("createProjectBtn")?.addEventListener("click", async () => {
@@ -1314,6 +1364,11 @@ async function initUploadPage() {
                     status: stEl ? stEl.value : "active",
                     registeredCountry: rcEl ? (rcEl.value || "").trim() : null,
                     registeredCategory: catEl ? (catEl.value || "").trim() : null,
+                    includeInCompanyRegistry: !!document.getElementById("newProjectIncludeCompany")?.checked,
+                    productType: (document.getElementById("newProjectProductType")?.value || "").trim() || null,
+                    expectedCertificationDate: document.getElementById("newProjectCertDate")?.value || null,
+                    expectedSubmissionDate: document.getElementById("newProjectSubmitDate")?.value || null,
+                    progressDescription: (document.getElementById("newProjectProgress")?.value || "").trim() || null,
                 }),
             });
             if (nameEl) nameEl.value = "";
@@ -1371,8 +1426,12 @@ async function initUploadPage() {
             const id = tr.dataset.projectId;
             const prEl = projectsManageBody.querySelector(`.project-priority-select[data-id="${id}"]`);
             const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
-            const rcInput = tr.querySelector(".project-registered-country-input");
+            const rcInput = tr.querySelector(".project-registered-country-select");
             const catInput = tr.querySelector(".project-registered-category-input");
+            const ptInput = tr.querySelector(".project-product-type-input");
+            const certInput = tr.querySelector(".project-cert-date-input");
+            const subInput = tr.querySelector(".project-submit-date-input");
+            const progInput = tr.querySelector(".project-progress-input");
             if (!id || !prEl || !stEl) return;
             payload.push({
                 id,
@@ -1380,6 +1439,10 @@ async function initUploadPage() {
                 status: stEl.value,
                 registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
                 registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                productType: ptInput ? (ptInput.value || "").trim() : null,
+                expectedCertificationDate: certInput ? certInput.value || null : null,
+                expectedSubmissionDate: subInput ? subInput.value || null : null,
+                progressDescription: progInput ? (progInput.value || "").trim() : null,
             });
         });
         if (!payload.length) { App.notify("没有可保存的项目", "warning"); return; }
@@ -1863,6 +1926,174 @@ async function initUploadPage() {
     });
 }
 
+let registeredCountriesDictCache = null;
+
+async function loadRegisteredCountriesDict(force) {
+    if (!force && registeredCountriesDictCache) {
+        return registeredCountriesDictCache;
+    }
+    try {
+        const res = await App.request("/api/registered-countries");
+        registeredCountriesDictCache = Array.isArray(res?.countries) ? res.countries : [];
+    } catch (_) {
+        registeredCountriesDictCache = registeredCountriesDictCache || [];
+    }
+    return registeredCountriesDictCache;
+}
+
+function buildRegisteredCountryOptionsHtml(selected, includeEmpty) {
+    const esc = (s) =>
+        String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    const v = (selected || "").trim();
+    let html = includeEmpty !== false ? '<option value="">—</option>' : "";
+    (registeredCountriesDictCache || []).forEach((name) => {
+        html += `<option value="${esc(name)}"${name === v ? " selected" : ""}>${esc(name)}</option>`;
+    });
+    if (v && !(registeredCountriesDictCache || []).includes(v)) {
+        html += `<option value="${esc(v)}" selected>${esc(v)}（未在字典）</option>`;
+    }
+    return html;
+}
+
+function mountTagMultiPicker(host, options) {
+    if (!host) return;
+    const opts = options || {};
+    const state = {
+        values: [...(opts.values || [])].map((x) => String(x).trim()).filter(Boolean),
+        optionList: (opts.options || []).map((o) =>
+            typeof o === "string"
+                ? { value: o, label: o }
+                : { value: String(o.value), label: o.label || o.value }
+        ),
+        placeholder: opts.placeholder || "— 请选择后点「添加」—",
+        emptyHint: opts.emptyHint || "暂未选择",
+    };
+    host._tagMultiPickerState = state;
+    host.classList.add("tag-multi-picker");
+    host.innerHTML = `
+        <div class="tag-multi-picker-tags"></div>
+        <div class="tag-multi-picker-add-row input-group input-group-sm">
+            <select class="form-select tag-multi-picker-add-select"></select>
+            <button type="button" class="btn btn-outline-primary tag-multi-picker-add-btn">添加</button>
+        </div>`;
+    const tagsEl = host.querySelector(".tag-multi-picker-tags");
+    const addSel = host.querySelector(".tag-multi-picker-add-select");
+    const addBtn = host.querySelector(".tag-multi-picker-add-btn");
+
+    const renderTags = () => {
+        if (!tagsEl) return;
+        if (!state.values.length) {
+            tagsEl.innerHTML = `<span class="tag-multi-picker-empty">${state.emptyHint}</span>`;
+            return;
+        }
+        tagsEl.innerHTML = state.values
+            .map(
+                (val) => {
+                    const lab =
+                        state.optionList.find((o) => o.value === val)?.label || val;
+                    return `<span class="tag-multi-picker-tag" data-value="${val.replace(/"/g, "&quot;")}">
+                        <span>${lab.replace(/</g, "&lt;")}</span>
+                        <button type="button" class="tag-multi-picker-tag-remove" title="移除" aria-label="移除">×</button>
+                    </span>`;
+                }
+            )
+            .join("");
+        tagsEl.querySelectorAll(".tag-multi-picker-tag-remove").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const tag = btn.closest(".tag-multi-picker-tag");
+                const v = tag?.dataset?.value;
+                if (!v) return;
+                state.values = state.values.filter((x) => x !== v);
+                renderTags();
+                refreshAddSelect();
+                opts.onChange?.(getTagMultiPickerValues(host));
+            });
+        });
+    };
+
+    const refreshAddSelect = () => {
+        if (!addSel) return;
+        const chosen = new Set(state.values);
+        addSel.innerHTML = `<option value="">${state.placeholder}</option>`;
+        state.optionList.forEach((o) => {
+            if (chosen.has(o.value)) return;
+            const opt = document.createElement("option");
+            opt.value = o.value;
+            opt.textContent = o.label;
+            addSel.appendChild(opt);
+        });
+    };
+
+    addBtn?.addEventListener("click", () => {
+        const v = (addSel?.value || "").trim();
+        if (!v) return;
+        if (!state.values.includes(v)) state.values.push(v);
+        renderTags();
+        refreshAddSelect();
+        if (addSel) addSel.value = "";
+        opts.onChange?.(getTagMultiPickerValues(host));
+    });
+
+    renderTags();
+    refreshAddSelect();
+}
+
+function getTagMultiPickerValues(host) {
+    return [...(host?._tagMultiPickerState?.values || [])];
+}
+
+function setTagMultiPicker(host, options) {
+    if (!host) return;
+    mountTagMultiPicker(host, options);
+}
+
+function fillRegisteredCountrySelect(sel, value, includeEmpty) {
+    if (!sel) return;
+    const v = (value || "").trim();
+    const prev = sel.value;
+    sel.innerHTML = "";
+    if (includeEmpty !== false) {
+        const o0 = document.createElement("option");
+        o0.value = "";
+        o0.textContent = "—";
+        sel.appendChild(o0);
+    }
+    (registeredCountriesDictCache || []).forEach((name) => {
+        const o = document.createElement("option");
+        o.value = name;
+        o.textContent = name;
+        sel.appendChild(o);
+    });
+    if (v && ![...sel.options].some((o) => o.value === v)) {
+        const ox = document.createElement("option");
+        ox.value = v;
+        ox.textContent = v;
+        sel.appendChild(ox);
+    }
+    sel.value = v || prev || "";
+}
+
+function refreshNewProjectCountrySelect() {
+    const sel = document.getElementById("newProjectRegisteredCountry");
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = buildRegisteredCountryOptionsHtml(prev, true);
+}
+
+async function loadProjectTeamsForPickers() {
+    try {
+        const res = await App.request("/api/project-teams");
+        return Array.isArray(res) ? res : res?.teams || [];
+    } catch (_) {
+        return [];
+    }
+}
+
+
 function initEditUserMobile() {
     const saveBtn = document.getElementById("saveUserMobileBtn");
     const modalEl = document.getElementById("editUserMobileModal");
@@ -1871,6 +2102,7 @@ function initEditUserMobile() {
         const id = document.getElementById("editUserMobileId").value;
         const mobile = document.getElementById("editUserMobileValue").value.trim();
         const displayName = (document.getElementById("editUserDisplayName")?.value || "").trim();
+        const adminRole = document.getElementById("editUserAdminRole")?.value || "none";
         try {
             await App.request(`/api/users/${id}`, {
                 method: "PATCH",
@@ -1878,10 +2110,19 @@ function initEditUserMobile() {
                 body: JSON.stringify({
                     mobile: mobile || null,
                     displayName: displayName || null,
+                    adminRole,
+                    registeredCountries: getTagMultiPickerValues(
+                        document.getElementById("editUserCountriesPicker")
+                    ),
+                    teamIds: getTagMultiPickerValues(
+                        document.getElementById("editUserTeamsPicker")
+                    ),
                 }),
             });
-            App.notify("手机号已更新");
+            App.notify("账号已更新；公司管理员请刷新页面0 以应用新的国家维度");
             bootstrap.Modal.getInstance(modalEl)?.hide();
+            registeredCountriesDictCache = null;
+            await loadRegisteredCountriesDict(true).catch(() => {});
             loadUsersList();
         } catch (e) {
             App.notify(e.message || "更新失败", "danger");
@@ -3197,7 +3438,7 @@ function renderUsersList() {
     tbody.innerHTML = "";
     if (!filtered.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="5" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
+        tr.innerHTML = `<td colspan="8" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
         tbody.appendChild(tr);
         return;
     }
@@ -3206,15 +3447,27 @@ function renderUsersList() {
         const adminBadge = u.isAdmin
             ? '<span class="badge bg-primary">是</span>'
             : '<span class="text-muted">否</span>';
+        const roleLabels = { none: "无", project: "项目", company: "公司" };
+        const roleBadge = `<span class="badge bg-secondary">${_escUserCell(roleLabels[u.adminRole] || u.adminRole || "无")}</span>`;
         const displayName = (u.displayName || "").trim() || "-";
+        const p0On = u.adminRole === "company";
+        const p0Badge = p0On
+            ? '<span class="badge bg-warning text-dark">公司管理员</span>'
+            : '<span class="text-muted">—</span>';
+        const countries = (u.registeredCountries || []).length
+            ? _escUserCell((u.registeredCountries || []).join("、"))
+            : '<span class="text-muted">—</span>';
         tr.innerHTML = `
             <td>${_escUserCell(u.username)}</td>
             <td>${_escUserCell(displayName)}</td>
             <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
             <td>${adminBadge}</td>
+            <td>${roleBadge}</td>
+            <td>${p0Badge}</td>
+            <td class="small">${countries}</td>
             <td class="text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info btn-check-at me-1" data-username="${_escUserCell(u.username)}">检查@</button>
-                <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-display-name="${_escUserCell(u.displayName || "")}" data-mobile="${_escUserCell(u.mobile || "")}">编辑</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-display-name="${_escUserCell(u.displayName || "")}" data-mobile="${_escUserCell(u.mobile || "")}" data-admin-role="${_escUserCell(u.adminRole || "none")}">编辑</button>
                 <button type="button" class="btn btn-sm btn-outline-primary btn-toggle-admin me-1" data-id="${u.id}" data-admin="${u.isAdmin ? "1" : "0"}">${u.isAdmin ? "取消管理员" : "设为管理员"}</button>
                 <button type="button" class="btn btn-sm btn-outline-danger btn-delete-user" data-id="${u.id}">删除</button>
             </td>
@@ -3262,12 +3515,32 @@ function renderUsersList() {
         });
     });
     tbody.querySelectorAll(".btn-edit-mobile").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+            const u = usersListCache.find((x) => x.id === btn.dataset.id);
             document.getElementById("editUserMobileId").value = btn.dataset.id;
             document.getElementById("editUserMobileUsername").value = btn.dataset.username || "";
             const dnEl = document.getElementById("editUserDisplayName");
             if (dnEl) dnEl.value = btn.dataset.displayName || "";
             document.getElementById("editUserMobileValue").value = btn.dataset.mobile || "";
+            const roleEl = document.getElementById("editUserAdminRole");
+            if (roleEl) roleEl.value = u?.adminRole || btn.dataset.adminRole || "none";
+            await loadRegisteredCountriesDict(true);
+            const teams = await loadProjectTeamsForPickers();
+            setTagMultiPicker(document.getElementById("editUserCountriesPicker"), {
+                values: u?.registeredCountries || [],
+                options: (registeredCountriesDictCache || []).map((n) => ({
+                    value: n,
+                    label: n,
+                })),
+                emptyHint: "未选择国家（表示全部国家）",
+            });
+            setTagMultiPicker(document.getElementById("editUserTeamsPicker"), {
+                values: u?.teamIds || [],
+                options: teams
+                    .filter((t) => t.isActive !== false)
+                    .map((t) => ({ value: t.id, label: t.name })),
+                emptyHint: "未选择项目组",
+            });
             const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
             modal.show();
         });
@@ -3479,6 +3752,10 @@ async function submitCreateUserForm() {
         displayName: displayNameInput ? (displayNameInput.value || "").trim() || null : null,
         mobile: mobileInput ? (mobileInput.value || "").trim() || null : null,
         isAdmin: !!(isAdminInput && isAdminInput.checked),
+        adminRole: document.getElementById("newUserAdminRole")?.value || "none",
+        registeredCountries: getTagMultiPickerValues(
+            document.getElementById("newUserCountriesPicker")
+        ),
     };
     if (!payload.username || !payload.password) {
         App.notify("用户名和密码不能为空", "warning");
@@ -3503,8 +3780,17 @@ function initCreateUserModal() {
     const submitBtn = document.getElementById("createUserSubmitBtn");
     if (!modalEl) return;
 
-    openBtn?.addEventListener("click", () => {
+    openBtn?.addEventListener("click", async () => {
         form?.reset();
+        await loadRegisteredCountriesDict(true);
+        setTagMultiPicker(document.getElementById("newUserCountriesPicker"), {
+            values: [],
+            options: (registeredCountriesDictCache || []).map((n) => ({
+                value: n,
+                label: n,
+            })),
+            emptyHint: "未选择国家（表示全部国家）",
+        });
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
         setTimeout(() => document.getElementById("newUsername")?.focus(), 200);
     });
@@ -3740,19 +4026,33 @@ function initLoginPage() {
     const form = document.getElementById("loginForm");
     if (!form) return;
 
+    const params = new URLSearchParams(window.location.search);
+    const nextRaw = (params.get("next") || "").trim();
+    const forCompany =
+        Boolean(window.__LOGIN_FOR_COMPANY__) ||
+        nextRaw.startsWith("/company") ||
+        params.get("for") === "company";
+
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const payload = {
             username: document.getElementById("loginUsername").value.trim(),
             password: document.getElementById("loginPassword").value,
+            forCompanyRegistry: forCompany,
         };
+        if (nextRaw) payload.next = nextRaw;
         try {
-            await App.request("/api/login", {
+            const res = await App.request("/api/login", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-            window.location.href = _appPath("/generate");
+            if (forCompany && res?.user?.adminRole !== "company") {
+                App.notify("该账号不是公司管理员", "danger");
+                return;
+            }
+            const dest = _appPath(res?.redirectUrl || res?.homeUrl || "/generate");
+            window.location.href = dest;
         } catch (error) {
             App.notify(error.message, "danger");
         }
@@ -3782,12 +4082,20 @@ async function initGeneratePage() {
     await loadTaskTypes();
 
     App.request("/api/me").then((res) => {
-        if (res.loggedIn && userInfo) {
-            let label = `欢迎，${res.user.displayName || res.user.username}`;
-            if (res.user.isAdmin || res.featureAdminViewer) {
-                label += "（管理员）";
+        if (userInfo) {
+            if (res.page13SuperAdmin && !res.loggedIn) {
+                userInfo.textContent = "超级管理员（访问密码）";
+            } else if (res.loggedIn) {
+                let label = `欢迎，${res.user.displayName || res.user.username}`;
+                if (res.page13SuperAdmin) {
+                    label += "（超级管理员）";
+                } else if (res.user.adminRole === "project") {
+                    label += "（项目管理员）";
+                } else if (res.user.isAdmin || res.featureAdminViewer) {
+                    label += "（管理员）";
+                }
+                userInfo.textContent = label;
             }
-            userInfo.textContent = label;
         }
         if (res.featureFlags && typeof res.featureFlags === "object") {
             window.__FEATURE_FLAGS__ = res.featureFlags;
@@ -4542,6 +4850,82 @@ ${sectionToolsHtml}
 }
 
 function initDashboardPage() {
+    let teamDingtalkRows = [];
+    const teamSelect = document.getElementById("teamDingtalkTeamId");
+    const teamWebhookInput = document.getElementById("teamDingtalkWebhook");
+    const teamSecretInput = document.getElementById("teamDingtalkSecret");
+    const saveTeamBtn = document.getElementById("saveTeamDingtalkBtn");
+
+    const renderTeamDingtalkForm = () => {
+        if (!teamSelect) return;
+        const keep = teamSelect.value || "";
+        teamSelect.innerHTML = "";
+        if (!teamDingtalkRows.length) {
+            const op = document.createElement("option");
+            op.value = "";
+            op.textContent = "暂无可配置项目组";
+            teamSelect.appendChild(op);
+            if (teamWebhookInput) teamWebhookInput.value = "";
+            if (teamSecretInput) teamSecretInput.value = "";
+            if (saveTeamBtn) saveTeamBtn.disabled = true;
+            return;
+        }
+        teamDingtalkRows.forEach((t) => {
+            const op = document.createElement("option");
+            op.value = t.id;
+            op.textContent = t.name || t.id;
+            teamSelect.appendChild(op);
+        });
+        teamSelect.value = keep && teamDingtalkRows.some((t) => t.id === keep) ? keep : teamDingtalkRows[0].id;
+        const cur = teamDingtalkRows.find((t) => t.id === teamSelect.value) || null;
+        if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
+        if (teamSecretInput) teamSecretInput.value = "";
+        if (saveTeamBtn) saveTeamBtn.disabled = false;
+    };
+
+    const loadTeamDingtalkSettings = async () => {
+        if (!teamSelect) return;
+        try {
+            const res = await App.request("/api/system-settings/team-dingtalk");
+            teamDingtalkRows = Array.isArray(res?.teams) ? res.teams : [];
+            renderTeamDingtalkForm();
+        } catch (e) {
+            teamDingtalkRows = [];
+            renderTeamDingtalkForm();
+            App.notify((e && e.message) || "项目组钉钉配置加载失败", "danger");
+        }
+    };
+
+    teamSelect?.addEventListener("change", () => {
+        const cur = teamDingtalkRows.find((t) => t.id === teamSelect.value) || null;
+        if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
+        if (teamSecretInput) teamSecretInput.value = "";
+    });
+    saveTeamBtn?.addEventListener("click", async () => {
+        const tid = (teamSelect?.value || "").trim();
+        if (!tid) {
+            App.notify("请先选择项目组", "warning");
+            return;
+        }
+        try {
+            _setButtonBusy(saveTeamBtn, true, "保存中…");
+            await App.request(`/api/system-settings/team-dingtalk/${encodeURIComponent(tid)}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    dingtalkWebhook: (teamWebhookInput?.value || "").trim(),
+                    dingtalkSecret: (teamSecretInput?.value || "").trim(),
+                }),
+            });
+            App.notify("项目组钉钉配置已保存", "success");
+            await loadTeamDingtalkSettings();
+        } catch (e) {
+            App.notify((e && e.message) || "保存失败", "danger");
+        } finally {
+            _setButtonBusy(saveTeamBtn, false);
+        }
+    });
+
     const loadSystemSettings = async () => {
         const container = document.getElementById("systemSettingsForm");
         if (!container) return;
@@ -4633,6 +5017,7 @@ function initDashboardPage() {
         loadSystemSettings();
         systemSettingsLoaded = true;
     }
+    loadTeamDingtalkSettings();
 
     document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
         const container = document.getElementById("systemSettingsForm");
@@ -4675,7 +5060,7 @@ function initDashboardPage() {
     // 默认不加载：等用户点击打开弹窗后拉取
 
     const overallRate = document.getElementById("overallRate");
-    if (!overallRate) return;
+    const scheduleWeeklyEl = document.getElementById("scheduleWeekly");
 
     const tableBody = document.getElementById("detailTableBody");
     const projectBody = document.getElementById("projectStatsBody");
@@ -4817,6 +5202,11 @@ function initDashboardPage() {
         await testAutoNotify("module_cascade");
         loadModuleCascadeStatus();
     });
+
+    if (!overallRate) {
+        if (scheduleWeeklyEl) loadSchedule();
+        return;
+    }
 
     const loadSummary = async () => {
         try {
@@ -5680,6 +6070,16 @@ function initColumnToggle(btnId, menuId, tableId) {
     }
 }
 
+function initAdminPage() {
+    if (!document.getElementById("adminPageRoot")) return;
+    initCreateUserModal();
+    initUsersListFilter();
+    initConfigManagement();
+    initEditUserMobile();
+    loadUsersList();
+    initDashboardPage();
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
     await loadCompletionStatuses().catch((e) => {
         console.warn("loadCompletionStatuses:", e);
@@ -5691,6 +6091,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     initLoginPage();
     initGeneratePage();
     initDashboardPage();
+    initAdminPage();
 
     initColumnToggle("colToggleBtn1", "colToggleMenu1", "recordsTable");
     initColumnToggle("colToggleBtn2", "colToggleMenu2", "myTasksTable");

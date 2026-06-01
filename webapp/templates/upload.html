@@ -44,20 +44,23 @@
         <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
-            <span class="small text-muted">勾选后可批量设置优先级/状态；修改后点“一键保存”统一提交。</span>
+            <span class="small text-muted">产品类型/取证/递交/进度与页面0 公司总览双向同步；修改后点「保存」或「一键保存」。</span>
         </div>
-        <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
+        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
             <table class="table table-sm table-striped table-hover align-middle mb-0">
                 <thead class="table-light sticky-top">
                 <tr>
                     <th style="width:38px"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
                     <th>项目</th>
-                    <th style="width:170px">注册国家</th>
-                    <th style="width:170px">注册类别</th>
-                    <th style="width:120px">优先级</th>
-                    <th style="width:120px">状态</th>
-                    <th style="width:180px">更新时间</th>
-                    <th style="width:120px">操作</th>
+                    <th style="width:120px">注册国家</th>
+                    <th style="width:120px">注册类别</th>
+                    <th style="width:100px">产品类型</th>
+                    <th style="width:108px">预计取证</th>
+                    <th style="width:108px">预计递交</th>
+                    <th style="min-width:140px">进度描述</th>
+                    <th style="width:88px">优先级</th>
+                    <th style="width:88px">状态</th>
+                    <th style="width:140px">操作</th>
                 </tr>
                 </thead>
                 <tbody id="projectsManageBody"></tbody>
@@ -80,12 +83,37 @@
                         <div class="row g-2 mb-1">
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">注册国家</label>
-                                <input type="text" class="form-control form-control-sm" id="newProjectRegisteredCountry" placeholder="如 中国 / 美国 等">
+                                <select class="form-select form-select-sm" id="newProjectRegisteredCountry">
+                                    <option value="">—</option>
+                                </select>
+                                <p class="form-text small text-muted mb-0">选项来自注册国家字典，维护请联系管理员处理</p>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">注册类别</label>
                                 <input type="text" class="form-control form-control-sm" id="newProjectRegisteredCategory" placeholder="如 类别A / 类别B">
                             </div>
+                        </div>
+                        <div class="form-check mb-2" id="newProjectIncludeCompanyWrap" style="display:none">
+                            <input class="form-check-input" type="checkbox" id="newProjectIncludeCompany">
+                            <label class="form-check-label small" for="newProjectIncludeCompany">纳入公司总览（页面0 可见）</label>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-0">产品类型</label>
+                            <input type="text" class="form-control form-control-sm" id="newProjectProductType" placeholder="可选">
+                        </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">预计取证时间</label>
+                                <input type="date" class="form-control form-control-sm" id="newProjectCertDate">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small mb-0">预计递交时间</label>
+                                <input type="date" class="form-control form-control-sm" id="newProjectSubmitDate">
+                            </div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-0">进度描述</label>
+                            <textarea class="form-control form-control-sm" id="newProjectProgress" rows="2" placeholder="可选"></textarea>
                         </div>
                         <div class="row g-2">
                             <div class="col-md-6">
@@ -323,114 +351,7 @@
     </div>
 </div>
 
-<div class="row g-4">
-    <div class="col-lg-7">
-        <div class="card mb-3 users-management-card">
-            <div class="card-body">
-                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                    <h5 class="card-title mb-0">账号管理（页面2登录）</h5>
-                    <button type="button" class="btn btn-success btn-sm" id="btnOpenCreateUserModal">创建账号</button>
-                </div>
-                <div class="row g-2 mb-2">
-                    <div class="col-md-5">
-                        <input type="text" class="form-control form-control-sm" id="filterUserKeyword" placeholder="筛选：用户名 / 显示名称">
-                    </div>
-                    <div class="col-md-4">
-                        <input type="text" class="form-control form-control-sm" id="filterUserMobile" placeholder="筛选：手机号">
-                    </div>
-                    <div class="col-md-3">
-                        <select class="form-select form-select-sm" id="filterUserAdmin">
-                            <option value="">全部账号</option>
-                            <option value="yes">仅管理员</option>
-                            <option value="no">仅普通账号</option>
-                        </select>
-                    </div>
-                </div>
-                <p class="small text-muted mb-2" id="usersListCountHint">共 0 个账号</p>
-                <div class="table-responsive users-list-panel">
-                    <table class="table table-sm table-bordered table-hover align-middle mb-0">
-                        <thead class="table-light">
-                            <tr>
-                                <th>用户名</th>
-                                <th>显示名称</th>
-                                <th>手机号</th>
-                                <th>管理员</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="usersTableBody"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="col-lg-5">
-        <div class="card">
-            <div class="card-body">
-                <h5 class="card-title">配置管理</h5>
-                <div class="mb-3">
-                    <label class="form-label small fw-bold">任务类型</label>
-                    <div class="input-group input-group-sm mb-2">
-                        <select class="form-select" id="newTaskCategory" style="max-width:96px" title="任务类别">
-                            <option value="file" selected>文件型</option>
-                            <option value="matter">事项型</option>
-                        </select>
-                        <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
-                        <button class="btn btn-outline-success" type="button" id="addTaskTypeBtn">+</button>
-                    </div>
-                    <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
-                    <p class="small text-muted mb-0">点击徽章可在「文件型 ↔ 事项型」间切换。事项型任务在页面2 仅做事项跟进，不出现「上传/替换/初稿生成/审核后修改/翻译」等文档相关按钮。</p>
-                </div>
-                <hr>
-                <div>
-                    <label class="form-label small fw-bold">完成状态（页面2）</label>
-                    <div class="input-group input-group-sm mb-2">
-                        <input type="text" class="form-control" id="newCompletionStatus" placeholder="新增完成状态">
-                        <button class="btn btn-outline-success" type="button" id="addCompletionStatusBtn">+</button>
-                    </div>
-                    <div id="completionStatusesList" class="d-flex flex-wrap gap-1"></div>
-                </div>
-                <hr>
-                <div>
-                    <label class="form-label small fw-bold">审核状态（页面1）</label>
-                    <div class="input-group input-group-sm mb-2">
-                        <input type="text" class="form-control" id="newAuditStatus" placeholder="新增审核状态">
-                        <button class="btn btn-outline-success" type="button" id="addAuditStatusBtn">+</button>
-                    </div>
-                    <div id="auditStatusesList" class="d-flex flex-wrap gap-1"></div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- 编辑用户账号弹窗（显示名、手机号） -->
-<div class="modal fade" id="editUserMobileModal" tabindex="-1">
-    <div class="modal-dialog modal-sm">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">编辑账号</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <input type="hidden" id="editUserMobileId">
-                <div class="mb-2">
-                    <label class="form-label small">用户名（登录用，不可改）</label>
-                    <input type="text" class="form-control form-control-sm" id="editUserMobileUsername" readonly>
-                </div>
-                <div class="mb-2">
-                    <label class="form-label small">显示名称</label>
-                    <input type="text" class="form-control form-control-sm" id="editUserDisplayName" placeholder="与任务「编写人」一致时便于催办@">
-                </div>
-                <div class="mb-2">
-                    <label class="form-label small">手机号（钉钉@）</label>
-                    <input type="text" class="form-control form-control-sm" id="editUserMobileValue" placeholder="11位或 +86-1xx…，保存时自动规范">
-                </div>
-                <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
-            </div>
-        </div>
-    </div>
-</div>
+<p class="small text-muted mb-3">账号管理、任务类型/完成状态/审核状态等配置请联系管理员处理。</p>
 
 <!-- 编辑任务弹窗（页面1） -->
 <div class="modal fade" id="editRecordModal" tabindex="-1">
@@ -706,46 +627,6 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" id="batchEditSaveBtn">应用到所选</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- 页面1 账号管理：创建账号 -->
-<div class="modal fade" id="createUserModal" tabindex="-1" data-bs-backdrop="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">创建账号</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="createUserForm">
-                    <div class="mb-2">
-                        <label class="form-label small mb-0">用户名 <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control form-control-sm" id="newUsername" placeholder="登录用户名" required autocomplete="off">
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small mb-0">密码 <span class="text-danger">*</span></label>
-                        <input type="password" class="form-control form-control-sm" id="newPassword" placeholder="登录密码" required autocomplete="new-password">
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small mb-0">显示名称</label>
-                        <input type="text" class="form-control form-control-sm" id="newDisplayName" placeholder="可选，默认同用户名" autocomplete="off">
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small mb-0">手机号</label>
-                        <input type="text" class="form-control form-control-sm" id="newMobile" placeholder="钉钉 @ 用，可选" autocomplete="off">
-                    </div>
-                    <div class="form-check mb-0">
-                        <input class="form-check-input" type="checkbox" id="newUserIsAdmin" value="1">
-                        <label class="form-check-label small" for="newUserIsAdmin">管理员（页面2 不受功能开关限制）</label>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-success btn-sm" id="createUserSubmitBtn">创建</button>
             </div>
         </div>
     </div>

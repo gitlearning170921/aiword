@@ -50,7 +50,7 @@ from .task_template_archive import resolve_task_template_from_saved_path
 from .models import (
     GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
-    Project, ModuleCascadeReminder, now_local,
+    Project, ProjectTeam, ModuleCascadeReminder, now_local,
     ExamBankIngestJob,
     ExamSetReviewJob,
     ExamCenterActivity,
@@ -77,6 +77,19 @@ def _dingtalk_secret_opt() -> Optional[str]:
     from .app_settings import get_setting
     s = (get_setting("DINGTALK_SECRET") or "").strip()
     return s or None
+
+
+def _resolve_dingtalk_for_team(team_id: str | None) -> tuple[str, Optional[str], str]:
+    from .dingtalk_team import resolve_dingtalk_credentials
+
+    webhook, secret, source = resolve_dingtalk_credentials(team_id)
+    return webhook, secret, source
+
+
+def _resolve_team_id_by_project_name(project_name: str | None) -> str | None:
+    from .dingtalk_team import resolve_team_id_by_project_name
+
+    return resolve_team_id_by_project_name(project_name)
 
 
 def _chatbot_enabled() -> bool:
@@ -2390,23 +2403,19 @@ def _upload_record_has_task_file(r: UploadRecord) -> bool:
 
 
 def _upload_record_visible_to_page2_user(rec: UploadRecord) -> bool:
-    """与页面2「我的任务」/初稿带入一致：负责人或编写人匹配当前登录用户。"""
-    username = (session.get("username") or "").strip()
-    display_name = (session.get("display_name") or "").strip()
-    an = (rec.assignee_name or "").strip()
-    au = (rec.author or "").strip()
-    if username and (an == username or au == username):
-        return True
-    if display_name and (an == display_name or au == display_name):
-        return True
-    return False
+    """与页面2「我的任务」/初稿带入一致；分级管理员只增权。"""
+    from .authz import upload_record_visible_to_user
+
+    return upload_record_visible_to_user(rec)
 
 
 def _can_access_upload_template(upload: UploadRecord) -> bool:
-    """页面1（访问密码）或页面2（登录且为负责人/编写人）可下载任务模板。"""
+    """页面1（访问密码超级管理员）或页面2（登录且有权）可下载任务模板。"""
+    from .authz import is_page13_super_admin
+
     if not _page13_password_configured():
         return True
-    if session.get("page13_authenticated"):
+    if is_page13_super_admin():
         return True
     if session.get("user_id"):
         return _upload_record_visible_to_page2_user(upload)
@@ -3014,25 +3023,65 @@ def _summary_payload():
 # ---------- 登录验证装饰器 ----------
 
 def login_required(f):
+    """页面2 等：须登录；页面1·3 访问密码视同超级管理员；公司管理员仅页面0。"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        from .authz import (
+            _company_admin_blocked_response,
+            company_registry_enabled,
+            is_company_admin,
+            is_page13_super_admin,
+            is_project_admin,
+            user_team_ids,
+        )
+
+        if is_page13_super_admin():
+            return f(*args, **kwargs)
         if not session.get("user_id"):
             if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
                 return jsonify({"message": "请先登录", "needsLogin": True}), 401
-            return redirect(url_for("pages.login_page"))
+            next_url = request.full_path if request.query_string else request.path
+            if next_url.endswith("?"):
+                next_url = next_url[:-1]
+            return redirect(url_for("pages.login_page", next=next_url or "/generate"))
+        if is_company_admin():
+            return _company_admin_blocked_response()
+        if company_registry_enabled() and is_project_admin() and not user_team_ids():
+            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
+                return jsonify({"message": "项目管理员须先在页面1 账号管理中分配所属项目组"}), 403
+            return (
+                render_template(
+                    "error.html",
+                    title="未分配项目组",
+                    message="项目管理员须先在页面1「账号管理」中分配所属项目组后再访问页面1/3。",
+                    back_url=url_for("pages.login_page"),
+                    back_label="重新登录",
+                    hide_main_nav=True,
+                    gate_page=True,
+                ),
+                403,
+            )
         return f(*args, **kwargs)
     return decorated_function
 
 
 def _page13_or_login_required(f):
-    """登录 或 已通过页面1/3 访问密码 任一即可（供页面1 未登录时也能加载配置、页面2 仅登录即可）。"""
+    """访问密码超级管理员，或任意已登录账号（含页面2 普通账号；公司管理员除外）。"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not _page13_password_configured():
+        from .authz import (
+            _company_admin_blocked_response,
+            is_company_admin,
+            is_page13_super_admin,
+        )
+
+        if is_page13_super_admin():
             return f(*args, **kwargs)
         if session.get("user_id"):
+            if is_company_admin():
+                return _company_admin_blocked_response()
             return f(*args, **kwargs)
-        if session.get("page13_authenticated"):
+        if not _page13_password_configured():
             return f(*args, **kwargs)
         if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
             return jsonify({"message": "需要输入访问密码", "needsPage13Auth": True}), 401
@@ -3047,18 +3096,76 @@ def _page13_password_configured() -> bool:
     return bool(p and str(p).strip())
 
 
+def super_admin_required(f):
+    """页面4：仅访问密码超级管理员（字典/账号/配置/系统与钉钉维护）。"""
+    from .authz import super_admin_required as _authz_super_admin_required
+
+    return _authz_super_admin_required(f)
+
+
+def page4_access_required(f):
+    """页面4 HTML：须访问密码验证。"""
+    from .authz import page4_access_required as _authz_page4_access_required
+
+    return _authz_page4_access_required(f)
+
+
 def page13_access_required(f):
-    """页面1、页面3 及其相关 API 的访问密码校验。密码不在网络中传输，使用 nonce+hash 校验。"""
+    """页面1、页面3：默认走账号登录（项目管理员 + 项目组）；page13 密码仅作超级管理员兜底。"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not _page13_password_configured():
+        from .authz import (
+            _company_admin_blocked_response,
+            company_registry_enabled,
+            is_company_admin,
+            is_page13_super_admin,
+            is_project_admin,
+            user_team_ids,
+        )
+
+        if is_page13_super_admin():
             return f(*args, **kwargs)
-        if session.get("page13_authenticated"):
-            return f(*args, **kwargs)
-        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
-            return jsonify({"message": "需要输入访问密码", "needsPage13Auth": True}), 401
-        next_url = request.path or "/upload"
-        return render_template("page13_gate.html", next_url=next_url, gate_page=True)
+        if session.get("user_id") and is_company_admin():
+            return _company_admin_blocked_response()
+        if session.get("user_id") and is_project_admin():
+            if user_team_ids():
+                return f(*args, **kwargs)
+            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
+                return jsonify(
+                    {"message": "项目管理员须先在页面1 账号管理中分配所属项目组"}
+                ), 403
+            return render_template(
+                "error.html",
+                title="未分配项目组",
+                message="项目管理员须先在页面1 账号管理中分配「所属项目组」后才能访问页面1/3。",
+                hide_main_nav=True,
+                gate_page=True,
+            ), 403
+        if not session.get("user_id"):
+            if _page13_password_configured() and session.get("page13_authenticated"):
+                return f(*args, **kwargs)
+            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
+                return jsonify({"message": "请先使用项目管理员账号登录", "needsLogin": True}), 401
+            next_url = request.full_path if request.query_string else request.path
+            if next_url.endswith("?"):
+                next_url = next_url[:-1]
+            return redirect(url_for("pages.login_page", next=next_url or "/upload"))
+        if company_registry_enabled():
+            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
+                return jsonify({"message": "页面1/3 仅项目管理员可访问"}), 403
+            return (
+                render_template(
+                    "error.html",
+                    title="无访问权限",
+                    message="页面1/3 仅项目管理员可访问，请使用项目管理员账号登录。",
+                    back_url=url_for("pages.login_page"),
+                    back_label="重新登录",
+                    hide_main_nav=True,
+                    gate_page=True,
+                ),
+                403,
+            )
+        return f(*args, **kwargs)
     return decorated_function
 
 
@@ -3075,10 +3182,14 @@ def index():
     # 两套用户体系：
     # - page13（管理员/老师/统计端）：进入页面1/3
     # - user_id（学生端/页面2）：进入页面2
-    if session.get("page13_authenticated"):
-        return redirect(url_for("pages.upload_page"))
     if session.get("user_id"):
-        return redirect(url_for("pages.generate_page"))
+        from .authz import role_home_url
+
+        return redirect(role_home_url())
+    if session.get("page13_authenticated"):
+        from .authz import role_home_url
+
+        return redirect(role_home_url())
     return redirect(url_for("pages.login_page"))
 
 
@@ -3126,7 +3237,17 @@ def api_go_aiprintword_batch_print():
 
 @bp.route("/login")
 def login_page():
-    return render_template("login.html")
+    next_url = (request.args.get("next") or "").strip()
+    for_company = next_url.startswith("/company") or request.args.get("for") == "company"
+    if session.get("user_id"):
+        from .authz import resolve_login_redirect
+
+        return redirect(resolve_login_redirect(next_url or None))
+    return render_template(
+        "login.html",
+        login_next=next_url or None,
+        for_company_registry=for_company,
+    )
 
 
 @bp.route("/generate")
@@ -3154,29 +3275,38 @@ def _exam_center_display_user() -> str:
 
 @bp.route("/exam-center")
 def exam_center_page():
+    from .authz import is_exam_center_staff, is_project_admin
+
     role_arg = request.args.get("role")
+    staff = is_exam_center_staff()
     if role_arg is None or str(role_arg).strip() == "":
-        # 兼容“从页面1/3进入考试中心”的默认行为：管理员体系默认进入老师端；
-        # 学生体系默认进入学生端（并由下方逻辑要求已登录）。
-        role = "teacher" if session.get("page13_authenticated") else "student"
+        if staff:
+            role = "teacher"
+        else:
+            role = "student"
     else:
         role = str(role_arg).strip().lower()
     if role not in {"teacher", "student", "analytics"}:
         role = "student"
 
-    # 两套体系可叠加：登录(user_id)→学生端；page13→老师端/统计端
     allowed_roles = []
     if session.get("user_id"):
-        allowed_roles.append("student")
+        if is_project_admin():
+            allowed_roles.extend(["teacher", "student", "analytics"])
+        else:
+            allowed_roles.append("student")
     if session.get("page13_authenticated"):
-        allowed_roles.extend(["teacher", "analytics"])
+        for r in ("teacher", "analytics"):
+            if r not in allowed_roles:
+                allowed_roles.append(r)
 
     if role in {"teacher", "analytics"}:
-        if _page13_password_configured() and not session.get("page13_authenticated"):
-            next_url = request.full_path or request.path or "/upload"
-            if next_url.endswith("?"):
-                next_url = next_url[:-1]
-            return render_template("page13_gate.html", next_url=next_url, gate_page=True)
+        if not staff:
+            if _page13_password_configured() and not session.get("page13_authenticated"):
+                next_url = request.full_path or request.path or "/upload"
+                if next_url.endswith("?"):
+                    next_url = next_url[:-1]
+                return render_template("page13_gate.html", next_url=next_url, gate_page=True)
     else:
         if not session.get("user_id"):
             return redirect(url_for("pages.login_page"))
@@ -3207,18 +3337,53 @@ def api_login():
     user = User.query.filter_by(username=username).first()
     if not user or not user.check_password(password):
         return jsonify({"message": "用户名或密码错误，请核对账号与密码后重试"}), 401
-    session["user_id"] = user.id
-    session["username"] = user.username
-    session["display_name"] = user.display_name or user.username
-    session["is_admin"] = bool(getattr(user, "is_admin", False))
+    from .authz import company_registry_enabled, resolve_login_redirect, role_home_url, sync_user_session
+    from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT
+
+    sync_user_session(user)
+    role = session.get("admin_role") or "none"
+
+    if company_registry_enabled() and role == ADMIN_ROLE_PROJECT:
+        if not list(session.get("team_ids") or []):
+            session.clear()
+            return jsonify(
+                {
+                    "message": "项目管理员须先在页面1 账号管理中分配所属项目组。",
+                    "needsTeamAssignment": True,
+                }
+            ), 403
+    for_company = bool(
+        data.get("forCompanyRegistry")
+        or data.get("for") == "company"
+        or (data.get("next") or "").strip().startswith("/company")
+    )
+    if for_company and role != ADMIN_ROLE_COMPANY:
+        session.clear()
+        return jsonify(
+            {
+                "message": "该账号不是公司管理员，无法登录公司总览。请在页面1 将分级角色设为「公司管理员」。",
+                "needsCompanyAdmin": True,
+            }
+        ), 403
+
+    next_url = (data.get("next") or "").strip() or None
+    home = role_home_url()
+    redirect_url = resolve_login_redirect(next_url)
     return jsonify({
         "message": "登录成功",
+        "homeUrl": home,
+        "redirectUrl": redirect_url,
         "user": {
             "id": user.id,
             "username": user.username,
             "displayName": user.display_name,
             "isAdmin": bool(getattr(user, "is_admin", False)),
+            "adminRole": role,
+            "teamIds": list(session.get("team_ids") or []),
+            "canAccessCompanyRegistry": bool(session.get("can_access_company_registry")),
+            "registeredCountries": list(session.get("country_scopes") or []),
         },
+        "companyRegistryEnabled": company_registry_enabled(),
     })
 
 
@@ -3230,7 +3395,21 @@ def api_logout():
 
 @bp.get("/api/me")
 def api_me():
+    from .authz import is_page13_super_admin, role_home_url
+
     if not session.get("user_id"):
+        if is_page13_super_admin():
+            from .app_settings import effective_feature_flags_for_request
+            from .authz import company_registry_enabled
+
+            return jsonify({
+                "loggedIn": False,
+                "page13SuperAdmin": True,
+                "homeUrl": role_home_url(),
+                "featureAdminViewer": True,
+                "featureFlags": effective_feature_flags_for_request(),
+                "companyRegistryEnabled": company_registry_enabled(),
+            })
         return jsonify({"loggedIn": False})
     is_admin = bool(session.get("is_admin"))
     if not is_admin and session.get("user_id"):
@@ -3239,16 +3418,35 @@ def api_me():
         session["is_admin"] = is_admin
     from .app_settings import effective_feature_flags_for_request
 
+    from .authz import (
+        company_registry_enabled,
+        current_admin_role,
+        is_company_registry_user,
+        is_page13_super_admin,
+        is_project_admin,
+        role_home_url,
+        user_country_scopes,
+    )
+
+    scopes = user_country_scopes()
     return jsonify({
         "loggedIn": True,
+        "homeUrl": role_home_url(),
+        "page13SuperAdmin": is_page13_super_admin(),
         "user": {
             "id": session.get("user_id"),
             "username": session.get("username"),
             "displayName": session.get("display_name"),
             "isAdmin": is_admin,
+            "adminRole": current_admin_role(),
+            "teamIds": list(session.get("team_ids") or []),
+            "canAccessCompanyRegistry": is_company_registry_user(),
+            "isProjectAdmin": is_project_admin(),
+            "registeredCountries": list(scopes or []),
         },
-        "featureAdminViewer": bool(session.get("page13_authenticated")) or is_admin,
+        "featureAdminViewer": bool(session.get("page13_authenticated")) or is_admin or is_project_admin(),
         "featureFlags": effective_feature_flags_for_request(),
+        "companyRegistryEnabled": company_registry_enabled(),
     })
 
 
@@ -3289,7 +3487,14 @@ def api_page13_auth():
     if not secrets.compare_digest(expected, client_hash):
         return jsonify({"message": "访问密码错误"}), 401
     session["page13_authenticated"] = True
-    return jsonify({"success": True, "message": "验证成功"})
+    from .authz import role_home_url
+
+    return jsonify({
+        "success": True,
+        "message": "验证成功",
+        "homeUrl": role_home_url(),
+        "page13SuperAdmin": True,
+    })
 
 
 # ---------- 考试训练中心 API（aiword 代理） ----------
@@ -6319,8 +6524,9 @@ def api_exam_activity_detail(activity_id: str):
     row = ExamCenterActivity.query.filter_by(id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    # 学生仅可看自己的记录；老师/统计（page13 通过）可看全部
-    if not session.get("page13_authenticated"):
+    from .authz import is_exam_center_staff
+
+    if not is_exam_center_staff():
         uid = str(session.get("user_id") or "").strip()
         if not uid or uid != str(row.user_id or ""):
             return jsonify({"code": "FORBIDDEN", "message": "无权查看该记录", "data": None, "trace_id": uuid.uuid4().hex}), 403
@@ -6374,8 +6580,9 @@ def api_exam_activity_attempt_items(activity_id: str):
     row = ExamCenterActivity.query.filter_by(id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    # 学生仅可看自己的记录；老师/统计可看全部
-    if not session.get("page13_authenticated"):
+    from .authz import is_exam_center_staff
+
+    if not is_exam_center_staff():
         uid = str(session.get("user_id") or "").strip()
         if not uid or uid != str(row.user_id or ""):
             return jsonify({"code": "FORBIDDEN", "message": "无权查看该记录", "data": None, "trace_id": uuid.uuid4().hex}), 403
@@ -6637,6 +6844,8 @@ def api_exam_center_health():
 @bp.get("/api/users")
 @page13_access_required
 def api_users_list():
+    from .user_access import serialize_user_access
+
     users = User.query.order_by(User.created_at.desc()).all()
     return jsonify({
         "users": [
@@ -6646,7 +6855,9 @@ def api_users_list():
                 "displayName": u.display_name,
                 "mobile": getattr(u, "mobile", None) or None,
                 "isAdmin": bool(getattr(u, "is_admin", False)),
+                "adminRole": (getattr(u, "admin_role", None) or "none").strip() or "none",
                 "createdAt": u.created_at.isoformat() if u.created_at else None,
+                **serialize_user_access(u),
             }
             for u in users
         ]
@@ -6654,7 +6865,7 @@ def api_users_list():
 
 
 @bp.post("/api/users")
-@page13_access_required
+@super_admin_required
 def api_users_create():
     data = request.get_json(force=True) or {}
     username = (data.get("username") or "").strip()
@@ -6664,13 +6875,38 @@ def api_users_create():
 
     mobile = format_mobile_for_storage(data.get("mobile"))
     is_admin = bool(data.get("isAdmin"))
+    from .models import ADMIN_ROLES
+
+    admin_role = (data.get("adminRole") or "none").strip()
+    if admin_role not in ADMIN_ROLES:
+        admin_role = "none"
     if not username or not password:
         return jsonify({"message": "用户名和密码不能为空"}), 400
     existing = User.query.filter_by(username=username).first()
     if existing:
         return jsonify({"message": "用户名已存在"}), 409
-    user = User(username=username, display_name=display_name, mobile=mobile, is_admin=is_admin)
+    user = User(
+        username=username,
+        display_name=display_name,
+        mobile=mobile,
+        is_admin=is_admin,
+        admin_role=admin_role,
+    )
     user.set_password(password)
+    db.session.add(user)
+    db.session.flush()
+    from .user_access import (
+        apply_user_access_fields,
+        ensure_role_team_requirement,
+        serialize_user_access,
+    )
+
+    try:
+        ensure_role_team_requirement(user, data)
+        apply_user_access_fields(user, data)
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"message": str(e)}), 400
     db.session.add(user)
     db.session.commit()
     return jsonify({
@@ -6681,12 +6917,14 @@ def api_users_create():
             "displayName": user.display_name,
             "mobile": user.mobile,
             "isAdmin": bool(getattr(user, "is_admin", False)),
+            "adminRole": getattr(user, "admin_role", None) or "none",
+            **serialize_user_access(user),
         },
     })
 
 
 @bp.patch("/api/users/<user_id>")
-@page13_access_required
+@super_admin_required
 def api_users_update(user_id: str):
     """更新用户显示名称、手机号（钉钉 @ 用）、管理员标记"""
     user = User.query.get(user_id)
@@ -6701,8 +6939,33 @@ def api_users_update(user_id: str):
         user.mobile = format_mobile_for_storage(data.get("mobile"))
     if "isAdmin" in data:
         user.is_admin = bool(data.get("isAdmin"))
+    if "adminRole" in data:
+        from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLES
+
+        role = (data.get("adminRole") or "none").strip()
+        user.admin_role = role if role in ADMIN_ROLES else "none"
+        if role == ADMIN_ROLE_COMPANY:
+            user.can_access_company_registry = True
+        else:
+            user.can_access_company_registry = False
+    from .authz import sync_user_session
+    from .user_access import (
+        apply_user_access_fields,
+        ensure_role_team_requirement,
+        serialize_user_access,
+    )
+
+    try:
+        ensure_role_team_requirement(user, data)
+        apply_user_access_fields(user, data)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
     db.session.add(user)
     db.session.commit()
+    if session.get("user_id") == user.id:
+        sync_user_session(user)
+    else:
+        session.pop("country_scopes", None)
     return jsonify({
         "message": "已更新",
         "user": {
@@ -6711,19 +6974,54 @@ def api_users_update(user_id: str):
             "displayName": user.display_name,
             "mobile": user.mobile,
             "isAdmin": bool(getattr(user, "is_admin", False)),
+            "adminRole": getattr(user, "admin_role", None) or "none",
+            **serialize_user_access(user),
         },
     })
 
 
 @bp.delete("/api/users/<user_id>")
-@page13_access_required
+@super_admin_required
 def api_users_delete(user_id: str):
+    from .models import UserCountryScope, UserTeamMembership
+
     user = User.query.get(user_id)
     if not user:
         return jsonify({"message": "用户不存在"}), 404
+    UserTeamMembership.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    UserCountryScope.query.filter_by(user_id=user_id).delete(synchronize_session=False)
     db.session.delete(user)
     db.session.commit()
     return jsonify({"message": "用户已删除"})
+
+
+@bp.get("/api/project-teams")
+@page13_access_required
+def api_project_teams_list():
+    """页面1 账号管理：项目组列表（不依赖公司总览功能开关）。"""
+    from .models import ProjectTeam
+
+    rows = ProjectTeam.query.order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc()).all()
+    return jsonify(
+        [
+            {
+                "id": t.id,
+                "name": t.name,
+                "sortOrder": t.sort_order,
+                "isActive": bool(t.is_active),
+            }
+            for t in rows
+        ]
+    )
+
+
+@bp.get("/api/registered-countries")
+@page13_access_required
+def api_registered_countries_suggest():
+    """注册国家字典（只读候选，维护请至页面0）。"""
+    from .registered_countries import list_registered_countries
+
+    return jsonify({"countries": list_registered_countries()})
 
 
 # ---------- 配置项 API ----------
@@ -6756,7 +7054,7 @@ def api_task_types():
 
 
 @bp.post("/api/configs/task-types")
-@page13_access_required
+@super_admin_required
 def api_task_types_create():
     """新增任务类型；可选 category 字段（file/matter，默认 file）。"""
     data = request.get_json(force=True) or {}
@@ -6780,7 +7078,7 @@ def api_task_types_create():
 
 
 @bp.patch("/api/configs/task-types/<item_id>")
-@page13_access_required
+@super_admin_required
 def api_task_types_update(item_id: str):
     """更新任务类型分类（用于把已有类型在「文件型/事项型」间切换）。"""
     item = TaskTypeConfig.query.get(item_id)
@@ -6795,7 +7093,7 @@ def api_task_types_update(item_id: str):
 
 
 @bp.delete("/api/configs/task-types/<item_id>")
-@page13_access_required
+@super_admin_required
 def api_task_types_delete(item_id: str):
     """删除任务类型"""
     item = TaskTypeConfig.query.get(item_id)
@@ -6817,7 +7115,7 @@ def api_completion_statuses():
 
 
 @bp.post("/api/configs/completion-statuses")
-@page13_access_required
+@super_admin_required
 def api_completion_statuses_create():
     """新增完成状态"""
     data = request.get_json(force=True) or {}
@@ -6835,7 +7133,7 @@ def api_completion_statuses_create():
 
 
 @bp.delete("/api/configs/completion-statuses/<item_id>")
-@page13_access_required
+@super_admin_required
 def api_completion_statuses_delete(item_id: str):
     """删除完成状态"""
     item = CompletionStatusConfig.query.get(item_id)
@@ -6857,7 +7155,7 @@ def api_audit_statuses():
 
 
 @bp.post("/api/configs/audit-statuses")
-@page13_access_required
+@super_admin_required
 def api_audit_statuses_create():
     """新增审核状态"""
     data = request.get_json(force=True) or {}
@@ -6875,7 +7173,7 @@ def api_audit_statuses_create():
 
 
 @bp.delete("/api/configs/audit-statuses/<item_id>")
-@page13_access_required
+@super_admin_required
 def api_audit_statuses_delete(item_id: str):
     """删除审核状态"""
     item = AuditStatusConfig.query.get(item_id)
@@ -7758,6 +8056,10 @@ def api_uploads_list():
         q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
         proj_meta,
     )
+    from .authz import rbac_enforced, upload_in_scope
+
+    if rbac_enforced():
+        records = [r for r in records if upload_in_scope(r)]
     upload_ids = [str(r.id) for r in records if getattr(r, "id", None)]
     has_gen: set[str] = set()
     if upload_ids:
@@ -8009,7 +8311,13 @@ def api_upload_update(upload_id: str):
 @bp.get("/api/my-tasks")
 @login_required
 def api_my_tasks():
-    """获取当前登录用户的任务列表（页面2使用）"""
+    """页面2：普通账号仅本人任务；项目管理员可见本项目组；访问密码超级管理员可见全部。"""
+    from .authz import (
+        is_page13_super_admin,
+        is_project_admin,
+        upload_record_visible_to_user,
+    )
+
     username = session.get("username")
     display_name = session.get("display_name")
 
@@ -8017,21 +8325,26 @@ def api_my_tasks():
     proj_meta = _project_meta_map(auto_create_from_uploads=True)
     ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
 
-    q = UploadRecord.query.filter(
-        db.or_(
-            UploadRecord.assignee_name == username,
-            UploadRecord.assignee_name == display_name,
-            UploadRecord.author == username,
-            UploadRecord.author == display_name,
+    if is_page13_super_admin() or is_project_admin():
+        q = UploadRecord.query
+    else:
+        q = UploadRecord.query.filter(
+            db.or_(
+                UploadRecord.assignee_name == username,
+                UploadRecord.assignee_name == display_name,
+                UploadRecord.author == username,
+                UploadRecord.author == display_name,
+            )
         )
-    )
     if (not include_history) and ended:
         q = q.filter(~UploadRecord.project_name.in_(list(ended)))
-    records = _sort_upload_records_by_project_priority(
-        q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
-        proj_meta,
-    )
-    
+    rows = q.order_by(
+        UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()
+    ).all()
+    if is_project_admin() and not is_page13_super_admin():
+        rows = [r for r in rows if upload_record_visible_to_user(r)]
+    records = _sort_upload_records_by_project_priority(rows, proj_meta)
+
     return jsonify({
         "records": [
             {
@@ -8518,32 +8831,79 @@ def api_summary():
 
 # ---------- 项目管理 API ----------
 
+def _project_api_item(
+    p: Project,
+    *,
+    prod_hints: dict[str, str] | None = None,
+    team_names: dict[str, str] | None = None,
+) -> dict:
+    tid = (getattr(p, "assigned_team_id", None) or "").strip()
+    teams = team_names or {}
+    return {
+        "id": p.id,
+        "companyProjectId": (getattr(p, "company_project_id", None) or None),
+        "name": p.name,
+        "registeredCountry": getattr(p, "registered_country", None),
+        "registeredCategory": getattr(p, "registered_category", None),
+        "registeredProductName": (prod_hints or {}).get(p.id),
+        "productType": getattr(p, "product_type", None),
+        "assignedTeamId": tid or None,
+        "assignedTeamName": teams.get(tid) if tid else None,
+        "expectedCertificationDate": (
+            p.expected_certification_date.strftime("%Y-%m-%d")
+            if getattr(p, "expected_certification_date", None)
+            else None
+        ),
+        "expectedSubmissionDate": (
+            p.expected_submission_date.strftime("%Y-%m-%d")
+            if getattr(p, "expected_submission_date", None)
+            else None
+        ),
+        "progressDescription": getattr(p, "progress_description", None),
+        "registrationScope": p.registration_scope_effective(),
+        "projectKey": _project_display_label(p),
+        "priority": int(p.priority or Project.PRIORITY_MEDIUM),
+        "priorityLabel": _project_priority_label(p.priority),
+        "status": p.status or Project.STATUS_ACTIVE,
+        "statusLabel": _project_status_label(p.status),
+        "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
 @bp.get("/api/projects")
 @page13_access_required
 def api_projects_list():
     """列出项目（从 upload_records 自动补齐缺失项）。"""
+    from .authz import project_in_scope, rbac_enforced
+    from .models import ProjectTeam
+
     _project_meta_map(auto_create_from_uploads=True)
     _backfill_project_ids()
     rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
-    prod_hints = _project_registered_product_name_hints([p.id for p in rows])
-    return jsonify(
-        [
-            {
-                "id": p.id,
-                "name": p.name,
-                "registeredCountry": getattr(p, "registered_country", None),
-                "registeredCategory": getattr(p, "registered_category", None),
-                "registeredProductName": prod_hints.get(p.id),
-                "projectKey": _project_display_label(p),
-                "priority": int(p.priority or Project.PRIORITY_MEDIUM),
-                "priorityLabel": _project_priority_label(p.priority),
-                "status": p.status or Project.STATUS_ACTIVE,
-                "statusLabel": _project_status_label(p.status),
-                "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
-            }
+    if rbac_enforced():
+        rows = [p for p in rows if project_in_scope(p)]
+    try:
+        from .project_registry_sync import sync_company_to_page1
+
+        cp_ids = {
+            (getattr(p, "company_project_id", None) or "").strip()
             for p in rows
-        ]
-    )
+            if (getattr(p, "company_project_id", None) or "").strip()
+        }
+        if cp_ids:
+            for cid in cp_ids:
+                sync_company_to_page1(cid)
+            db.session.commit()
+            rows = Project.query.order_by(
+                Project.priority.desc(), Project.name.asc()
+            ).all()
+            if rbac_enforced():
+                rows = [p for p in rows if project_in_scope(p)]
+    except Exception:
+        pass
+    prod_hints = _project_registered_product_name_hints([p.id for p in rows])
+    team_names = {t.id: t.name for t in ProjectTeam.query.all()}
+    return jsonify([_project_api_item(p, prod_hints=prod_hints, team_names=team_names) for p in rows])
 
 
 @bp.post("/api/projects")
@@ -8554,7 +8914,13 @@ def api_projects_create_or_update():
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"message": "项目名称不能为空"}), 400
-    registered_country = (data.get("registeredCountry") or "").strip() or None
+    from .registered_countries import validate_registered_country_selection
+
+    registered_country, country_err = validate_registered_country_selection(
+        data.get("registeredCountry")
+    )
+    if country_err:
+        return jsonify({"message": country_err}), 400
     registered_category = (data.get("registeredCategory") or "").strip() or None
     priority = data.get("priority")
     status = (data.get("status") or "").strip().lower() or Project.STATUS_ACTIVE
@@ -8568,6 +8934,34 @@ def api_projects_create_or_update():
     if status not in (Project.STATUS_ACTIVE, Project.STATUS_ENDED):
         status = Project.STATUS_ACTIVE
 
+    from .authz import (
+        current_admin_role,
+        is_company_admin,
+        parse_optional_date,
+        rbac_enforced,
+        user_team_ids,
+    )
+    from .models import (
+        ADMIN_ROLE_PROJECT,
+        CompanyProject,
+        REGISTRATION_SCOPE_LEGACY,
+        REGISTRATION_SCOPE_TEAM_LOCAL,
+    )
+
+    scope = (data.get("registrationScope") or "").strip()
+    if scope not in (
+        REGISTRATION_SCOPE_LEGACY,
+        REGISTRATION_SCOPE_TEAM_LOCAL,
+        "company",
+    ):
+        scope = REGISTRATION_SCOPE_LEGACY
+    if rbac_enforced():
+        if is_company_admin():
+            scope = REGISTRATION_SCOPE_LEGACY
+        elif current_admin_role() == ADMIN_ROLE_PROJECT:
+            inc = bool(data.get("includeInCompanyRegistry"))
+            scope = REGISTRATION_SCOPE_LEGACY if inc else REGISTRATION_SCOPE_TEAM_LOCAL
+
     q = Project.query.filter(Project.name == name)
     q = _filter_nullable_eq(q, Project.registered_country, registered_country)
     q = _filter_nullable_eq(q, Project.registered_category, registered_category)
@@ -8579,28 +8973,64 @@ def api_projects_create_or_update():
             registered_category=registered_category,
             priority=priority,
             status=status,
+            registration_scope=scope,
+            created_by_user_id=session.get("user_id"),
         )
     row.priority = priority
     row.status = status
+    row.registration_scope = scope
+    cp_link = (data.get("companyProjectId") or "").strip()
+    if bool(data.get("includeInCompanyRegistry")):
+        if cp_link:
+            row.company_project_id = cp_link
+        else:
+            cp = CompanyProject(
+                name=name,
+                registered_country=registered_country,
+                registered_category=registered_category,
+                priority=priority,
+                status=status,
+                created_by_user_id=session.get("user_id"),
+            )
+            from .project_registry_sync import apply_payload_to_company, payload_from_api_data
+
+            pl_cp = payload_from_api_data(data)
+            if pl_cp:
+                apply_payload_to_company(cp, pl_cp)
+            db.session.add(cp)
+            db.session.flush()
+            row.company_project_id = cp.id
+    tid = (data.get("assignedTeamId") or "").strip() or None
+    if tid:
+        row.assigned_team_id = tid
+    elif rbac_enforced() and current_admin_role() == ADMIN_ROLE_PROJECT:
+        tids = user_team_ids()
+        if tids:
+            row.assigned_team_id = tids[0]
     db.session.add(row)
+    db.session.flush()
+    _apply_page1_registry_fields_and_sync(row, data)
     db.session.commit()
     return jsonify(
         {
             "message": "已保存",
-            "project": {
-                "id": row.id,
-                "name": row.name,
-                "registeredCountry": getattr(row, "registered_country", None),
-                "registeredCategory": getattr(row, "registered_category", None),
-                "projectKey": _project_display_label(row),
-                "priority": int(row.priority or Project.PRIORITY_MEDIUM),
-                "priorityLabel": _project_priority_label(row.priority),
-                "status": row.status,
-                "statusLabel": _project_status_label(row.status),
-                "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
-            },
+            "project": _project_api_item(row),
         }
     )
+
+
+def _apply_page1_registry_fields_and_sync(row: Project, data: dict) -> None:
+    from .project_registry_sync import (
+        apply_payload_to_page1,
+        payload_from_api_data,
+        sync_page1_to_company,
+    )
+
+    pl = payload_from_api_data(data)
+    if not pl:
+        return
+    apply_payload_to_page1(row, pl)
+    sync_page1_to_company(row, pl)
 
 
 @bp.patch("/api/projects/<project_id>")
@@ -8621,7 +9051,13 @@ def api_projects_patch(project_id: str):
         if n:
             new_name = n
     if "registeredCountry" in data:
-        new_country = (data.get("registeredCountry") or "").strip() or None
+        from .registered_countries import validate_registered_country_selection
+
+        new_country, country_err = validate_registered_country_selection(
+            data.get("registeredCountry")
+        )
+        if country_err:
+            return jsonify({"message": country_err}), 400
     if "registeredCategory" in data:
         new_category = (data.get("registeredCategory") or "").strip() or None
 
@@ -8651,6 +9087,13 @@ def api_projects_patch(project_id: str):
         s = (data.get("status") or "").strip().lower()
         if s in (Project.STATUS_ACTIVE, Project.STATUS_ENDED):
             row.status = s
+
+    from .authz import project_in_scope, rbac_enforced
+
+    if rbac_enforced() and not project_in_scope(row):
+        return jsonify({"message": "无权修改该项目"}), 403
+
+    _apply_page1_registry_fields_and_sync(row, data)
 
     # 真正应用三字段
     row.name = new_name
@@ -8712,7 +9155,13 @@ def api_projects_batch_update():
         row = Project.query.get(pid)
         if not row:
             continue
-        target_country = (it.get("registeredCountry") or "").strip() or None
+        from .registered_countries import validate_registered_country_selection
+
+        target_country, country_err = validate_registered_country_selection(
+            it.get("registeredCountry")
+        )
+        if country_err:
+            return jsonify({"message": country_err}), 400
         target_category = (it.get("registeredCategory") or "").strip() or None
         triple = (row.name, target_country, target_category)
         triples_to_ids.setdefault(triple, []).append(pid)
@@ -8772,9 +9221,18 @@ def api_projects_batch_update():
                 row.status = s
 
         if "registeredCountry" in it:
-            row.registered_country = (it.get("registeredCountry") or "").strip() or None
+            from .registered_countries import validate_registered_country_selection
+
+            rc, country_err = validate_registered_country_selection(
+                it.get("registeredCountry")
+            )
+            if country_err:
+                return jsonify({"message": country_err}), 400
+            row.registered_country = rc
         if "registeredCategory" in it:
             row.registered_category = (it.get("registeredCategory") or "").strip() or None
+
+        _apply_page1_registry_fields_and_sync(row, it)
 
         new_key = _project_display_label(row)
         if old_key != new_key:
@@ -8936,7 +9394,7 @@ def api_reorder_uploads():
 # ---------- 钉钉通知推送 API ----------
 
 @bp.get("/chatbot-test")
-@page13_access_required
+@page4_access_required
 def chatbot_test_page():
     """钉钉机器人本地联调页：输入问题→调用 aicheckword→展示生成结果（不发真实钉钉消息）。"""
     return render_template("chatbot_test.html")
@@ -9365,12 +9823,6 @@ def api_notify_by_project():
     if not project_name:
         return jsonify({"message": "请提供项目名称"}), 400
     
-    webhook = _dingtalk_webhook_str()
-    secret = _dingtalk_secret_opt()
-    
-    if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
-    
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.project_name == project_name,
         UploadRecord.completion_status.is_(None)
@@ -9385,6 +9837,10 @@ def api_notify_by_project():
         collect_notify_person_names_from_uploads,
         resolve_mobiles_for_author_labels,
     )
+    team_id = _resolve_team_id_by_project_name(project_name)
+    webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+    if not webhook:
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写"}), 400
 
     assignees = collect_notify_person_names_from_uploads(pending_uploads)
     task_list_with_links_md = _notify_pending_task_list_md(pending_uploads)
@@ -9437,12 +9893,6 @@ def api_notify_by_author():
     if not author:
         return jsonify({"message": "请提供编写人员"}), 400
     
-    webhook = _dingtalk_webhook_str()
-    secret = _dingtalk_secret_opt()
-    
-    if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
-    
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.author == author,
         UploadRecord.completion_status.is_(None)
@@ -9482,10 +9932,6 @@ def api_notify_by_author():
             lines.append(line)
         return "\n".join(lines)
     
-    task_list = "\n\n".join(
-        _task_block_md(k, grp) for k, grp in groups.items()
-    )
-    
     base_url = _get_base_url()
     page2_path = url_for("pages.generate_page", _external=False)
     page2_url = f"{base_url}{page2_path}" if base_url else url_for("pages.generate_page", _external=True)
@@ -9494,15 +9940,6 @@ def api_notify_by_author():
     if not template:
         template = "【个人任务催办】\n致：{author}\n您有 {pending_count} 个任务待完成：\n{task_list}\n\n请抓紧处理！"
     
-    message = template.format(
-        author=author,
-        pending_count=len(pending_uploads),
-        task_list=task_list,
-        page2_url=page2_url,
-    )
-    message = message.rstrip()
-    if not message.endswith("请抓紧处理！"):
-        message += "\n\n请抓紧处理！"
     from .notify_content import (
         normalize_person_name,
         page2_my_tasks_link_md,
@@ -9510,21 +9947,55 @@ def api_notify_by_author():
     )
 
     author_key = normalize_person_name(author)
-    message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
 
     at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels([author_key])
-    result = dingtalk_service.send_markdown_message(
-        "个人任务催办",
-        message,
-        at_all=False,
-        at_mobiles=at_mobiles,
-        at_names=[author_key],
-        webhook=webhook,
-        secret=secret,
-    )
-    ok = result is not None and result.get("success") is True
-    if ok:
+    from .dingtalk_team import group_uploads_by_team
+
+    grouped = group_uploads_by_team(pending_uploads)
+    if not grouped:
+        return jsonify({"message": f"{author} 没有可发送的任务"})
+    total_success = 0
+    failed_errors: list[str] = []
+    for team_id, uploads in grouped.items():
+        if not uploads:
+            continue
+        webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+        if not webhook:
+            failed_errors.append("未配置钉钉 Webhook")
+            continue
+        team_groups = {}
+        for u in uploads:
+            team_groups.setdefault(_group_key(u), []).append(u)
+        team_task_list = "\n\n".join(_task_block_md(k, grp) for k, grp in team_groups.items())
+        team_message = template.format(
+            author=author,
+            pending_count=len(uploads),
+            task_list=team_task_list,
+            page2_url=page2_url,
+        ).rstrip()
+        if not team_message.endswith("请抓紧处理！"):
+            team_message += "\n\n请抓紧处理！"
+        team_message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
+        result = dingtalk_service.send_markdown_message(
+            "个人任务催办",
+            team_message,
+            at_all=False,
+            at_mobiles=at_mobiles,
+            at_names=[author_key],
+            webhook=webhook,
+            secret=secret,
+        )
+        if result is not None and result.get("success") is True:
+            total_success += 1
+        else:
+            err = result.get("error", "未知错误") if result else "未知错误"
+            if isinstance(err, dict):
+                err = "未知错误"
+            failed_errors.append(str(err))
+    if total_success > 0:
         msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        if failed_errors:
+            msg += f"（部分项目组发送失败：{'; '.join(failed_errors[:2])}）"
         return jsonify({
             "success": True,
             "message": msg,
@@ -9533,10 +10004,7 @@ def api_notify_by_author():
             "unmatchedAuthors": unmatched,
             "authorsWithoutMobile": no_mobile,
         }), 200
-    err = result.get("error", "未知错误") if result else "未知错误"
-    if isinstance(err, dict):
-        err = "未知错误"
-    return jsonify({"success": False, "message": f"通知发送失败: {err}"}), 200
+    return jsonify({"success": False, "message": f"通知发送失败: {'; '.join(failed_errors[:2]) or '未知错误'}"}), 200
 
 
 @bp.post("/api/notify/by-project-author")
@@ -9550,11 +10018,6 @@ def api_notify_by_project_author():
     if not project_name or not author:
         return jsonify({"message": "请提供项目名称与编写人员"}), 400
 
-    webhook = _dingtalk_webhook_str()
-    secret = _dingtalk_secret_opt()
-    if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
-
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.project_name == project_name,
         UploadRecord.author == author,
@@ -9565,8 +10028,11 @@ def api_notify_by_project_author():
         return jsonify({
             "message": f"项目「{project_name}」下 {author} 没有未完成的任务",
         })
+    from .dingtalk_team import group_uploads_by_team
+    team_groups = group_uploads_by_team(pending_uploads)
+    success = 0
+    failed_errors: list[str] = []
 
-    task_list = _notify_pending_task_list_md(pending_uploads)
     page2_url = _page2_url_for_notify()
 
     template = _get_notify_template("project_author_reminder")
@@ -9579,36 +10045,50 @@ def api_notify_by_project_author():
             "请抓紧处理！"
         )
 
-    message = template.format(
-        author=author,
-        project_name=project_name,
-        pending_count=len(pending_uploads),
-        task_list=task_list,
-        page2_url=page2_url,
-    )
-    message = message.rstrip()
     from .notify_content import page2_my_tasks_link_md
-
-    if "页面2" not in message and page2_url:
-        message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
-    if not message.endswith("请抓紧处理！"):
-        message += "\n\n请抓紧处理！"
 
     from .notify_content import resolve_mobiles_for_author_labels
 
     at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels([author])
-    result = dingtalk_service.send_markdown_message(
-        "个人任务催办",
-        message,
-        at_all=False,
-        at_mobiles=at_mobiles,
-        at_names=[author],
-        webhook=webhook,
-        secret=secret,
-    )
-    ok = result is not None and result.get("success") is True
-    if ok:
+    for team_id, uploads in team_groups.items():
+        if not uploads:
+            continue
+        webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+        if not webhook:
+            failed_errors.append("未配置钉钉 Webhook")
+            continue
+        task_list = _notify_pending_task_list_md(uploads)
+        message = template.format(
+            author=author,
+            project_name=project_name,
+            pending_count=len(uploads),
+            task_list=task_list,
+            page2_url=page2_url,
+        ).rstrip()
+        if "页面2" not in message and page2_url:
+            message += f"\n\n{page2_my_tasks_link_md(page2_url)}\n\n### **编写完成后请在页面2中标记完成状态。**"
+        if not message.endswith("请抓紧处理！"):
+            message += "\n\n请抓紧处理！"
+        result = dingtalk_service.send_markdown_message(
+            "个人任务催办",
+            message,
+            at_all=False,
+            at_mobiles=at_mobiles,
+            at_names=[author],
+            webhook=webhook,
+            secret=secret,
+        )
+        if result is not None and result.get("success") is True:
+            success += 1
+        else:
+            err = result.get("error", "未知错误") if result else "未知错误"
+            if isinstance(err, dict):
+                err = "未知错误"
+            failed_errors.append(str(err))
+    if success > 0:
         msg = "通知发送成功" + _notify_at_result_suffix(unmatched, no_mobile, at_mobiles)
+        if failed_errors:
+            msg += f"（部分项目组发送失败：{'; '.join(failed_errors[:2])}）"
         return jsonify({
             "success": True,
             "message": msg,
@@ -9618,10 +10098,7 @@ def api_notify_by_project_author():
             "authorsWithoutMobile": no_mobile,
             "projectName": project_name,
         }), 200
-    err = result.get("error", "未知错误") if result else "未知错误"
-    if isinstance(err, dict):
-        err = "未知错误"
-    return jsonify({"success": False, "message": f"通知发送失败: {err}"}), 200
+    return jsonify({"success": False, "message": f"通知发送失败: {'; '.join(failed_errors[:2]) or '未知错误'}"}), 200
 
 
 @bp.post("/api/notify/single-task")
@@ -9634,18 +10111,18 @@ def api_notify_single_task():
     if not upload_id:
         return jsonify({"message": "请提供任务ID"}), 400
     
-    webhook = _dingtalk_webhook_str()
-    secret = _dingtalk_secret_opt()
-    
-    if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「系统配置」中填写"}), 400
-    
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该任务"}), 404
     
     if upload.completion_status:
         return jsonify({"message": "该任务已完成，无需催办"})
+    from .dingtalk_team import resolve_team_id_by_upload
+
+    team_id = resolve_team_id_by_upload(upload)
+    webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+    if not webhook:
+        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写"}), 400
     
     from .notify_content import notify_doc_link_md_for_template
 
@@ -9745,7 +10222,11 @@ def api_notify_next_schedule():
     next_times = scheduler_service.get_next_run_times(cfg)
     
     webhook = _dingtalk_webhook_str()
-    next_times["dingtalkConfigured"] = bool(webhook)
+    team_webhook_exists = (
+        ProjectTeam.query.filter(ProjectTeam.dingtalk_webhook.isnot(None), ProjectTeam.dingtalk_webhook != "").first()
+        is not None
+    )
+    next_times["dingtalkConfigured"] = bool(webhook) or team_webhook_exists
     
     return jsonify(next_times)
 
@@ -9772,7 +10253,7 @@ def api_get_schedule_config():
 
 
 @bp.put("/api/notify/schedule-config")
-@page13_access_required
+@super_admin_required
 def api_put_schedule_config():
     """保存自动通知时间配置并立即生效"""
     data = request.get_json() or {}
@@ -9806,7 +10287,7 @@ def api_put_schedule_config():
 
 
 @bp.get("/api/system-settings")
-@page13_access_required
+@super_admin_required
 def api_get_system_settings():
     """系统配置：默认带出当前生效值（已通过页面1/3 校验；数据库 URI 脱敏）。"""
     from .app_settings import (
@@ -9832,7 +10313,7 @@ def api_get_system_settings():
 
 
 @bp.put("/api/system-settings")
-@page13_access_required
+@super_admin_required
 def api_put_system_settings():
     """保存系统配置并刷新当前进程 app.config（数据库连接 URI 需重启后生效）。"""
     body = request.get_json(force=True) or {}
@@ -9850,6 +10331,43 @@ def api_put_system_settings():
         current_app.logger.exception("保存系统配置失败")
         return jsonify({"message": f"保存失败：{e}"}), 500
     return jsonify({"success": True, "message": "已保存。若修改了数据库连接 URI，请重启服务后生效。"})
+
+
+@bp.get("/api/system-settings/team-dingtalk")
+@super_admin_required
+def api_get_team_dingtalk_settings():
+    from .authz import is_page13_super_admin, is_project_admin, user_team_ids
+    from .project_teams import serialize_team_item
+
+    q = ProjectTeam.query.order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc())
+    rows = q.all()
+    if not is_page13_super_admin() and is_project_admin():
+        allow = set(user_team_ids())
+        rows = [t for t in rows if t.id in allow]
+    teams = [serialize_team_item(t) for t in rows]
+    return jsonify({"teams": teams})
+
+
+@bp.put("/api/system-settings/team-dingtalk/<team_id>")
+@super_admin_required
+def api_put_team_dingtalk_settings(team_id: str):
+    from .authz import is_page13_super_admin, is_project_admin, user_team_ids
+    from .project_teams import serialize_team_item
+
+    t = ProjectTeam.query.get((team_id or "").strip())
+    if not t:
+        return jsonify({"message": "未找到该项目组"}), 404
+    if not is_page13_super_admin() and is_project_admin():
+        if t.id not in set(user_team_ids()):
+            return jsonify({"message": "仅可配置所属项目组的钉钉 webhook"}), 403
+    data = request.get_json(force=True) or {}
+    if "dingtalkWebhook" in data:
+        t.dingtalk_webhook = (data.get("dingtalkWebhook") or "").strip() or None
+    if "dingtalkSecret" in data:
+        t.dingtalk_secret = (data.get("dingtalkSecret") or "").strip() or None
+    db.session.add(t)
+    db.session.commit()
+    return jsonify({"success": True, "message": "已保存", "team": serialize_team_item(t)})
 
 
 @bp.get("/api/notify/module-cascade-status")
@@ -9897,9 +10415,6 @@ def api_module_cascade_status():
 @page13_access_required
 def api_notify_module_cascade_manual():
     """手动模块级联催办：按项目检查，产品全部完成→催办开发；开发全部完成→催办测试。body 可传 projectName 仅处理该项目。"""
-    webhook = _dingtalk_webhook_str()
-    if not webhook:
-        return jsonify({"success": False, "message": "未配置钉钉 Webhook，请在页面3「系统配置」填写"}), 400
     data = request.get_json(silent=True) or {}
     project_name = (data.get("projectName") or "").strip() or None
     try:
@@ -9916,14 +10431,6 @@ def api_notify_module_cascade_manual():
 @page13_access_required
 def api_notify_test_auto():
     """测试自动催办：按类型执行与定时任务完全相同的逻辑，仅时间提前到点击时。"""
-    webhook = _dingtalk_webhook_str()
-    if not webhook:
-        return jsonify({
-            "success": False,
-            "webhook_configured": False,
-            "message": "未配置钉钉 Webhook，请在页面3「系统配置」填写",
-        }), 400
-
     payload = request.get_json(silent=True) or {}
     test_type = (payload.get("type") or "").strip().lower()
 
@@ -9988,7 +10495,14 @@ def api_notify_test_auto():
         })
 
     from . import dingtalk_service
-    secret = _dingtalk_secret_opt()
+    webhook, secret, _source = _resolve_dingtalk_for_team(None)
+    if not webhook:
+        return jsonify({
+            "success": False,
+            "webhook_configured": False,
+            "message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写",
+            "type": test_type or "default",
+        }), 400
     content = "【自动催办测试】通道正常。定时任务将按配置时间发送每周任务完成提醒、逾期前一日催告、每两天项目完成情况统计。"
     result = dingtalk_service.send_text_message(content, webhook=webhook, secret=secret)
     ok = result.get("success") is True

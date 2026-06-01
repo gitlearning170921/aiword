@@ -148,21 +148,11 @@ def _get_schedule_config_from_db():
     }
 
 
-def _get_webhook_secret():
-    """从数据库 app_configs（经 get_setting）读取钉钉 webhook 与 secret。"""
-    app = _app
-    if not app:
-        try:
-            from flask import current_app
-            app = current_app._get_current_object()
-        except RuntimeError:
-            return "", None
-    from .app_settings import get_setting_for_scheduler
+def _get_webhook_secret(team_id: str | None = None):
+    """按项目组解析 webhook/secret（无组配置时回退全局）。"""
+    from .dingtalk_team import resolve_dingtalk_credentials
 
-    w = get_setting_for_scheduler("DINGTALK_WEBHOOK", default="", app=app)
-    s = get_setting_for_scheduler("DINGTALK_SECRET", default="", app=app)
-    webhook = (str(w).strip() if w else "") or ""
-    secret = (str(s).strip() if s else "") or None
+    webhook, secret, _source = resolve_dingtalk_credentials(team_id, for_scheduler=True)
     return webhook, secret
 
 
@@ -221,7 +211,11 @@ def _project_meta_for_scheduler() -> tuple[dict[str, dict], set[str]]:
             continue
         pr = int(getattr(r, "priority", None) or Project.PRIORITY_MEDIUM)
         st = (getattr(r, "status", None) or Project.STATUS_ACTIVE).strip().lower()
-        meta[label] = {"priority": pr, "status": st}
+        meta[label] = {
+            "priority": pr,
+            "status": st,
+            "team_id": (getattr(r, "assigned_team_id", None) or "").strip() or None,
+        }
         if st == Project.STATUS_ENDED:
             ended.add(label)
     return meta, ended
@@ -493,11 +487,6 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
             from . import dingtalk_service
             from .models import UploadRecord
 
-            webhook, secret = _get_webhook_secret()
-            if not webhook:
-                logger.warning("自动催办(周四提醒)：未配置 DINGTALK_WEBHOOK，跳过发送")
-                return
-
             proj_meta, ended = _project_meta_for_scheduler()
             q_all = UploadRecord.query.filter(UploadRecord.assignee_name.isnot(None))
             if ended:
@@ -526,68 +515,12 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 return (u.project_name or "", u.business_side or "", u.product or "")
 
             by_project = {}
-            all_assignees = set()
             for u in pending_tasks:
                 p = u.project_name or ""
                 if p not in by_project:
                     by_project[p] = []
                 by_project[p].append(u)
-                name = (u.assignee_name or u.author or "").strip()
-                if name:
-                    all_assignees.add(name)
 
-            lines = [
-                "【每周任务完成提醒】",
-                "",
-                f"全部事项共 {total_count} 项：已完成 {completed_count} 项，未完成 {len(pending_tasks)} 项。",
-                "",
-            ]
-
-            if not by_project:
-                lines.append("当前无未完成任务。")
-                if page2_url:
-                    lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
-                lines.append("")
-                lines.append("## **编写完成后请在页面2中标记完成状态。**")
-                lines.append("")
-                lines.append("请抓紧处理！")
-            else:
-                def _proj_sort_key(pn: str):
-                    m = proj_meta.get(pn) or {}
-                    return (-int(m.get("priority") or 2), pn or "")
-
-                for project_name in sorted(by_project.keys(), key=_proj_sort_key):
-                    uploads = by_project[project_name]
-                    groups = {}
-                    for u in uploads:
-                        k = _group_key(u)
-                        groups.setdefault(k, []).append(u)
-                    lines.append(f"项目：{project_name or '（空）'}")
-                    lines.append("")
-                    lines.append(f"未完成任务数：{len(uploads)}")
-                    lines.append("")
-                    assignees = list(set(u.assignee_name or u.author for u in uploads if (u.assignee_name or u.author)))
-                    if assignees:
-                        lines.append(f"请以下人员尽快完成：{'、'.join(assignees)}")
-                        lines.append("")
-                    lines.append("")
-                    task_blocks = []
-                    for key, grp in sorted(groups.items()):
-                        task_blocks.append(_task_block_md(key, grp, project_name=project_name))
-                    lines.append("\n\n".join(task_blocks))
-                    lines.append("")
-                    lines.append("")
-                if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
-                    lines.append("")
-                lines.append("## **编写完成后请在页面2中标记完成状态。**")
-                lines.append("")
-                lines.append("请抓紧处理！")
-
-            content = "\n".join(lines)
-            at_names = sorted(all_assignees) if all_assignees else None
-            at_mobiles = _resolve_mobiles_for_authors(list(all_assignees)) if all_assignees else None
             dedupe_key = None
             if not skip_dedupe:
                 dedupe_key = _cron_send_dedupe_slot_key("thursday_reminder")
@@ -596,15 +529,81 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                     return
             send_ok = False
             try:
-                result = dingtalk_service.send_markdown_message(
-                    "每周任务完成提醒",
-                    content,
-                    at_mobiles=at_mobiles,
-                    at_names=at_names,
-                    webhook=webhook,
-                    secret=secret,
-                )
-                send_ok = bool(result and result.get("success"))
+                team_to_projects: dict[str | None, list[str]] = {}
+                for pn in by_project.keys():
+                    team_id = (proj_meta.get(pn) or {}).get("team_id")
+                    team_to_projects.setdefault(team_id, []).append(pn)
+                if not team_to_projects:
+                    team_to_projects = {None: []}
+                for team_id, team_projects in team_to_projects.items():
+                    webhook, secret = _get_webhook_secret(team_id)
+                    if not webhook:
+                        logger.warning("自动催办(周四提醒)：team_id=%s 未配置 webhook，已跳过", team_id)
+                        continue
+                    team_pending = []
+                    for pn in team_projects:
+                        team_pending.extend(by_project.get(pn) or [])
+                    if not team_projects:
+                        team_pending = []
+                    team_total = total_count if not team_projects else len(team_pending) + completed_count
+                    lines = [
+                        "【每周任务完成提醒】",
+                        "",
+                        f"全部事项共 {team_total} 项：已完成 {completed_count} 项，未完成 {len(team_pending)} 项。",
+                        "",
+                    ]
+                    if not team_pending:
+                        lines.append("当前无未完成任务。")
+                    else:
+                        def _proj_sort_key(pn: str):
+                            m = proj_meta.get(pn) or {}
+                            return (-int(m.get("priority") or 2), pn or "")
+
+                        for project_name in sorted(team_projects, key=_proj_sort_key):
+                            uploads = by_project.get(project_name) or []
+                            groups = {}
+                            for u in uploads:
+                                k = _group_key(u)
+                                groups.setdefault(k, []).append(u)
+                            lines.append(f"项目：{project_name or '（空）'}")
+                            lines.append("")
+                            lines.append(f"未完成任务数：{len(uploads)}")
+                            lines.append("")
+                            assignees = list(set(u.assignee_name or u.author for u in uploads if (u.assignee_name or u.author)))
+                            if assignees:
+                                lines.append(f"请以下人员尽快完成：{'、'.join(assignees)}")
+                                lines.append("")
+                            lines.append("")
+                            task_blocks = []
+                            for key, grp in sorted(groups.items()):
+                                task_blocks.append(_task_block_md(key, grp, project_name=project_name))
+                            lines.append("\n\n".join(task_blocks))
+                            lines.append("")
+                            lines.append("")
+                    if page2_url:
+                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                        lines.append("")
+                    lines.append("## **编写完成后请在页面2中标记完成状态。**")
+                    lines.append("")
+                    lines.append("请抓紧处理！")
+                    team_assignees = sorted(
+                        {
+                            (u.assignee_name or u.author or "").strip()
+                            for u in team_pending
+                            if (u.assignee_name or u.author or "").strip()
+                        }
+                    )
+                    at_names = team_assignees if team_assignees else None
+                    at_mobiles = _resolve_mobiles_for_authors(team_assignees) if team_assignees else None
+                    result = dingtalk_service.send_markdown_message(
+                        "每周任务完成提醒",
+                        "\n".join(lines),
+                        at_mobiles=at_mobiles,
+                        at_names=at_names,
+                        webhook=webhook,
+                        secret=secret,
+                    )
+                    send_ok = bool(result and result.get("success")) or send_ok
             finally:
                 if dedupe_key and not send_ok:
                     _release_cron_send_dedupe_claim(dedupe_key)
@@ -639,11 +638,6 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
             from . import dingtalk_service
             from .models import UploadRecord, now_local
 
-            webhook, secret = _get_webhook_secret()
-            if not webhook:
-                logger.warning("自动催办(逾期前一日)：未配置 DINGTALK_WEBHOOK，跳过发送")
-                return {"no_tasks": False, "sent": 0, "failed": 0, "last_error": "未配置 DINGTALK_WEBHOOK"}
-
             tomorrow = (now_local().date() + timedelta(days=1))
             proj_meta, ended = _project_meta_for_scheduler()
             q = UploadRecord.query.filter(
@@ -675,21 +669,28 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
             page2_path = _get_page2_path(app)
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
-            by_assignee = {}
+            by_team_assignee: dict[tuple[str | None, str], list] = {}
+            from .dingtalk_team import resolve_team_id_by_upload
+
             for t in tasks:
                 name = (t.assignee_name or t.author or "").strip()
                 if not name:
                     continue
-                if name not in by_assignee:
-                    by_assignee[name] = []
-                by_assignee[name].append(t)
+                team_id = resolve_team_id_by_upload(t)
+                key = (team_id, name)
+                by_team_assignee.setdefault(key, []).append(t)
 
             sent = 0
             failed = 0
             last_error = None
             try:
-                for assignee_name, person_tasks in by_assignee.items():
+                for (team_id, assignee_name), person_tasks in by_team_assignee.items():
                     if not person_tasks:
+                        continue
+                    webhook, secret = _get_webhook_secret(team_id)
+                    if not webhook:
+                        failed += 1
+                        last_error = "未配置钉钉 Webhook"
                         continue
                     groups = {}
                     for u in person_tasks:
@@ -767,11 +768,6 @@ def _run_project_stats(skip_dedupe: bool = False):
             from . import dingtalk_service
             from .models import UploadRecord, now_local
 
-            webhook, secret = _get_webhook_secret()
-            if not webhook:
-                logger.warning("自动催办(项目统计)：未配置 DINGTALK_WEBHOOK，跳过发送")
-                return
-
             from .app_settings import get_setting_for_scheduler
             base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
             page2_path = _get_page2_path(app)
@@ -785,64 +781,12 @@ def _run_project_stats(skip_dedupe: bool = False):
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
 
             by_project = {}
-            all_assignees = set()
             for u in pending_tasks:
                 p = u.project_name or ""
                 if p not in by_project:
                     by_project[p] = []
                 by_project[p].append(u)
-                name = (u.assignee_name or u.author or "").strip()
-                if name:
-                    all_assignees.add(name)
 
-            if not by_project:
-                lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
-                if page2_url:
-                    lines.append("")
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
-                lines.append("")
-                lines.append("## **编写完成后请在页面2中标记完成状态。**")
-                at_names = None
-                at_mobiles = None
-            else:
-                lines = [
-                    "【每两天项目完成情况统计】",
-                    "",
-                    f"整体未完成任务数：{len(pending_tasks)} 项，涉及 {len(by_project)} 个项目。",
-                    "",
-                ]
-                def _proj_sort_key(pn: str):
-                    m = proj_meta.get(pn) or {}
-                    return (-int(m.get("priority") or 2), pn or "")
-
-                for project_name in sorted(by_project.keys(), key=_proj_sort_key):
-                    uploads = by_project[project_name]
-                    by_person = {}
-                    for u in uploads:
-                        name = (u.assignee_name or u.author or "").strip() or "（未指定）"
-                        by_person[name] = by_person.get(name, 0) + 1
-                    person_stats = "、".join(f"{name} {cnt} 项" for name, cnt in sorted(by_person.items()))
-                    pn = project_name or "（空）"
-                    lines.append(f"项目：**{pn}**")
-                    lines.append("")
-                    lines.append(f"未完成任务（按人统计）：{person_stats}")
-                    # 只要项目下存在已过期任务就提示；多个过期日期以最后一个（最晚的过期日）为准计算延期天数
-                    today = now_local().date()
-                    overdue_dates = [u.due_date for u in uploads if u.due_date and u.due_date < today]
-                    if overdue_dates:
-                        last_overdue = max(overdue_dates)
-                        delay_days = (today - last_overdue).days
-                        lines.append("")
-                        lines.append(f"该项目已**<font color=\"red\">延期{delay_days}天</font>**，请抓紧处理")
-                    lines.append("")
-                    lines.append("")
-                if page2_url:
-                    lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
-                    lines.append("")
-                lines.append("## **编写完成后请在页面2中标记完成状态。**")
-                at_names = sorted(all_assignees) if all_assignees else None
-                at_mobiles = _resolve_mobiles_for_authors(list(all_assignees)) if all_assignees else None
-            content = "\n".join(lines)
             dedupe_key = None
             if not skip_dedupe:
                 dedupe_key = _cron_send_dedupe_slot_key("project_stats")
@@ -851,15 +795,76 @@ def _run_project_stats(skip_dedupe: bool = False):
                     return
             send_ok = False
             try:
-                result = dingtalk_service.send_markdown_message(
-                    "每两天项目完成情况统计",
-                    content,
-                    at_mobiles=at_mobiles,
-                    at_names=at_names,
-                    webhook=webhook,
-                    secret=secret,
-                )
-                send_ok = bool(result and result.get("success"))
+                team_to_projects: dict[str | None, list[str]] = {}
+                for pn in by_project.keys():
+                    team_id = (proj_meta.get(pn) or {}).get("team_id")
+                    team_to_projects.setdefault(team_id, []).append(pn)
+                if not team_to_projects:
+                    team_to_projects = {None: []}
+                for team_id, team_projects in team_to_projects.items():
+                    webhook, secret = _get_webhook_secret(team_id)
+                    if not webhook:
+                        logger.warning("自动催办(项目统计)：team_id=%s 未配置 webhook，已跳过", team_id)
+                        continue
+                    team_pending = []
+                    for pn in team_projects:
+                        team_pending.extend(by_project.get(pn) or [])
+                    if not team_pending:
+                        lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
+                        at_names = None
+                        at_mobiles = None
+                    else:
+                        lines = [
+                            "【每两天项目完成情况统计】",
+                            "",
+                            f"整体未完成任务数：{len(team_pending)} 项，涉及 {len(team_projects)} 个项目。",
+                            "",
+                        ]
+                        def _proj_sort_key(pn: str):
+                            m = proj_meta.get(pn) or {}
+                            return (-int(m.get("priority") or 2), pn or "")
+
+                        for project_name in sorted(team_projects, key=_proj_sort_key):
+                            uploads = by_project.get(project_name) or []
+                            by_person = {}
+                            for u in uploads:
+                                name = (u.assignee_name or u.author or "").strip() or "（未指定）"
+                                by_person[name] = by_person.get(name, 0) + 1
+                            person_stats = "、".join(f"{name} {cnt} 项" for name, cnt in sorted(by_person.items()))
+                            pn = project_name or "（空）"
+                            lines.append(f"项目：**{pn}**")
+                            lines.append("")
+                            lines.append(f"未完成任务（按人统计）：{person_stats}")
+                            today = now_local().date()
+                            overdue_dates = [u.due_date for u in uploads if u.due_date and u.due_date < today]
+                            if overdue_dates:
+                                last_overdue = max(overdue_dates)
+                                delay_days = (today - last_overdue).days
+                                lines.append("")
+                                lines.append(f"该项目已**<font color=\"red\">延期{delay_days}天</font>**，请抓紧处理")
+                            lines.append("")
+                            lines.append("")
+                        at_names = sorted(
+                            {
+                                (u.assignee_name or u.author or "").strip()
+                                for u in team_pending
+                                if (u.assignee_name or u.author or "").strip()
+                            }
+                        ) or None
+                        at_mobiles = _resolve_mobiles_for_authors(list(at_names)) if at_names else None
+                    if page2_url:
+                        lines.append(f"页面2（我的任务）：[点击打开]({page2_url})（账号为中文姓名，密码默认为姓名拼音首字母123456。如毛应森，mys123456）")
+                        lines.append("")
+                    lines.append("## **编写完成后请在页面2中标记完成状态。**")
+                    result = dingtalk_service.send_markdown_message(
+                        "每两天项目完成情况统计",
+                        "\n".join(lines),
+                        at_mobiles=at_mobiles,
+                        at_names=at_names,
+                        webhook=webhook,
+                        secret=secret,
+                    )
+                    send_ok = bool(result and result.get("success")) or send_ok
             finally:
                 if dedupe_key and not send_ok:
                     _release_cron_send_dedupe_claim(dedupe_key)
@@ -884,7 +889,9 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
     app = _app
     if not app:
         return
-    webhook, secret = _get_webhook_secret()
+    from .dingtalk_team import resolve_team_id_by_project_name
+
+    webhook, secret = _get_webhook_secret(resolve_team_id_by_project_name(project_name))
     if not webhook:
         return
     from .app_settings import get_setting_for_scheduler
@@ -984,10 +991,6 @@ def _run_module_cascade_manual(project_name: str | None = None):
         from . import db
         from .models import UploadRecord
 
-        webhook, secret = _get_webhook_secret()
-        if not webhook:
-            logger.warning("手动模块级联催办：未配置 DINGTALK_WEBHOOK，跳过")
-            return
         if project_name and (project_name or "").strip():
             project_names = [(project_name or "").strip()]
         else:
@@ -1038,9 +1041,6 @@ def _run_process_module_cascade_pending():
         with app.app_context():
             from .models import UploadRecord, ModuleCascadeReminder, AppConfig, now_local
 
-            webhook, secret = _get_webhook_secret()
-            if not webhook:
-                return
             _meta, _ended = _project_meta_for_scheduler()
             now = now_local()
             pending = ModuleCascadeReminder.query.filter(

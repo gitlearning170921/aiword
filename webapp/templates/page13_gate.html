@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}访问验证 - 页面1/页面3{% endblock %}
+{% block title %}{{ gate_title|default('访问验证') }}{% endblock %}
 {% block head_extra %}
 {# HTTP 非 localhost 时 crypto.subtle 不可用，用 CryptoJS 计算 SHA-256 与 Python 一致 #}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
@@ -11,7 +11,7 @@
             <div class="card-body p-5">
                 <div class="text-center mb-4">
                     <h3 class="fw-bold text-primary">AI Word 工具</h3>
-                    <p class="text-muted">请输入访问密码以进入页面1或页面3</p>
+                    <p class="text-muted">{{ gate_description|default('请输入访问密码以进入受保护页面') }}</p>
                 </div>
                 <form id="page13AuthForm">
                     <div class="mb-4">
@@ -154,7 +154,7 @@
                 return;
             }
             if (authRes.ok && data.success) {
-                window.location.href = nextUrl || "/upload";
+                window.location.href = nextUrl || "/admin";
                 return;
             }
             alert(data.message || "验证失败");

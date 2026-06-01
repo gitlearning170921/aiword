@@ -507,6 +507,15 @@ tr[draggable="true"].dragging {
     font-size: 0.72rem;
 }
 
+/* 页面0 · 公司项目总览：特别关注行 */
+tr.cp-row-starred > td {
+    background-color: rgba(255, 193, 7, 0.08);
+}
+.cp-star-btn {
+    line-height: 1;
+    text-decoration: none !important;
+}
+
 /* ===== 列显隐 ===== */
 .col-toggle-wrap {
     position: relative;
@@ -763,5 +772,66 @@ tr[draggable="true"].dragging {
 #myTasksTable thead th[data-col="completionStatus"] {
     color: var(--bs-danger);
     font-weight: 700;
+}
+
+/* 标签式多选：下拉添加 + 标签 × 移除（非 select multiple） */
+.tag-multi-picker-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    min-height: 1.75rem;
+    margin-bottom: 0.4rem;
+}
+.tag-multi-picker-empty {
+    color: var(--bs-secondary-color);
+    font-size: 0.8rem;
+}
+.tag-multi-picker-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.15rem 0.45rem 0.15rem 0.55rem;
+    font-size: 0.8rem;
+    background: rgba(13, 110, 253, 0.12);
+    border: 1px solid rgba(13, 110, 253, 0.35);
+    border-radius: 999px;
+}
+.tag-multi-picker-tag-remove {
+    border: none;
+    background: transparent;
+    color: var(--bs-danger);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 0.15rem;
+    cursor: pointer;
+}
+.tag-multi-picker-tag-remove:hover {
+    opacity: 0.85;
+}
+.tag-multi-picker-add-row {
+    display: flex;
+    gap: 0.35rem;
+    align-items: stretch;
+}
+.tag-multi-picker-add-row .form-select {
+    flex: 1;
+    min-width: 0;
+}
+
+.dict-panels-section .dict-panels-toggle {
+    border-style: dashed;
+}
+.dict-panels-row .dict-panel-card {
+    min-height: 100%;
+}
+.dict-item-list .dict-item-row {
+    gap: 0.5rem;
+}
+.dict-item-list .dict-usage-badge {
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+.dict-item-list .dict-item-actions {
+    flex-shrink: 0;
 }
 

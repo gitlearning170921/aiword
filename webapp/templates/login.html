@@ -7,7 +7,13 @@
             <div class="card-body p-5">
                 <div class="text-center mb-4">
                     <h3 class="fw-bold text-primary">AI Word 工具</h3>
-                    <p class="text-muted">请登录以查看和处理您的任务</p>
+                    {% if for_company_registry %}
+                    <p class="text-muted mb-1">页面0 · 公司总览登录</p>
+                    <p class="small text-muted">仅可使用账号管理中设为<strong>公司管理员</strong>的账号；登录后进入页面0。</p>
+                    {% else %}
+                    <p class="text-muted">请使用账号管理中已录入的账号登录</p>
+                    <p class="small text-muted mb-0">登录后将按<strong>分级角色</strong>自动进入对应页面：公司管理员→页面0；项目管理员→页面1；普通账号→页面2。项目管理员须已分配<strong>所属项目组</strong>。</p>
+                    {% endif %}
                 </div>
                 <form id="loginForm">
                     <div class="mb-3">
@@ -27,4 +33,7 @@
         </div>
     </div>
 </div>
+{% endblock %}
+{% block body_extra %}
+<script>window.__LOGIN_FOR_COMPANY__ = {{ for_company_registry|default(false)|tojson }};</script>
 {% endblock %}

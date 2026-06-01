@@ -10,7 +10,7 @@ try:
 except Exception:  # pragma: no cover
     CN_TZ = timezone(timedelta(hours=8))
 
-from sqlalchemy import LargeBinary, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.mysql import MEDIUMBLOB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -47,6 +47,10 @@ class User(db.Model):
     mobile: Mapped[Optional[str]] = mapped_column(db.String(32))
     #: 页面2 管理员：不受系统配置功能开关限制，始终显示全部操作入口与说明文案。
     is_admin: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False)
+    #: 分级管理：none / project / company（默认 none）
+    admin_role: Mapped[str] = mapped_column(db.String(16), nullable=False, default="none")
+    #: 可访问页面0（公司总览）；公司管理员默认可访问，亦可单独勾选
+    can_access_company_registry: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime, default=now_local, onupdate=now_local
@@ -128,8 +132,104 @@ class AppConfig(db.Model):
     )
 
 
+REGISTRATION_SCOPE_LEGACY = "legacy"
+REGISTRATION_SCOPE_COMPANY = "company"
+REGISTRATION_SCOPE_TEAM_LOCAL = "team_local"
+REGISTRATION_SCOPES = (
+    REGISTRATION_SCOPE_LEGACY,
+    REGISTRATION_SCOPE_COMPANY,
+    REGISTRATION_SCOPE_TEAM_LOCAL,
+)
+
+ADMIN_ROLE_NONE = "none"
+ADMIN_ROLE_PROJECT = "project"
+ADMIN_ROLE_COMPANY = "company"
+ADMIN_ROLES = (ADMIN_ROLE_NONE, ADMIN_ROLE_PROJECT, ADMIN_ROLE_COMPANY)
+
+
+class ProjectTeam(db.Model):
+    """项目组字典（公司管理员维护）。"""
+    __tablename__ = "project_teams"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(db.String(128), unique=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(default=0)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    dingtalk_webhook: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    dingtalk_secret: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class UserTeamMembership(db.Model):
+    """用户与项目组多对多。"""
+    __tablename__ = "user_team_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "team_id", name="uq_user_team"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), ForeignKey("users.id"), nullable=False)
+    team_id: Mapped[str] = mapped_column(db.String(36), ForeignKey("project_teams.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class RegisteredCountry(db.Model):
+    """注册国家字典：页面0/1/账号国家维度等统一引用；历史数据启动时自动汇入。"""
+    __tablename__ = "registered_country_dict"
+    __table_args__ = (UniqueConstraint("name", name="uq_registered_country_dict_name"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    sort_order: Mapped[int] = mapped_column(db.Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class UserCountryScope(db.Model):
+    """用户按注册国家划分的项目管理维度（页面1 项目 / 页面0 公司总览）。"""
+    __tablename__ = "user_country_scopes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "registered_country", name="uq_user_country"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), ForeignKey("users.id"), nullable=False)
+    registered_country: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class CompanyProject(db.Model):
+    """页面0 · 公司总览项目（与页面1  operational 项目分开存储，一对多关联）。"""
+    __tablename__ = "company_projects"
+
+    PRIORITY_LOW = 1
+    PRIORITY_MEDIUM = 2
+    PRIORITY_HIGH = 3
+    STATUS_ACTIVE = "active"
+    STATUS_ENDED = "ended"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    product_type: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    registered_country: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    registered_category: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    assigned_team_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    expected_certification_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    expected_submission_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    progress_description: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    priority: Mapped[int] = mapped_column(db.Integer, default=PRIORITY_MEDIUM)
+    status: Mapped[str] = mapped_column(db.String(16), default=STATUS_ACTIVE)
+    is_starred: Mapped[bool] = mapped_column(default=False)
+    registration_owner: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    progress_updated_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class Project(db.Model):
-    """项目元数据：优先级与状态（进行中/已结束）。"""
+    """页面1 项目元数据：优先级与状态（进行中/已结束）；可关联到公司总览项目。"""
     __tablename__ = "projects"
 
     PRIORITY_LOW = 1
@@ -140,13 +240,29 @@ class Project(db.Model):
     STATUS_ENDED = "ended"    # 已结束
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    company_project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     # 注册国家/注册类别用于区分“同名不同项目”的唯一性
     registered_country: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     registered_category: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    product_type: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    assigned_team_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    expected_certification_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    expected_submission_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    progress_description: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    registration_scope: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default=REGISTRATION_SCOPE_LEGACY
+    )
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    progress_updated_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
     priority: Mapped[int] = mapped_column(db.Integer, default=PRIORITY_MEDIUM)
     status: Mapped[str] = mapped_column(db.String(16), default=STATUS_ACTIVE)
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+
+    def registration_scope_effective(self) -> str:
+        s = (getattr(self, "registration_scope", None) or "").strip()
+        return s if s in REGISTRATION_SCOPES else REGISTRATION_SCOPE_LEGACY
 
 
 class ModuleCascadeReminder(db.Model):

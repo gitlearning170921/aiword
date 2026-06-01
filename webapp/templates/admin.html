@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+{% block title %}页面4 · 系统管理{% endblock %}
+{% block content %}
+<div id="adminPageRoot">
+    <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+        <div>
+            <h1>页面4 · 系统管理</h1>
+            <p class="mb-0 small text-muted">超级管理员入口：注册国家/项目组字典、账号与配置、系统参数与钉钉联调。须已通过访问密码验证。</p>
+        </div>
+        <div class="text-end">
+            <span class="badge bg-warning text-dark">超级管理员</span>
+            <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="adminLogoutPage13Btn">退出超级管理员</button>
+        </div>
+    </div>
+
+    <ul class="nav nav-tabs mb-3" id="adminTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="tab-dict-btn" data-bs-toggle="tab" data-bs-target="#tab-dict" type="button" role="tab">字典</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-users-btn" data-bs-toggle="tab" data-bs-target="#tab-users" type="button" role="tab">账号管理</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-config-btn" data-bs-toggle="tab" data-bs-target="#tab-config" type="button" role="tab">配置管理</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-system-btn" data-bs-toggle="tab" data-bs-target="#tab-system" type="button" role="tab">系统与钉钉</button>
+        </li>
+    </ul>
+
+    <div class="tab-content" id="adminTabContent">
+        <div class="tab-pane fade show active" id="tab-dict" role="tabpanel">
+            <div class="row g-3">
+                <div class="col-lg-6">
+                    <div class="card h-100 dict-panel-card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>注册国家字典</span>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshCountryDict">刷新</button>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">在此维护；页面0/1 等从此字典下拉选择。已绑定项目/账号的条目不可删除。</p>
+                            <div class="input-group input-group-sm mb-3">
+                                <input type="text" class="form-control" id="newCountryDictName" placeholder="新注册国家名称">
+                                <button type="button" class="btn btn-primary" id="btnAddCountryDict">添加</button>
+                            </div>
+                            <ul class="list-group list-group-flush small dict-item-list" id="countryDictList">
+                                <li class="list-group-item text-muted">加载中…</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-6">
+                    <div class="card h-100 dict-panel-card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>项目组字典</span>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshTeamDict">刷新</button>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">在此维护；项目分配与账号所属项目组从此选择。已绑定数据不可删除。</p>
+                            <div class="input-group input-group-sm mb-3">
+                                <input type="text" class="form-control" id="newTeamName" placeholder="新项目组名称">
+                                <button type="button" class="btn btn-primary" id="btnAddTeam">添加</button>
+                            </div>
+                            <ul class="list-group list-group-flush small dict-item-list" id="teamsDictList">
+                                <li class="list-group-item text-muted">加载中…</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-users" role="tabpanel">
+            <div class="card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <h5 class="card-title mb-0">账号管理（页面2 登录）</h5>
+                        <button type="button" class="btn btn-success btn-sm" id="btnOpenCreateUserModal">创建账号</button>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-5">
+                            <input type="text" class="form-control form-control-sm" id="filterUserKeyword" placeholder="筛选：用户名 / 显示名称">
+                        </div>
+                        <div class="col-md-4">
+                            <input type="text" class="form-control form-control-sm" id="filterUserMobile" placeholder="筛选：手机号">
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="filterUserAdmin">
+                                <option value="">全部账号</option>
+                                <option value="yes">仅管理员</option>
+                                <option value="no">仅普通账号</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p class="small text-muted mb-2" id="usersListCountHint">共 0 个账号</p>
+                    <div class="table-responsive users-list-panel">
+                        <table class="table table-sm table-bordered table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>用户名</th>
+                                    <th>显示名称</th>
+                                    <th>手机号</th>
+                                    <th>管理员</th>
+                                    <th>分级角色</th>
+                                    <th>页面0</th>
+                                    <th>国家维度</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="usersTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-config" role="tabpanel">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">配置管理</h5>
+                    <div class="mb-3">
+                        <label class="form-label small fw-bold">任务类型</label>
+                        <div class="input-group input-group-sm mb-2">
+                            <select class="form-select" id="newTaskCategory" style="max-width:96px" title="任务类别">
+                                <option value="file" selected>文件型</option>
+                                <option value="matter">事项型</option>
+                            </select>
+                            <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
+                            <button class="btn btn-outline-success" type="button" id="addTaskTypeBtn">+</button>
+                        </div>
+                        <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
+                    </div>
+                    <hr>
+                    <div>
+                        <label class="form-label small fw-bold">完成状态（页面2）</label>
+                        <div class="input-group input-group-sm mb-2">
+                            <input type="text" class="form-control" id="newCompletionStatus" placeholder="新增完成状态">
+                            <button class="btn btn-outline-success" type="button" id="addCompletionStatusBtn">+</button>
+                        </div>
+                        <div id="completionStatusesList" class="d-flex flex-wrap gap-1"></div>
+                    </div>
+                    <hr>
+                    <div>
+                        <label class="form-label small fw-bold">审核状态（页面1）</label>
+                        <div class="input-group input-group-sm mb-2">
+                            <input type="text" class="form-control" id="newAuditStatus" placeholder="新增审核状态">
+                            <button class="btn btn-outline-success" type="button" id="addAuditStatusBtn">+</button>
+                        </div>
+                        <div id="auditStatusesList" class="d-flex flex-wrap gap-1"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-system" role="tabpanel">
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h6 class="small fw-bold mb-2">自动通知时间配置</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">每周任务完成提醒</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-0">逾期前一日催告</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">每两天项目统计</label>
+                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30">
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-sm btn-primary w-100" id="saveScheduleConfigBtn">保存</button>
+                        </div>
+                        <div class="col-md-2 mt-2">
+                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
+                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5">
+                        </div>
+                    </div>
+                    <p class="small text-muted mb-2 mt-2">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30。</p>
+                    <div id="scheduleInfo" class="d-flex flex-wrap gap-3 small"></div>
+                </div>
+            </div>
+            <div class="card mb-3">
+                <div class="card-body py-2">
+                    <h6 class="small fw-bold mb-2">项目组钉钉配置</h6>
+                    <p class="small text-muted mb-2">按项目组设置专属 Webhook/Secret；未配置时回退全局钉钉参数。</p>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">项目组</label>
+                            <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small mb-0">Webhook</label>
+                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="https://oapi.dingtalk.com/robot/send?...">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-0">Secret（留空不改）</label>
+                            <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="保持不变请留空">
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-sm btn-outline-primary w-100" id="saveTeamDingtalkBtn">保存</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-body">
+                    <h6 class="small fw-bold mb-2">系统配置</h6>
+                    <p class="small text-muted mb-2">功能开关、数据库、Session、访问密码、全局钉钉等。敏感项留空表示不修改。修改数据库连接后需重启服务。</p>
+                    <div class="d-flex flex-wrap gap-2 mb-2">
+                        <button type="button" class="btn btn-sm btn-primary" id="openSystemSettingsBtn">打开系统配置</button>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="dictEditModal" tabindex="-1">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header py-2">
+                <h6 class="modal-title" id="dictEditModalTitle">编辑字典项</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="dictEditKind">
+                <input type="hidden" id="dictEditId">
+                <label class="form-label small mb-1" id="dictEditNameLabel">名称</label>
+                <input type="text" class="form-control form-control-sm" id="dictEditName" required>
+            </div>
+            <div class="modal-footer py-2">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" id="btnSaveDictEdit">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="createUserModal" tabindex="-1" data-bs-backdrop="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">创建账号</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="createUserForm">
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">用户名 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control form-control-sm" id="newUsername" required autocomplete="off">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">密码 <span class="text-danger">*</span></label>
+                        <input type="password" class="form-control form-control-sm" id="newPassword" required autocomplete="new-password">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">显示名称</label>
+                        <input type="text" class="form-control form-control-sm" id="newDisplayName" autocomplete="off">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">手机号</label>
+                        <input type="text" class="form-control form-control-sm" id="newMobile" autocomplete="off">
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="newUserIsAdmin" value="1">
+                        <label class="form-check-label small" for="newUserIsAdmin">管理员（页面2 不受功能开关限制）</label>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small mb-0">分级角色</label>
+                        <select class="form-select form-select-sm" id="newUserAdminRole">
+                            <option value="none" selected>无</option>
+                            <option value="project">项目管理员</option>
+                            <option value="company">公司管理员</option>
+                        </select>
+                    </div>
+                    <div class="mb-0">
+                        <label class="form-label small mb-0">页面0 · 注册国家维度（公司管理员）</label>
+                        <div id="newUserCountriesPicker" class="tag-multi-picker"></div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success btn-sm" id="createUserSubmitBtn">创建</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editUserMobileModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑账号</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editUserMobileId">
+                <div class="mb-2">
+                    <label class="form-label small">用户名（不可改）</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserMobileUsername" readonly>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">显示名称</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserDisplayName">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">手机号（钉钉@）</label>
+                    <input type="text" class="form-control form-control-sm" id="editUserMobileValue">
+                </div>
+                <div class="mb-2" id="editUserAdminRoleWrap">
+                    <label class="form-label small">分级角色</label>
+                    <select class="form-select form-select-sm" id="editUserAdminRole">
+                        <option value="none">无</option>
+                        <option value="project">项目管理员</option>
+                        <option value="company">公司管理员</option>
+                    </select>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">页面0 · 注册国家维度</label>
+                    <div id="editUserCountriesPicker" class="tag-multi-picker"></div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small">所属项目组（项目管理员）</label>
+                    <div id="editUserTeamsPicker" class="tag-multi-picker"></div>
+                </div>
+                <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="systemSettingsModal" class="system-modal" aria-hidden="true">
+    <div class="system-modal-backdrop" data-close="1"></div>
+    <div class="system-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="systemSettingsModalTitle">
+        <div class="system-modal-header">
+            <div class="system-modal-title" id="systemSettingsModalTitle">系统配置</div>
+            <button type="button" class="system-modal-close" id="closeSystemSettingsBtn" aria-label="关闭">×</button>
+        </div>
+        <div class="system-modal-body">
+            <div id="systemSettingsForm" class="sys-cfg-form"></div>
+        </div>
+        <div class="system-modal-footer">
+            <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/company_registry.js', v=static_version) }}"></script>
+<script>
+document.getElementById("adminLogoutPage13Btn")?.addEventListener("click", async function () {
+    try {
+        await App.request("/api/logout", { method: "POST" });
+    } catch (_) { /* ignore */ }
+    window.location.href = (window.__SCRIPT_ROOT__ || "") + "/login";
+});
+</script>
+{% endblock %}

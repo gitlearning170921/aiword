@@ -155,6 +155,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "考试训练中心入口开关（页面1/2/3 顶部「进入考试训练中心」按钮；1=显示；空或0=隐藏。默认隐藏）",
         False,
     ),
+    (
+        "FEATURE_COMPANY_REGISTRY",
+        "公司项目总览模块（页面0 与 /api/company/*；1=开启；空或0=关闭。访问密码调试模式不受此项限制）",
+        False,
+    ),
 ]
 
 
@@ -165,6 +170,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE2_AUDIT_MODIFY",
     "FEATURE_PAGE2_TRANSLATE",
     "FEATURE_EXAM_CENTER",
+    "FEATURE_COMPANY_REGISTRY",
 )
 
 # 页面3「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
@@ -317,7 +323,7 @@ def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]
 
 
 def is_feature_admin_viewer() -> bool:
-    """页面2 功能开关管理员视角：页面1/3 已验证，或当前登录用户标记为管理员。"""
+    """页面2 功能开关管理员视角：页面1/3 已验证，或管理员/分级管理员账号。"""
     try:
         from flask import has_request_context, session
     except Exception:
@@ -330,10 +336,15 @@ def is_feature_admin_viewer() -> bool:
     if not uid:
         return False
     try:
-        from .models import User
+        from .models import User, ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT
 
         u = User.query.get(uid)
-        return bool(u and getattr(u, "is_admin", False))
+        if not u:
+            return False
+        if getattr(u, "is_admin", False):
+            return True
+        role = (getattr(u, "admin_role", None) or "none").strip()
+        return role in (ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT)
     except Exception:
         return False
 

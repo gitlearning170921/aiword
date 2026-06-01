@@ -10,32 +10,41 @@
     {% block head_extra %}{% endblock %}
 </head>
 <body class="app-body {% if request.endpoint == 'pages.generate_page' %}generate-view{% endif %}">
-{% if not hide_main_nav and request.endpoint != 'pages.login_page' and request.endpoint != 'pages.generate_page' %}
+{% set _suppress_top_nav = request.endpoint == 'pages.generate_page' and not (nav_show_page123_staff|default(false)) %}
+{% if not hide_main_nav and request.endpoint != 'pages.login_page' and not _suppress_top_nav %}
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4 shadow-lg">
     <div class="container-fluid">
         <a class="navbar-brand fw-bold"
-           href="{% if session.get('page13_authenticated') %}{{ url_for('pages.upload_page') }}{% elif session.get('user_id') %}{{ url_for('pages.generate_page') }}{% else %}{{ url_for('pages.login_page') }}{% endif %}">AI Word 工具</a>
+           href="{% if nav_show_page4|default(false) %}{{ url_for('admin.admin_page') }}{% elif nav_show_page0|default(false) %}{{ url_for('company.company_registry_page') }}{% elif nav_show_page123_staff|default(false) %}{{ url_for('pages.upload_page') }}{% elif nav_show_page2|default(false) %}{{ url_for('pages.generate_page') }}{% elif session.get('page13_authenticated') %}{{ url_for('admin.admin_page') }}{% else %}{{ url_for('pages.login_page') }}{% endif %}">AI Word 工具</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
             <span class="navbar-toggler-icon"></span>
         </button>
         <div class="collapse navbar-collapse" id="navbarNav">
             {% if not hide_main_nav and request.endpoint != 'pages.login_page' %}
-            {% set _show_page13_nav = session.get('page13_authenticated') %}
-            {% set _show_page2_nav = session.get('user_id') or session.get('page13_authenticated') %}
             <ul class="navbar-nav me-auto gap-2">
-                {% if _show_page13_nav %}
+                {% if nav_show_page0|default(false) %}
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/company' %}active{% endif %}" href="{{ url_for('company.company_registry_page') }}">页面0 · 公司总览</a>
+                </li>
+                {% endif %}
+                {% if nav_show_page123_staff|default(false) %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="{{ url_for('pages.upload_page') }}">页面1 · 上传</a>
                 </li>
                 {% endif %}
-                {% if _show_page2_nav %}
+                {% if nav_show_page2|default(false) %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/generate' %}active{% endif %}" href="{{ url_for('pages.generate_page') }}">页面2 · 生成</a>
                 </li>
                 {% endif %}
-                {% if _show_page13_nav %}
+                {% if nav_show_page123_staff|default(false) %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" href="{{ url_for('pages.dashboard_page') }}">页面3 · 统计</a>
+                </li>
+                {% endif %}
+                {% if nav_show_page4|default(false) %}
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="{{ url_for('admin.admin_page') }}">页面4 · 系统管理</a>
                 </li>
                 {% endif %}
             </ul>
@@ -58,10 +67,9 @@
 
 <script src="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.bundle.min.js', v=static_version) }}"></script>
 <script>
-    // 兼容反向代理/子路径部署（SCRIPT_NAME），用于前端拼接 API 路径
     window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
-    // 页面2/考试训练中心入口开关：由后端 app_configs 控制，关闭时前端不渲染对应按钮。
     window.__FEATURE_FLAGS__ = {{ (feature_flags or {})|tojson }};
+    window.__COMPANY_REGISTRY_ENABLED__ = {{ company_registry_enabled|default(false)|tojson }};
 </script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
@@ -69,4 +77,3 @@
 {% block body_extra %}{% endblock %}
 </body>
 </html>
-

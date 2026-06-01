@@ -218,18 +218,10 @@ def client_llm_headers_for_session() -> dict[str, str]:
 
 
 def upload_record_visible_to_user(rec: Any) -> bool:
-    """与页面2 / 初稿一致：负责人或编写人匹配当前 session。"""
-    if rec is None:
-        return False
-    username = (session.get("username") or "").strip()
-    display_name = (session.get("display_name") or "").strip()
-    an = (getattr(rec, "assignee_name", None) or "").strip()
-    au = (getattr(rec, "author", None) or "").strip()
-    if username and (an == username or au == username):
-        return True
-    if display_name and (an == display_name or au == display_name):
-        return True
-    return False
+    """与页面2 / 初稿一致；公司/项目管理员在 RBAC 生效时只增权。"""
+    from .authz import upload_record_visible_to_user as _authz_visible
+
+    return _authz_visible(rec)
 
 
 def safe_truncate(s: Optional[str], limit: int = 4000) -> str:

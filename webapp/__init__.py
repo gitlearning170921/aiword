@@ -813,6 +813,147 @@ def ensure_schema(app: Flask):
         except Exception:
             pass
 
+    # 公司级项目总览 / RBAC
+    ensure_column(
+        "users",
+        "admin_role",
+        "ALTER TABLE users ADD COLUMN admin_role VARCHAR(16) NOT NULL DEFAULT 'none'",
+        "ALTER TABLE users ADD COLUMN admin_role VARCHAR(16) NOT NULL DEFAULT 'none'",
+    )
+    for col, ddl_s, ddl_m in (
+        (
+            "product_type",
+            "ALTER TABLE projects ADD COLUMN product_type VARCHAR(128)",
+            "ALTER TABLE projects ADD COLUMN product_type VARCHAR(128)",
+        ),
+        (
+            "assigned_team_id",
+            "ALTER TABLE projects ADD COLUMN assigned_team_id VARCHAR(36)",
+            "ALTER TABLE projects ADD COLUMN assigned_team_id VARCHAR(36)",
+        ),
+        (
+            "expected_certification_date",
+            "ALTER TABLE projects ADD COLUMN expected_certification_date DATE",
+            "ALTER TABLE projects ADD COLUMN expected_certification_date DATE",
+        ),
+        (
+            "expected_submission_date",
+            "ALTER TABLE projects ADD COLUMN expected_submission_date DATE",
+            "ALTER TABLE projects ADD COLUMN expected_submission_date DATE",
+        ),
+        (
+            "progress_description",
+            "ALTER TABLE projects ADD COLUMN progress_description TEXT",
+            "ALTER TABLE projects ADD COLUMN progress_description TEXT",
+        ),
+        (
+            "registration_scope",
+            "ALTER TABLE projects ADD COLUMN registration_scope VARCHAR(16) NOT NULL DEFAULT 'legacy'",
+            "ALTER TABLE projects ADD COLUMN registration_scope VARCHAR(16) NOT NULL DEFAULT 'legacy'",
+        ),
+        (
+            "created_by_user_id",
+            "ALTER TABLE projects ADD COLUMN created_by_user_id VARCHAR(36)",
+            "ALTER TABLE projects ADD COLUMN created_by_user_id VARCHAR(36)",
+        ),
+        (
+            "updated_by",
+            "ALTER TABLE projects ADD COLUMN updated_by VARCHAR(128)",
+            "ALTER TABLE projects ADD COLUMN updated_by VARCHAR(128)",
+        ),
+        (
+            "progress_updated_at",
+            "ALTER TABLE projects ADD COLUMN progress_updated_at DATETIME",
+            "ALTER TABLE projects ADD COLUMN progress_updated_at DATETIME",
+        ),
+    ):
+        ensure_column("projects", col, ddl_s, ddl_m)
+
+    insp_rbac = inspect(engine)
+    rbac_tables = insp_rbac.get_table_names()
+    if "project_teams" not in rbac_tables:
+        from .models import ProjectTeam
+
+        ProjectTeam.__table__.create(bind=engine, checkfirst=True)
+    ensure_column(
+        "project_teams",
+        "dingtalk_webhook",
+        "ALTER TABLE project_teams ADD COLUMN dingtalk_webhook VARCHAR(512)",
+        "ALTER TABLE project_teams ADD COLUMN dingtalk_webhook VARCHAR(512)",
+    )
+    ensure_column(
+        "project_teams",
+        "dingtalk_secret",
+        "ALTER TABLE project_teams ADD COLUMN dingtalk_secret VARCHAR(256)",
+        "ALTER TABLE project_teams ADD COLUMN dingtalk_secret VARCHAR(256)",
+    )
+    if "user_team_memberships" not in rbac_tables:
+        from .models import UserTeamMembership
+
+        UserTeamMembership.__table__.create(bind=engine, checkfirst=True)
+
+    if "company_projects" not in rbac_tables:
+        from .models import CompanyProject
+
+        CompanyProject.__table__.create(bind=engine, checkfirst=True)
+
+    ensure_column(
+        "company_projects",
+        "is_starred",
+        ddl_sqlite="ALTER TABLE company_projects ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0",
+        ddl_other="ALTER TABLE company_projects ADD COLUMN is_starred TINYINT(1) NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        "company_projects",
+        "registration_owner",
+        ddl_sqlite="ALTER TABLE company_projects ADD COLUMN registration_owner VARCHAR(128)",
+        ddl_other="ALTER TABLE company_projects ADD COLUMN registration_owner VARCHAR(128) NULL",
+    )
+
+    ensure_column(
+        "users",
+        "can_access_company_registry",
+        ddl_sqlite="ALTER TABLE users ADD COLUMN can_access_company_registry INTEGER NOT NULL DEFAULT 0",
+        ddl_other="ALTER TABLE users ADD COLUMN can_access_company_registry TINYINT(1) NOT NULL DEFAULT 0",
+    )
+
+    insp_rbac2 = inspect(engine)
+    rbac_tables2 = insp_rbac2.get_table_names()
+    if "user_country_scopes" not in rbac_tables2:
+        from .models import UserCountryScope
+
+        UserCountryScope.__table__.create(bind=engine, checkfirst=True)
+
+    if "registered_country_dict" not in rbac_tables2:
+        from .models import RegisteredCountry
+
+        RegisteredCountry.__table__.create(bind=engine, checkfirst=True)
+
+    try:
+        from .registered_countries import bootstrap_registered_countries_from_data
+
+        bootstrap_registered_countries_from_data()
+    except Exception:
+        pass
+
+    ensure_column(
+        "projects",
+        "company_project_id",
+        "ALTER TABLE projects ADD COLUMN company_project_id VARCHAR(36)",
+        "ALTER TABLE projects ADD COLUMN company_project_id VARCHAR(36)",
+    )
+
+    if "projects" in existing_tables:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "UPDATE projects SET registration_scope='legacy' "
+                    "WHERE registration_scope IS NULL OR TRIM(registration_scope)=''"
+                ))
+                conn.commit()
+        except Exception:
+            pass
+
 
 def init_default_configs():
     """初始化默认的配置项数据"""
@@ -1047,6 +1188,48 @@ def create_app() -> Flask:
             flags = {}
         return {"feature_flags": flags}
 
+    @app.context_processor
+    def _inject_company_registry():
+        try:
+            from .authz import (
+                company_registry_enabled,
+                current_admin_role,
+                is_company_admin,
+                is_company_registry_user,
+                is_page13_super_admin,
+                is_project_admin,
+                nav_show_page0,
+                nav_show_page123_staff,
+                nav_show_page2,
+                nav_show_page4,
+            )
+
+            return {
+                "company_registry_enabled": company_registry_enabled(),
+                "current_admin_role": current_admin_role(),
+                "is_company_admin": is_company_admin(),
+                "is_project_admin": is_project_admin(),
+                "is_page13_super_admin": is_page13_super_admin(),
+                "can_access_company_registry": is_company_registry_user(),
+                "nav_show_page0": nav_show_page0(),
+                "nav_show_page123_staff": nav_show_page123_staff(),
+                "nav_show_page2": nav_show_page2(),
+                "nav_show_page4": nav_show_page4(),
+            }
+        except Exception:
+            return {
+                "company_registry_enabled": False,
+                "current_admin_role": "none",
+                "is_company_admin": False,
+                "is_project_admin": False,
+                "is_page13_super_admin": False,
+                "can_access_company_registry": False,
+                "nav_show_page0": False,
+                "nav_show_page123_staff": False,
+                "nav_show_page2": False,
+                "nav_show_page4": False,
+            }
+
     @app.after_request
     def _no_store_for_app_js_css(response):
         from flask import request
@@ -1054,6 +1237,7 @@ def create_app() -> Flask:
         p = (request.path or "").replace("\\", "/")
         if (
             p.endswith("/static/js/app.js")
+            or p.endswith("/static/js/company_registry.js")
             or p.endswith("/static/js/exam_center.js")
             or p.endswith("/static/js/draft_gen.js")
             or p.endswith("/static/css/app.css")
@@ -1090,7 +1274,13 @@ def create_app() -> Flask:
             return {"message": "数据库连接中断，请刷新页面重试"}, 503
         try:
             from flask import render_template
-            return render_template("error.html", message="数据库连接中断，请刷新页面重试"), 503
+            return render_template(
+                "error.html",
+                title="服务暂时不可用",
+                message="数据库连接中断，请刷新页面重试",
+                hide_main_nav=True,
+                gate_page=True,
+            ), 503
         except Exception:
             return "<h1>数据库连接中断</h1><p>请刷新页面重试。</p>", 503
 
@@ -1119,6 +1309,12 @@ def create_app() -> Flask:
 
         app.register_blueprint(translation_bp)
 
+        from .company_routes import company_bp
+        from .admin_routes import register_admin_blueprint
+
+        app.register_blueprint(company_bp)
+        register_admin_blueprint(app)
+
         db.create_all()
         init_default_configs()
         from .app_settings import (
@@ -1140,6 +1336,14 @@ def create_app() -> Flask:
         from .startup_local_env import run_startup_local_maintenance
 
         run_startup_local_maintenance(app, project_root)
+        try:
+            from .team_data_migration import ensure_default_team_data
+
+            stats = ensure_default_team_data()
+            app.logger.info("team_data_migration done: %s", stats)
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("team_data_migration failed")
 
     try:
         from .scheduler import init_scheduler

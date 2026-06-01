@@ -194,16 +194,9 @@ def _login_wall():
 
 
 def _upload_record_visible_to_draft_user(rec: UploadRecord) -> bool:
-    """与页面2「我的任务」一致：负责人或编写人匹配当前登录用户。"""
-    username = (session.get("username") or "").strip()
-    display_name = (session.get("display_name") or "").strip()
-    an = (rec.assignee_name or "").strip()
-    au = (rec.author or "").strip()
-    if username and (an == username or au == username):
-        return True
-    if display_name and (an == display_name or au == display_name):
-        return True
-    return False
+    from ._integration_common import upload_record_visible_to_user
+
+    return upload_record_visible_to_user(rec)
 
 
 def _auto_bind_base_files_by_target(
