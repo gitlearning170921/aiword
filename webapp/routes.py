@@ -186,19 +186,24 @@ def _chatbot_normalize_provider(requested: Optional[str]) -> tuple[str, Optional
 
 
 def _chatbot_client_headers(provider: str) -> dict[str, str]:
-    """页面2 个人 LLM 凭据透传（与初稿/翻译一致）；未登录页面2 时仅用 aicheckword 系统配置。"""
+    """页面2 个人 LLM 凭据透传；始终带上 X-Client-Llm-Provider 以免上游误用全局 deepseek。"""
+    prov = (provider or "").strip().lower()
+    headers: dict[str, str] = {}
+    if prov:
+        headers["X-Client-Llm-Provider"] = prov
     uid = session.get("user_id")
     if not uid:
-        return {}
+        return headers
     try:
         from .draft_generation_routes import _client_llm_headers, _normalize_requested_provider
 
-        prov = _normalize_requested_provider(provider) or provider
-        if prov in ("deepseek", "tongyi", "cursor"):
-            return _client_llm_headers(str(uid), provider=prov) or {}
+        norm = _normalize_requested_provider(prov) or prov
+        if norm in ("deepseek", "tongyi", "cursor"):
+            headers.update(_client_llm_headers(str(uid), provider=norm) or {})
+            headers["X-Client-Llm-Provider"] = norm
     except Exception:
         pass
-    return {}
+    return headers
 
 
 def _chatbot_extract_text(payload: dict[str, Any]) -> str:
@@ -276,7 +281,8 @@ def _chatbot_call_aicheckword(
             "knowledge_category": "program",
             "top_k": 6,
             "min_similarity": 0.55,
-            "max_reply_chars": 220,
+            "max_reply_chars": 320,
+            "max_detail_chars": 2400,
         },
     }
     try:
@@ -9013,6 +9019,7 @@ def api_dingtalk_chatbot_test():
     session_webhook = str(payload.get("session_webhook") or payload.get("sessionWebhook") or "").strip()
     req_provider = str(payload.get("provider") or payload.get("current_provider") or "").strip() or None
     eff_provider, provider_note = _chatbot_normalize_provider(req_provider)
+    client_hdrs = _chatbot_client_headers(eff_provider)
 
     diagnostics = {
         "chatbot_enabled": _chatbot_enabled(),
@@ -9023,7 +9030,9 @@ def api_dingtalk_chatbot_test():
         "api_base": _chatbot_api_base(),
         "api_base_configured": bool(_chatbot_api_base()),
         "chat_timeout_seconds": _chatbot_api_timeout_seconds(),
+        "requested_provider": req_provider or "(系统配置)",
         "llm_provider": eff_provider,
+        "client_llm_provider_header": client_hdrs.get("X-Client-Llm-Provider"),
         "has_personal_llm_key": bool(session.get("user_id")),
     }
     if provider_note:
@@ -9042,12 +9051,18 @@ def api_dingtalk_chatbot_test():
         return jsonify({"success": False, "message": err, "diagnostics": diagnostics}), 200
 
     need_human = bool(reply_data.get("need_human"))
-    answer = (reply_data.get("answer") or "").strip()
+    answer_summary = (
+        reply_data.get("answer_summary") or reply_data.get("answer") or ""
+    ).strip()
+    answer_detail = (reply_data.get("answer_detail") or answer_summary or "").strip()
+    answer = answer_summary
     confidence = float(reply_data.get("confidence") or 0.0)
     conf_threshold = _chatbot_confidence_threshold()
-    delivered_answer = answer
-    if need_human or confidence < conf_threshold or not answer:
+    delivered_answer = answer_summary
+    if need_human or confidence < conf_threshold or not answer_summary:
         delivered_answer = "这个问题我先帮你转人工确认，稍后给你准确答复。"
+        answer_summary = ""
+        answer_detail = ""
 
     sent_result: Optional[dict[str, Any]] = None
     if send_real:
@@ -9066,11 +9081,14 @@ def api_dingtalk_chatbot_test():
             "need_human": need_human,
             "confidence": confidence,
             "answer_raw": answer,
+            "answer_summary": answer_summary,
+            "answer_detail": answer_detail,
             "answer_delivered": delivered_answer,
             "references": reply_data.get("references") or [],
             "reason": reply_data.get("reason") or "",
             "model_used": reply_data.get("model_used") or "",
             "effective_provider": reply_data.get("effective_provider") or eff_provider,
+            "llm_provider_used": reply_data.get("llm_provider_used") or reply_data.get("effective_provider") or eff_provider,
             "provider_note": reply_data.get("provider_note") or provider_note,
             "latency_ms": reply_data.get("latency_ms") or 0,
             "upstream_request_id": reply_data.get("request_id") or "",
@@ -9129,7 +9147,9 @@ def api_dingtalk_chatbot_callback():
         return jsonify({"success": False, "message": err}), 200
 
     need_human = bool(reply_data.get("need_human"))
-    answer = (reply_data.get("answer") or "").strip()
+    answer = (
+        reply_data.get("answer_summary") or reply_data.get("answer") or ""
+    ).strip()
     confidence = float(reply_data.get("confidence") or 0.0)
     conf_threshold = _chatbot_confidence_threshold()
     if need_human or confidence < conf_threshold or not answer:

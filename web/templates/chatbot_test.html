@@ -1,16 +1,29 @@
 {% extends "base.html" %}
 {% block title %}钉钉机器人本地联调{% endblock %}
 
+{% block head_extra %}
+<style>
+.cb-answer-summary { white-space: pre-wrap; line-height: 1.6; font-size: 1rem; }
+.cb-answer-detail { white-space: pre-wrap; line-height: 1.65; font-size: 0.95rem; }
+.cb-meta { font-size: 0.85rem; color: #6c757d; }
+.cb-ref-item { border-left: 3px solid #0d6efd; padding-left: 0.75rem; margin-bottom: 0.75rem; }
+.cb-ref-name { font-weight: 600; font-size: 0.9rem; }
+.cb-ref-snippet { font-size: 0.85rem; color: #495057; white-space: pre-wrap; }
+.cb-badge-ok { background: #d1e7dd; color: #0f5132; }
+.cb-badge-warn { background: #fff3cd; color: #664d03; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container py-4" style="max-width: 960px;">
     <h2 class="mb-3">钉钉机器人 · 本地联调</h2>
-    <p class="text-muted">不走真实钉钉，调用 aicheckword <code>/api/chat/reply/generate</code>（意图分类 + 检索 + 生成，通常 30～120 秒）。<strong>LLM 提供方</strong>与翻译页类似：本页下拉优先；钉钉群真实回复使用系统配置 <code>CHATBOT_LLM_PROVIDER</code>。若已登录页面2并保存个人 Key，将透传个人凭据（deepseek/通义）。</p>
+    <p class="text-muted small">简化版默认展示；详细说明、依据文件与原始 JSON 在「更多」中展开。钉钉群实际发送内容为<strong>简化版</strong>。</p>
 
     <div class="card mb-3">
         <div class="card-body">
             <div class="mb-3">
                 <label class="form-label">问题文本</label>
-                <textarea id="cbText" class="form-control" rows="3" placeholder="例如：仓库入库记录怎么写？"></textarea>
+                <textarea id="cbText" class="form-control" rows="3" placeholder="例如：仓库管理员体系运行记录怎么写？"></textarea>
             </div>
             <div class="row g-2 mb-3">
                 <div class="col-md-4">
@@ -31,7 +44,7 @@
             </div>
             <div class="form-check mb-3">
                 <input class="form-check-input" type="checkbox" id="cbSend">
-                <label class="form-check-label" for="cbSend">同时发送到钉钉（默认仅本地预览）</label>
+                <label class="form-check-label" for="cbSend">同时发送到钉钉（仅发送简化版）</label>
             </div>
             <button id="cbRun" class="btn btn-primary">运行</button>
             <span id="cbStatus" class="ms-3 text-muted"></span>
@@ -39,16 +52,39 @@
     </div>
 
     <div class="card mb-3">
-        <div class="card-header">运行结果</div>
-        <div class="card-body">
-            <pre id="cbResult" class="bg-light p-3 mb-0" style="white-space: pre-wrap; min-height: 100px;">尚未运行</pre>
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>回答</span>
+            <span id="cbMeta" class="cb-meta"></span>
         </div>
-    </div>
-
-    <div class="card">
-        <div class="card-header">诊断信息</div>
         <div class="card-body">
-            <pre id="cbDiag" class="bg-light p-3 mb-0" style="white-space: pre-wrap; min-height: 60px;">尚未运行</pre>
+            <div id="cbAnswerEmpty" class="text-muted">尚未运行</div>
+            <div id="cbAnswerWrap" class="d-none">
+                <div class="mb-2">
+                    <span class="badge cb-badge-ok me-1">简化版</span>
+                    <span id="cbNeedHuman" class="badge d-none"></span>
+                </div>
+                <div id="cbSummary" class="cb-answer-summary border rounded p-3 bg-white"></div>
+
+                <details id="cbMore" class="mt-3">
+                    <summary class="btn btn-sm btn-outline-secondary user-select-none">更多 ▾</summary>
+                    <div class="mt-3 ps-1">
+                        <h6 class="small fw-bold text-muted">详细版</h6>
+                        <div id="cbDetail" class="cb-answer-detail border rounded p-3 bg-light mb-3"></div>
+
+                        <h6 class="small fw-bold text-muted">依据文件</h6>
+                        <div id="cbRefs" class="mb-3"></div>
+
+                        <h6 class="small fw-bold text-muted">钉钉将发送</h6>
+                        <div id="cbDelivered" class="cb-answer-summary border rounded p-2 bg-white small mb-3"></div>
+
+                        <details class="mt-2">
+                            <summary class="small text-muted user-select-none">技术信息 / 原始 JSON</summary>
+                            <pre id="cbRawJson" class="bg-light p-2 mt-2 small mb-0" style="white-space: pre-wrap; max-height: 320px; overflow: auto;"></pre>
+                            <pre id="cbDiag" class="bg-light p-2 mt-2 small mb-0" style="white-space: pre-wrap; max-height: 200px; overflow: auto;"></pre>
+                        </details>
+                    </div>
+                </details>
+            </div>
         </div>
     </div>
 </div>
@@ -64,8 +100,32 @@
     const elSendWebhook = document.getElementById("cbSessionWebhook");
     const elSend = document.getElementById("cbSend");
     const elStatus = document.getElementById("cbStatus");
-    const elResult = document.getElementById("cbResult");
+    const elMeta = document.getElementById("cbMeta");
+    const elAnswerEmpty = document.getElementById("cbAnswerEmpty");
+    const elAnswerWrap = document.getElementById("cbAnswerWrap");
+    const elSummary = document.getElementById("cbSummary");
+    const elDetail = document.getElementById("cbDetail");
+    const elRefs = document.getElementById("cbRefs");
+    const elDelivered = document.getElementById("cbDelivered");
+    const elNeedHuman = document.getElementById("cbNeedHuman");
+    const elMore = document.getElementById("cbMore");
+    const elRawJson = document.getElementById("cbRawJson");
     const elDiag = document.getElementById("cbDiag");
+
+    function esc(s) {
+        return String(s || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function normText(s) {
+        return String(s || "")
+            .replace(/\\r\\n/g, "\n")
+            .replace(/\\n/g, "\n")
+            .trim();
+    }
 
     function fillProviderOptions(data) {
         const allowed = Array.isArray(data.allowedProviders) ? data.allowedProviders : [];
@@ -109,6 +169,68 @@
         }
     }
 
+    function renderAnswer(data, diag) {
+        elAnswerEmpty.classList.add("d-none");
+        elAnswerWrap.classList.remove("d-none");
+        elMore.open = false;
+
+        const summary = normText(data.answer_summary || data.answer_delivered || data.answer_raw || "");
+        const detail = normText(data.answer_detail || data.answer_raw || summary);
+        const delivered = normText(data.answer_delivered || summary);
+        const needHuman = !!data.need_human;
+        const conf = typeof data.confidence === "number" ? data.confidence.toFixed(2) : String(data.confidence || "");
+
+        elSummary.textContent = summary || (data.message || "（无简化版内容）");
+        elDetail.textContent = detail || "（无详细版内容）";
+        elDelivered.textContent = delivered || "（无）";
+
+        if (needHuman) {
+            elNeedHuman.className = "badge cb-badge-warn";
+            elNeedHuman.textContent = "建议转人工";
+            elNeedHuman.classList.remove("d-none");
+        } else {
+            elNeedHuman.classList.add("d-none");
+        }
+
+        elMeta.textContent = [
+            data.effective_provider ? "请求: " + data.effective_provider : "",
+            data.llm_provider_used && data.llm_provider_used !== data.effective_provider
+                ? "实际: " + data.llm_provider_used
+                : "",
+            data.model_used ? "模型: " + data.model_used : "",
+            "置信度: " + conf,
+            data.latency_ms ? Math.round(data.latency_ms / 1000) + "s" : "",
+        ].filter(Boolean).join(" · ");
+        if (data.provider_note) {
+            elMeta.textContent += (elMeta.textContent ? " · " : "") + data.provider_note;
+        }
+
+        const refs = Array.isArray(data.references) ? data.references : [];
+        if (!refs.length) {
+            elRefs.innerHTML = '<p class="text-muted small mb-0">无引用片段</p>';
+        } else {
+            elRefs.innerHTML = refs.map(function (r) {
+                return (
+                    '<div class="cb-ref-item">' +
+                    '<div class="cb-ref-name">' + esc(r.file_name || "未知") + '</div>' +
+                    '<div class="cb-ref-snippet">' + esc(normText(r.snippet)) + "</div></div>"
+                );
+            }).join("");
+        }
+
+        const rawCopy = Object.assign({}, data);
+        delete rawCopy.diagnostics;
+        elRawJson.textContent = JSON.stringify(rawCopy, null, 2);
+        elDiag.textContent = JSON.stringify(diag || {}, null, 2);
+    }
+
+    function clearAnswer(msg) {
+        elAnswerWrap.classList.add("d-none");
+        elAnswerEmpty.classList.remove("d-none");
+        elAnswerEmpty.textContent = msg || "尚未运行";
+        elMeta.textContent = "";
+    }
+
     async function loadLlmSettings() {
         try {
             const r = await fetch(root + "/api/dingtalk/chatbot/llm-settings", {
@@ -118,8 +240,8 @@
             if (!r.ok) throw new Error(data.message || ("HTTP " + r.status));
             fillProviderOptions(data);
         } catch (e) {
-            elProvider.innerHTML = "<option value=\"\">deepseek（加载选项失败，仍可使用）</option>";
-            elProviderHint.textContent = String(e) + "（多为 aiword 未重启，新路由 /api/dingtalk/chatbot/llm-settings 尚未生效）";
+            elProvider.innerHTML = '<option value="">deepseek（加载选项失败，仍可使用）</option>';
+            elProviderHint.textContent = String(e);
         }
     }
 
@@ -131,8 +253,7 @@
         }
         btn.disabled = true;
         elStatus.textContent = "调用中（可能需 1～2 分钟）…";
-        elResult.textContent = "";
-        elDiag.textContent = "";
+        clearAnswer("处理中…");
         const body = {
             text: text,
             group_id: (elGroup.value || "").trim() || "__test__",
@@ -152,14 +273,23 @@
                 body: JSON.stringify(body),
             });
             const data = await _safeJson(r);
-            elStatus.textContent = data.success ? "完成" : (data.message || ("HTTP " + r.status));
             const diag = data.diagnostics || {};
             delete data.diagnostics;
-            elResult.textContent = JSON.stringify(data, null, 2);
-            elDiag.textContent = JSON.stringify(diag, null, 2);
+            if (!data.success) {
+                elStatus.textContent = data.message || "失败";
+                clearAnswer(data.message || "调用失败");
+                elRawJson.textContent = JSON.stringify(data, null, 2);
+                elDiag.textContent = JSON.stringify(diag, null, 2);
+                elAnswerWrap.classList.remove("d-none");
+                elAnswerEmpty.classList.add("d-none");
+                elMore.open = true;
+                return;
+            }
+            elStatus.textContent = "完成";
+            renderAnswer(data, diag);
         } catch (e) {
             elStatus.textContent = "出错";
-            elResult.textContent = String(e);
+            clearAnswer(String(e));
         } finally {
             btn.disabled = false;
         }
