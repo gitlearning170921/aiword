@@ -911,6 +911,129 @@
         });
     }
 
+    async function initCompanyTrainingPanel() {
+        const orgSel = document.getElementById("companyActiveOrgSelect");
+        const categorySel = document.getElementById("companyTrainCategory");
+        const filesInput = document.getElementById("companyTrainFiles");
+        const uploadBtn = document.getElementById("btnCompanyTrainUpload");
+        const hint = document.getElementById("companyTrainHint");
+        const caseNameInput = document.getElementById("companyTrainCaseName");
+        if (!orgSel || !categorySel || !filesInput || !uploadBtn) return;
+
+        const setHint = (msg) => {
+            if (hint) hint.textContent = msg || "";
+        };
+
+        const loadContext = async () => {
+            const ctx = await apiRequest("/api/company/context");
+            const orgs = Array.isArray(ctx?.organizations) ? ctx.organizations : [];
+            const active = String(ctx?.activeOrganizationId || "").trim();
+            orgSel.innerHTML = orgs
+                .map((o) => {
+                    const id = String(o.id || "").trim();
+                    const kc = String(o.knowledgeCollection || "regulations");
+                    return `<option value="${esc(id)}">${esc(`${o.name || id} (${kc})`)}</option>`;
+                })
+                .join("");
+            if (active) orgSel.value = active;
+            const row = orgs.find((x) => String(x.id || "").trim() === String(orgSel.value || "").trim());
+            setHint(row ? `当前知识库：${row.knowledgeCollection || "regulations"}` : "");
+        };
+
+        try {
+            await loadContext();
+        } catch (e) {
+            setHint("");
+            notify(e.message || "公司上下文加载失败", "danger");
+        }
+
+        orgSel.addEventListener("change", async () => {
+            const id = String(orgSel.value || "").trim();
+            if (!id) return;
+            try {
+                const res = await apiRequest("/api/company/context/active", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: id }),
+                });
+                setHint(`当前知识库：${res?.activeKnowledgeCollection || ""}`);
+                notify("已切换当前公司", "success");
+            } catch (e) {
+                notify(e.message || "切换公司失败", "danger");
+            }
+        });
+
+        uploadBtn.addEventListener("click", async () => {
+            const selected = filesInput.files ? Array.from(filesInput.files) : [];
+            if (!selected.length) {
+                notify("请先选择要训练的文件", "warning");
+                return;
+            }
+            const category = String(categorySel.value || "regulation");
+            uploadBtn.disabled = true;
+            setHint("训练中，请稍候...");
+            try {
+                let res = null;
+                if (category === "project_case") {
+                    const caseName = String(caseNameInput?.value || "").trim();
+                    if (!caseName) {
+                        notify("分类为项目案例时，请填写案例名称", "warning");
+                        return;
+                    }
+                    const created = await apiRequest("/api/company/training/project-cases/create", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            organizationId: String(orgSel.value || "").trim(),
+                            caseName,
+                            documentLanguage: "zh",
+                        }),
+                    });
+                    const caseId =
+                        Number(created?.upstream?.data?.case_id || created?.upstream?.data?.case?.id || 0) || 0;
+                    if (!caseId) {
+                        throw new Error("创建项目案例失败：未返回 case_id");
+                    }
+                    const fd = new FormData();
+                    fd.append("organizationId", String(orgSel.value || "").trim());
+                    fd.append("caseId", String(caseId));
+                    selected.forEach((f) => fd.append("files", f));
+                    res = await apiRequest("/api/company/training/project-cases/upload", {
+                        method: "POST",
+                        body: fd,
+                    });
+                } else {
+                    const fd = new FormData();
+                    fd.append("organizationId", String(orgSel.value || "").trim());
+                    fd.append("category", category);
+                    selected.forEach((f) => fd.append("files", f));
+                    res = await apiRequest("/api/company/training/upload", {
+                        method: "POST",
+                        body: fd,
+                    });
+                }
+                const files = Number(
+                    res?.upstream?.files_processed ||
+                    res?.upstream?.data?.files_processed ||
+                    0
+                );
+                const chunks = Number(
+                    res?.upstream?.total_chunks_added ||
+                    res?.upstream?.data?.total_chunks_added ||
+                    0
+                );
+                setHint(`训练完成：文件 ${files}，新增块 ${chunks}`);
+                notify(`训练完成（${files} 个文件，${chunks} 个块）`, "success");
+                filesInput.value = "";
+            } catch (e) {
+                setHint("");
+                notify(e.message || "训练失败", "danger");
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        });
+    }
+
     function bindDictMaintenanceEvents() {
         document.getElementById("btnAddCountryDict")?.addEventListener("click", async () => {
             const name = (document.getElementById("newCountryDictName")?.value || "").trim();
@@ -973,6 +1096,7 @@
     function boot() {
         if (body) {
             initCompanySessionBar();
+            initCompanyTrainingPanel();
             initStarFilterSelect();
             initGroupBySelect();
             bindEvents();

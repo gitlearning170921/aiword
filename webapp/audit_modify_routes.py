@@ -50,6 +50,7 @@ from ._integration_common import (
     latest_audit_report_id_for_scope,
     login_wall,
     manual_upload_only_from_request,
+    resolve_org_collection_for_integration,
     resolve_aicheckword_project_id_for_upload,
     safe_truncate,
     upload_record_visible_to_user,
@@ -105,6 +106,7 @@ def _fetch_immediate_remediation_upstream(
     report_id: Optional[int] = None,
     report_dict: Optional[dict[str, Any]] = None,
     selected_refs: Optional[set[str]] = None,
+    organization_id: Optional[str] = None,
 ) -> tuple[dict[str, str], Optional[str], dict[str, Any]]:
     """调用 aicheckword ``immediate-remediation`` API（与 Streamlit 同源逻辑）。"""
     base = integration_api_base()
@@ -120,13 +122,17 @@ def _fetch_immediate_remediation_upstream(
             r = requests.get(
                 url,
                 params=params,
-                headers=upstream_headers(for_multipart=False),
+                headers=upstream_headers(
+                    for_multipart=False, organization_id=organization_id
+                ),
                 timeout=integration_requests_timeout(read_seconds=min(30, _audit_modify_timeout())),
             )
         elif isinstance(report_dict, dict) and report_dict:
             r = requests.post(
                 f"{base}/api/integration/audit/reports/immediate-remediation",
-                headers=upstream_headers(for_multipart=False),
+                headers=upstream_headers(
+                    for_multipart=False, organization_id=organization_id
+                ),
                 json={
                     "report": report_dict,
                     "selected_refs": sorted(selected_refs) if selected_refs else None,
@@ -204,6 +210,7 @@ def _load_raw_report_for_request() -> tuple[Optional[dict], Optional[int], Optio
     base = integration_api_base()
     report_id_raw = (request.form.get("report_id") or request.args.get("report_id") or "").strip()
     upload_id_raw = (request.form.get("upload_id") or request.args.get("upload_id") or "").strip()
+    org_id, _ = resolve_org_collection_for_integration(upload_id=upload_id_raw)
     report_file = request.files.get("report_json_file") if request.files else None
     if report_file:
         try:
@@ -220,7 +227,7 @@ def _load_raw_report_for_request() -> tuple[Optional[dict], Optional[int], Optio
         try:
             r = requests.get(
                 f"{base}/api/integration/audit/reports/{rid}",
-                headers=upstream_headers(for_multipart=False),
+                headers=upstream_headers(for_multipart=False, organization_id=org_id),
                 timeout=integration_requests_timeout(read_seconds=min(30, _audit_modify_timeout())),
             )
             if r.status_code != 200:
@@ -246,7 +253,7 @@ def _load_raw_report_for_request() -> tuple[Optional[dict], Optional[int], Optio
         try:
             r = requests.get(
                 f"{base}/api/integration/audit/reports/{int(rid)}",
-                headers=upstream_headers(for_multipart=False),
+                headers=upstream_headers(for_multipart=False, organization_id=org_id),
                 timeout=integration_requests_timeout(read_seconds=min(30, _audit_modify_timeout())),
             )
             if r.status_code != 200:
@@ -269,10 +276,14 @@ def _fetch_remediation_for_request() -> tuple[Optional[dict[str, str]], Optional
     selected_refs = _parse_selected_refs(
         (request.form.get("selected_audit_point_refs") or request.args.get("selected_refs") or "")
     )
+    org_id, _ = resolve_org_collection_for_integration(
+        upload_id=(request.form.get("upload_id") or request.args.get("upload_id") or "").strip()
+    )
     remediation, rem_err, _meta = _fetch_immediate_remediation_upstream(
         report_id=report_id,
         report_dict=raw_report if report_id is None else None,
         selected_refs=selected_refs,
+        organization_id=org_id,
     )
     if rem_err:
         return None, rem_err, raw_report
@@ -312,7 +323,14 @@ def api_audit_modify_integration_bootstrap():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
-    payload = build_integration_bootstrap_payload(collection, read_timeout=30)
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
+    payload = build_integration_bootstrap_payload(
+        resolved_collection,
+        read_timeout=30,
+        organization_id=org_id,
+    )
     if not payload.get("ok"):
         return jsonify({"message": payload.get("message") or "加载失败"}), 502
     return jsonify(payload)
@@ -360,6 +378,14 @@ def api_audit_modify_create_job():
             raise ValueError("payload 必须是 JSON 对象")
     except Exception as e:  # noqa: BLE001
         return jsonify({"message": f"payload 解析失败：{e}"}), 400
+
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=str(payload_obj.get("collection") or "regulations"),
+        upload_ids=[
+            x for x in [upload_id, base_upload_id] if str(x or "").strip()
+        ],
+    )
+    payload_obj["collection"] = resolved_collection
 
     try:
         pid = int(payload_obj.get("project_id") or 0)
@@ -471,7 +497,7 @@ def api_audit_modify_create_job():
     prep_body: dict[str, Any] = {
         "template_file_name": tpl_manual or upload_name,
         "base_file_name": upload_name,
-        "collection": str(payload_obj.get("collection") or "regulations"),
+        "collection": resolved_collection,
         "project_id": pid_for_prepare,
         "skip_case_template_text": skip_tpl,
         "docx_track_changes": track,
@@ -488,6 +514,7 @@ def api_audit_modify_create_job():
         "api/integration/audit/audit-modify/prepare-draft-payload",
         prep_body,
         read_timeout_seconds=min(15, _audit_modify_timeout()),
+        organization_id=org_id,
     )
     if prep_err:
         return jsonify({"message": prep_err}), 400
@@ -522,9 +549,10 @@ def api_audit_modify_create_job():
     # 本地 job：复用 DraftGenerationJob，标记 source=audit_modify
     local_job = DraftGenerationJob(
         user_id=uid_session,
+        organization_id=(org_id or None),
         status="pending",
         progress=0.0,
-        collection=str(payload_obj.get("collection") or "regulations"),
+        collection=resolved_collection,
         base_case_id=int(payload_obj.get("base_case_id") or 0) or None,
         project_id=int(payload_obj.get("project_id") or 0) or None,
         template_names_json=list(target_names),
@@ -560,7 +588,7 @@ def api_audit_modify_create_job():
 
     # 提交上游 draft jobs
     url = f"{base}/api/integration/draft/jobs"
-    hdrs = upstream_headers(for_multipart=True)
+    hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
     hdrs.update(client_llm_headers_for_session())
     files_to_upload: list[tuple[str, tuple[str, bytes, str]]] = [
         ("base_files", (upload_name, base_uploads[0][1], "application/octet-stream"))
@@ -730,6 +758,7 @@ def api_post_audit_defaults():
             report_id = str(rec.last_audit_report_id)
     if not report_id:
         return jsonify({"message": "缺少 report_id 或带历史报告的 upload_id"}), 400
+    org_id, _ = resolve_org_collection_for_integration(upload_id=upload_id)
     params: dict[str, Any] = {}
     pid = (request.args.get("project_id") or "").strip()
     if pid:
@@ -738,6 +767,7 @@ def api_post_audit_defaults():
         f"api/integration/audit/reports/{int(report_id)}/post-audit-defaults",
         params=params or None,
         read_timeout_seconds=20,
+        organization_id=org_id,
     )
     if up_err:
         return jsonify({"message": up_err}), 502
@@ -754,10 +784,14 @@ def api_preview_remediation():
     if load_err:
         return jsonify({"message": load_err}), 400
     selected_refs = _parse_selected_refs(request.args.get("selected_refs"))
+    org_id, _ = resolve_org_collection_for_integration(
+        upload_id=(request.args.get("upload_id") or "").strip()
+    )
     rem, rem_err, meta = _fetch_immediate_remediation_upstream(
         report_id=report_id,
         report_dict=raw_report if report_id is None else None,
         selected_refs=selected_refs,
+        organization_id=org_id,
     )
     if rem_err:
         return jsonify({"message": rem_err}), 400

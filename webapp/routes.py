@@ -382,7 +382,81 @@ def _items_from_activity_detail_snapshot(det: ExamCenterActivityDetail | None) -
     return []
 
 
-def _quiz_api_headers() -> dict[str, str]:
+def _resolve_exam_organization_id(
+    *,
+    explicit_org_id: str | None = None,
+    assignment_id: str | None = None,
+    attempt_id: str | None = None,
+    activity_id: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """解析考试中心上游请求应携带的 organization_id。"""
+    from .app_settings import is_multi_tenant_enabled
+    from .tenant_context import resolve_organization_context
+
+    if not is_multi_tenant_enabled():
+        return ""
+
+    oid = str(explicit_org_id or "").strip()
+    if oid:
+        return oid
+
+    aid = str(assignment_id or "").strip()
+    if aid:
+        row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+        oid = str(getattr(row, "organization_id", "") or "").strip() if row else ""
+        if oid:
+            return oid
+
+    atid = str(attempt_id or "").strip()
+    if atid:
+        att = ExamAttempt.query.filter_by(attempt_id=atid).first()
+        if att:
+            oid = str(getattr(att, "organization_id", "") or "").strip()
+            if oid:
+                return oid
+            aid2 = str(getattr(att, "assignment_id", "") or "").strip()
+            if aid2:
+                row = ExamCenterAssignment.query.filter_by(assignment_id=aid2).first()
+                oid = str(getattr(row, "organization_id", "") or "").strip() if row else ""
+                if oid:
+                    return oid
+
+    actid = str(activity_id or "").strip()
+    if actid:
+        act = ExamCenterActivity.query.filter_by(id=actid).first()
+        if act:
+            oid = str(getattr(act, "organization_id", "") or "").strip()
+            if oid:
+                return oid
+            aid3 = str(getattr(act, "assignment_id", "") or "").strip()
+            if aid3:
+                row = ExamCenterAssignment.query.filter_by(assignment_id=aid3).first()
+                oid = str(getattr(row, "organization_id", "") or "").strip() if row else ""
+                if oid:
+                    return oid
+
+    pid = str(project_id or "").strip()
+    if pid:
+        proj = Project.query.get(pid)
+        oid = str(getattr(proj, "organization_id", "") or "").strip() if proj else ""
+        if oid:
+            return oid
+
+    oid, _ = resolve_organization_context()
+    return str(oid or "").strip()
+
+
+def _current_exam_scope_organization_id() -> str:
+    """当前会话在考试中心的数据作用域 organization_id（单租户返回空串）。"""
+    from .app_settings import is_multi_tenant_enabled
+
+    if not is_multi_tenant_enabled():
+        return ""
+    return _resolve_exam_organization_id()
+
+
+def _quiz_api_headers(*, organization_id: str | None = None) -> dict[str, str]:
     from .app_settings import get_setting
 
     headers = {
@@ -395,6 +469,9 @@ def _quiz_api_headers() -> dict[str, str]:
         headers["Authorization"] = f"Bearer {bearer}"
     if secret:
         headers["X-Integration-Secret"] = secret
+    oid = str(organization_id or "").strip()
+    if oid:
+        headers["X-Aiword-Company-Id"] = oid
     return headers
 
 
@@ -404,6 +481,7 @@ def _quiz_api_call(
     payload: Optional[dict[str, Any]] = None,
     query: Optional[dict[str, Any]] = None,
     timeout_seconds: Optional[int] = None,
+    organization_id: Optional[str] = None,
 ) -> tuple[int, dict[str, Any]]:
     base_url = _quiz_api_base_url()
     trace_id = uuid.uuid4().hex
@@ -429,10 +507,38 @@ def _quiz_api_call(
     if payload is not None and req_method in {"POST", "PUT", "PATCH", "DELETE"}:
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
+    p = payload if isinstance(payload, dict) else {}
+    qd = query if isinstance(query, dict) else {}
+    oid = _resolve_exam_organization_id(
+        explicit_org_id=(
+            str(organization_id or "").strip()
+            or str(p.get("organization_id") or p.get("organizationId") or qd.get("organization_id") or qd.get("organizationId") or "")
+        ),
+        assignment_id=(
+            str(p.get("assignment_id") or p.get("assignmentId") or qd.get("assignment_id") or qd.get("assignmentId") or "")
+        ),
+        attempt_id=(
+            str(
+                p.get("attempt_id")
+                or p.get("attemptId")
+                or p.get("session_id")
+                or qd.get("attempt_id")
+                or qd.get("attemptId")
+                or ""
+            )
+        ),
+        activity_id=(
+            str(p.get("activity_id") or p.get("activityId") or qd.get("activity_id") or qd.get("activityId") or "")
+        ),
+        project_id=(
+            str(p.get("project_id") or p.get("projectId") or qd.get("project_id") or qd.get("projectId") or "")
+        ),
+    )
+
     req = Request(
         url=url,
         data=body_bytes,
-        headers=_quiz_api_headers(),
+        headers=_quiz_api_headers(organization_id=oid),
         method=req_method,
     )
 
@@ -454,6 +560,7 @@ def _quiz_api_call(
                 "data": data,
                 "trace_id": trace_id,
                 "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
+                "organization_id": oid or None,
             }
     except HTTPError as e:
         raw = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
@@ -509,6 +616,7 @@ def _quiz_try_paths(
     method: str,
     payload: Optional[dict[str, Any]] = None,
     query: Optional[dict[str, Any]] = None,
+    organization_id: Optional[str] = None,
 ) -> tuple[int, dict[str, Any], list[str]]:
     """依次尝试多个上游路径（新旧路由不一致时兼容）。"""
     tried: list[str] = []
@@ -524,7 +632,13 @@ def _quiz_try_paths(
         if not pp:
             continue
         tried.append(pp)
-        st, pl = _quiz_api_call(pp, method=method, payload=payload, query=query)
+        st, pl = _quiz_api_call(
+            pp,
+            method=method,
+            payload=payload,
+            query=query,
+            organization_id=organization_id,
+        )
         last_status, last_payload = int(st), pl if isinstance(pl, dict) else {"data": pl}
         if 200 <= last_status < 300:
             return last_status, last_payload, tried
@@ -1011,6 +1125,13 @@ def _log_student_exam_center_activity(
         username = s_username or (u.username if u else "")
         display_name = s_display_name or ((u.display_name or u.username) if u else "")
         row = ExamCenterActivity(
+            organization_id=(
+                _resolve_exam_organization_id(
+                    assignment_id=(assignment_id or "").strip(),
+                    attempt_id=(attempt_id or "").strip(),
+                )
+                or None
+            ),
             user_id=uid,
             username=str(username) if username else None,
             display_name=str(display_name) if display_name else None,
@@ -3648,6 +3769,12 @@ def api_exam_student_project_cases():
 @page13_access_required
 def api_exam_teacher_ingest_bank():
     req_payload = _expand_quiz_request_body(_json_payload())
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(
+            req_payload.get("organization_id") or req_payload.get("organizationId") or ""
+        ).strip(),
+        project_id=str(req_payload.get("project_id") or req_payload.get("projectId") or "").strip(),
+    )
     tc = _exam_ingest_target_count()
     wk = _exam_ingest_knowledge_weights()
     wt = _exam_ingest_question_type_weights()
@@ -3659,7 +3786,12 @@ def api_exam_teacher_ingest_bank():
     req_payload["ingest_knowledge_weights"] = wk
     req_payload["ingest_question_type_weights"] = wt
     req_payload["max_similar_frac"] = msf
-    status, payload = _quiz_api_call("quiz/bank/ingest-by-ai", method="POST", payload=req_payload)
+    status, payload = _quiz_api_call(
+        "quiz/bank/ingest-by-ai",
+        method="POST",
+        payload=req_payload,
+        organization_id=org_id,
+    )
 
     # 成功拿到 job_id 后：落库生成任务记录（用于后续从记录查询轮询状态与结果）
     if 200 <= int(status) < 300 and isinstance(payload, dict):
@@ -3675,9 +3807,13 @@ def api_exam_teacher_ingest_bank():
             except Exception:
                 target_count = None
             review_mode = (req_payload.get("review_mode") or req_payload.get("reviewMode") or "").strip() or None
-            row = ExamBankIngestJob.query.filter_by(upstream_job_id=upstream_job_id).first()
+            row_q = ExamBankIngestJob.query.filter_by(upstream_job_id=upstream_job_id)
+            if org_id:
+                row_q = row_q.filter(ExamBankIngestJob.organization_id == org_id)
+            row = row_q.first()
             if not row:
                 row = ExamBankIngestJob(
+                    organization_id=org_id or None,
                     upstream_job_id=upstream_job_id,
                     exam_track=exam_track,
                     exam_category=exam_category,
@@ -3686,6 +3822,7 @@ def api_exam_teacher_ingest_bank():
                     status="pending",
                     created_by=created_by,
                 )
+            row.organization_id = org_id or row.organization_id
             row.exam_category = exam_category
             row.last_upstream_http_status = int(status)
             row.last_upstream_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload.get("data")
@@ -3882,18 +4019,32 @@ def api_exam_teacher_ingest_job(job_id: str):
         )
     # 1) 先查本地任务记录（如果不存在，也允许继续向上游查询）
     row = ExamBankIngestJob.query.filter_by(upstream_job_id=job_id).first()
+    scope_org_id = _current_exam_scope_organization_id()
+    if row is not None and scope_org_id and str(getattr(row, "organization_id", "") or "").strip() != scope_org_id:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录", "data": None, "trace_id": uuid.uuid4().hex}), 404
 
     # 2) 默认刷新上游状态（refresh=0 可只看本地快照）
     refresh = (request.args.get("refresh") or "1").strip()
     if refresh not in {"0", "false", "no"}:
+        req_org_id = (
+            str(getattr(row, "organization_id", "") or "").strip()
+            or scope_org_id
+            or _resolve_exam_organization_id()
+        )
         status, payload = _quiz_api_call(
             f"quiz/bank/ingest-jobs/{job_id}",
             method="GET",
             query={k: v for k, v in request.args.to_dict().items() if k != "refresh"},
+            organization_id=req_org_id,
         )
         # 回写本地快照
         if row is None:
-            row = ExamBankIngestJob(upstream_job_id=job_id, status="unknown")
+            row = ExamBankIngestJob(
+                upstream_job_id=job_id,
+                status="unknown",
+                organization_id=req_org_id or None,
+            )
+        row.organization_id = req_org_id or row.organization_id
         row.last_upstream_http_status = int(status)
         if isinstance(payload, dict):
             row.last_message = (payload.get("message") or None)
@@ -3966,11 +4117,11 @@ def api_exam_teacher_ingest_jobs_list():
     if limit > 200:
         limit = 200
 
-    rows = (
-        ExamBankIngestJob.query.order_by(ExamBankIngestJob.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+    scope_org_id = _current_exam_scope_organization_id()
+    q_rows = ExamBankIngestJob.query
+    if scope_org_id:
+        q_rows = q_rows.filter(ExamBankIngestJob.organization_id == scope_org_id)
+    rows = q_rows.order_by(ExamBankIngestJob.created_at.desc()).limit(limit).all()
     return jsonify(
         {
             "code": 0,
@@ -4007,11 +4158,11 @@ def api_exam_teacher_ingest_jobs_list():
 def api_exam_teacher_sets_list():
     """老师端：套题列表（上游）+ 本地 ingest 关联。"""
     status, payload = _quiz_api_call("quiz/sets", method="GET", query=request.args.to_dict())
-    rows = (
-        ExamBankIngestJob.query.order_by(ExamBankIngestJob.created_at.desc())
-        .limit(200)
-        .all()
-    )
+    scope_org_id = _current_exam_scope_organization_id()
+    q_rows = ExamBankIngestJob.query
+    if scope_org_id:
+        q_rows = q_rows.filter(ExamBankIngestJob.organization_id == scope_org_id)
+    rows = q_rows.order_by(ExamBankIngestJob.created_at.desc()).limit(200).all()
     by_set: dict[str, Any] = {}
     without_set: list[dict[str, Any]] = []
     for r in rows:
@@ -4221,10 +4372,11 @@ def api_exam_teacher_bank_question_delete(question_id: str):
 
 
 def _exam_stats_options_local() -> dict[str, Any]:
+    org_id = _current_exam_scope_organization_id()
     students_map: dict[str, dict[str, str]] = {}
     try:
         # 与 _local_stats_overview_all / 按学生表同源：按 user_id 去重，取最近一条活动的展示名
-        rows = (
+        q_students = (
             db.session.query(
                 ExamCenterActivity.user_id,
                 ExamCenterActivity.display_name,
@@ -4232,9 +4384,10 @@ def _exam_stats_options_local() -> dict[str, Any]:
             )
             .filter(ExamCenterActivity.user_id.isnot(None))
             .filter(ExamCenterActivity.user_id != "")
-            .order_by(ExamCenterActivity.user_id.asc(), ExamCenterActivity.created_at.desc())
-            .all()
         )
+        if org_id:
+            q_students = q_students.filter(ExamCenterActivity.organization_id == org_id)
+        rows = q_students.order_by(ExamCenterActivity.user_id.asc(), ExamCenterActivity.created_at.desc()).all()
         for uid, dname, uname in rows:
             sid = str(uid or "").strip()
             if not sid or sid in students_map:
@@ -4246,30 +4399,29 @@ def _exam_stats_options_local() -> dict[str, Any]:
     students = sorted(students_map.values(), key=lambda x: str(x.get("name") or ""))
     assignments_map: dict[str, dict[str, Any]] = {}
     try:
-        rows = (
+        q_assign = (
             db.session.query(ExamCenterActivity.assignment_id, ExamCenterActivity.assignment_label)
             .filter(ExamCenterActivity.assignment_id.isnot(None))
             .filter(ExamCenterActivity.assignment_id != "")
-            .distinct()
-            .limit(500)
-            .all()
         )
+        if org_id:
+            q_assign = q_assign.filter(ExamCenterActivity.organization_id == org_id)
+        rows = q_assign.distinct().limit(500).all()
         for aid, alab in rows:
             k = str(aid or "").strip()
             if not k:
                 continue
             lab = str(alab or "").strip() or k
             assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": ""}
-        local_rows = (
-            ExamCenterAssignment.query.filter(
-                or_(
-                    ExamCenterAssignment.status.is_(None),
-                    ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
-                )
+        q_local_assign = ExamCenterAssignment.query.filter(
+            or_(
+                ExamCenterAssignment.status.is_(None),
+                ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
             )
-            .limit(500)
-            .all()
         )
+        if org_id:
+            q_local_assign = q_local_assign.filter(ExamCenterAssignment.organization_id == org_id)
+        local_rows = q_local_assign.limit(500).all()
         for r in local_rows:
             k = str(r.assignment_id or "").strip()
             if not k:
@@ -4279,7 +4431,10 @@ def _exam_stats_options_local() -> dict[str, Any]:
             assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": sid}
         all_aids = [x for x in assignments_map.keys() if x]
         if all_aids:
-            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(all_aids)).all():
+            q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(all_aids))
+            if org_id:
+                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            for ar in q_rows.all():
                 kk = str(ar.assignment_id or "").strip()
                 if kk in assignments_map:
                     s2 = str(getattr(ar, "set_id", None) or "").strip()
@@ -4306,7 +4461,11 @@ def _local_stats_for_student(user_id: str) -> dict[str, Any]:
     uid = str(user_id or "").strip()
     if not uid:
         return {}
-    rows = ExamCenterActivity.query.filter_by(user_id=uid).order_by(ExamCenterActivity.created_at.desc()).all()
+    org_id = _current_exam_scope_organization_id()
+    q_rows = ExamCenterActivity.query.filter_by(user_id=uid)
+    if org_id:
+        q_rows = q_rows.filter(ExamCenterActivity.organization_id == org_id)
+    rows = q_rows.order_by(ExamCenterActivity.created_at.desc()).all()
     if not rows:
         return {
             "student_id": uid,
@@ -4394,6 +4553,7 @@ def _local_stats_all_students_rows() -> list[dict[str, Any]]:
 
 
 def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
+    org_id = _current_exam_scope_organization_id()
     """学生 ×（考试/练习）交叉分组：记录数、已判分、通过/不通过/通过率；判分口径与 /stats/mode 一致（有 score 即计分）。"""
     opts = _exam_stats_options_local()
     studs = opts.get("students") if isinstance(opts.get("students"), list) else []
@@ -4406,7 +4566,10 @@ def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
         if not sid:
             continue
         label = str(s.get("label") or s.get("name") or sid).strip() or sid
-        rows_u = ExamCenterActivity.query.filter_by(user_id=sid).order_by(ExamCenterActivity.created_at.desc()).all()
+        rows_q = ExamCenterActivity.query.filter_by(user_id=sid)
+        if org_id:
+            rows_q = rows_q.filter(ExamCenterActivity.organization_id == org_id)
+        rows_u = rows_q.order_by(ExamCenterActivity.created_at.desc()).all()
         ids = [str(r.id) for r in rows_u if getattr(r, "id", None)]
         det_map: dict[str, ExamCenterActivityDetail] = {}
         if ids:
@@ -4448,9 +4611,15 @@ def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
 
 def _local_stats_overview_all() -> dict[str, Any]:
     """全库聚合（不按条数截断），与 /stats/mode、按学生聚合口径一致。"""
+    org_id = _current_exam_scope_organization_id()
     pass_score = _exam_pass_score()
-    practice_count = ExamCenterActivity.query.filter_by(mode="practice").count()
-    exam_act = ExamCenterActivity.query.filter_by(mode="exam").all()
+    q_practice = ExamCenterActivity.query.filter_by(mode="practice")
+    q_exam = ExamCenterActivity.query.filter_by(mode="exam")
+    if org_id:
+        q_practice = q_practice.filter(ExamCenterActivity.organization_id == org_id)
+        q_exam = q_exam.filter(ExamCenterActivity.organization_id == org_id)
+    practice_count = q_practice.count()
+    exam_act = q_exam.all()
     exam_count = len(exam_act)
     ids_exam = [str(r.id) for r in exam_act if getattr(r, "id", None)]
     det_map: dict[str, ExamCenterActivityDetail] = {}
@@ -4470,13 +4639,14 @@ def _local_stats_overview_all() -> dict[str, Any]:
     graded_exam_count = pass_count + fail_count
     pass_rate = round((pass_count * 100.0 / graded_exam_count), 2) if graded_exam_count > 0 else None
     try:
-        urows = (
+        uq = (
             db.session.query(ExamCenterActivity.user_id)
             .filter(ExamCenterActivity.user_id.isnot(None))
             .filter(ExamCenterActivity.user_id != "")
-            .distinct()
-            .all()
         )
+        if org_id:
+            uq = uq.filter(ExamCenterActivity.organization_id == org_id)
+        urows = uq.distinct().all()
         uid_list = [str(u[0]).strip() for u in urows if u and u[0]]
     except Exception:
         uid_list = []
@@ -4501,8 +4671,12 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
     lim = max(1, min(200, int(limit or 80)))
     out: list[dict[str, Any]] = []
     pass_score = _exam_pass_score()
+    org_id = _current_exam_scope_organization_id()
     try:
-        rows = ExamCenterActivity.query.order_by(ExamCenterActivity.created_at.desc()).limit(lim).all()
+        rq = ExamCenterActivity.query
+        if org_id:
+            rq = rq.filter(ExamCenterActivity.organization_id == org_id)
+        rows = rq.order_by(ExamCenterActivity.created_at.desc()).limit(lim).all()
         ids = [str(r.id) for r in rows if getattr(r, "id", None)]
         det_map: dict[str, ExamCenterActivityDetail] = {}
         if ids:
@@ -4611,24 +4785,34 @@ def api_exam_teacher_review_set():
     set_id = (data.pop("set_id", "") or "").strip()
     if not set_id:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(data.get("organization_id") or data.get("organizationId") or "").strip(),
+        project_id=str(data.get("project_id") or data.get("projectId") or "").strip(),
+    )
     status, payload = _quiz_api_call(
         f"quiz/sets/{set_id}/review-by-ai",
         method="POST",
         payload=data,
+        organization_id=org_id,
     )
     # 异步复审：上游立即返回 job_id；本地落库便于轮询与任务列表（与录题 ingest 一致）
     if 200 <= int(status) < 300 and isinstance(payload, dict):
         upstream_job_id = _guess_job_id_from_payload(payload)
         if upstream_job_id:
             created_by = (session.get("display_name") or session.get("username") or "").strip() or None
-            row = ExamSetReviewJob.query.filter_by(upstream_job_id=upstream_job_id).first()
+            row_q = ExamSetReviewJob.query.filter_by(upstream_job_id=upstream_job_id)
+            if org_id:
+                row_q = row_q.filter(ExamSetReviewJob.organization_id == org_id)
+            row = row_q.first()
             if not row:
                 row = ExamSetReviewJob(
+                    organization_id=org_id or None,
                     upstream_job_id=upstream_job_id,
                     set_id=set_id,
                     status="pending",
                     created_by=created_by,
                 )
+            row.organization_id = org_id or row.organization_id
             row.last_upstream_http_status = int(status)
             row.last_upstream_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload.get("data")
             row.last_upstream_request_url = ((payload.get("request") or {}).get("url") if isinstance(payload.get("request"), dict) else None) or None
@@ -4671,15 +4855,29 @@ def api_exam_teacher_review_job(job_id: str):
             400,
         )
     row = ExamSetReviewJob.query.filter_by(upstream_job_id=job_id).first()
+    scope_org_id = _current_exam_scope_organization_id()
+    if row is not None and scope_org_id and str(getattr(row, "organization_id", "") or "").strip() != scope_org_id:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录", "data": None, "trace_id": uuid.uuid4().hex}), 404
     refresh = (request.args.get("refresh") or "1").strip()
     if refresh not in {"0", "false", "no"}:
+        req_org_id = (
+            str(getattr(row, "organization_id", "") or "").strip()
+            or scope_org_id
+            or _resolve_exam_organization_id()
+        )
         status, payload = _quiz_api_call(
             f"quiz/sets/review-jobs/{job_id}",
             method="GET",
             query={k: v for k, v in request.args.to_dict().items() if k != "refresh"},
+            organization_id=req_org_id,
         )
         if row is None:
-            row = ExamSetReviewJob(upstream_job_id=job_id, status="unknown")
+            row = ExamSetReviewJob(
+                upstream_job_id=job_id,
+                status="unknown",
+                organization_id=req_org_id or None,
+            )
+        row.organization_id = req_org_id or row.organization_id
         row.last_upstream_http_status = int(status)
         if isinstance(payload, dict):
             row.last_message = (payload.get("message") or None)
@@ -4745,7 +4943,11 @@ def api_exam_teacher_review_jobs_list():
     if limit > 200:
         limit = 200
 
-    rows = ExamSetReviewJob.query.order_by(ExamSetReviewJob.created_at.desc()).limit(limit).all()
+    scope_org_id = _current_exam_scope_organization_id()
+    q_rows = ExamSetReviewJob.query
+    if scope_org_id:
+        q_rows = q_rows.filter(ExamSetReviewJob.organization_id == scope_org_id)
+    rows = q_rows.order_by(ExamSetReviewJob.created_at.desc()).limit(limit).all()
     return jsonify(
         {
             "code": 0,
@@ -4799,6 +5001,12 @@ def api_exam_teacher_create_paper():
 @page13_access_required
 def api_exam_teacher_create_assignment():
     req = _json_payload()
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(
+            req.get("organization_id") or req.get("organizationId") or ""
+        ).strip(),
+        project_id=str(req.get("project_id") or req.get("projectId") or "").strip(),
+    )
     due_val, due_update = _parse_assignment_due_from_request(req)
     forward = dict(req) if isinstance(req, dict) else {}
     if due_val and "due_at" not in forward and "dueAt" not in forward:
@@ -4814,6 +5022,7 @@ def api_exam_teacher_create_assignment():
         method="POST",
         payload=forward,
         query=None,
+        organization_id=org_id,
     )
     if isinstance(payload, dict) and tried:
         payload.setdefault("request", {})
@@ -4835,6 +5044,7 @@ def api_exam_teacher_create_assignment():
         if diff_req not in ("easy", "medium", "hard"):
             diff_req = ""
         row = ExamCenterAssignment(assignment_id=aid_local)
+        row.organization_id = org_id or None
         row.title = title_local
         row.set_id = set_id_local
         row.exam_track = exam_track_local
@@ -4878,6 +5088,7 @@ def api_exam_teacher_create_assignment():
             row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
             if not row:
                 row = ExamCenterAssignment(assignment_id=aid)
+            row.organization_id = org_id or row.organization_id
             row.title = title or row.title
             row.set_id = set_id or row.set_id or str(req.get("set_id") or req.get("setId") or "").strip() or None
             row.exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or row.exam_track
@@ -4891,7 +5102,12 @@ def api_exam_teacher_create_assignment():
                 row.due_at = due_val
             sid = str(row.set_id or "").strip()
             if sid and (not row.difficulty or row.difficulty not in ("easy", "medium", "hard")):
-                st_set, pl_set = _quiz_api_call(f"quiz/sets/{_urlquote(sid, safe='')}", method="GET", query=None)
+                st_set, pl_set = _quiz_api_call(
+                    f"quiz/sets/{_urlquote(sid, safe='')}",
+                    method="GET",
+                    query=None,
+                    organization_id=(org_id or row.organization_id or ""),
+                )
                 if 200 <= int(st_set) < 300 and isinstance(pl_set, dict):
                     d2 = _difficulty_from_quiz_get_set_payload(pl_set)
                     if d2:
@@ -4921,6 +5137,12 @@ def api_exam_teacher_create_assignment():
 def api_exam_teacher_issue_assignments_modal():
     """老师端弹窗：本地下发考试任务（含受众/截止/目的），学生端仅受众可见。"""
     req = _json_payload()
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(
+            req.get("organization_id") or req.get("organizationId") or ""
+        ).strip(),
+        project_id=str(req.get("project_id") or req.get("projectId") or "").strip(),
+    )
     due_val, due_update = _parse_assignment_due_from_request(req)
     purpose = str(req.get("purpose") or req.get("exam_purpose") or "").strip() or None
     exam_track = str(req.get("exam_track") or req.get("examTrack") or "").strip() or None
@@ -4967,6 +5189,7 @@ def api_exam_teacher_issue_assignments_modal():
             else:
                 nm = f"{sid} 考试任务"
             row = ExamCenterAssignment(assignment_id=aid_local)
+            row.organization_id = org_id or None
             row.title = nm
             row.set_id = sid
             row.exam_track = exam_track
@@ -5012,6 +5235,7 @@ def api_exam_teacher_issue_assignments_modal():
 def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
     """对已下发任务调用上游可变路径；不要求全部成功以便本地仍可收口。"""
     aid = (assignment_id or "").strip()
+    org_id = _resolve_exam_organization_id(assignment_id=aid)
     q = _urlquote(aid, safe="")
     attempts: list[dict[str, Any]] = []
     last_status = 599
@@ -5039,7 +5263,12 @@ def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> t
             ),
         ]
     for path, meth, bod in ops:
-        st0, pl0 = _quiz_api_call(path.strip("/"), method=meth, payload=bod if isinstance(bod, dict) else None)
+        st0, pl0 = _quiz_api_call(
+            path.strip("/"),
+            method=meth,
+            payload=bod if isinstance(bod, dict) else None,
+            organization_id=org_id,
+        )
         attempts.append({"path": path, "method": meth, "http_status": int(st0)})
         last_status = int(st0)
         last_pl = pl0 if isinstance(pl0, dict) else {}
@@ -5054,8 +5283,12 @@ def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> t
 @page13_access_required
 def api_teacher_assignments_local_list():
     """老师端：列出 aiword 本地镜像的考试任务。"""
+    org_id = _current_exam_scope_organization_id()
     try:
-        rows = ExamCenterAssignment.query.order_by(ExamCenterAssignment.created_at.desc()).limit(500).all()
+        q_rows = ExamCenterAssignment.query
+        if org_id:
+            q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+        rows = q_rows.order_by(ExamCenterAssignment.created_at.desc()).limit(500).all()
     except Exception as e:
         return jsonify(
             {
@@ -5094,6 +5327,9 @@ def api_teacher_get_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    org_id = _current_exam_scope_organization_id()
+    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     purpose = ""
     try:
@@ -5137,6 +5373,9 @@ def api_teacher_patch_assignment(assignment_id: str):
         req = {}
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    org_id = _current_exam_scope_organization_id()
+    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
 
     if "title" in req:
@@ -5223,7 +5462,12 @@ def api_teacher_patch_assignment(assignment_id: str):
 
     q = _urlquote(aid, safe="")
     for path in (f"quiz/assignments/{q}", f"quiz/teacher/assignments/{q}", f"quiz/exam-center/assignments/{q}"):
-        st0, pl0 = _quiz_api_call(path.strip("/"), method="PATCH", payload=forward)
+        st0, pl0 = _quiz_api_call(
+            path.strip("/"),
+            method="PATCH",
+            payload=forward,
+            organization_id=str(getattr(row, "organization_id", "") or "").strip(),
+        )
         upstream_attempts.append({"path": path, "method": "PATCH", "http_status": int(st0)})
         last_st = int(st0)
         last_pl = pl0 if isinstance(pl0, dict) else {}
@@ -5253,6 +5497,9 @@ def api_teacher_delete_local_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "delete")
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    org_id = _current_exam_scope_organization_id()
+    if row and org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     if row:
         try:
             ExamCenterAssignment.query.filter_by(assignment_id=aid).delete()
@@ -5278,6 +5525,9 @@ def api_teacher_unpublish_local_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "unpublish")
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+    org_id = _current_exam_scope_organization_id()
+    if row and org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+        return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     if row:
         try:
             row.status = "inactive"
@@ -5305,6 +5555,9 @@ def api_teacher_publish_local_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
+        return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录，无法上架", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    org_id = _current_exam_scope_organization_id()
+    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
         return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录，无法上架", "data": None, "trace_id": uuid.uuid4().hex}), 404
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "publish")
     try:
@@ -5386,7 +5639,11 @@ def api_student_quiz_grading_status(attempt_id: str):
     aid = (attempt_id or "").strip().lstrip("/")
     if not aid:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 attempt_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
-    st, pl = _quiz_api_call(f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status", method="GET")
+    st, pl = _quiz_api_call(
+        f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status",
+        method="GET",
+        organization_id=_resolve_exam_organization_id(attempt_id=aid),
+    )
     return jsonify(pl), st
 
 
@@ -5411,7 +5668,14 @@ def api_student_sync_quiz_attempt_result():
             {"code": "NOT_FOUND", "message": "未找到与该 attempt 匹配的本地记录", "data": {"updated": False}, "trace_id": uuid.uuid4().hex}
         ), 404
 
-    st, pl = _quiz_api_call(f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status", method="GET")
+    st, pl = _quiz_api_call(
+        f"quiz/attempts/{_urlquote(aid, safe='')}/grading-status",
+        method="GET",
+        organization_id=(
+            str(getattr(row, "organization_id", "") or "").strip()
+            or _resolve_exam_organization_id(attempt_id=aid)
+        ),
+    )
     if not (200 <= int(st) < 300) or not isinstance(pl, dict):
         return jsonify(pl), st
 
@@ -5504,6 +5768,7 @@ def api_exam_student_tracks():
 @bp.get("/api/exam-center/student/assignments")
 @login_required
 def api_exam_student_assignments_list():
+    org_id = _current_exam_scope_organization_id()
     paths = [
         "quiz/student/assignments",
         "quiz/me/assignments",
@@ -5526,7 +5791,10 @@ def api_exam_student_assignments_list():
     due_map: dict[str, Optional[datetime]] = {}
     if aids:
         try:
-            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids)).all():
+            q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids))
+            if org_id:
+                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            for ar in q_rows.all():
                 aid_k = str(ar.assignment_id or "").strip()
                 if aid_k:
                     due_map[aid_k] = getattr(ar, "due_at", None)
@@ -5539,7 +5807,10 @@ def api_exam_student_assignments_list():
             r["due_at"] = dt.isoformat(timespec="seconds")
     if aids:
         try:
-            for ar in ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids)).all():
+            q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids))
+            if org_id:
+                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            for ar in q_rows.all():
                 aid_k = str(ar.assignment_id or "").strip()
                 if not aid_k:
                     continue
@@ -5558,17 +5829,15 @@ def api_exam_student_assignments_list():
     # 仅当「上游已成功解析出非空任务列表」时才不合并本地，避免与上游真实列表混用过期 assignment_id。
     if not normalized:
         try:
-            local_rows = (
-                ExamCenterAssignment.query.filter(
-                    or_(
-                        ExamCenterAssignment.status.is_(None),
-                        ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
-                    )
+            local_q = ExamCenterAssignment.query.filter(
+                or_(
+                    ExamCenterAssignment.status.is_(None),
+                    ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
                 )
-                .order_by(ExamCenterAssignment.created_at.desc())
-                .limit(200)
-                .all()
             )
+            if org_id:
+                local_q = local_q.filter(ExamCenterAssignment.organization_id == org_id)
+            local_rows = local_q.order_by(ExamCenterAssignment.created_at.desc()).limit(200).all()
             uid_cur = str(session.get("user_id") or "").strip()
             allow_ids: set[str] = set()
             any_audience_ids: set[str] = set()
@@ -5651,6 +5920,9 @@ def api_exam_student_history():
     offset = max(0, offset)
     pass_score = _exam_pass_score()
     base_q = ExamCenterActivity.query.filter_by(user_id=uid)
+    org_id = _current_exam_scope_organization_id()
+    if org_id:
+        base_q = base_q.filter(ExamCenterActivity.organization_id == org_id)
     total = base_q.count()
     rows = (
         base_q.order_by(ExamCenterActivity.created_at.desc())
@@ -5714,6 +5986,12 @@ def _assignment_visible_to_user(*, assignment_id: str, user_id: str) -> bool:
     if not aid or not uid:
         return False
     try:
+        row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
+        if not row:
+            return False
+        org_id = _current_exam_scope_organization_id()
+        if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+            return False
         any_rows = ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).limit(1).all()
         if not any_rows:
             return True
@@ -6139,7 +6417,12 @@ def api_exam_student_start_exam_local():
     if not set_id:
         return jsonify({"code": "BAD_REQUEST", "message": "任务缺少 set_id，无法开考", "data": None, "trace_id": uuid.uuid4().hex}), 400
 
-    st_set, pl_set = _quiz_api_call(f"quiz/sets/{_urlquote(set_id, safe='')}", method="GET", query={})
+    st_set, pl_set = _quiz_api_call(
+        f"quiz/sets/{_urlquote(set_id, safe='')}",
+        method="GET",
+        query={},
+        organization_id=str(getattr(row, "organization_id", "") or "").strip(),
+    )
     if not (200 <= int(st_set) < 300) or not isinstance(pl_set, dict):
         return jsonify(pl_set), st_set
     up = _unwrap_quiz_api_success_data(pl_set)
@@ -6150,6 +6433,7 @@ def api_exam_student_start_exam_local():
     attempt_id = uuid.uuid4().hex
     try:
         att = ExamAttempt(
+            organization_id=(str(getattr(row, "organization_id", "") or "").strip() or None),
             attempt_id=attempt_id,
             assignment_id=assignment_id,
             user_id=uid,

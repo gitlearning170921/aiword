@@ -1,0 +1,65 @@
+---
+description: aiword 与 aicheckword 多公司租户契约（开关、Header、collection、回归）
+alwaysApply: true
+---
+
+# aiword × aicheckword 多公司租户契约
+
+本规则约束「多公司租户」改造的所有后续修改：保持向后兼容（开关默认关闭），统一 Header
+与 collection 解析，避免又一次破坏单租户现网。
+
+## 1. 开关与默认行为
+
+- 业务开关键：`FEATURE_MULTI_TENANT`（写入 `webapp/app_settings.SYSTEM_CONFIG_KEYS` 与
+  `FEATURE_FLAG_KEYS`），通过页面3「系统配置」维护；**默认关闭**。
+- 关闭时：
+  - 所有解析（`tenant_context.resolve_organization_context`）回退到默认组织 + 入参 `preferred_collection`；
+  - 出站请求**不发送** `X-Aiword-Company-Id`；
+  - aicheckword 端 `_resolve_request_collection` 仅在收到 Header 时映射，否则保留请求体的 `collection`。
+- 开启时：
+  - 所有 aiword → aicheckword 出站统一带 `X-Aiword-Company-Id`（见 `_integration_common.upstream_headers(organization_id=...)`）；
+  - aicheckword `_resolve_request_collection` 用 Header 反查 `companies.knowledge_collection`，并强制覆盖请求里的 `collection`；
+  - 业务对象（CompanyProject/Project/UploadRecord/Job/ExamAttempt/...）按 `organization_id` 隔离查询与写入。
+
+## 2. 模型与数据契约
+
+- aiword：`Organization`、`UserOrganizationMembership`、各业务表新增可空 `organization_id`（不强制 NOT NULL，保证升级期幂等回填）。
+- aicheckword：`companies`（`aiword_company_id`/`name`/`slug`/`knowledge_collection`/`is_default`/`is_active`），由 aiword 同步写入。
+- 同步入口：
+  - 单条：`webapp/company_routes._sync_org_to_aicheckword(org, delete=False)`；
+  - 启动批量：`webapp/__init__._sync_all_organizations_to_aicheckword()`（仅多租户开启时执行，失败仅日志）。
+
+## 3. Header 与 collection 解析
+
+- 唯一 Header 名：`X-Aiword-Company-Id`。任何新加的 aiword → aicheckword 出站必须用
+  `_integration_common.upstream_headers(..., organization_id=oid)` 统一构造，不允许各路由自己拼。
+- aicheckword 所有接收 `collection` 的入口都必须经 `_resolve_request_collection(req, collection)`：
+  - Form/Query：在函数签名加 `req: Request`，进入函数后立刻覆盖 `collection`；
+  - Pydantic body：用 `body.collection = _resolve_request_collection(req, body.collection)`；
+  - 异步作业（draft/audit/translation jobs）：在创建任务入口解析后写入 `body.collection`，任务后台只用 `payload.collection`，不再访问 `request`。
+
+## 4. 业务范围（org scope）
+
+- aiword 端凡是按业务对象列表/查询的 API，**先按 `_current_*_scope_organization_id()` 过滤**：
+  - 公司管理项目：`webapp/company_routes._current_company_scope_org_id`、`_company_project_in_active_org`；
+  - 考试中心：`webapp/routes._resolve_exam_organization_id`、`_current_exam_scope_organization_id`；
+- 新建业务记录必须显式赋值 `organization_id`（解析自上下文，不允许默认空）。
+
+## 5. 回归脚本
+
+- 改动多租户相关代码后，必须本地跑通：
+
+```bash
+cd aiword
+python scripts/multi_tenant_smoke.py
+```
+
+- 该脚本覆盖：表存在性、organization_id 列、默认组织、用户-组织映射、resolve 在开/关分支的行为。
+- 若新增 backfill 表，请同步加入 `scripts/multi_tenant_smoke.py::REQUIRED_ORG_COLUMN_TABLES`。
+
+## 6. 禁止的改法
+
+- 禁止在路由里直接读 `session["active_organization_id"]` 决定 collection；统一走
+  `tenant_context.resolve_organization_context(...)`。
+- 禁止把 `FEATURE_MULTI_TENANT` 当成「仅环境变量」开关；只能从页面3 / `app_configs` 读取。
+- 禁止把 `Organization.id` 暴露给 aicheckword 的 Streamlit 用户输入；Streamlit 只能选「name + collection」并由本地 `companies` 表反查。

@@ -1927,6 +1927,7 @@ async function initUploadPage() {
 }
 
 let registeredCountriesDictCache = null;
+let organizationsCache = null;
 
 async function loadRegisteredCountriesDict(force) {
     if (!force && registeredCountriesDictCache) {
@@ -1939,6 +1940,24 @@ async function loadRegisteredCountriesDict(force) {
         registeredCountriesDictCache = registeredCountriesDictCache || [];
     }
     return registeredCountriesDictCache;
+}
+
+async function loadOrganizationsDict(force) {
+    if (!force && organizationsCache) return organizationsCache;
+    try {
+        const res = await App.request("/api/organizations");
+        organizationsCache = Array.isArray(res?.organizations) ? res.organizations : [];
+    } catch (_) {
+        organizationsCache = organizationsCache || [];
+    }
+    return organizationsCache;
+}
+
+function organizationNameById(orgId) {
+    const oid = String(orgId || "").trim();
+    if (!oid) return "";
+    const row = (organizationsCache || []).find((o) => String(o.id || "").trim() === oid);
+    return String(row?.name || "").trim();
 }
 
 function buildRegisteredCountryOptionsHtml(selected, includeEmpty) {
@@ -2111,6 +2130,9 @@ function initEditUserMobile() {
                     mobile: mobile || null,
                     displayName: displayName || null,
                     adminRole,
+                    organizationIds: getTagMultiPickerValues(
+                        document.getElementById("editUserOrganizationsPicker")
+                    ),
                     registeredCountries: getTagMultiPickerValues(
                         document.getElementById("editUserCountriesPicker")
                     ),
@@ -2119,10 +2141,12 @@ function initEditUserMobile() {
                     ),
                 }),
             });
-            App.notify("账号已更新；公司管理员请刷新页面0 以应用新的国家维度");
+            App.notify("账号已更新");
             bootstrap.Modal.getInstance(modalEl)?.hide();
             registeredCountriesDictCache = null;
+            organizationsCache = null;
             await loadRegisteredCountriesDict(true).catch(() => {});
+            await loadOrganizationsDict(true).catch(() => {});
             loadUsersList();
         } catch (e) {
             App.notify(e.message || "更新失败", "danger");
@@ -3438,7 +3462,7 @@ function renderUsersList() {
     tbody.innerHTML = "";
     if (!filtered.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="8" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
+        tr.innerHTML = `<td colspan="9" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
         tbody.appendChild(tr);
         return;
     }
@@ -3454,6 +3478,12 @@ function renderUsersList() {
         const p0Badge = p0On
             ? '<span class="badge bg-warning text-dark">公司管理员</span>'
             : '<span class="text-muted">—</span>';
+        const orgNames = (u.organizationIds || [])
+            .map((oid) => organizationNameById(oid))
+            .filter(Boolean);
+        const orgText = orgNames.length
+            ? _escUserCell(orgNames.join("、"))
+            : '<span class="text-muted">—</span>';
         const countries = (u.registeredCountries || []).length
             ? _escUserCell((u.registeredCountries || []).join("、"))
             : '<span class="text-muted">—</span>';
@@ -3464,6 +3494,7 @@ function renderUsersList() {
             <td>${adminBadge}</td>
             <td>${roleBadge}</td>
             <td>${p0Badge}</td>
+            <td class="small">${orgText}</td>
             <td class="small">${countries}</td>
             <td class="text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info btn-check-at me-1" data-username="${_escUserCell(u.username)}">检查@</button>
@@ -3534,6 +3565,14 @@ function renderUsersList() {
                 })),
                 emptyHint: "未选择国家（表示全部国家）",
             });
+            await loadOrganizationsDict(true);
+            setTagMultiPicker(document.getElementById("editUserOrganizationsPicker"), {
+                values: u?.organizationIds || [],
+                options: (organizationsCache || [])
+                    .filter((o) => o.isActive !== false)
+                    .map((o) => ({ value: o.id, label: o.name })),
+                emptyHint: "未选择公司",
+            });
             setTagMultiPicker(document.getElementById("editUserTeamsPicker"), {
                 values: u?.teamIds || [],
                 options: teams
@@ -3551,8 +3590,8 @@ function loadUsersList() {
     const tbody = document.getElementById("usersTableBody");
     if (!tbody) return Promise.resolve();
 
-    return App.request("/api/users")
-        .then((res) => {
+    return Promise.all([loadOrganizationsDict(true), App.request("/api/users")])
+        .then(([, res]) => {
             usersListCache = res.users || [];
             renderUsersList();
             refreshAllAuthorPickers();
@@ -3753,6 +3792,9 @@ async function submitCreateUserForm() {
         mobile: mobileInput ? (mobileInput.value || "").trim() || null : null,
         isAdmin: !!(isAdminInput && isAdminInput.checked),
         adminRole: document.getElementById("newUserAdminRole")?.value || "none",
+        organizationIds: getTagMultiPickerValues(
+            document.getElementById("newUserOrganizationsPicker")
+        ),
         registeredCountries: getTagMultiPickerValues(
             document.getElementById("newUserCountriesPicker")
         ),
@@ -3783,6 +3825,7 @@ function initCreateUserModal() {
     openBtn?.addEventListener("click", async () => {
         form?.reset();
         await loadRegisteredCountriesDict(true);
+        await loadOrganizationsDict(true);
         setTagMultiPicker(document.getElementById("newUserCountriesPicker"), {
             values: [],
             options: (registeredCountriesDictCache || []).map((n) => ({
@@ -3790,6 +3833,14 @@ function initCreateUserModal() {
                 label: n,
             })),
             emptyHint: "未选择国家（表示全部国家）",
+        });
+        const defaultOrg = (organizationsCache || []).find((o) => o.isDefault);
+        setTagMultiPicker(document.getElementById("newUserOrganizationsPicker"), {
+            values: defaultOrg?.id ? [defaultOrg.id] : [],
+            options: (organizationsCache || [])
+                .filter((o) => o.isActive !== false)
+                .map((o) => ({ value: o.id, label: o.name })),
+            emptyHint: "未选择公司",
         });
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
         setTimeout(() => document.getElementById("newUsername")?.focus(), 200);
@@ -6070,8 +6121,177 @@ function initColumnToggle(btnId, menuId, tableId) {
     }
 }
 
+function initOrganizationsAdmin() {
+    const tableBody = document.getElementById("organizationsTableBody");
+    if (!tableBody) return;
+    const refreshBtn = document.getElementById("btnRefreshOrganizations");
+    const createBtn = document.getElementById("btnCreateOrganization");
+    const nameInput = document.getElementById("newOrganizationName");
+    const slugInput = document.getElementById("newOrganizationSlug");
+    const colInput = document.getElementById("newOrganizationCollection");
+
+    const esc = (s) =>
+        String(s ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+
+    const render = () => {
+        const rows = Array.isArray(organizationsCache) ? organizationsCache : [];
+        if (!rows.length) {
+            tableBody.innerHTML =
+                '<tr><td colspan="7" class="text-muted text-center small py-3">暂无公司，请先新增</td></tr>';
+            return;
+        }
+        tableBody.innerHTML = rows
+            .map((o) => {
+                const usage = Number(o.usageCount || 0);
+                return `<tr>
+                    <td>${esc(o.name)}</td>
+                    <td><code>${esc(o.slug || "")}</code></td>
+                    <td><code>${esc(o.knowledgeCollection || "")}</code></td>
+                    <td>${o.isDefault ? '<span class="badge bg-primary">默认</span>' : '<span class="text-muted">—</span>'}</td>
+                    <td>${o.isActive !== false ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>'}</td>
+                    <td>${usage}</td>
+                    <td class="text-nowrap">
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1 btn-org-edit" data-id="${esc(o.id)}">编辑</button>
+                        <button type="button" class="btn btn-sm btn-outline-primary me-1 btn-org-default" data-id="${esc(o.id)}"${o.isDefault ? " disabled" : ""}>设为默认</button>
+                        <button type="button" class="btn btn-sm btn-outline-warning me-1 btn-org-toggle" data-id="${esc(o.id)}">${o.isActive !== false ? "停用" : "启用"}</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger btn-org-delete" data-id="${esc(o.id)}"${o.isDefault ? " disabled" : ""}>删除</button>
+                    </td>
+                </tr>`;
+            })
+            .join("");
+
+        tableBody.querySelectorAll(".btn-org-edit").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const row = (organizationsCache || []).find((x) => x.id === btn.dataset.id);
+                if (!row) return;
+                const nextName = (window.prompt("公司名称", row.name || "") || "").trim();
+                if (!nextName) return;
+                const nextSlug = (
+                    window.prompt("slug（英文字母/数字/短横线）", row.slug || "") || ""
+                ).trim();
+                const nextCol = (
+                    window.prompt("knowledge_collection", row.knowledgeCollection || "") || ""
+                ).trim();
+                try {
+                    await App.request(`/api/organizations/${encodeURIComponent(row.id)}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            name: nextName,
+                            slug: nextSlug,
+                            knowledgeCollection: nextCol,
+                        }),
+                    });
+                    App.notify("公司信息已更新", "success");
+                    await loadOrganizationsDict(true);
+                    render();
+                    loadUsersList();
+                } catch (e) {
+                    App.notify(e.message || "更新失败", "danger");
+                }
+            });
+        });
+        tableBody.querySelectorAll(".btn-org-default").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                try {
+                    await App.request(`/api/organizations/${encodeURIComponent(btn.dataset.id)}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ isDefault: true }),
+                    });
+                    App.notify("默认公司已更新", "success");
+                    await loadOrganizationsDict(true);
+                    render();
+                } catch (e) {
+                    App.notify(e.message || "设置失败", "danger");
+                }
+            });
+        });
+        tableBody.querySelectorAll(".btn-org-toggle").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const row = (organizationsCache || []).find((x) => x.id === btn.dataset.id);
+                if (!row) return;
+                try {
+                    await App.request(`/api/organizations/${encodeURIComponent(row.id)}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ isActive: !(row.isActive !== false) }),
+                    });
+                    App.notify("状态已更新", "success");
+                    await loadOrganizationsDict(true);
+                    render();
+                    loadUsersList();
+                } catch (e) {
+                    App.notify(e.message || "更新失败", "danger");
+                }
+            });
+        });
+        tableBody.querySelectorAll(".btn-org-delete").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const row = (organizationsCache || []).find((x) => x.id === btn.dataset.id);
+                const label = row?.name || btn.dataset.id || "";
+                if (!window.confirm(`确定删除公司「${label}」？`)) return;
+                try {
+                    await App.request(`/api/organizations/${encodeURIComponent(btn.dataset.id)}`, {
+                        method: "DELETE",
+                    });
+                    App.notify("公司已删除", "success");
+                    await loadOrganizationsDict(true);
+                    render();
+                    loadUsersList();
+                } catch (e) {
+                    App.notify(e.message || "删除失败", "danger");
+                }
+            });
+        });
+    };
+
+    const reload = async () => {
+        await loadOrganizationsDict(true);
+        render();
+    };
+
+    refreshBtn?.addEventListener("click", reload);
+    createBtn?.addEventListener("click", async () => {
+        const name = (nameInput?.value || "").trim();
+        const slug = (slugInput?.value || "").trim();
+        const col = (colInput?.value || "").trim();
+        if (!name) {
+            App.notify("请先填写公司名称", "warning");
+            return;
+        }
+        try {
+            await App.request("/api/organizations", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    name,
+                    slug: slug || undefined,
+                    knowledgeCollection: col || undefined,
+                }),
+            });
+            if (nameInput) nameInput.value = "";
+            if (slugInput) slugInput.value = "";
+            if (colInput) colInput.value = "";
+            App.notify("公司已创建", "success");
+            await reload();
+        } catch (e) {
+            App.notify(e.message || "创建失败", "danger");
+        }
+    });
+    reload().catch(() => {
+        tableBody.innerHTML =
+            '<tr><td colspan="7" class="text-muted text-center small py-3">加载失败，请稍后重试</td></tr>';
+    });
+}
+
 function initAdminPage() {
     if (!document.getElementById("adminPageRoot")) return;
+    initOrganizationsAdmin();
     initCreateUserModal();
     initUsersListFilter();
     initConfigManagement();

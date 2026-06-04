@@ -6,7 +6,14 @@ import re
 from typing import Any, Optional
 
 from . import db
-from .models import User, UserCountryScope, UserTeamMembership, ProjectTeam
+from .models import (
+    User,
+    UserCountryScope,
+    UserOrganizationMembership,
+    UserTeamMembership,
+    ProjectTeam,
+    Organization,
+)
 from .registered_countries import (
     normalize_registered_country,
     resolve_registered_country_selection,
@@ -64,6 +71,20 @@ def set_user_team_memberships(user_id: str, team_ids: list[str]) -> list[str]:
     return applied
 
 
+def set_user_organization_memberships(user_id: str, organization_ids: list[str]) -> list[str]:
+    new_ids = {str(x).strip() for x in organization_ids if str(x).strip()}
+    UserOrganizationMembership.query.filter_by(user_id=user_id).delete(
+        synchronize_session=False
+    )
+    applied: list[str] = []
+    for oid in sorted(new_ids):
+        if not Organization.query.get(oid):
+            continue
+        db.session.add(UserOrganizationMembership(user_id=user_id, organization_id=oid))
+        applied.append(oid)
+    return applied
+
+
 def _valid_team_ids(raw_team_ids: list[Any]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -110,6 +131,11 @@ def serialize_user_access(user: User) -> dict[str, Any]:
             for m in UserTeamMembership.query.filter_by(user_id=user.id).all()
             if str(m.team_id).strip()
         ],
+        "organizationIds": [
+            str(m.organization_id).strip()
+            for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
+            if str(m.organization_id).strip()
+        ],
     }
 
 
@@ -128,3 +154,7 @@ def apply_user_access_fields(user: User, data: dict) -> None:
         raw = data.get("teamIds")
         if isinstance(raw, list):
             set_user_team_memberships(user.id, raw)
+    if "organizationIds" in data:
+        raw = data.get("organizationIds")
+        if isinstance(raw, list):
+            set_user_organization_memberships(user.id, raw)

@@ -50,6 +50,7 @@ from ._integration_common import (
     manual_upload_only_from_request,
     safe_truncate,
     resolve_aicheckword_project_id_for_upload,
+    resolve_org_collection_for_integration,
     upload_record_visible_to_user,
     upstream_headers,
 )
@@ -252,8 +253,13 @@ def api_audit_meta():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
     payload = build_integration_bootstrap_payload(
-        collection, read_timeout=min(30, _audit_timeout())
+        resolved_collection,
+        read_timeout=min(30, _audit_timeout()),
+        organization_id=org_id,
     )
     if not payload.get("ok"):
         return jsonify({"message": payload.get("message") or "加载失败"}), 502
@@ -339,6 +345,12 @@ def api_audit_create_job():
         pid = int(payload_obj.get("project_id") or 0)
     except (TypeError, ValueError):
         pid = 0
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=str(payload_obj.get("collection") or "regulations"),
+        upload_ids=upload_ids if has_task_source else None,
+    )
+    payload_obj["collection"] = resolved_collection
+
     if has_task_source and upload_ids:
         pid_guess = resolve_aicheckword_project_id_for_upload(
             upload_ids[0], user_id=str(session.get("user_id") or "")
@@ -415,10 +427,11 @@ def api_audit_create_job():
     # 本地 job 记录
     local_job = AuditJob(
         user_id=uid_session,
+        organization_id=(org_id or None),
         status="pending",
         progress=0.0,
         mode=mode,
-        collection=str(payload_obj.get("collection") or "regulations"),
+        collection=resolved_collection,
         source=("task" if has_task_source else "manual"),
         integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
@@ -448,7 +461,7 @@ def api_audit_create_job():
 
     # 提交上游
     url = f"{base}/api/integration/audit/jobs"
-    hdrs = upstream_headers(for_multipart=True)
+    hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
     hdrs.update(client_llm_headers_for_session())
     try:
         r = requests.post(
@@ -528,10 +541,11 @@ def api_audit_job_status(local_id: str):
     if not base:
         return jsonify({"message": "未配置上游 API"}), 500
     url = f"{base}/api/integration/audit/jobs/{job.upstream_job_id}"
+    org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
         r = requests.get(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
         )
     except requests.RequestException as e:
@@ -622,6 +636,7 @@ def _fetch_upstream_report_row(
     report_id: int,
     *,
     read_seconds: int,
+    organization_id: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """拉取 aicheckword ``GET /api/reports/{id}`` 完整行（含 report JSON）。"""
     base = integration_api_base()
@@ -630,7 +645,10 @@ def _fetch_upstream_report_row(
     try:
         r = requests.get(
             f"{base}/api/reports/{int(report_id)}",
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False,
+                organization_id=organization_id,
+            ),
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as e:
@@ -665,7 +683,12 @@ def api_audit_job_full_reports(local_id: str):
             try:
                 r = requests.get(
                     f"{base}/api/integration/audit/jobs/{job.upstream_job_id}",
-                    headers=upstream_headers(for_multipart=False),
+                    headers=upstream_headers(
+                        for_multipart=False,
+                        organization_id=str(
+                            getattr(job, "organization_id", "") or ""
+                        ).strip(),
+                    ),
                     timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
                 )
                 if r.status_code == 200:
@@ -691,7 +714,11 @@ def api_audit_job_full_reports(local_id: str):
     items: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for rid in report_ids:
-        row, em = _fetch_upstream_report_row(rid, read_seconds=read_sec)
+        row, em = _fetch_upstream_report_row(
+            rid,
+            read_seconds=read_sec,
+            organization_id=str(getattr(job, "organization_id", "") or "").strip(),
+        )
         if row:
             items.append(row)
         else:
@@ -721,10 +748,11 @@ def api_audit_job_download(local_id: str):
     if not base or not job.upstream_job_id:
         return jsonify({"message": "上游未就绪"}), 400
     url = f"{base}/api/integration/audit/jobs/{job.upstream_job_id}/download"
+    org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
         r = requests.get(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=_audit_timeout()),
             stream=False,
         )
@@ -825,10 +853,11 @@ def api_audit_report_proxy_get(report_id: int):
     base = integration_api_base()
     if not base:
         return jsonify({"message": "未配置上游 API"}), 500
+    org_id, _ = resolve_org_collection_for_integration()
     try:
         r = requests.get(
             f"{base}/api/reports/{int(report_id)}",
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
         )
     except requests.RequestException as e:
@@ -861,12 +890,13 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
         sub_idx = 0
     if sub_idx < 0:
         sub_idx = 0
+    org_id, _ = resolve_org_collection_for_integration()
     try:
         r = requests.patch(
             f"{base}/api/reports/{int(report_id)}/points/{int(point_index)}",
             params={"sub_report_index": sub_idx},
             json=body,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
         )
     except requests.RequestException as e:
@@ -892,13 +922,16 @@ def api_upload_latest_report(upload_id: str):
     if not upload_record_visible_to_user(rec):
         return jsonify({"message": "无权限"}), 403
 
+    rec_org_id = str(getattr(rec, "organization_id", "") or "").strip()
     local_rid = rec.last_audit_report_id
     base = integration_api_base()
     if local_rid and base:
         try:
             r = requests.get(
                 f"{base}/api/integration/audit/reports/{int(local_rid)}",
-                headers=upstream_headers(for_multipart=False),
+                headers=upstream_headers(
+                    for_multipart=False, organization_id=rec_org_id
+                ),
                 timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
             )
             if r.status_code == 200:
@@ -928,7 +961,9 @@ def api_upload_latest_report(upload_id: str):
                 "file_name": fn,
                 "limit": 1,
             },
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False, organization_id=rec_org_id
+            ),
             timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
         )
     except requests.RequestException as e:

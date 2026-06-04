@@ -20,7 +20,8 @@ from typing import Any, Optional, Tuple
 import requests
 from flask import current_app, jsonify, session
 
-from .app_settings import get_setting
+from .app_settings import get_setting, is_multi_tenant_enabled
+from .tenant_context import resolve_organization_context
 
 
 # 与 draft_generation_routes 保持同步的"读超时上限"
@@ -58,7 +59,11 @@ def integration_requests_timeout(read_seconds: int) -> tuple[int, int]:
     return (integration_connect_timeout(), max(5, int(read_seconds)))
 
 
-def upstream_headers(*, for_multipart: bool = False) -> dict[str, str]:
+def upstream_headers(
+    *,
+    for_multipart: bool = False,
+    organization_id: Optional[str] = None,
+) -> dict[str, str]:
     h: dict[str, str] = {"Accept": "application/json"}
     bearer = (get_setting("QUIZ_API_BEARER_TOKEN") or "").strip()
     secret = (get_setting("QUIZ_API_SECRET") or "").strip()
@@ -66,6 +71,10 @@ def upstream_headers(*, for_multipart: bool = False) -> dict[str, str]:
         h["Authorization"] = f"Bearer {bearer}"
     if secret:
         h["X-Integration-Secret"] = secret
+    if is_multi_tenant_enabled():
+        oid = str(organization_id or "").strip()
+        if oid:
+            h["X-Aiword-Company-Id"] = oid
     if not for_multipart:
         h["Content-Type"] = "application/json; charset=utf-8"
     return h
@@ -82,6 +91,7 @@ def fetch_upstream_common_bootstrap(
     collection: str,
     *,
     read_timeout_seconds: int = 30,
+    organization_id: Optional[str] = None,
 ) -> Tuple[Optional[dict[str, Any]], Optional[str]]:
     """拉取 aicheckword ``GET /api/integration/common/bootstrap``。"""
     base = integration_api_base()
@@ -92,7 +102,9 @@ def fetch_upstream_common_bootstrap(
         r = requests.get(
             f"{base}/api/integration/common/bootstrap",
             params={"collection": coll},
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False, organization_id=organization_id
+            ),
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
@@ -131,6 +143,7 @@ def fetch_draft_page_bootstrap(
     base_case_id: Optional[int] = None,
     template_names: Optional[list[str]] = None,
     read_timeout_seconds: int = 60,
+    organization_id: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str], Optional[dict[str, Any]]]:
     """拉取 aicheckword ``GET /api/integration/draft/page-bootstrap``。
 
@@ -149,7 +162,9 @@ def fetch_draft_page_bootstrap(
         r = requests.get(
             url,
             params=params,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False, organization_id=organization_id
+            ),
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
@@ -168,9 +183,18 @@ def fetch_draft_page_bootstrap(
     return data, None, body
 
 
-def build_integration_bootstrap_payload(collection: str, *, read_timeout: int = 30) -> dict[str, Any]:
+def build_integration_bootstrap_payload(
+    collection: str,
+    *,
+    read_timeout: int = 30,
+    organization_id: Optional[str] = None,
+) -> dict[str, Any]:
     """合并上游 common/bootstrap 与本地 collections 配置。"""
-    data, err = fetch_upstream_common_bootstrap(collection, read_timeout_seconds=read_timeout)
+    data, err = fetch_upstream_common_bootstrap(
+        collection,
+        read_timeout_seconds=read_timeout,
+        organization_id=organization_id,
+    )
     if err:
         return {"ok": False, "message": err}
     assert data is not None
@@ -233,6 +257,7 @@ def upstream_get_json(
     *,
     params: Optional[dict[str, Any]] = None,
     read_timeout_seconds: int = 30,
+    organization_id: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """GET aicheckword integration JSON；返回 (data 子对象, error)。"""
     base = integration_api_base()
@@ -243,7 +268,9 @@ def upstream_get_json(
         r = requests.get(
             url,
             params=params,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False, organization_id=organization_id
+            ),
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
@@ -270,6 +297,7 @@ def upstream_post_json(
     json_body: dict[str, Any],
     *,
     read_timeout_seconds: int = 30,
+    organization_id: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """POST aicheckword integration JSON；返回 (data 子对象, error)。"""
     base = integration_api_base()
@@ -279,7 +307,9 @@ def upstream_post_json(
     try:
         r = requests.post(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(
+                for_multipart=False, organization_id=organization_id
+            ),
             json=json_body,
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
@@ -300,6 +330,21 @@ def upstream_post_json(
         return None, (body.get("detail") or body.get("message") or "上游失败") if isinstance(body, dict) else "上游失败"
     data = body.get("data")
     return (data if isinstance(data, dict) else body), None
+
+
+def resolve_org_collection_for_integration(
+    *,
+    preferred_collection: Optional[str] = None,
+    explicit_organization_id: Optional[str] = None,
+    upload_id: Optional[str] = None,
+    upload_ids: Optional[list[str]] = None,
+) -> tuple[str, str]:
+    return resolve_organization_context(
+        preferred_collection=preferred_collection,
+        explicit_organization_id=explicit_organization_id,
+        upload_id=upload_id,
+        upload_ids=upload_ids,
+    )
 
 
 def fetch_audit_prompt_defaults_upstream() -> dict[str, str]:

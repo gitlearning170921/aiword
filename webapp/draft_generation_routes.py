@@ -37,6 +37,7 @@ from ._integration_common import (
     integration_scope_list_filter,
     manual_upload_only_from_request,
     resolve_aicheckword_project_id_for_upload,
+    resolve_org_collection_for_integration,
     upstream_get_json,
 )
 from .llm_credential_crypto import decrypt_api_key, encrypt_api_key
@@ -417,10 +418,13 @@ def _refresh_upstream_interop_if_stale(*, force: bool = False) -> None:
         _interop_err = "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"
         return
     url = f"{base}/api/integration/draft/interop-config"
+    org_id, _ = resolve_org_collection_for_integration()
     try:
         r = requests.get(
             url,
-            headers=_upstream_headers(for_multipart=False),
+            headers=_upstream_headers(
+                for_multipart=False, organization_id=org_id
+            ),
             timeout=_draft_requests_timeout(read_seconds=min(30, _draft_timeout())),
         )
         if r.status_code != 200:
@@ -550,7 +554,11 @@ def _draft_personal_key_headers() -> dict[str, str]:
     return {"X-Client-Llm-Personal-Keys-Only": "1"}
 
 
-def _upstream_headers(*, for_multipart: bool = False) -> dict[str, str]:
+def _upstream_headers(
+    *,
+    for_multipart: bool = False,
+    organization_id: Optional[str] = None,
+) -> dict[str, str]:
     h: dict[str, str] = {"Accept": "application/json"}
     bearer = (get_setting("QUIZ_API_BEARER_TOKEN") or "").strip()
     secret = (get_setting("QUIZ_API_SECRET") or "").strip()
@@ -558,6 +566,8 @@ def _upstream_headers(*, for_multipart: bool = False) -> dict[str, str]:
         h["Authorization"] = f"Bearer {bearer}"
     if secret:
         h["X-Integration-Secret"] = secret
+    if organization_id:
+        h["X-Aiword-Company-Id"] = str(organization_id).strip()
     if not for_multipart:
         h["Content-Type"] = "application/json; charset=utf-8"
     return h
@@ -745,7 +755,12 @@ def api_llm_settings_post():
     return jsonify({"ok": True, "message": "已保存"})
 
 
-def _fetch_upstream_meta(collection: str, base_case_id: Optional[int]) -> Tuple[Optional[dict[str, Any]], Optional[str]]:
+def _fetch_upstream_meta(
+    collection: str,
+    base_case_id: Optional[int],
+    *,
+    organization_id: Optional[str] = None,
+) -> Tuple[Optional[dict[str, Any]], Optional[str]]:
     """请求 aicheckword draft meta；返回 (json_body, error_message)。"""
     base = _draft_api_base()
     if not base:
@@ -758,7 +773,10 @@ def _fetch_upstream_meta(collection: str, base_case_id: Optional[int]) -> Tuple[
         r = requests.get(
             url,
             params=params,
-            headers=_upstream_headers(for_multipart=False),
+            headers=_upstream_headers(
+                for_multipart=False,
+                organization_id=organization_id,
+            ),
             timeout=_draft_requests_timeout(read_seconds=min(60, _draft_timeout())),
         )
         try:
@@ -779,6 +797,9 @@ def api_draft_bootstrap():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
     bc_raw = (request.args.get("base_case_id") or "").strip()
     base_case_id: Optional[int] = None
     if bc_raw:
@@ -791,18 +812,23 @@ def api_draft_bootstrap():
 
     tpl_names = [str(x).strip() for x in request.args.getlist("templates") if str(x).strip()]
     bootstrap, boot_err, upstream_body = fetch_draft_page_bootstrap(
-        collection,
+        resolved_collection,
         base_case_id=base_case_id,
         template_names=tpl_names or None,
+        organization_id=org_id,
     )
-    meta_body, meta_err = _fetch_upstream_meta(collection, base_case_id)
+    meta_body, meta_err = _fetch_upstream_meta(
+        resolved_collection,
+        base_case_id,
+        organization_id=org_id,
+    )
 
     out: dict[str, Any] = {"ok": True}
     if bootstrap:
         out.update(bootstrap)
-        out["collection"] = bootstrap.get("collection") or collection
+        out["collection"] = bootstrap.get("collection") or resolved_collection
     else:
-        out["collection"] = collection
+        out["collection"] = resolved_collection
     out["collections"] = integration_collection_rows()
     out["metaOk"] = boot_err is None and bool(bootstrap)
     out["metaError"] = boot_err or (None if bootstrap else "page-bootstrap 异常")
@@ -831,11 +857,14 @@ def api_suggest_author_role():
     base = _draft_api_base()
     if not base:
         return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
+    org_id, _ = resolve_org_collection_for_integration()
     try:
         r = requests.get(
             f"{base}/api/integration/draft/suggest-author-role",
             params=params,
-            headers=_upstream_headers(for_multipart=False),
+            headers=_upstream_headers(
+                for_multipart=False, organization_id=org_id
+            ),
             timeout=_draft_requests_timeout(read_seconds=30),
         )
         body = r.json()
@@ -872,8 +901,11 @@ def api_meta():
     if not base:
         return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
     collection = (request.args.get("collection") or "regulations").strip()
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
     bc = request.args.get("base_case_id")
-    params: dict[str, Any] = {"collection": collection}
+    params: dict[str, Any] = {"collection": resolved_collection}
     if bc is not None and str(bc).strip() != "":
         try:
             params["base_case_id"] = int(bc)
@@ -884,7 +916,9 @@ def api_meta():
         r = requests.get(
             url,
             params=params,
-            headers=_upstream_headers(for_multipart=False),
+            headers=_upstream_headers(
+                for_multipart=False, organization_id=org_id
+            ),
             timeout=_draft_requests_timeout(read_seconds=min(60, _draft_timeout())),
         )
         try:
@@ -1123,6 +1157,11 @@ def api_jobs_submit():
     payload_obj["aiword_user_id"] = uid
 
     base_ids_ordered = _collect_base_upload_record_ids(payload_obj)
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=str(payload_obj.get("collection") or "regulations"),
+        upload_ids=base_ids_ordered,
+    )
+    payload_obj["collection"] = resolved_collection
     if base_ids_ordered:
         pid_guess = resolve_aicheckword_project_id_for_upload(base_ids_ordered[0], user_id=uid)
         try:
@@ -1180,8 +1219,9 @@ def api_jobs_submit():
 
     job = DraftGenerationJob(
         user_id=uid,
+        organization_id=(org_id or None),
         status="pending",
-        collection=str(payload_obj.get("collection") or "regulations")[:64],
+        collection=resolved_collection[:64],
         base_case_id=payload_obj.get("base_case_id"),
         template_names_json=payload_obj.get("template_file_names"),
         input_display_names_json=display_names,
@@ -1202,7 +1242,7 @@ def api_jobs_submit():
         files.append(("base_files", (fn, f.read(), "application/octet-stream")))
 
     hdr = {
-        **_upstream_headers(for_multipart=True),
+        **_upstream_headers(for_multipart=True, organization_id=org_id),
         **_draft_personal_key_headers(),
         **_client_llm_headers(uid, provider=p),
     }
@@ -1272,7 +1312,13 @@ def api_job_status(local_id: str):
     base = _draft_api_base()
     if not base:
         return jsonify({"message": "未配置上游地址"}), 503
-    hdr = {**_upstream_headers(for_multipart=True), **_client_llm_headers(uid)}
+    hdr = {
+        **_upstream_headers(
+            for_multipart=True,
+            organization_id=str(getattr(job, "organization_id", "") or "").strip(),
+        ),
+        **_client_llm_headers(uid),
+    }
     url = f"{base}/api/integration/draft/jobs/{job.upstream_job_id}"
     try:
         r = requests.get(
@@ -1311,7 +1357,10 @@ def api_job_download(local_id: str):
     if not base:
         return jsonify({"message": "未配置上游地址"}), 503
     hdr = {
-        **_upstream_headers(for_multipart=True),
+        **_upstream_headers(
+            for_multipart=True,
+            organization_id=str(getattr(job, "organization_id", "") or "").strip(),
+        ),
         **_draft_personal_key_headers(),
         **_client_llm_headers(uid),
     }

@@ -160,6 +160,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "公司项目总览模块（页面0 与 /api/company/*；1=开启；空或0=关闭。访问密码调试模式不受此项限制）",
         False,
     ),
+    (
+        "FEATURE_MULTI_TENANT",
+        "多公司租户开关（1=启用公司维度隔离；空或0=关闭并保持现网单租户行为）",
+        False,
+    ),
 ]
 
 
@@ -171,6 +176,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE2_TRANSLATE",
     "FEATURE_EXAM_CENTER",
     "FEATURE_COMPANY_REGISTRY",
+    "FEATURE_MULTI_TENANT",
 )
 
 # 页面3「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
@@ -354,6 +360,11 @@ def effective_feature_flags_for_request(app: Optional["Flask"] = None) -> dict[s
     if is_feature_admin_viewer():
         return {k: True for k in FEATURE_FLAG_KEYS}
     return feature_flags_for_template(app)
+
+
+def is_multi_tenant_enabled(app: Optional["Flask"] = None) -> bool:
+    """多公司租户总开关（默认关闭，关闭时保持现网行为）。"""
+    return _parse_flag(get_setting("FEATURE_MULTI_TENANT", default="", app=app))
 
 
 SENSITIVE_KEYS = {k for k, _, sens in SYSTEM_CONFIG_KEYS if sens}

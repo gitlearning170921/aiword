@@ -18,6 +18,7 @@ from .models import (
     Project,
     UploadRecord,
     User,
+    UserOrganizationMembership,
     UserTeamMembership,
 )
 
@@ -401,6 +402,18 @@ def sync_user_session(user: User) -> None:
         for m in UserTeamMembership.query.filter_by(user_id=user.id).all()
         if str(m.team_id).strip()
     ]
+    org_ids = [
+        str(m.organization_id).strip()
+        for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
+        if str(m.organization_id).strip()
+    ]
+    session["organization_ids"] = org_ids
+    active_org = str(session.get("active_organization_id") or "").strip()
+    if org_ids:
+        if active_org not in org_ids:
+            session["active_organization_id"] = org_ids[0]
+    else:
+        session.pop("active_organization_id", None)
     from .user_access import user_country_scope_list
 
     scopes = user_country_scope_list(user.id)

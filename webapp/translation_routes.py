@@ -41,6 +41,7 @@ from ._integration_common import (
     integration_scope_from_request,
     integration_scope_list_filter,
     login_wall,
+    resolve_org_collection_for_integration,
     safe_truncate,
     upload_record_visible_to_user,
     upstream_headers,
@@ -83,8 +84,13 @@ def api_translate_meta():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
     payload = build_integration_bootstrap_payload(
-        collection, read_timeout=min(30, _translation_timeout())
+        resolved_collection,
+        read_timeout=min(30, _translation_timeout()),
+        organization_id=org_id,
     )
     if not payload.get("ok"):
         return jsonify({"message": payload.get("message") or "加载失败"}), 502
@@ -130,10 +136,12 @@ def api_translate_kb_query_extra():
         v = (request.args.get(k) or "").strip()
         if v:
             params[k] = v
+    org_id, _ = resolve_org_collection_for_integration()
     data, up_err = upstream_get_json(
         "api/integration/translation/kb-query-extra",
         params=params,
         read_timeout_seconds=20,
+        organization_id=org_id,
     )
     if up_err:
         return jsonify({"message": up_err}), 502
@@ -251,6 +259,12 @@ def api_translate_create_job():
     if not has_task_source and not has_manual_source:
         return jsonify({"message": "请至少提供一个 upload_ids 或 input_files"}), 400
 
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=str(payload_obj.get("collection") or "regulations"),
+        upload_ids=upload_ids if has_task_source else None,
+    )
+    payload_obj["collection"] = resolved_collection
+
     resolved: list[tuple[str, bytes, str]] = []
     if has_task_source:
         from .draft_generation_routes import _base_doc_bytes_from_upload, _template_display_filename
@@ -320,10 +334,11 @@ def api_translate_create_job():
     job_scope = integration_scope_from_request()
     local_job = TranslationJob(
         user_id=uid_session,
+        organization_id=(org_id or None),
         status="pending",
         progress=0.0,
         target_lang=target_lang,
-        collection=str(payload_obj.get("collection") or "regulations"),
+        collection=resolved_collection,
         source=("task" if has_task_source else "manual"),
         integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
@@ -344,7 +359,7 @@ def api_translate_create_job():
     db.session.commit()
 
     url = f"{base}/api/integration/translation/jobs"
-    hdrs = upstream_headers(for_multipart=True)
+    hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
     hdrs.update(client_llm_headers_for_session())
     try:
         r = requests.post(
@@ -424,10 +439,11 @@ def api_translate_status(local_id: str):
     if not base:
         return jsonify({"message": "未配置上游 API"}), 500
     url = f"{base}/api/integration/translation/jobs/{job.upstream_job_id}"
+    org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
         r = requests.get(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(
                 read_seconds=min(60, _translation_timeout())
             ),
@@ -511,10 +527,11 @@ def api_translate_download(local_id: str):
     if not base or not job.upstream_job_id:
         return jsonify({"message": "上游未就绪"}), 400
     url = f"{base}/api/integration/translation/jobs/{job.upstream_job_id}/download"
+    org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
         r = requests.get(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=_translation_timeout()),
             stream=False,
         )
@@ -648,6 +665,12 @@ def api_translate_correct_create_job():
     if not has_task_source and not has_manual_source:
         return jsonify({"message": "请至少提供一个 upload_ids 或 input_files"}), 400
 
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=str(payload_obj.get("collection") or "regulations"),
+        upload_ids=upload_ids if has_task_source else None,
+    )
+    payload_obj["collection"] = resolved_collection
+
     resolved: list[tuple[str, bytes, str]] = []
     if has_task_source:
         from .draft_generation_routes import _base_doc_bytes_from_upload, _template_display_filename
@@ -714,10 +737,11 @@ def api_translate_correct_create_job():
     job_scope = integration_scope_from_request()
     local_job = TranslationJob(
         user_id=uid_session,
+        organization_id=(org_id or None),
         status="pending",
         progress=0.0,
         target_lang=target_lang,
-        collection=str(payload_obj.get("collection") or "regulations"),
+        collection=resolved_collection,
         source=("task_correct" if has_task_source else "manual_correct"),
         integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
@@ -739,7 +763,7 @@ def api_translate_correct_create_job():
     db.session.commit()
 
     url = f"{base}/api/integration/translation/correct/jobs"
-    hdrs = upstream_headers(for_multipart=True)
+    hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
     hdrs.update(client_llm_headers_for_session())
     try:
         r = requests.post(
@@ -818,10 +842,11 @@ def api_translate_correct_download(local_id: str):
     if not base or not job.upstream_job_id:
         return jsonify({"message": "上游未就绪"}), 400
     url = f"{base}/api/integration/translation/correct/jobs/{job.upstream_job_id}/download"
+    org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
         r = requests.get(
             url,
-            headers=upstream_headers(for_multipart=False),
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
             timeout=integration_requests_timeout(read_seconds=_translation_timeout()),
             stream=False,
         )

@@ -36,6 +36,27 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hash_password(password) == password_hash
 
 
+class Organization(db.Model):
+    """租户公司：账号多公司关联、项目归属与知识库映射来源。"""
+    __tablename__ = "organizations"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_organizations_name"),
+        UniqueConstraint("slug", name="uq_organizations_slug"),
+        UniqueConstraint("knowledge_collection", name="uq_organizations_collection"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    slug: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    knowledge_collection: Mapped[str] = mapped_column(db.String(128), nullable=False, default="regulations")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    is_default: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class User(db.Model):
     """用户账号，用于页面2登录。在页面1管理。"""
     __tablename__ = "users"
@@ -61,6 +82,19 @@ class User(db.Model):
 
     def check_password(self, password: str) -> bool:
         return verify_password(password, self.password_hash)
+
+
+class UserOrganizationMembership(db.Model):
+    """用户与公司多对多关联。"""
+    __tablename__ = "user_organization_memberships"
+    __table_args__ = (
+        UniqueConstraint("user_id", "organization_id", name="uq_user_organization"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), ForeignKey("users.id"), nullable=False)
+    organization_id: Mapped[str] = mapped_column(db.String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
 #: 任务类型一级分类：file=文件型任务（携带模板/链接，参与初稿、审核、翻译等文档流转）；
@@ -153,6 +187,7 @@ class ProjectTeam(db.Model):
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(db.String(128), unique=True, nullable=False)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
     dingtalk_webhook: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
@@ -207,6 +242,7 @@ class CompanyProject(db.Model):
     STATUS_ENDED = "ended"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     product_type: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     registered_country: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
@@ -240,6 +276,7 @@ class Project(db.Model):
     STATUS_ENDED = "ended"    # 已结束
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     company_project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     # 注册国家/注册类别用于区分“同名不同项目”的唯一性
@@ -291,6 +328,7 @@ class UploadRecord(db.Model):
     )
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     project_name: Mapped[str] = mapped_column(db.String(128), nullable=False)
     file_name: Mapped[str] = mapped_column(db.String(255), nullable=False)
@@ -436,6 +474,7 @@ class ExamBankIngestJob(db.Model):
     )
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     upstream_job_id: Mapped[str] = mapped_column(db.String(128), nullable=False)
     # 上游套题 ID：ingest-by-ai 可能在任务进行中就返回（不必等 done）
     upstream_set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
@@ -465,6 +504,7 @@ class ExamSetReviewJob(db.Model):
     __table_args__ = (UniqueConstraint("upstream_job_id", name="uq_exam_set_review_upstream_job_id"),)
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     upstream_job_id: Mapped[str] = mapped_column(db.String(128), nullable=False)
     set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
 
@@ -486,6 +526,7 @@ class ExamCenterActivity(db.Model):
     __tablename__ = "exam_center_activities"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
     username: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
@@ -510,6 +551,7 @@ class ExamCenterAssignment(db.Model):
     __tablename__ = "exam_center_assignments"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, unique=True, index=True)
     set_id: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True, index=True)
     title: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
@@ -552,6 +594,7 @@ class ExamAttempt(db.Model):
     __tablename__ = "exam_attempts"
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     attempt_id: Mapped[str] = mapped_column(db.String(36), nullable=False, unique=True, index=True)
     assignment_id: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
@@ -652,6 +695,7 @@ class DraftGenerationJob(db.Model):
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(db.String(32), default="pending")  # pending|queued|running|succeeded|failed
     progress: Mapped[float] = mapped_column(db.Float, default=0.0)
@@ -683,6 +727,7 @@ class AuditJob(db.Model):
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(db.String(32), default="pending")
     progress: Mapped[float] = mapped_column(db.Float, default=0.0)
@@ -711,6 +756,7 @@ class TranslationJob(db.Model):
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
     user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     upstream_job_id: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(db.String(32), default="pending")
     progress: Mapped[float] = mapped_column(db.Float, default=0.0)

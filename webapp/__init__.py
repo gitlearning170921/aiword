@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from flask import Flask
@@ -85,15 +86,22 @@ def ensure_schema(app: Flask):
         conn.commit()
 
     def ensure_column(table: str, column: str, ddl_sqlite: str, ddl_other: str):
-        if table not in existing_tables:
+        live_inspector = inspect(engine)
+        if table not in live_inspector.get_table_names():
             return
-        columns = {col["name"] for col in inspector.get_columns(table)}
+        columns = {col["name"] for col in live_inspector.get_columns(table)}
         if column in columns:
             return
         ddl = ddl_sqlite if is_sqlite else ddl_other
-        with engine.connect() as conn:
-            conn.execute(text(ddl))
-            conn.commit()
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(ddl))
+                conn.commit()
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "duplicate column" in msg or "already exists" in msg:
+                return
+            raise
 
     def fix_upload_records_nullable():
         """修复 upload_records 表中某些字段的 nullable 约束（SQLite专用）"""
@@ -893,6 +901,14 @@ def ensure_schema(app: Flask):
         from .models import ProjectTeam
 
         ProjectTeam.__table__.create(bind=engine, checkfirst=True)
+    if "organizations" not in rbac_tables:
+        from .models import Organization
+
+        Organization.__table__.create(bind=engine, checkfirst=True)
+    if "user_organization_memberships" not in rbac_tables:
+        from .models import UserOrganizationMembership
+
+        UserOrganizationMembership.__table__.create(bind=engine, checkfirst=True)
     ensure_column(
         "project_teams",
         "dingtalk_webhook",
@@ -904,6 +920,12 @@ def ensure_schema(app: Flask):
         "dingtalk_secret",
         "ALTER TABLE project_teams ADD COLUMN dingtalk_secret VARCHAR(256)",
         "ALTER TABLE project_teams ADD COLUMN dingtalk_secret VARCHAR(256)",
+    )
+    ensure_column(
+        "project_teams",
+        "organization_id",
+        "ALTER TABLE project_teams ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE project_teams ADD COLUMN organization_id VARCHAR(36)",
     )
     if "user_team_memberships" not in rbac_tables:
         from .models import UserTeamMembership
@@ -926,6 +948,12 @@ def ensure_schema(app: Flask):
         "registration_owner",
         ddl_sqlite="ALTER TABLE company_projects ADD COLUMN registration_owner VARCHAR(128)",
         ddl_other="ALTER TABLE company_projects ADD COLUMN registration_owner VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "company_projects",
+        "organization_id",
+        ddl_sqlite="ALTER TABLE company_projects ADD COLUMN organization_id VARCHAR(36)",
+        ddl_other="ALTER TABLE company_projects ADD COLUMN organization_id VARCHAR(36) NULL",
     )
 
     ensure_column(
@@ -960,6 +988,259 @@ def ensure_schema(app: Flask):
         "ALTER TABLE projects ADD COLUMN company_project_id VARCHAR(36)",
         "ALTER TABLE projects ADD COLUMN company_project_id VARCHAR(36)",
     )
+    ensure_column(
+        "projects",
+        "organization_id",
+        "ALTER TABLE projects ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE projects ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "upload_records",
+        "organization_id",
+        "ALTER TABLE upload_records ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE upload_records ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "draft_generation_jobs",
+        "organization_id",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "audit_jobs",
+        "organization_id",
+        "ALTER TABLE audit_jobs ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE audit_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "translation_jobs",
+        "organization_id",
+        "ALTER TABLE translation_jobs ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE translation_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "exam_center_assignments",
+        "organization_id",
+        "ALTER TABLE exam_center_assignments ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE exam_center_assignments ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "exam_center_activities",
+        "organization_id",
+        "ALTER TABLE exam_center_activities ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE exam_center_activities ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "exam_attempts",
+        "organization_id",
+        "ALTER TABLE exam_attempts ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE exam_attempts ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "exam_bank_ingest_jobs",
+        "organization_id",
+        "ALTER TABLE exam_bank_ingest_jobs ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE exam_bank_ingest_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "exam_set_review_jobs",
+        "organization_id",
+        "ALTER TABLE exam_set_review_jobs ADD COLUMN organization_id VARCHAR(36)",
+        "ALTER TABLE exam_set_review_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+
+    def _table_needs_org_backfill(conn, table_name: str) -> bool:
+        try:
+            row = conn.execute(
+                text(
+                    f"SELECT 1 FROM {table_name} "
+                    "WHERE organization_id IS NULL OR organization_id = '' LIMIT 1"
+                )
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def _sync_all_organizations_to_aicheckword():
+        """启动后把所有 organizations 推送到 aicheckword companies（幂等 upsert）。
+
+        - 失败仅日志，不阻断启动
+        - 仅在 FEATURE_MULTI_TENANT 开启时才执行（避免单租户场景产生无谓的对外请求）
+        """
+        try:
+            from . import app_settings as _aps
+            if not _aps.is_multi_tenant_enabled():
+                return
+        except Exception:
+            return
+        try:
+            from . import _integration_common as _ic
+        except Exception:
+            return
+        base = _ic.integration_api_base()
+        if not base:
+            return
+        try:
+            import requests as _rq
+        except Exception:
+            return
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT id, name, slug, knowledge_collection, is_active, is_default "
+                        "FROM organizations"
+                    )
+                ).fetchall()
+        except Exception:
+            return
+        if not rows:
+            return
+        try:
+            from startup_util import startup_note as _sn
+        except Exception:
+            _sn = lambda *_a, **_k: None
+        try:
+            _sn(f"同步 {len(rows)} 家公司到 aicheckword …")
+        except Exception:
+            pass
+        ok_cnt = 0
+        err_cnt = 0
+        for r in rows:
+            try:
+                oid = str(r[0] or "").strip()
+                if not oid:
+                    continue
+                _rq.post(
+                    f"{base.rstrip('/')}/admin/companies/sync",
+                    json={
+                        "aiword_company_id": oid,
+                        "name": str(r[1] or "").strip(),
+                        "slug": str(r[2] or "").strip(),
+                        "knowledge_collection": (str(r[3] or "").strip() or "regulations"),
+                        "is_active": bool(r[4]),
+                        "is_default": bool(r[5]),
+                    },
+                    headers=_ic.upstream_headers(
+                        for_multipart=False, organization_id=oid
+                    ),
+                    timeout=_ic.integration_requests_timeout(read_seconds=15),
+                )
+                ok_cnt += 1
+            except Exception:
+                err_cnt += 1
+        try:
+            _sn(
+                f"公司映射同步完成：成功 {ok_cnt} / 失败 {err_cnt}"
+            )
+        except Exception:
+            pass
+
+    def seed_default_organization_and_backfill():
+        org_id = ""
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id FROM organizations WHERE is_default = 1 "
+                    "ORDER BY created_at ASC LIMIT 1"
+                )
+            ).fetchone()
+            if row and row[0]:
+                org_id = str(row[0]).strip()
+            if not org_id:
+                row = conn.execute(
+                    text(
+                        "SELECT id FROM organizations WHERE knowledge_collection = :c "
+                        "ORDER BY created_at ASC LIMIT 1"
+                    ),
+                    {"c": "regulations"},
+                ).fetchone()
+                if row and row[0]:
+                    org_id = str(row[0]).strip()
+            if not org_id:
+                org_id = str(uuid.uuid4())
+                conn.execute(
+                    text(
+                        "INSERT INTO organizations "
+                        "(id, name, slug, knowledge_collection, is_active, is_default, created_at, updated_at) "
+                        "VALUES (:id, :name, :slug, :kc, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "id": org_id,
+                        "name": "南京鱼跃软件技术有限公司",
+                        "slug": "nanjing-yuyue-software",
+                        "kc": "regulations",
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE organizations SET is_default = CASE WHEN id = :id THEN 1 ELSE is_default END"
+                    ),
+                    {"id": org_id},
+                )
+
+            miss_rows = conn.execute(
+                text(
+                    "SELECT u.id FROM users u "
+                    "WHERE NOT EXISTS ("
+                    "SELECT 1 FROM user_organization_memberships m "
+                    "WHERE m.user_id = u.id AND m.organization_id = :oid"
+                    ")"
+                ),
+                {"oid": org_id},
+            ).fetchall()
+            for row_u in miss_rows:
+                uid = str((row_u[0] or "")).strip()
+                if not uid:
+                    continue
+                conn.execute(
+                    text(
+                        "INSERT INTO user_organization_memberships "
+                        "(id, user_id, organization_id, created_at) "
+                        "VALUES (:id, :uid, :oid, CURRENT_TIMESTAMP)"
+                    ),
+                    {"id": str(uuid.uuid4()), "uid": uid, "oid": org_id},
+                )
+            backfill_tables = (
+                "project_teams",
+                "company_projects",
+                "projects",
+                "upload_records",
+                "draft_generation_jobs",
+                "audit_jobs",
+                "translation_jobs",
+                "exam_center_assignments",
+                "exam_center_activities",
+                "exam_attempts",
+                "exam_bank_ingest_jobs",
+                "exam_set_review_jobs",
+            )
+            needs_backfill = bool(miss_rows) or any(
+                _table_needs_org_backfill(conn, t) for t in backfill_tables
+            )
+            if needs_backfill:
+                for table_name in backfill_tables:
+                    if not _table_needs_org_backfill(conn, table_name):
+                        continue
+                    conn.execute(
+                        text(
+                            f"UPDATE {table_name} SET organization_id = :oid "
+                            "WHERE organization_id IS NULL OR organization_id = ''"
+                        ),
+                        {"oid": org_id},
+                    )
+            conn.commit()
+
+    seed_default_organization_and_backfill()
+
+    try:
+        _sync_all_organizations_to_aicheckword()
+    except Exception:
+        try:
+            app.logger.exception("startup sync organizations to aicheckword failed")
+        except Exception:
+            pass
 
     if "projects" in existing_tables:
         try:
@@ -1066,6 +1347,9 @@ def init_default_configs():
 
 def create_app() -> Flask:
     """Application factory for the AI Word web suite."""
+    from startup_util import startup_note
+
+    startup_note("create_app: 加载配置与目录…")
     project_root = Path(__file__).resolve().parent.parent
     
     # 尝试从 .env 加载环境变量（若已安装 python-dotenv）
@@ -1273,6 +1557,7 @@ def create_app() -> Flask:
     data_dir.mkdir(exist_ok=True)
 
     db.init_app(app)
+    startup_note("create_app: 连接数据库并检查表结构（可能较慢）…")
 
     # 数据库连接断开后（如网络恢复前拿到的连接已失效）：清空连接池，下次请求自动重连，无需重启服务
     from sqlalchemy.exc import OperationalError, InterfaceError
@@ -1304,6 +1589,7 @@ def create_app() -> Flask:
 
     with app.app_context():
         ensure_schema(app)
+        startup_note("create_app: 注册路由与加载系统配置…")
         from .routes import register_blueprint
 
         register_blueprint(app)
