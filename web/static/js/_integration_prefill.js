@@ -630,6 +630,27 @@
     });
   }
 
+  function integrationScopeFromLocation() {
+    try {
+      var q = new URLSearchParams(window.location.search || "");
+      var scope = (q.get("scope") || "").trim().toLowerCase();
+      if (scope === "page0" || scope === "workflow") return scope;
+      var manual = (q.get("manual") || "").trim().toLowerCase();
+      if (manual === "1" || manual === "true" || manual === "yes" || manual === "on") return "page0";
+    } catch (e) { /* ignore */ }
+    return "workflow";
+  }
+
+  function integrationScopeQuery() {
+    return "scope=" + encodeURIComponent(integrationScopeFromLocation());
+  }
+
+  function appendIntegrationScope(fd) {
+    if (fd && fd.append) {
+      fd.append("integration_scope", integrationScopeFromLocation());
+    }
+  }
+
   function readCompanyOverrides(prefix) {
     var out = {};
     COMPANY_FIELD_KEYS.forEach(function (pair) {
@@ -665,6 +686,9 @@
     parseManualRulesText: parseManualRulesText,
     applyCompanyConfig: applyCompanyConfig,
     readCompanyOverrides: readCompanyOverrides,
+    integrationScopeFromLocation: integrationScopeFromLocation,
+    integrationScopeQuery: integrationScopeQuery,
+    appendIntegrationScope: appendIntegrationScope,
     classifyRegRouteFromCountry: classifyRegRouteFromCountry,
     PROJECT_EMPTY_OPT: PROJECT_EMPTY_OPT,
   };

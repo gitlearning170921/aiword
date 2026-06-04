@@ -156,8 +156,11 @@
   }
 
   function loadHistory() {
+    var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
+      ? window.IntegrationPrefill.integrationScopeQuery()
+      : "scope=workflow";
     AsyncJob.api(
-      root + "/audit/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10",
+      root + "/audit/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
       if (x.ok && x.json && x.json.ok) {
@@ -429,7 +432,7 @@
     if (dlBtn) dlBtn.disabled = true;
 
     var payload = buildPayload();
-    var uploadIdsTxt = ($("aud_upload_ids").value || "").trim();
+    var uploadIdsTxt = ($("aud_upload_ids") && $("aud_upload_ids").value || "").trim();
     var pickedFiles = ($("aud_files_picker").files || []);
     var hasTask = !!uploadIdsTxt;
     var hasManual = pickedFiles && pickedFiles.length > 0;
@@ -461,6 +464,9 @@
       for (var i = 0; i < pickedFiles.length; i++) {
         fd.append("input_files", pickedFiles[i], pickedFiles[i].name);
       }
+    }
+    if (window.IntegrationPrefill && window.IntegrationPrefill.appendIntegrationScope) {
+      window.IntegrationPrefill.appendIntegrationScope(fd);
     }
 
     if (btn) btn.disabled = true;
@@ -538,7 +544,7 @@
     var IP = window.IntegrationPrefill;
     var q = parseQuery();
     var pf = IP.parsePrefillFromLocation();
-    if (q.upload_ids) {
+    if (q.upload_ids && $("aud_upload_ids")) {
       var lst = String(q.upload_ids).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
       $("aud_upload_ids").value = lst.join("\n");
       renderUploadNames();

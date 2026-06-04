@@ -38,6 +38,8 @@ from ._integration_common import (
     integration_api_base,
     integration_read_timeout,
     integration_requests_timeout,
+    integration_scope_from_request,
+    integration_scope_list_filter,
     login_wall,
     safe_truncate,
     upload_record_visible_to_user,
@@ -200,7 +202,17 @@ def translate_page():
         from flask import redirect, url_for
 
         return redirect(url_for("pages.login_page"))
-    return render_template("translate.html")
+    from ._integration_common import (
+        integration_scope_from_request,
+        manual_upload_only_from_request,
+    )
+
+    scope = integration_scope_from_request()
+    return render_template(
+        "translate.html",
+        manual_upload_only=manual_upload_only_from_request(),
+        integration_scope=scope,
+    )
 
 
 @translation_bp.post("/api/jobs")
@@ -305,6 +317,7 @@ def api_translate_create_job():
     payload_obj["aiword_user_id"] = str(session.get("user_id") or "")
 
     uid_session = str(session.get("user_id") or "")
+    job_scope = integration_scope_from_request()
     local_job = TranslationJob(
         user_id=uid_session,
         status="pending",
@@ -312,6 +325,7 @@ def api_translate_create_job():
         target_lang=target_lang,
         collection=str(payload_obj.get("collection") or "regulations"),
         source=("task" if has_task_source else "manual"),
+        integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
         payload_snapshot_json={
             k: payload_obj.get(k)
@@ -550,7 +564,9 @@ def api_translate_jobs_list():
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
     uid = str(session.get("user_id") or "")
+    scope = integration_scope_from_request()
     q = TranslationJob.query.filter_by(user_id=uid)
+    q = integration_scope_list_filter(q, TranslationJob, scope)
     total = q.count()
     rows = (
         q
@@ -695,6 +711,7 @@ def api_translate_correct_create_job():
     payload_obj["aiword_user_id"] = str(session.get("user_id") or "")
 
     uid_session = str(session.get("user_id") or "")
+    job_scope = integration_scope_from_request()
     local_job = TranslationJob(
         user_id=uid_session,
         status="pending",
@@ -702,6 +719,7 @@ def api_translate_correct_create_job():
         target_lang=target_lang,
         collection=str(payload_obj.get("collection") or "regulations"),
         source=("task_correct" if has_task_source else "manual_correct"),
+        integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
         payload_snapshot_json={
             k: payload_obj.get(k)

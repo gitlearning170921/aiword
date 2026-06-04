@@ -38,13 +38,18 @@ from sqlalchemy import desc
 
 from . import db
 from ._integration_common import (
+    INTEGRATION_SCOPE_PAGE0,
     build_integration_bootstrap_payload,
     build_upload_prefill_payload,
     client_llm_headers_for_session,
     integration_api_base,
     integration_read_timeout,
     integration_requests_timeout,
+    integration_scope_from_request,
+    integration_scope_list_filter,
+    latest_audit_report_id_for_scope,
     login_wall,
+    manual_upload_only_from_request,
     resolve_aicheckword_project_id_for_upload,
     safe_truncate,
     upload_record_visible_to_user,
@@ -286,7 +291,19 @@ def audit_modify_page():
         from flask import redirect, url_for
 
         return redirect(url_for("pages.login_page"))
-    return render_template("audit_modify.html")
+    scope = integration_scope_from_request()
+    default_page0_report_id = None
+    if scope == INTEGRATION_SCOPE_PAGE0:
+        default_page0_report_id = latest_audit_report_id_for_scope(
+            str(session.get("user_id") or ""), scope
+        )
+
+    return render_template(
+        "audit_modify.html",
+        manual_upload_only=manual_upload_only_from_request(),
+        integration_scope=scope,
+        default_page0_report_id=default_page0_report_id,
+    )
 
 
 @audit_modify_bp.get("/api/integration-bootstrap")
@@ -501,6 +518,7 @@ def api_audit_modify_create_job():
     payload_obj["base_files_by_target"] = base_files_by_target
 
     uid_session = str(session.get("user_id") or "")
+    job_scope = integration_scope_from_request()
     # 本地 job：复用 DraftGenerationJob，标记 source=audit_modify
     local_job = DraftGenerationJob(
         user_id=uid_session,
@@ -511,6 +529,7 @@ def api_audit_modify_create_job():
         project_id=int(payload_obj.get("project_id") or 0) or None,
         template_names_json=list(target_names),
         input_display_names_json=[upload_name],
+        integration_scope=job_scope,
         payload_snapshot_json={
             k: payload_obj.get(k)
             for k in (
@@ -636,7 +655,9 @@ def api_audit_modify_jobs_list():
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
     uid = str(session.get("user_id") or "")
+    scope = integration_scope_from_request()
     q = DraftGenerationJob.query.filter_by(user_id=uid, source="audit_modify")
+    q = integration_scope_list_filter(q, DraftGenerationJob, scope)
     total = q.count()
     rows = (
         q
@@ -677,6 +698,20 @@ def api_audit_modify_jobs_list():
             },
         }
     )
+
+
+@audit_modify_bp.get("/api/latest-audit-report")
+def api_audit_modify_latest_audit_report():
+    """页面0：取当前用户在该 scope 下最近一次成功审核的 report_id。"""
+    err = login_wall()
+    if err:
+        return err
+    scope = integration_scope_from_request(allow_form=False)
+    uid = str(session.get("user_id") or "")
+    rid = latest_audit_report_id_for_scope(uid, scope)
+    if not rid:
+        return jsonify({"ok": True, "reportId": None, "scope": scope})
+    return jsonify({"ok": True, "reportId": rid, "scope": scope})
 
 
 @audit_modify_bp.get("/api/post-audit-defaults")

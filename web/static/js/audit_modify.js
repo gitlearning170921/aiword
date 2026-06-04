@@ -120,8 +120,11 @@
   }
 
   function loadHistory() {
+    var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
+      ? window.IntegrationPrefill.integrationScopeQuery()
+      : "scope=workflow";
     AsyncJob.api(
-      root + "/audit-modify/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10",
+      root + "/audit-modify/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
       if (x.ok && x.json && x.json.ok) {
@@ -133,7 +136,7 @@
 
   function preview() {
     var rid = ($("amod_report_id").value || "").trim();
-    var uid = ($("amod_upload_id").value || "").trim();
+    var uid = ($("amod_upload_id") && $("amod_upload_id").value || "").trim();
     if (!rid && !uid) {
       showMsg("预览需要 report_id 或 upload_id 任一", true);
       return;
@@ -213,9 +216,9 @@
     var fd = new FormData();
     fd.append("payload", JSON.stringify(payload));
     var rid = ($("amod_report_id").value || "").trim();
-    var uid = ($("amod_upload_id").value || "").trim();
+    var uid = ($("amod_upload_id") && $("amod_upload_id").value || "").trim();
     var rfile = ($("amod_report_file").files && $("amod_report_file").files[0]) || null;
-    var bUid = ($("amod_base_upload_id").value || "").trim();
+    var bUid = ($("amod_base_upload_id") && $("amod_base_upload_id").value || "").trim();
     var bFile = ($("amod_base_files").files && $("amod_base_files").files[0]) || null;
     if (!rid && !uid && !rfile) {
       showMsg("请提供 report_id、upload_id 或 上传 report.json", true);
@@ -234,6 +237,9 @@
     if (rfile) fd.append("report_json_file", rfile, rfile.name);
     if (bUid) fd.append("base_upload_id", bUid);
     if (bFile) fd.append("base_files", bFile, bFile.name);
+    if (window.IntegrationPrefill && window.IntegrationPrefill.appendIntegrationScope) {
+      window.IntegrationPrefill.appendIntegrationScope(fd);
+    }
 
     if (btn) btn.disabled = true;
     showMsg("正在提交…", false);
@@ -335,9 +341,9 @@
     var IP = window.IntegrationPrefill;
     var q = parseQuery();
     var pf = IP.parsePrefillFromLocation();
-    if (q.upload_id) $("amod_upload_id").value = String(q.upload_id);
+    if (q.upload_id && $("amod_upload_id")) $("amod_upload_id").value = String(q.upload_id);
     if (q.report_id) $("amod_report_id").value = String(q.report_id);
-    if (q.base_upload_id) $("amod_base_upload_id").value = String(q.base_upload_id);
+    if (q.base_upload_id && $("amod_base_upload_id")) $("amod_base_upload_id").value = String(q.base_upload_id);
     if (q.template_file_name) $("amod_template_file_name").value = String(q.template_file_name);
     if (!pf && (q.upload_id || q.from === "page2")) {
       pf = {
@@ -353,24 +359,6 @@
     }
     resolveUploadName(($("amod_upload_id") && $("amod_upload_id").value) || "", "amod_upload_name");
     resolveUploadName(($("amod_base_upload_id") && $("amod_base_upload_id").value) || "", "amod_base_upload_name");
-    var amodBootstrapOpts = {
-      prefix: "amod",
-      root: root,
-      bootstrapUrl: root + "/audit-modify/api/integration-bootstrap",
-      uploadPrefillBase: root + "/audit-modify",
-      prefill: pf,
-      withCases: false,
-      onError: function (m) { showMsg(m, true); },
-      onReady: function () {
-        if (q.template_file_name && !$("amod_template_file_name").value) {
-          $("amod_template_file_name").value = String(q.template_file_name);
-        } else if (pf && pf.file_name && !$("amod_template_file_name").value) {
-          $("amod_template_file_name").value = pf.file_name;
-        }
-        if (q.report_id || q.upload_id) fetchPostAuditDefaults();
-      },
-    };
-    IP.loadBootstrap(amodBootstrapOpts);
 
     function applyPostAuditMeta(meta) {
       if (!meta) return;
@@ -394,7 +382,7 @@
 
     function fetchPostAuditDefaults() {
       var rid = ($("amod_report_id").value || "").trim();
-      var uid = ($("amod_upload_id").value || "").trim();
+      var uid = ($("amod_upload_id") && $("amod_upload_id").value || "").trim();
       var pid = ($("amod_project_id").value || $("amod_project_sel").value || "").trim();
       if (!rid && !uid) return Promise.resolve();
       var url = root + "/audit-modify/api/post-audit-defaults?";
@@ -406,6 +394,41 @@
         if (x.ok && x.json && x.json.ok) applyPostAuditMeta(x.json.meta);
       });
     }
+
+    function loadPage0LatestReportIfNeeded() {
+      if (IP.integrationScopeFromLocation() !== "page0") return Promise.resolve();
+      if (($("amod_report_id").value || "").trim()) return Promise.resolve();
+      var scopeQ = IP.integrationScopeQuery ? IP.integrationScopeQuery() : "scope=page0";
+      return AsyncJob.api(root + "/audit-modify/api/latest-audit-report?" + scopeQ, { method: "GET" })
+        .then(function (x) {
+          if (!x.ok || !x.json || !x.json.ok || !x.json.reportId) return;
+          $("amod_report_id").value = String(x.json.reportId);
+        });
+    }
+
+    var amodBootstrapOpts = {
+      prefix: "amod",
+      root: root,
+      bootstrapUrl: root + "/audit-modify/api/integration-bootstrap",
+      uploadPrefillBase: root + "/audit-modify",
+      prefill: pf,
+      withCases: false,
+      onError: function (m) { showMsg(m, true); },
+      onReady: function () {
+        if (q.template_file_name && !$("amod_template_file_name").value) {
+          $("amod_template_file_name").value = String(q.template_file_name);
+        } else if (pf && pf.file_name && !$("amod_template_file_name").value) {
+          $("amod_template_file_name").value = pf.file_name;
+        }
+        var rid = ($("amod_report_id").value || "").trim();
+        var uid = ($("amod_upload_id") && $("amod_upload_id").value || "").trim();
+        if (rid || uid) fetchPostAuditDefaults();
+      },
+    };
+    loadPage0LatestReportIfNeeded().then(function () {
+      IP.loadBootstrap(amodBootstrapOpts);
+    });
+
     IP.wireProjectSelect("amod", function () { return window.__integrationBootstrap_amod; }, function () {
       return IP.getPagePrefill("amod") || IP.parsePrefillFromLocation();
     });

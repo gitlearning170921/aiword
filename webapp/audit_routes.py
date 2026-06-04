@@ -44,7 +44,10 @@ from ._integration_common import (
     integration_api_base,
     integration_read_timeout,
     integration_requests_timeout,
+    integration_scope_from_request,
+    integration_scope_list_filter,
     login_wall,
+    manual_upload_only_from_request,
     safe_truncate,
     resolve_aicheckword_project_id_for_upload,
     upload_record_visible_to_user,
@@ -234,7 +237,12 @@ def audit_page():
         from flask import redirect, url_for
 
         return redirect(url_for("pages.login_page"))
-    return render_template("audit.html")
+    scope = integration_scope_from_request()
+    return render_template(
+        "audit.html",
+        manual_upload_only=manual_upload_only_from_request(),
+        integration_scope=scope,
+    )
 
 
 @audit_bp.get("/api/meta")
@@ -403,6 +411,7 @@ def api_audit_create_job():
     enrich_audit_payload_from_upstream(payload_obj)
 
     uid_session = str(session.get("user_id") or "")
+    job_scope = integration_scope_from_request()
     # 本地 job 记录
     local_job = AuditJob(
         user_id=uid_session,
@@ -411,6 +420,7 @@ def api_audit_create_job():
         mode=mode,
         collection=str(payload_obj.get("collection") or "regulations"),
         source=("task" if has_task_source else "manual"),
+        integration_scope=job_scope,
         upload_ids_json=(list(upload_ids) if has_task_source else None),
         payload_snapshot_json={
             k: v
@@ -747,7 +757,9 @@ def api_audit_jobs_list():
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
     uid = str(session.get("user_id") or "")
+    scope = integration_scope_from_request()
     q = AuditJob.query.filter_by(user_id=uid)
+    q = integration_scope_list_filter(q, AuditJob, scope)
     total = q.count()
     rows = (
         q

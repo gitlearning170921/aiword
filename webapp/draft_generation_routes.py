@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 
 import requests
 from flask import (
@@ -33,6 +33,9 @@ from .app_settings import get_setting
 from ._integration_common import (
     fetch_draft_page_bootstrap,
     integration_collection_rows,
+    integration_scope_from_request,
+    integration_scope_list_filter,
+    manual_upload_only_from_request,
     resolve_aicheckword_project_id_for_upload,
     upstream_get_json,
 )
@@ -624,7 +627,12 @@ def draft_gen_page():
         from flask import redirect, url_for
 
         return redirect(url_for("pages.login_page"))
-    return render_template("draft_gen.html")
+    scope = integration_scope_from_request()
+    return render_template(
+        "draft_gen.html",
+        manual_upload_only=manual_upload_only_from_request(),
+        integration_scope=scope,
+    )
 
 
 def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, Any]:
@@ -905,7 +913,15 @@ def api_jobs_list():
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
     uid = str(session["user_id"])
-    q = DraftGenerationJob.query.filter_by(user_id=uid)
+    scope = integration_scope_from_request()
+    q = DraftGenerationJob.query.filter_by(user_id=uid).filter(
+        or_(
+            DraftGenerationJob.source.is_(None),
+            DraftGenerationJob.source == "",
+            DraftGenerationJob.source == "draft",
+        )
+    )
+    q = integration_scope_list_filter(q, DraftGenerationJob, scope)
     total = q.count()
     rows = (
         q
@@ -1170,6 +1186,7 @@ def api_jobs_submit():
         template_names_json=payload_obj.get("template_file_names"),
         input_display_names_json=display_names,
         payload_snapshot_json=snap,
+        integration_scope=integration_scope_from_request(),
     )
     db.session.add(job)
     db.session.commit()

@@ -6,7 +6,11 @@
     <h2 class="mb-3">文档审核（aicheckword）</h2>
     <p class="text-muted small">
       调用 aicheckword 的 <code>/api/integration/audit/*</code>。支持三种审核模式（单文档 / 多文档一致性 / 跨文档追溯），
+      {% if manual_upload_only %}
+      本页为<strong>手动上传</strong>模式，请直接选择待审文件。
+      {% else %}
       可从「页面1 任务」勾选携带 <code>upload_ids</code> 触发，也可手动上传文件。
+      {% endif %}
       个人 LLM 凭据沿用「初稿生成」页保存的 Key（如未配置则使用 aicheckword 系统默认）。
       审核逻辑与 aicheckword 第三步一致（含自动匹配过往案例、章节完整性、按项目过滤审核点等）。
     </p>
@@ -16,14 +20,16 @@
       <div class="card-header">来源</div>
       <div class="card-body">
         <div class="row g-2">
+          {% if not manual_upload_only %}
           <div class="col-md-6">
             <label class="form-label">从页面1 任务带入（upload_ids）</label>
             <textarea id="aud_upload_ids" class="form-control font-monospace" rows="3" placeholder="一行一个 upload_id；从页面1 勾选『审核』时自动填入"></textarea>
             <div id="aud_upload_names" class="small text-muted mt-1"></div>
             <div class="form-text">优先级高于"手动上传"；二选一不可同时提供。</div>
           </div>
-          <div class="col-md-6">
-            <label class="form-label">或手动上传文件</label>
+          {% endif %}
+          <div class="col-md-{% if manual_upload_only %}12{% else %}6{% endif %}">
+            <label class="form-label">{% if manual_upload_only %}手动上传文件{% else %}或手动上传文件{% endif %}</label>
             <input type="file" id="aud_files_picker" class="form-control" multiple accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md"/>
             <div class="form-text" id="aud_files_count">未选择</div>
           </div>

@@ -11,6 +11,21 @@
   /** @type {any} */
   let lastBootstrap = null;
 
+  function dgIntegrationScopeFromLocation() {
+    try {
+      var q = new URLSearchParams(window.location.search || "");
+      var scope = (q.get("scope") || "").trim().toLowerCase();
+      if (scope === "page0" || scope === "workflow") return scope;
+      var manual = (q.get("manual") || "").trim().toLowerCase();
+      if (manual === "1" || manual === "true" || manual === "yes" || manual === "on") return "page0";
+    } catch (e) { /* ignore */ }
+    return "workflow";
+  }
+
+  function dgIntegrationScopeQuery() {
+    return "scope=" + encodeURIComponent(dgIntegrationScopeFromLocation());
+  }
+
   /** 与 aicheckword 初稿页 file_uploader type= 一致 */
   var DRAFT_UPLOAD_ACCEPT = ".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz";
   /** @type {File[]} */
@@ -1868,6 +1883,7 @@
     _dgBaseFilesAccum.forEach(function (f) {
       fd.append("base_files", f, f.name);
     });
+    fd.append("integration_scope", dgIntegrationScopeFromLocation());
     var submitBtn = el("dg_btn_submit");
     if (submitBtn) submitBtn.disabled = true;
     function releaseSubmitBtn() {
@@ -2036,7 +2052,7 @@
   }
 
   function loadJobList() {
-    api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10", { method: "GET" }).then(function (x) {
+    api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10&" + dgIntegrationScopeQuery(), { method: "GET" }).then(function (x) {
       const tb = el("dg_job_rows");
       if (!tb) return;
       if (!x.ok) {

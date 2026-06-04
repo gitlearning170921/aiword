@@ -19,6 +19,25 @@
 </div>
 
 <div class="card mb-4">
+    <div class="card-header">文档工具</div>
+    <div class="card-body">
+        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从页面1/2 任务带入。</p>
+        <div class="d-flex flex-wrap gap-2">
+            {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
+            <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+            {% endif %}
+            <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
+            {% if feature_flags.FEATURE_PAGE2_AUDIT_MODIFY %}
+            <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE2_TRANSLATE %}
+            <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span>全公司项目列表</span>
         <div class="d-flex gap-2 flex-wrap align-items-center">

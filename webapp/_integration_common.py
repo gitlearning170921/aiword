@@ -519,3 +519,89 @@ def build_upload_prefill_payload(upload_id: str) -> tuple[dict[str, Any], int]:
         body["aicheckwordProjectId"] = acw_pid
         body["aicheckword_project_id"] = acw_pid
     return body, 200
+
+
+def manual_upload_only_from_request() -> bool:
+    """页面0 等入口带 ?manual=1 时，集成页隐藏 upload_id(s) 任务带入区。"""
+    from flask import request
+
+    v = (request.args.get("manual") or request.args.get("manual_upload") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+INTEGRATION_SCOPE_WORKFLOW = "workflow"
+INTEGRATION_SCOPE_PAGE0 = "page0"
+
+
+def normalize_integration_scope(raw: Any) -> str:
+    s = str(raw or "").strip().lower()
+    if s == INTEGRATION_SCOPE_PAGE0:
+        return INTEGRATION_SCOPE_PAGE0
+    return INTEGRATION_SCOPE_WORKFLOW
+
+
+def integration_scope_from_request(*, allow_form: bool = True) -> str:
+    """解析当前请求的集成数据域：页面0 手动工具 vs 页面1/2 工作流。"""
+    from flask import request
+
+    if allow_form:
+        form_scope = (request.form.get("integration_scope") or "").strip()
+        if form_scope:
+            return normalize_integration_scope(form_scope)
+    query_scope = (request.args.get("scope") or "").strip()
+    if query_scope:
+        return normalize_integration_scope(query_scope)
+    if manual_upload_only_from_request():
+        return INTEGRATION_SCOPE_PAGE0
+    return INTEGRATION_SCOPE_WORKFLOW
+
+
+def integration_scope_list_filter(q: Any, model: Any, scope: str) -> Any:
+    """按 integration_scope 过滤 job 列表；旧数据 NULL 视为 workflow。"""
+    from sqlalchemy import or_
+
+    scope = normalize_integration_scope(scope)
+    col = getattr(model, "integration_scope", None)
+    if col is None:
+        return q
+    if scope == INTEGRATION_SCOPE_PAGE0:
+        return q.filter(col == INTEGRATION_SCOPE_PAGE0)
+    return q.filter(or_(col.is_(None), col == "", col == INTEGRATION_SCOPE_WORKFLOW))
+
+
+def latest_audit_report_id_for_scope(
+    user_id: str,
+    scope: str = INTEGRATION_SCOPE_PAGE0,
+) -> Optional[int]:
+    """取指定 scope 下最近一次成功审核的主 report_id（供页面0 审核后修改预填）。"""
+    from sqlalchemy import desc
+
+    from .models import AuditJob
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+    q = AuditJob.query.filter_by(user_id=uid, status="succeeded")
+    q = integration_scope_list_filter(q, AuditJob, scope)
+    for job in q.order_by(desc(AuditJob.created_at)).limit(30).all():
+        rids = job.report_ids_json
+        if isinstance(rids, list) and rids:
+            for rid in reversed(rids):
+                try:
+                    n = int(rid)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    return n
+        rs = job.reports_summary_json
+        if isinstance(rs, list):
+            for item in reversed(rs):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    n = int(item.get("report_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    return n
+    return None

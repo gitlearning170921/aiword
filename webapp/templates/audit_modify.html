@@ -8,24 +8,32 @@
       与 aicheckword「审核后修改」同源：仅落实报告中<strong>立即修改</strong>审核点（高/中风险在未单独标记 <code>action</code> 时默认视为立即修改）。
       默认<strong>不使用案例库模板</strong>、开启 <strong>Word 修订标记</strong>；PATCH 须带 <code>audit_point_refs</code>。
       稳态模式：1 个目标文件 + 1 个 Base；请先「预览修改清单」核对后再提交。
+      {% if manual_upload_only %}
+      本页为<strong>手动上传</strong>模式：请上传 report.json 与 Base Word，不从页面2 任务带入。
+      {% endif %}
     </p>
     <div id="amod_msg" class="alert d-none" role="alert"></div>
 
     <div class="card mb-3">
       <div class="card-header">审核报告来源</div>
       <div class="card-body row g-2">
+        {% if not manual_upload_only %}
         <div class="col-md-4">
           <label class="form-label">aiword 任务（upload_id）</label>
           <input id="amod_upload_id" class="form-control" placeholder="从页面2 任务行带入"/>
           <div id="amod_upload_name" class="small text-muted mt-1"></div>
           <div class="form-text">命中本地 <code>last_audit_report_id</code> 时自动取报告。</div>
         </div>
-        <div class="col-md-4">
-          <label class="form-label">或直接指定 report_id</label>
-          <input id="amod_report_id" type="number" min="0" class="form-control" placeholder="aicheckword audit_reports.id"/>
+        {% endif %}
+        <div class="col-md-{% if manual_upload_only %}6{% else %}4{% endif %}">
+          <label class="form-label">{% if manual_upload_only %}指定 report_id{% else %}或直接指定 report_id{% endif %}</label>
+          <input id="amod_report_id" type="number" min="0" class="form-control" placeholder="aicheckword audit_reports.id"{% if default_page0_report_id %} value="{{ default_page0_report_id }}"{% endif %}/>
+          {% if manual_upload_only %}
+          <div class="form-text">默认带入页面0 最近一次成功审核的报告 ID；若无记录请手动填写或上传 report.json。</div>
+          {% endif %}
         </div>
-        <div class="col-md-4">
-          <label class="form-label">或上传 report.json（最终兜底）</label>
+        <div class="col-md-{% if manual_upload_only %}6{% else %}4{% endif %}">
+          <label class="form-label">{% if manual_upload_only %}或上传 report.json{% else %}或上传 report.json（最终兜底）{% endif %}</label>
           <input type="file" id="amod_report_file" class="form-control" accept=".json,application/json"/>
         </div>
         <div class="col-12 mt-2">
@@ -41,13 +49,15 @@
     <div class="card mb-3">
       <div class="card-header">Base 文件（原始 Word，需要被修改的那份）</div>
       <div class="card-body row g-2">
+        {% if not manual_upload_only %}
         <div class="col-md-6">
           <label class="form-label">从页面2 任务带入 Base（base_upload_id）</label>
           <input id="amod_base_upload_id" class="form-control" placeholder="留空则使用手动上传"/>
           <div id="amod_base_upload_name" class="small text-muted mt-1"></div>
         </div>
-        <div class="col-md-6">
-          <label class="form-label">或手动上传 1 个 Base 文件</label>
+        {% endif %}
+        <div class="col-md-{% if manual_upload_only %}12{% else %}6{% endif %}">
+          <label class="form-label">{% if manual_upload_only %}手动上传 1 个 Base 文件{% else %}或手动上传 1 个 Base 文件{% endif %}</label>
           <input type="file" id="amod_base_files" class="form-control" accept=".docx,.doc,.xlsx,.xls,.txt,.md"/>
         </div>
       </div>

@@ -668,6 +668,10 @@ class DraftGenerationJob(db.Model):
     local_zip_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
     # 区分初稿 / 审核后修改：draft（默认） | audit_modify
     source: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True, default="draft", index=True)
+    # 区分页面0 文档工具与页面1/2 工作流：workflow（默认） | page0
+    integration_scope: Mapped[Optional[str]] = mapped_column(
+        db.String(16), nullable=True, default="workflow", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 
@@ -687,6 +691,9 @@ class AuditJob(db.Model):
     mode: Mapped[str] = mapped_column(db.String(16), default="single")  # single|multi|traceability
     collection: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     source: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True, default="task")  # task|manual
+    integration_scope: Mapped[Optional[str]] = mapped_column(
+        db.String(16), nullable=True, default="workflow", index=True
+    )
     upload_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     report_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
@@ -712,6 +719,9 @@ class TranslationJob(db.Model):
     target_lang: Mapped[str] = mapped_column(db.String(8), default="en")  # en|de|zh
     collection: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     source: Mapped[Optional[str]] = mapped_column(db.String(16), nullable=True, default="manual")  # task|manual
+    integration_scope: Mapped[Optional[str]] = mapped_column(
+        db.String(16), nullable=True, default="workflow", index=True
+    )
     upload_ids_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     payload_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     out_file_names_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)

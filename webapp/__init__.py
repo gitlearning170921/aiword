@@ -768,6 +768,24 @@ def ensure_schema(app: Flask):
         "ALTER TABLE draft_generation_jobs ADD COLUMN source TEXT",
         "ALTER TABLE draft_generation_jobs ADD COLUMN source VARCHAR(32)",
     )
+    ensure_column(
+        "draft_generation_jobs",
+        "integration_scope",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN integration_scope TEXT",
+        "ALTER TABLE draft_generation_jobs ADD COLUMN integration_scope VARCHAR(16)",
+    )
+    ensure_column(
+        "audit_jobs",
+        "integration_scope",
+        "ALTER TABLE audit_jobs ADD COLUMN integration_scope TEXT",
+        "ALTER TABLE audit_jobs ADD COLUMN integration_scope VARCHAR(16)",
+    )
+    ensure_column(
+        "translation_jobs",
+        "integration_scope",
+        "ALTER TABLE translation_jobs ADD COLUMN integration_scope TEXT",
+        "ALTER TABLE translation_jobs ADD COLUMN integration_scope VARCHAR(16)",
+    )
 
     # UploadRecord 增量列：last_audit_*（aicheckword 审核集成的最近一次报告摘要缓存）。
     ensure_column(

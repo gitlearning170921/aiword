@@ -163,8 +163,11 @@
   }
 
   function loadHistory() {
+    var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
+      ? window.IntegrationPrefill.integrationScopeQuery()
+      : "scope=workflow";
     AsyncJob.api(
-      root + "/translate/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10",
+      root + "/translate/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
       if (x.ok && x.json && x.json.ok) {
@@ -239,7 +242,7 @@
     var dlBtn = $("tr_btn_download");
     if (dlBtn) dlBtn.disabled = true;
 
-    var uploadIdsTxt = ($("tr_upload_ids").value || "").trim();
+    var uploadIdsTxt = ($("tr_upload_ids") && $("tr_upload_ids").value || "").trim();
     var pickedFiles = ($("tr_files_picker").files || []);
     var hasTask = !!uploadIdsTxt;
     var hasManual = pickedFiles && pickedFiles.length > 0;
@@ -267,6 +270,9 @@
       for (var i = 0; i < pickedFiles.length; i++) {
         fd.append("input_files", pickedFiles[i], pickedFiles[i].name);
       }
+    }
+    if (window.IntegrationPrefill && window.IntegrationPrefill.appendIntegrationScope) {
+      window.IntegrationPrefill.appendIntegrationScope(fd);
     }
 
     if (btn) btn.disabled = true;
@@ -365,7 +371,7 @@
     var dlBtn = $("tr_btn_download");
     if (dlBtn) dlBtn.disabled = true;
 
-    var uploadIdsTxt = ($("tr_upload_ids").value || "").trim();
+    var uploadIdsTxt = ($("tr_upload_ids") && $("tr_upload_ids").value || "").trim();
     var pickedFiles = ($("tr_files_picker").files || []);
     var hasTask = !!uploadIdsTxt;
     var hasManual = pickedFiles && pickedFiles.length > 0;
@@ -393,6 +399,9 @@
       for (var i = 0; i < pickedFiles.length; i++) {
         fd.append("input_files", pickedFiles[i], pickedFiles[i].name);
       }
+    }
+    if (window.IntegrationPrefill && window.IntegrationPrefill.appendIntegrationScope) {
+      window.IntegrationPrefill.appendIntegrationScope(fd);
     }
 
     if (btn) btn.disabled = true;
@@ -472,7 +481,11 @@
     var jid = ($("tr_local_job_id").textContent || "").trim();
     if (!jid || jid === "—") return;
     AsyncJob.api(
-      root + "/translate/api/jobs?page=1&page_size=50",
+      root + "/translate/api/jobs?page=1&page_size=50&" + (
+        (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
+          ? window.IntegrationPrefill.integrationScopeQuery()
+          : "scope=workflow"
+      ),
       { method: "GET" }
     ).then(function (x) {
       var hit = null;
@@ -492,13 +505,15 @@
 
   function init() {
     var q = parseQuery();
-    if (q.upload_ids) {
+    if (q.upload_ids && $("tr_upload_ids")) {
       var lst = String(q.upload_ids).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
       $("tr_upload_ids").value = lst.join("\n");
       renderUploadNames();
     }
-    if (q.upload_id) $("tr_upload_ids").value = String(q.upload_id);
-    if (q.upload_id) renderUploadNames();
+    if (q.upload_id && $("tr_upload_ids")) {
+      $("tr_upload_ids").value = String(q.upload_id);
+      renderUploadNames();
+    }
     if (q.target_lang && ["en", "de", "zh"].indexOf(q.target_lang) >= 0) $("tr_target_lang").value = q.target_lang;
 
     var picker = $("tr_files_picker");
