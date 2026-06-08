@@ -17,6 +17,7 @@
             <h6 class="form-section-title mb-0">项目管理（优先级 / 状态）</h6>
             <div class="d-flex gap-2 align-items-center">
                 <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="从页面0 同步分配到本账号所属项目组的公司总览项目">同步页面0项目</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
             </div>
@@ -36,7 +37,13 @@
                         <option value="ended">已结束</option>
                     </select>
                 </div>
-                <div class="col-md-5 text-end">
+                <div class="col-md-3">
+                    <label class="form-label small mb-0">所属公司</label>
+                    <select class="form-select form-select-sm" id="filterProjectOrganization" title="多公司账号可筛选；默认展示全部绑定公司并集">
+                        <option value="__all__">全部公司（并集）</option>
+                    </select>
+                </div>
+                <div class="col-md-2 text-end">
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="clearProjectFilterBtn">清空</button>
                 </div>
             </div>
@@ -54,6 +61,7 @@
                     <th>项目</th>
                     <th style="width:120px">注册国家</th>
                     <th style="width:120px">注册类别</th>
+                    <th style="width:140px">所属公司</th>
                     <th style="width:100px">产品类型</th>
                     <th style="width:108px">预计取证</th>
                     <th style="width:108px">预计递交</th>

@@ -8,8 +8,6 @@ from .models import (
     CompanyProject,
     Project,
     ProjectTeam,
-    REGISTRATION_SCOPE_LEGACY,
-    REGISTRATION_SCOPE_TEAM_LOCAL,
     UploadRecord,
     User,
     UserTeamMembership,
@@ -77,19 +75,24 @@ def ensure_default_team_data() -> dict[str, int | str]:
     db.session.flush()
 
     default_team_id = team.id
+
+    try:
+        from .tenant_context import default_organization
+        from .team_organizations import set_team_organization_ids
+
+        dorg = default_organization()
+        dorg_id = str(getattr(dorg, "id", "") or "").strip()
+        if dorg_id:
+            set_team_organization_ids(str(team.id), [dorg_id])
+    except Exception:
+        pass
+
     company_projects_updated = CompanyProject.query.filter(
         CompanyProject.assigned_team_id.is_(None)
     ).update({"assigned_team_id": default_team_id}, synchronize_session=False)
     projects_updated = Project.query.filter(
-        (Project.assigned_team_id.is_(None))
-        | (Project.registration_scope == REGISTRATION_SCOPE_LEGACY)
-    ).update(
-        {
-            "assigned_team_id": default_team_id,
-            "registration_scope": REGISTRATION_SCOPE_TEAM_LOCAL,
-        },
-        synchronize_session=False,
-    )
+        Project.assigned_team_id.is_(None)
+    ).update({"assigned_team_id": default_team_id}, synchronize_session=False)
     uploads_backfilled = _backfill_upload_project_ids()
 
     users_linked = 0

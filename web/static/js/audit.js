@@ -364,6 +364,59 @@
     });
   }
 
+  function currentSourceType() {
+    var r = document.querySelector('input[name="aud_source_type"]:checked');
+    return (r && r.value) || "files";
+  }
+
+  function syncSourcePanels() {
+    var st = currentSourceType();
+    var fp = $("aud_source_files_panel");
+    var tp = $("aud_source_text_panel");
+    var kp = $("aud_source_kdocs_panel");
+    if (fp) fp.classList.toggle("d-none", st !== "files");
+    if (tp) tp.classList.toggle("d-none", st !== "text");
+    if (kp) kp.classList.toggle("d-none", st !== "kdocs");
+    var modeSel = $("aud_mode");
+    if (modeSel) {
+      modeSel.disabled = st !== "files";
+      if (st !== "files" && modeSel.value !== "single") modeSel.value = "single";
+    }
+  }
+
+  function loadPromptDefaults() {
+    var IP = window.IntegrationPrefill;
+    var oid = (IP && IP.readOrganizationId ? IP.readOrganizationId("aud") : "") || "";
+    var q = oid ? ("?organizationId=" + encodeURIComponent(oid)) : "";
+    return AsyncJob.api(root + "/audit/api/prompt-defaults" + q, { method: "GET" }).then(function (x) {
+      if (!x.ok || !x.json || !x.json.ok) return;
+      var sp = $("aud_system_prompt");
+      var up = $("aud_user_prompt");
+      var ex = $("aud_extra_instructions");
+      if (sp && !sp.value.trim() && x.json.system_prompt) sp.value = x.json.system_prompt;
+      if (up && !up.value.trim() && x.json.user_prompt) up.value = x.json.user_prompt;
+      if (ex && !ex.value.trim() && x.json.extra_instructions) ex.value = x.json.extra_instructions;
+    }).catch(function () {});
+  }
+
+  function renderSyncReport(report, fileLabel) {
+    if (!report || typeof report !== "object") {
+      renderReportsSummary([]);
+      return;
+    }
+    var fname = fileLabel || report.original_filename || report.file_name || "同步审核";
+    renderReportsSummary([{
+      file: fname,
+      report_id: report._report_id || report.report_id || null,
+      total: report.total_points || (report.audit_points || []).length,
+      high: report.high_count || 0,
+      medium: report.medium_count || 0,
+      low: report.low_count || 0,
+      info: report.info_count || 0,
+    }]);
+    renderFullReports([{ id: report._report_id || report.report_id, file_name: fname, report: report }], []);
+  }
+
   function buildPayload() {
     var IP = window.IntegrationPrefill;
     var mode = ($("aud_mode") && $("aud_mode").value || "single").trim();
@@ -377,17 +430,25 @@
     var rt = ($("aud_registration_type") && $("aud_registration_type").value || "").trim();
     var rcomp = ($("aud_registration_component") && $("aud_registration_component").value || "").trim();
     var pf = ($("aud_project_form") && $("aud_project_form").value || "").trim();
+    var autoMatchEl = $("aud_auto_match_case");
     var payload = {
       mode: mode,
       collection: ($("aud_collection") && $("aud_collection").value || "regulations").trim() || "regulations",
+      organizationId: (IP && IP.readOrganizationId ? IP.readOrganizationId("aud") : "") || null,
       provider: ($("aud_provider") && $("aud_provider").value || "").trim() || null,
-      auto_match_case: true,
+      auto_match_case: !(autoMatchEl && !autoMatchEl.checked),
       document_language: ($("aud_document_language") && $("aud_document_language").value || "").trim(),
       registration_country: rc,
       registration_type: rt,
       registration_component: rcomp,
       project_form: pf,
     };
+    var sysP = ($("aud_system_prompt") && $("aud_system_prompt").value || "").trim();
+    var usrP = ($("aud_user_prompt") && $("aud_user_prompt").value || "").trim();
+    var extP = ($("aud_extra_instructions") && $("aud_extra_instructions").value || "").trim();
+    if (sysP) payload.system_prompt = sysP;
+    if (usrP) payload.user_prompt = usrP;
+    if (extP) payload.extra_instructions = extP;
     if (pid) payload.project_id = parseInt(pid, 10);
     var b = window.__integrationBootstrap_aud;
     var proj = IP && b ? IP.findProjectRow(b.projects, pid) : null;
@@ -412,6 +473,103 @@
     return payload;
   }
 
+  function submitTextReview(payload) {
+    var prog = AsyncJob.progressUI({
+      wrapId: "aud_progress_wrap",
+      barId: "aud_progress_bar",
+      textId: "aud_progress_caption",
+      headlineId: "aud_progress_headline",
+    });
+    var btn = $("aud_btn_submit");
+    var text = ($("aud_review_text") && $("aud_review_text").value || "").trim();
+    if (!text) {
+      showMsg("请粘贴待审文本", true);
+      return;
+    }
+    var body = Object.assign({}, payload, {
+      text: text,
+      file_name: ($("aud_review_text_filename") && $("aud_review_text_filename").value || "待审文档.docx").trim() || "待审文档.docx",
+    });
+    if (btn) btn.disabled = true;
+    showMsg("正在审核文本…", false);
+    prog.show(); prog.setRunning(true); prog.setHeadline("文本审核中…");
+    prog.update(0.2, "调用 aicheckword /review/text …");
+    AsyncJob.api(root + "/audit/api/review-text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (x) {
+      if (btn) btn.disabled = false;
+      prog.setRunning(false);
+      if (!x.ok || !x.json || !x.json.ok) {
+        prog.setTerminal(false);
+        showMsg((x.json && (x.json.message || x.json.detail)) || "文本审核失败", true);
+        return;
+      }
+      prog.setTerminal(true);
+      prog.update(1, "审核完成");
+      showMsg("文本审核完成", false);
+      renderSyncReport(x.json.report, body.file_name);
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      prog.setRunning(false); prog.setTerminal(false);
+      showMsg(String((e && e.message) || e || "文本审核异常"), true);
+    });
+  }
+
+  function submitKdocsReview(payload) {
+    var prog = AsyncJob.progressUI({
+      wrapId: "aud_progress_wrap",
+      barId: "aud_progress_bar",
+      textId: "aud_progress_caption",
+      headlineId: "aud_progress_headline",
+    });
+    var btn = $("aud_btn_submit");
+    var kurl = ($("aud_kdocs_url") && $("aud_kdocs_url").value || "").trim();
+    var kdurl = ($("aud_kdocs_download_url") && $("aud_kdocs_download_url").value || "").trim();
+    if (!kurl && !kdurl) {
+      showMsg("请填写金山文档链接", true);
+      return;
+    }
+    var body = Object.assign({}, payload, {
+      kdocsUrl: kurl,
+      kdocsDownloadUrl: kdurl,
+      fileName: ($("aud_kdocs_filename") && $("aud_kdocs_filename").value || "文档.docx").trim() || "文档.docx",
+      projectId: payload.project_id,
+    });
+    if (btn) btn.disabled = true;
+    showMsg("正在审核金山文档…", false);
+    prog.show(); prog.setRunning(true); prog.setHeadline("金山文档审核中…");
+    prog.update(0.2, "提取正文并审核…");
+    AsyncJob.api(root + "/audit/api/review-kdocs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (x) {
+      if (btn) btn.disabled = false;
+      prog.setRunning(false);
+      if (!x.ok || !x.json || !x.json.ok) {
+        prog.setTerminal(false);
+        showMsg((x.json && (x.json.message || x.json.detail)) || "金山文档审核失败", true);
+        return;
+      }
+      var res = x.json.result || {};
+      if (res.status === "error") {
+        prog.setTerminal(false);
+        showMsg(res.message || "金山文档审核失败", true);
+        return;
+      }
+      prog.setTerminal(true);
+      prog.update(1, res.summary || "审核完成");
+      showMsg(res.summary || "金山文档审核完成", false);
+      renderSyncReport(res.report || res, body.fileName);
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      prog.setRunning(false); prog.setTerminal(false);
+      showMsg(String((e && e.message) || e || "金山文档审核异常"), true);
+    });
+  }
+
   function submitJob() {
     var IP = window.IntegrationPrefill;
     if (IP && IP.requireAicheckwordProject) {
@@ -420,6 +578,16 @@
         showMsg(chk.message, true);
         return;
       }
+    }
+    var payload = buildPayload();
+    var sourceType = currentSourceType();
+    if (sourceType === "text") {
+      submitTextReview(payload);
+      return;
+    }
+    if (sourceType === "kdocs") {
+      submitKdocsReview(payload);
+      return;
     }
     var prog = AsyncJob.progressUI({
       wrapId: "aud_progress_wrap",
@@ -431,9 +599,8 @@
     var dlBtn = $("aud_btn_download");
     if (dlBtn) dlBtn.disabled = true;
 
-    var payload = buildPayload();
     var uploadIdsTxt = ($("aud_upload_ids") && $("aud_upload_ids").value || "").trim();
-    var pickedFiles = ($("aud_files_picker").files || []);
+    var pickedFiles = ($("aud_files_picker") && $("aud_files_picker").files || []);
     var hasTask = !!uploadIdsTxt;
     var hasManual = pickedFiles && pickedFiles.length > 0;
     if (hasTask && hasManual) {
@@ -590,13 +757,22 @@
         IP.rematchProjectFromTask("aud", bootstrapOpts);
       });
     }
-    var coll = $("aud_collection");
-    if (coll) {
-      coll.addEventListener("change", function () {
+    var orgSel = $("aud_organization");
+    if (orgSel) {
+      orgSel.addEventListener("change", function () {
         IP.loadBootstrap(Object.assign({}, bootstrapOpts, {
           prefill: IP.getPagePrefill("aud") || IP.parsePrefillFromLocation(),
         }));
+        loadPromptDefaults();
       });
+    }
+    document.querySelectorAll('input[name="aud_source_type"]').forEach(function (el) {
+      el.addEventListener("change", syncSourcePanels);
+    });
+    syncSourcePanels();
+    var promptPanel = $("aud_prompts_panel");
+    if (promptPanel) {
+      promptPanel.addEventListener("show.bs.collapse", loadPromptDefaults);
     }
     var dlBtn = $("aud_btn_download");
     if (dlBtn) dlBtn.addEventListener("click", downloadJob);

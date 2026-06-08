@@ -18,10 +18,15 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 import requests
-from flask import current_app, jsonify, session
+from flask import current_app, jsonify, request, session
 
 from .app_settings import get_setting, is_multi_tenant_enabled
-from .tenant_context import resolve_organization_context
+from .tenant_context import (
+    integration_org_context_payload,
+    integration_organizations_payload,
+    resolve_organization_context,
+    validate_resolved_collection,
+)
 
 
 # 与 draft_generation_routes 保持同步的"读超时上限"
@@ -80,8 +85,33 @@ def upstream_headers(
     return h
 
 
+def integration_html_access_wall(
+    *,
+    gate_description: str = "请输入访问密码以进入该功能（超级管理员无需账号登录）。",
+):
+    """集成页 HTML：超管密码或账号登录；否则密码门 / 登录跳转。"""
+    from flask import redirect, session, url_for
+
+    from .authz import (
+        gate_next_url,
+        is_page13_super_admin,
+        page13_password_configured,
+        super_admin_password_gate_response,
+    )
+
+    if is_page13_super_admin() or session.get("user_id"):
+        return None
+    if page13_password_configured():
+        return super_admin_password_gate_response(gate_description=gate_description)
+    return redirect(url_for("pages.login_page", next=gate_next_url()))
+
+
 def login_wall():
-    """与 draft 模块一致：未登录返回 401 JSON。"""
+    """与 draft 模块一致：未登录返回 401 JSON（页面4 超管访问密码已验证时放行）。"""
+    from .authz import is_page13_super_admin
+
+    if is_page13_super_admin():
+        return None
     if not session.get("user_id"):
         return jsonify({"message": "请先登录", "needsLogin": True}), 401
     return None
@@ -121,20 +151,36 @@ def fetch_upstream_common_bootstrap(
 
 
 def integration_collection_rows() -> list[dict[str, str]]:
-    """知识库下拉（与初稿页一致）。"""
-    raw = (get_setting("AICHECKWORD_DRAFT_COLLECTION_IDS", default="") or "").strip()
-    if raw:
-        ids = [x.strip() for x in raw.split(",") if x.strip()]
-    else:
-        ids = ["regulations"]
+    """知识库下拉：仅已绑定公司的 collection（organizations 表）。"""
     rows: list[dict[str, str]] = []
-    for cid in ids:
-        if cid == "regulations":
-            lab = "法规/通用知识库（regulations）"
-        else:
-            lab = f"知识库「{cid}」"
-        rows.append({"id": cid, "label": lab})
+    seen: set[str] = set()
+    for org in integration_organizations_payload():
+        cid = str(org.get("knowledgeCollection") or "").strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        name = str(org.get("name") or cid).strip()
+        rows.append(
+            {
+                "id": cid,
+                "label": f"{name} · {cid}",
+                "organizationId": str(org.get("id") or "").strip(),
+            }
+        )
+    if not rows:
+        rows.append({"id": "regulations", "label": "默认 · regulations", "organizationId": ""})
     return rows
+
+
+def _integration_query_organization_id() -> str:
+    oid = str(request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    if oid:
+        return oid
+    if request.method in ("POST", "PUT", "PATCH"):
+        body = request.get_json(silent=True) if request.is_json else None
+        if isinstance(body, dict):
+            return str(body.get("organizationId") or body.get("organization_id") or "").strip()
+    return ""
 
 
 def fetch_draft_page_bootstrap(
@@ -189,7 +235,10 @@ def build_integration_bootstrap_payload(
     read_timeout: int = 30,
     organization_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """合并上游 common/bootstrap 与本地 collections 配置。"""
+    """合并上游 common/bootstrap 与本地 organizations 配置。"""
+    err_msg = validate_resolved_collection(collection)
+    if err_msg:
+        return {"ok": False, "message": err_msg}
     data, err = fetch_upstream_common_bootstrap(
         collection,
         read_timeout_seconds=read_timeout,
@@ -198,11 +247,15 @@ def build_integration_bootstrap_payload(
     if err:
         return {"ok": False, "message": err}
     assert data is not None
+    org_ctx = integration_org_context_payload()
     return {
         "ok": True,
         "metaError": None,
         "collection": (data.get("collection") or collection or "regulations"),
         "collections": integration_collection_rows(),
+        "organizations": org_ctx.get("organizations") or [],
+        "activeOrganizationId": org_ctx.get("activeOrganizationId"),
+        "activeKnowledgeCollection": org_ctx.get("activeKnowledgeCollection"),
         "projects": data.get("projects") or [],
         "cases": data.get("cases") or [],
         "documentLanguages": data.get("documentLanguages") or [],
@@ -339,18 +392,34 @@ def resolve_org_collection_for_integration(
     upload_id: Optional[str] = None,
     upload_ids: Optional[list[str]] = None,
 ) -> tuple[str, str]:
-    return resolve_organization_context(
+    oid = str(explicit_organization_id or "").strip() or _integration_query_organization_id()
+    org_id, coll = resolve_organization_context(
         preferred_collection=preferred_collection,
-        explicit_organization_id=explicit_organization_id,
+        explicit_organization_id=oid or None,
         upload_id=upload_id,
         upload_ids=upload_ids,
     )
+    err = validate_resolved_collection(coll)
+    if err:
+        raise ValueError(err)
+    return org_id, coll
 
 
-def fetch_audit_prompt_defaults_upstream() -> dict[str, str]:
+def integration_org_context_response():
+    err = login_wall()
+    if err:
+        return err
+    return jsonify({"ok": True, **integration_org_context_payload()})
+
+
+def fetch_audit_prompt_defaults_upstream(
+    *,
+    organization_id: Optional[str] = None,
+) -> dict[str, str]:
     data, err = upstream_get_json(
         "api/integration/audit/prompt-defaults",
         read_timeout_seconds=15,
+        organization_id=organization_id,
     )
     if err or not data:
         return {}
@@ -361,11 +430,16 @@ def fetch_audit_prompt_defaults_upstream() -> dict[str, str]:
     }
 
 
-def enrich_audit_payload_from_upstream(payload_obj: dict[str, Any]) -> None:
+def enrich_audit_payload_from_upstream(
+    payload_obj: dict[str, Any],
+    *,
+    organization_id: Optional[str] = None,
+) -> None:
     """提交审核前补全提示词与项目英文字段（与 Streamlit 默认一致）。"""
     if not isinstance(payload_obj, dict):
         return
-    prompts = fetch_audit_prompt_defaults_upstream()
+    oid = str(organization_id or "").strip() or None
+    prompts = fetch_audit_prompt_defaults_upstream(organization_id=oid)
     for k in ("system_prompt", "user_prompt", "extra_instructions"):
         if not str(payload_obj.get(k) or "").strip() and prompts.get(k):
             payload_obj[k] = prompts[k]
@@ -378,6 +452,7 @@ def enrich_audit_payload_from_upstream(payload_obj: dict[str, Any]) -> None:
         fields, err = upstream_get_json(
             f"api/integration/audit/projects/{pid_int}/review-fields",
             read_timeout_seconds=15,
+            organization_id=oid,
         )
         if fields and not err:
             for k, v in fields.items():

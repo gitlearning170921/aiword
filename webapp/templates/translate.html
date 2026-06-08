@@ -5,8 +5,8 @@
   <div class="col-lg-10 mx-auto">
     <h2 class="mb-3">文档翻译（aicheckword）</h2>
     <p class="text-muted small">
-      调用 aicheckword 的 <code>/api/integration/translation/*</code>。仅支持 <code>.docx / .txt / .xlsx</code>，
-      单次最多 5 个文件 + 1 个目标语言。
+      调用 aicheckword 的 <code>/api/integration/translation/*</code>。支持 <code>.docx / .txt / .xlsx</code>，
+      以及 <code>.zip</code> 压缩包（自动解压内部可译文件），单次最多 5 个文件 + 1 个目标语言。
       {% if manual_upload_only %}
       本页为<strong>手动上传</strong>模式，请直接选择待译文件。
       {% else %}
@@ -27,7 +27,7 @@
         {% endif %}
         <div class="col-md-{% if manual_upload_only %}12{% else %}6{% endif %}">
           <label class="form-label">{% if manual_upload_only %}手动上传文件（≤5）{% else %}或手动上传文件（≤5）{% endif %}</label>
-          <input type="file" id="tr_files_picker" class="form-control" multiple accept=".docx,.txt,.xlsx"/>
+          <input type="file" id="tr_files_picker" class="form-control" multiple accept=".docx,.txt,.xlsx,.zip,.tar,.gz,.tgz"/>
           <div class="form-text" id="tr_files_count">未选择</div>
         </div>
       </div>
@@ -45,8 +45,10 @@
           </select>
         </div>
         <div class="col-md-3">
-          <label class="form-label">知识库（collection）</label>
-          <select id="tr_collection" class="form-select"></select>
+          <label class="form-label">所属公司</label>
+          <select id="tr_organization" class="form-select"></select>
+          <div class="form-text">知识库：<code id="tr_collection_display">—</code></div>
+          <input type="hidden" id="tr_collection" value="regulations"/>
         </div>
         <div class="col-md-3">
           <label class="form-label"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">aicheckword 项目</span><span id="tr_pf_project" class="dg-prefill-tag d-none">已匹配</span></label>

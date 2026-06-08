@@ -2,6 +2,7 @@
 """公司级项目总览：独立 company_projects 表，与页面1 projects 一对多关联。"""
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Any
@@ -50,19 +51,16 @@ company_bp = Blueprint("company", __name__)
 
 
 def _visible_organization_ids_for_session() -> list[str]:
+    from .tenant_context import user_allowed_organization_ids
+
     if is_page13_super_admin():
         rows = Organization.query.order_by(Organization.created_at.asc()).all()
         return [str(r.id or "").strip() for r in rows if str(r.id or "").strip()]
-    raw = session.get("organization_ids")
-    if not isinstance(raw, list):
-        raw = []
-    out: list[str] = []
-    for x in raw:
-        s = str(x or "").strip()
-        if s and s not in out:
-            out.append(s)
-    if out:
-        return out
+    ids = user_allowed_organization_ids()
+    if ids:
+        return ids
+    if session.get("user_id"):
+        return []
     d = default_organization()
     did = str(getattr(d, "id", "") or "").strip()
     return [did] if did else []
@@ -98,6 +96,19 @@ def _visible_organizations_payload() -> list[dict[str, Any]]:
 def _current_company_scope_org_id() -> str:
     oid, _ = resolve_organization_context()
     return str(oid or "").strip()
+
+
+def _requested_company_scope_org_ids() -> tuple[list[str], str | None]:
+    """列表/候选接口：默认按账号可见公司并集，支持按 query.organizationId 单公司过滤。"""
+    visible = [str(x).strip() for x in _visible_organization_ids_for_session() if str(x).strip()]
+    if not is_multi_tenant_enabled():
+        return visible, None
+    raw = str(request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    if not raw or raw in {"__all__", "all", "*"}:
+        return visible, None
+    if raw not in set(visible):
+        return [], "无权筛选该公司"
+    return [raw], None
 
 
 def _company_project_in_active_org(cp: CompanyProject | None) -> bool:
@@ -169,10 +180,12 @@ def _normalize_collection(raw: Any) -> str:
 
 
 def _serialize_organization(org: Organization) -> dict[str, Any]:
+    from .team_organizations import count_teams_for_organization
+
     oid = str(org.id or "").strip()
     usage = {
         "users": UserOrganizationMembership.query.filter_by(organization_id=oid).count(),
-        "projectTeams": ProjectTeam.query.filter_by(organization_id=oid).count(),
+        "projectTeams": count_teams_for_organization(oid),
         "companyProjects": CompanyProject.query.filter_by(organization_id=oid).count(),
         "projects": Project.query.filter_by(organization_id=oid).count(),
         "uploads": UploadRecord.query.filter_by(organization_id=oid).count(),
@@ -198,9 +211,11 @@ def _serialize_organization(org: Organization) -> dict[str, Any]:
 
 
 def _organization_delete_block_reason(org_id: str) -> str:
+    from .team_organizations import organization_has_team
+
     if UserOrganizationMembership.query.filter_by(organization_id=org_id).first():
         return "已有账号绑定该公司，无法删除"
-    if ProjectTeam.query.filter_by(organization_id=org_id).first():
+    if organization_has_team(org_id):
         return "已有项目组绑定该公司，无法删除"
     if CompanyProject.query.filter_by(organization_id=org_id).first():
         return "已有页面0 项目绑定该公司，无法删除"
@@ -227,12 +242,18 @@ def _team_name_map() -> dict[str, str]:
     return {t.id: t.name for t in ProjectTeam.query.all()}
 
 
-def _migrate_scope_company_to_company_projects() -> int:
+def _migrate_scope_company_to_company_projects(scope_org_ids: list[str] | None = None) -> int:
     """历史数据：registration_scope=company 的页面1 行迁入 company_projects 并改回 legacy。"""
     q = Project.query.filter(Project.registration_scope == REGISTRATION_SCOPE_COMPANY)
-    scope_org_id = _current_company_scope_org_id()
-    if is_multi_tenant_enabled() and scope_org_id:
-        q = q.filter(Project.organization_id == scope_org_id)
+    if is_multi_tenant_enabled():
+        ids = scope_org_ids if scope_org_ids is not None else [_current_company_scope_org_id()]
+        ids = [str(x).strip() for x in (ids or []) if str(x).strip()]
+        if ids:
+            q = q.filter(Project.organization_id.in_(ids))
+        else:
+            from sqlalchemy import false as sql_false
+
+            q = q.filter(sql_false())
     rows = q.all()
     n = 0
     for p in rows:
@@ -267,18 +288,24 @@ def _migrate_scope_company_to_company_projects() -> int:
     return n
 
 
-def _sync_unlinked_page1_one_to_one() -> int:
+def _sync_unlinked_page1_one_to_one(scope_org_ids: list[str] | None = None) -> int:
     """为尚未关联公司总览的页面1 项目各建一条公司项目（初始一对一，可在页面0 改绑为多对一）。"""
-    _migrate_scope_company_to_company_projects()
+    _migrate_scope_company_to_company_projects(scope_org_ids=scope_org_ids)
     q = Project.query.filter(
         or_(
             Project.company_project_id.is_(None),
             Project.company_project_id == "",
         )
     )
-    scope_org_id = _current_company_scope_org_id()
-    if is_multi_tenant_enabled() and scope_org_id:
-        q = q.filter(Project.organization_id == scope_org_id)
+    if is_multi_tenant_enabled():
+        ids = scope_org_ids if scope_org_ids is not None else [_current_company_scope_org_id()]
+        ids = [str(x).strip() for x in (ids or []) if str(x).strip()]
+        if ids:
+            q = q.filter(Project.organization_id.in_(ids))
+        else:
+            from sqlalchemy import false as sql_false
+
+            q = q.filter(sql_false())
     rows = q.all()
     n = 0
     for p in rows:
@@ -349,6 +376,27 @@ def _serialize_page1_link(p: Project) -> dict:
 
 def _company_is_starred(cp: CompanyProject) -> bool:
     return bool(getattr(cp, "is_starred", False))
+
+
+def _organization_name_map(org_ids: set[str] | list[str] | None = None) -> dict[str, str]:
+    ids = {str(x or "").strip() for x in (org_ids or []) if str(x or "").strip()}
+    if not ids:
+        return {}
+    rows = Organization.query.filter(Organization.id.in_(list(ids))).all()
+    return {
+        str(r.id or "").strip(): str(r.name or "").strip() or str(r.id or "").strip()
+        for r in rows
+    }
+
+
+def _resolve_assignable_organization_id(raw: Any) -> tuple[str | None, str | None]:
+    oid = str(raw or "").strip()
+    if not oid:
+        return None, "请选择所属公司"
+    allowed = {str(x.get("id") or "").strip() for x in _visible_organizations_payload()}
+    if oid not in allowed:
+        return None, "无权将项目分配到该公司"
+    return oid, None
 
 
 def _validate_assigned_team_change(cp: CompanyProject, new_team_id: str | None) -> str | None:
@@ -444,6 +492,32 @@ def _apply_company_fields(
         row.is_starred = bool(data.get("isStarred"))
     if "starred" in data and "isStarred" not in data:
         row.is_starred = bool(data.get("starred"))
+    if "organizationId" in data or "organization_id" in data:
+        from .project_teams import (
+            apply_company_project_organization_id,
+            company_project_has_page1_upload_tasks,
+            validate_organization_id_change,
+        )
+
+        raw = (
+            data.get("organizationId")
+            if "organizationId" in data
+            else data.get("organization_id")
+        )
+        new_oid, oid_err = _resolve_assignable_organization_id(raw)
+        if oid_err:
+            return oid_err
+        old_oid = str(getattr(row, "organization_id", "") or "").strip() or None
+        locked = company_project_has_page1_upload_tasks(row.id)
+        org_err = validate_organization_id_change(
+            old_org_id=old_oid,
+            new_org_id=new_oid,
+            upload_tasks_locked=locked,
+        )
+        if org_err:
+            return org_err
+        if old_oid != new_oid:
+            apply_company_project_organization_id(row, new_oid)
     return None
 
 
@@ -453,7 +527,9 @@ def _sync_company_to_page1_after_update(cp: CompanyProject) -> None:
     sync_company_to_page1(cp.id, push_nulls=True)
 
 
-def _serialize_company_project(cp: CompanyProject) -> dict:
+def _serialize_company_project(
+    cp: CompanyProject, *, org_names: dict[str, str] | None = None
+) -> dict:
     from .routes import _project_priority_label, _project_status_label
 
     from .project_teams import company_project_has_page1_upload_tasks
@@ -462,9 +538,16 @@ def _serialize_company_project(cp: CompanyProject) -> dict:
     tid = (getattr(cp, "assigned_team_id", None) or "").strip()
     linked = _linked_page1_rows(cp.id)
     team_locked = company_project_has_page1_upload_tasks(cp.id)
+    org_id = str(getattr(cp, "organization_id", "") or "").strip()
+    org_map = org_names or {}
+    if org_id and org_id not in org_map:
+        org_map = {**org_map, **_organization_name_map([org_id])}
     return {
         "id": cp.id,
         "name": cp.name,
+        "organizationId": org_id or None,
+        "organizationName": org_map.get(org_id) if org_id else None,
+        "organizationIdLocked": team_locked,
         "registeredCountry": getattr(cp, "registered_country", None),
         "registeredCategory": getattr(cp, "registered_category", None),
         "productType": getattr(cp, "product_type", None),
@@ -554,7 +637,7 @@ def company_registry_page():
     from .authz import is_page13_super_admin
 
     if is_page13_super_admin():
-        scope_label = "全部（页面1·3 访问密码 · 超级管理员）"
+        scope_label = "全部（页面4 访问密码 · 超级管理员）"
     else:
         scopes = user_country_scopes()
         scope_label = (
@@ -610,6 +693,218 @@ def api_company_context_set_active():
     )
 
 
+@company_bp.get("/api/company/training/meta")
+@company_registry_api_required
+def api_company_training_meta():
+    """项目案例训练：拉取 aicheckword 字典与已有案例列表（与 integration bootstrap 同源）。"""
+    explicit_org = str(
+        request.args.get("organizationId") or request.args.get("organization_id") or ""
+    ).strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from ._integration_common import fetch_upstream_common_bootstrap
+
+    data, err = fetch_upstream_common_bootstrap(
+        collection, organization_id=organization_id or None
+    )
+    if err:
+        return jsonify({"message": err}), 502
+    assert data is not None
+    return jsonify(
+        {
+            "ok": True,
+            "organizationId": organization_id or None,
+            "collection": collection,
+            "documentLanguages": data.get("documentLanguages") or [],
+            "registrationCountries": data.get("registrationCountries") or [],
+            "registrationTypes": data.get("registrationTypes") or [],
+            "registrationComponents": data.get("registrationComponents") or [],
+            "projectForms": data.get("projectForms") or [],
+            "cases": data.get("cases") or [],
+        }
+    )
+
+
+@company_bp.get("/api/company/training/status")
+@company_registry_api_required
+def api_company_training_status():
+    explicit_org = str(
+        request.args.get("organizationId") or request.args.get("organization_id") or ""
+    ).strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_get
+
+    resp, code = upstream_get(
+        "status",
+        params={"collection": collection},
+        organization_id=organization_id or None,
+    )
+    if code != 200:
+        return resp, code
+    data = resp.get_json()
+    return jsonify(
+        {
+            "ok": True,
+            "organizationId": organization_id,
+            "collection": collection,
+            "status": data.get("upstream") if isinstance(data, dict) else data,
+        }
+    )
+
+
+@company_bp.post("/api/company/training/checklist/generate")
+@company_admin_write_required
+def api_company_training_checklist_generate():
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_form_post
+
+    form_data = {"collection": collection}
+    base_cl = str(data.get("baseChecklist") or data.get("base_checklist") or "").strip()
+    if base_cl:
+        form_data["base_checklist"] = base_cl
+    resp, code = upstream_form_post(
+        "checklist/generate",
+        data=form_data,
+        organization_id=organization_id or None,
+        read_seconds=300,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json()
+    upstream = payload.get("upstream") if isinstance(payload, dict) else {}
+    checklist = upstream.get("checklist") if isinstance(upstream, dict) else []
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"已生成 {len(checklist or [])} 条审核点",
+            "organizationId": organization_id,
+            "collection": collection,
+            "checklist": checklist or [],
+            "totalPoints": upstream.get("total_points") if isinstance(upstream, dict) else len(checklist or []),
+            "upstream": upstream,
+        }
+    )
+
+
+@company_bp.post("/api/company/training/checklist/train")
+@company_admin_write_required
+def api_company_training_checklist_train():
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import parse_checklist_json, upstream_form_post
+
+    try:
+        checklist = parse_checklist_json(data.get("checklist") or data.get("checklistJson"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        return jsonify({"message": f"checklist 格式错误：{exc}"}), 400
+    if not checklist:
+        return jsonify({"message": "checklist 不能为空"}), 400
+    resp, code = upstream_form_post(
+        "checklist/train",
+        data={
+            "collection": collection,
+            "checklist_json": json.dumps(checklist, ensure_ascii=False),
+        },
+        organization_id=organization_id or None,
+        read_seconds=600,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json()
+    upstream = payload.get("upstream") if isinstance(payload, dict) else {}
+    chunks = upstream.get("chunks_added") if isinstance(upstream, dict) else 0
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"审核点已入库（新增 {chunks or 0} 块）",
+            "organizationId": organization_id,
+            "collection": collection,
+            "upstream": upstream,
+        }
+    )
+
+
+@company_bp.post("/api/company/training/knowledge/clear")
+@company_admin_write_required
+def api_company_training_knowledge_clear():
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_json_post
+
+    return upstream_json_post(
+        "knowledge/clear",
+        body={"collection": collection},
+        organization_id=organization_id or None,
+        read_seconds=120,
+    )
+
+
+@company_bp.post("/api/company/training/directory")
+@company_admin_write_required
+def api_company_training_directory():
+    """服务器本地目录训练（须 aicheckword 进程可访问该路径）。"""
+    data = request.get_json(force=True) or {}
+    dir_path = str(data.get("dirPath") or data.get("dir_path") or "").strip()
+    if not dir_path:
+        return jsonify({"message": "缺少 dirPath"}), 400
+    category = str(data.get("category") or "regulation").strip() or "regulation"
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_form_post
+
+    resp, code = upstream_form_post(
+        "train/directory",
+        data={"collection": collection, "category": category, "dir_path": dir_path},
+        organization_id=organization_id or None,
+        read_seconds=3600,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json()
+    return jsonify(
+        {
+            "ok": True,
+            "message": "目录训练请求已完成",
+            "organizationId": organization_id,
+            "collection": collection,
+            "upstream": payload.get("upstream") if isinstance(payload, dict) else payload,
+        }
+    )
+
+
 @company_bp.post("/api/company/training/upload")
 @company_admin_write_required
 def api_company_training_upload():
@@ -624,24 +919,20 @@ def api_company_training_upload():
         return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 503
     upstream_url = f"{base.rstrip('/')}/train/upload"
     form_files: list[tuple[str, tuple[str, bytes, str]]] = []
+    raw_items: list[tuple[str, bytes]] = []
     for f in files:
         if f is None:
             continue
         raw = f.read()
-        if not raw:
-            continue
-        form_files.append(
-            (
-                "files",
-                (
-                    str(f.filename or "upload.bin"),
-                    raw,
-                    str(getattr(f, "mimetype", None) or "application/octet-stream"),
-                ),
-            )
-        )
-    if not form_files:
-        return jsonify({"message": "文件为空或读取失败"}), 400
+        if raw:
+            raw_items.append((str(f.filename or "upload.bin"), raw))
+    from .archive_expand import expand_upload_blobs
+
+    expanded = expand_upload_blobs(raw_items)
+    if not expanded:
+        return jsonify({"message": "无有效训练文件（支持单文件或 zip/tar 压缩包）"}), 400
+    for disp_name, raw in expanded:
+        form_files.append(("files", (disp_name, raw, "application/octet-stream")))
     try:
         resp = requests.post(
             upstream_url,
@@ -686,8 +977,13 @@ def api_company_training_project_case_create():
             data={
                 "collection": collection,
                 "case_name": case_name,
+                "case_name_en": str(data.get("caseNameEn") or data.get("case_name_en") or "").strip(),
                 "product_name": str(data.get("productName") or data.get("product_name") or "").strip(),
+                "product_name_en": str(data.get("productNameEn") or data.get("product_name_en") or "").strip(),
                 "registration_country": str(data.get("registrationCountry") or data.get("registration_country") or "").strip(),
+                "registration_country_en": str(
+                    data.get("registrationCountryEn") or data.get("registration_country_en") or ""
+                ).strip(),
                 "registration_type": str(data.get("registrationType") or data.get("registration_type") or "").strip(),
                 "registration_component": str(data.get("registrationComponent") or data.get("registration_component") or "").strip(),
                 "project_form": str(data.get("projectForm") or data.get("project_form") or "").strip(),
@@ -796,12 +1092,11 @@ def api_company_projects_list():
     synced = 0
     sync_arg = (request.args.get("syncLegacy") or "").strip().lower()
     force_sync = sync_arg in ("1", "true", "yes", "on")
-    scope_org_id = _current_company_scope_org_id()
-    scoped_q = CompanyProject.query
-    if is_multi_tenant_enabled() and scope_org_id:
-        scoped_q = scoped_q.filter(CompanyProject.organization_id == scope_org_id)
-    if force_sync or scoped_q.count() == 0:
-        synced = _sync_unlinked_page1_one_to_one()
+    scope_org_ids, scope_err = _requested_company_scope_org_ids()
+    if scope_err:
+        return jsonify({"message": scope_err}), 403
+    if force_sync:
+        synced = _sync_unlinked_page1_one_to_one(scope_org_ids=scope_org_ids)
 
     from .project_registry_sync import sync_all_linked_page1_from_company
 
@@ -811,8 +1106,13 @@ def api_company_projects_list():
 
     _project_meta_map(auto_create_from_uploads=True)
     q = CompanyProject.query
-    if is_multi_tenant_enabled() and scope_org_id:
-        q = q.filter(CompanyProject.organization_id == scope_org_id)
+    if is_multi_tenant_enabled():
+        if scope_org_ids:
+            q = q.filter(CompanyProject.organization_id.in_(scope_org_ids))
+        else:
+            from sqlalchemy import false as sql_false
+
+            q = q.filter(sql_false())
     starred_only = (request.args.get("starredOnly") or "").strip().lower()
     if starred_only in ("1", "true", "yes", "on"):
         q = q.filter(CompanyProject.is_starred.is_(True))
@@ -824,7 +1124,13 @@ def api_company_projects_list():
     from .authz import company_project_in_scope
 
     rows = [cp for cp in rows if company_project_in_scope(cp)]
-    projects = [_serialize_company_project(cp) for cp in rows]
+    org_ids = {
+        str(getattr(cp, "organization_id", "") or "").strip()
+        for cp in rows
+        if str(getattr(cp, "organization_id", "") or "").strip()
+    }
+    org_names = _organization_name_map(org_ids)
+    projects = [_serialize_company_project(cp, org_names=org_names) for cp in rows]
     return jsonify({"projects": projects, "synced": synced, "total": len(projects)})
 
 
@@ -836,9 +1142,16 @@ def api_page1_project_candidates():
 
     _project_meta_map(auto_create_from_uploads=True)
     q = Project.query
-    scope_org_id = _current_company_scope_org_id()
-    if is_multi_tenant_enabled() and scope_org_id:
-        q = q.filter(Project.organization_id == scope_org_id)
+    scope_org_ids, scope_err = _requested_company_scope_org_ids()
+    if scope_err:
+        return jsonify({"message": scope_err}), 403
+    if is_multi_tenant_enabled():
+        if scope_org_ids:
+            q = q.filter(Project.organization_id.in_(scope_org_ids))
+        else:
+            from sqlalchemy import false as sql_false
+
+            q = q.filter(sql_false())
     rows = q.order_by(Project.name.asc()).all()
     return jsonify(
         [
@@ -900,6 +1213,16 @@ def api_company_projects_create():
         name=name,
         created_by_user_id=session.get("user_id"),
     )
+    if "organizationId" in data or "organization_id" in data:
+        raw = (
+            data.get("organizationId")
+            if "organizationId" in data
+            else data.get("organization_id")
+        )
+        oid, oid_err = _resolve_assignable_organization_id(raw)
+        if oid_err:
+            return jsonify({"message": oid_err}), 400
+        row.organization_id = oid
     field_err = _apply_company_fields(row, data)
     if field_err:
         return jsonify({"message": field_err}), 400
@@ -1004,6 +1327,32 @@ def api_company_projects_batch_update():
         patch["registrationOwner"] = (data.get("registrationOwner") or "").strip() or None
     if "isStarred" in data:
         patch["isStarred"] = bool(data.get("isStarred"))
+    if "organizationId" in data or "organization_id" in data:
+        raw = (
+            data.get("organizationId")
+            if "organizationId" in data
+            else data.get("organization_id")
+        )
+        oid, oid_err = _resolve_assignable_organization_id(raw)
+        if oid_err:
+            return jsonify({"message": oid_err}), 400
+        patch["organizationId"] = oid
+        from .authz import is_page13_super_admin
+        from .project_teams import (
+            ORGANIZATION_ID_LOCKED_MSG,
+            company_project_has_page1_upload_tasks,
+        )
+
+        if not is_page13_super_admin():
+            for cid in ids:
+                row = CompanyProject.query.get(cid)
+                if not row:
+                    continue
+                old = str(getattr(row, "organization_id", "") or "").strip() or None
+                if old == oid:
+                    continue
+                if company_project_has_page1_upload_tasks(cid):
+                    return jsonify({"message": ORGANIZATION_ID_LOCKED_MSG}), 403
     if not patch:
         return jsonify({"message": "请至少选择一项要修改的字段"}), 400
     from .authz import company_project_in_scope
@@ -1117,6 +1466,14 @@ def api_teams_create():
         dingtalk_secret=(data.get("dingtalkSecret") or "").strip() or None,
     )
     db.session.add(t)
+    db.session.flush()
+    org_ids = data.get("organizationIds")
+    if org_ids is None and data.get("organizationId"):
+        org_ids = [data.get("organizationId")]
+    if org_ids is not None:
+        from .team_organizations import set_team_organization_ids
+
+        set_team_organization_ids(t.id, org_ids if isinstance(org_ids, list) else [])
     db.session.commit()
     from .project_teams import serialize_team_item
 
@@ -1148,6 +1505,16 @@ def api_teams_patch(team_id: str):
     if "dingtalkSecret" in data:
         # 明确传空串表示清空，未传则保持原值。
         t.dingtalk_secret = (data.get("dingtalkSecret") or "").strip() or None
+    if "organizationIds" in data or "organizationId" in data:
+        from .team_organizations import set_team_organization_ids
+
+        raw = data.get("organizationIds")
+        if raw is None and "organizationId" in data:
+            oid = str(data.get("organizationId") or "").strip()
+            raw = [oid] if oid else []
+        if not isinstance(raw, list):
+            raw = []
+        set_team_organization_ids(team_id, raw)
     db.session.add(t)
     db.session.commit()
     return jsonify({"message": "已更新", "team": serialize_team_item(t)})

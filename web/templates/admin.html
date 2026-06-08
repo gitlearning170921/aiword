@@ -5,7 +5,7 @@
     <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
         <div>
             <h1>页面4 · 系统管理</h1>
-            <p class="mb-0 small text-muted">超级管理员入口：注册国家/项目组字典、账号与配置、系统参数与钉钉联调。须已通过访问密码验证。</p>
+            <p class="mb-0 small text-muted">超级管理员入口：注册国家/项目组字典、账号与配置、系统参数与钉钉联调。须已通过页面4 访问密码验证。</p>
         </div>
         <div class="text-end">
             <span class="badge bg-warning text-dark">超级管理员</span>
@@ -28,6 +28,9 @@
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-system-btn" data-bs-toggle="tab" data-bs-target="#tab-system" type="button" role="tab">系统与钉钉</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-scope-btn" data-bs-toggle="tab" data-bs-target="#tab-scope" type="button" role="tab">作用域诊断</button>
         </li>
     </ul>
 
@@ -59,7 +62,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshTeamDict">刷新</button>
                         </div>
                         <div class="card-body">
-                            <p class="small text-muted mb-2">在此维护；项目分配与账号所属项目组从此选择。已绑定数据不可删除。</p>
+                            <p class="small text-muted mb-2">在此维护；项目分配与账号所属项目组从此选择。可在编辑时关联一个或多个公司（多对多）。已绑定数据不可删除。</p>
                             <div class="input-group input-group-sm mb-3">
                                 <input type="text" class="form-control" id="newTeamName" placeholder="新项目组名称">
                                 <button type="button" class="btn btn-primary" id="btnAddTeam">添加</button>
@@ -201,9 +204,10 @@
         </div>
 
         <div class="tab-pane fade" id="tab-system" role="tabpanel">
+            <p class="small text-muted mb-3">催办通知与体系记录机器人为<strong>两套独立配置</strong>，可填不同 Webhook；填相同地址则实际为同一机器人。详细参数在「系统配置」弹窗对应分区。</p>
             <div class="card mb-3">
                 <div class="card-body">
-                    <h6 class="small fw-bold mb-2">自动通知时间配置</h6>
+                    <h6 class="small fw-bold mb-2">催办 · 自动通知时间</h6>
                     <div class="row g-2 align-items-end">
                         <div class="col-md-4">
                             <label class="form-label small mb-0">每周任务完成提醒</label>
@@ -231,8 +235,8 @@
             </div>
             <div class="card mb-3">
                 <div class="card-body py-2">
-                    <h6 class="small fw-bold mb-2">项目组钉钉配置</h6>
-                    <p class="small text-muted mb-2">按项目组设置专属 Webhook/Secret；未配置时回退全局钉钉参数。</p>
+                    <h6 class="small fw-bold mb-2">催办 · 项目组钉钉</h6>
+                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；未配置时回退「系统配置 → 催办与定时通知」中的全局 Webhook。</p>
                     <div class="row g-2 align-items-end">
                         <div class="col-md-4">
                             <label class="form-label small mb-0">项目组</label>
@@ -252,14 +256,38 @@
                     </div>
                 </div>
             </div>
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h6 class="small fw-bold mb-2">体系记录机器人</h6>
+                    <p class="small text-muted mb-2">HTTP 回调接收 @机器人 / 关键词消息并自动回复。回调 URL 由系统配置中的 <code>BASE_URL</code> 自动生成（调试填穿透地址，正式填域名），复制到钉钉开放平台即可。</p>
+                    <div id="adminChatbotCallbackUrlPanel" class="mb-2">
+                        <div class="small text-muted">加载回调 URL…</div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 mb-0">
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
+                    </div>
+                </div>
+            </div>
             <div class="card">
                 <div class="card-body">
                     <h6 class="small fw-bold mb-2">系统配置</h6>
-                    <p class="small text-muted mb-2">功能开关、数据库、Session、访问密码、全局钉钉等。敏感项留空表示不修改。修改数据库连接后需重启服务。</p>
+                    <p class="small text-muted mb-2">功能开关、数据库、Session、访问密码，以及「催办与定时通知」「体系记录机器人」等分区。敏感项留空表示不修改。修改数据库连接后需重启服务。</p>
                     <div class="d-flex flex-wrap gap-2 mb-2">
                         <button type="button" class="btn btn-sm btn-primary" id="openSystemSettingsBtn">打开系统配置</button>
-                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-scope" role="tabpanel">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>作用域诊断</span>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshScopeDiagnostics">刷新</button>
+                </div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">排查「看不到数据」时，核对账号绑定、Session 当前公司/项目组与各页 API 实际过滤规则是否一致。</p>
+                    <div id="scopeDiagnosticsPanel" class="small text-muted">加载中…</div>
                 </div>
             </div>
         </div>
@@ -278,6 +306,11 @@
                 <input type="hidden" id="dictEditId">
                 <label class="form-label small mb-1" id="dictEditNameLabel">名称</label>
                 <input type="text" class="form-control form-control-sm" id="dictEditName" required>
+                <div id="dictEditTeamOrgsWrap" class="mt-2 d-none">
+                    <label class="form-label small mb-1">关联公司（可多选）</label>
+                    <div id="dictEditTeamOrgsPicker" class="border rounded p-2 small" style="max-height: 10rem; overflow-y: auto;"></div>
+                    <div class="form-text">学生端考试中心的公司下拉仅展示其所属项目组关联的公司。</div>
+                </div>
             </div>
             <div class="modal-footer py-2">
                 <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
@@ -414,5 +447,50 @@ document.getElementById("adminLogoutPage13Btn")?.addEventListener("click", async
     } catch (_) { /* ignore */ }
     window.location.href = (window.__SCRIPT_ROOT__ || "") + "/login";
 });
+
+function renderScopeDiagnosticsPanel(data) {
+    const panel = document.getElementById("scopeDiagnosticsPanel");
+    if (!panel) return;
+    if (!data || !data.ok) {
+        panel.innerHTML = '<div class="text-danger">' + (data && data.message ? data.message : "加载失败") + "</div>";
+        return;
+    }
+    const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const u = data.user || {};
+    const b = data.bindings || {};
+    const s = data.session || {};
+    const e = data.effective || {};
+    let apiHtml = "";
+    if (data.apiFilters) {
+        apiHtml = "<ul class='mb-0 ps-3'>" + Object.keys(data.apiFilters).map(function (k) {
+            return "<li><code>" + esc(k) + "</code>：" + esc(data.apiFilters[k]) + "</li>";
+        }).join("") + "</ul>";
+    }
+    panel.innerHTML =
+        "<dl class='row mb-3'>" +
+        "<dt class='col-sm-3'>账号</dt><dd class='col-sm-9'>" + esc(u.username || "—") + "（" + esc(u.adminRoleLabel || "") + "）</dd>" +
+        "<dt class='col-sm-3'>绑定公司</dt><dd class='col-sm-9'>" + esc((b.organizationNames || []).join("、") || "—") + "</dd>" +
+        "<dt class='col-sm-3'>绑定项目组</dt><dd class='col-sm-9'>" + esc((b.teamNames || []).join("、") || "—") + "</dd>" +
+        "<dt class='col-sm-3'>Session 公司</dt><dd class='col-sm-9'><code>" + esc(s.activeOrganizationId || "—") + "</code></dd>" +
+        "<dt class='col-sm-3'>Session 项目组</dt><dd class='col-sm-9'><code>" + esc(s.activeExamTeamId || (s.examTeamScopeAll ? "全部" : "—")) + "</code></dd>" +
+        "<dt class='col-sm-3'>有效范围</dt><dd class='col-sm-9'>" + esc(e.scopeSummary || "") + "<br><span class='text-muted'>" + esc(e.scopeHint || "") + "</span></dd>" +
+        "</dl>" +
+        (apiHtml ? "<p class='fw-semibold mb-1'>各页 API 过滤</p>" + apiHtml : "");
+}
+
+async function loadScopeDiagnosticsPanel() {
+    const panel = document.getElementById("scopeDiagnosticsPanel");
+    if (!panel) return;
+    panel.textContent = "加载中…";
+    try {
+        const data = await App.request("/api/scope/diagnostics");
+        renderScopeDiagnosticsPanel(data);
+    } catch (e) {
+        panel.innerHTML = '<div class="text-danger">' + (e.message || "加载失败") + "</div>";
+    }
+}
+
+document.getElementById("btnRefreshScopeDiagnostics")?.addEventListener("click", loadScopeDiagnosticsPanel);
+document.getElementById("tab-scope-btn")?.addEventListener("shown.bs.tab", loadScopeDiagnosticsPanel);
 </script>
 {% endblock %}

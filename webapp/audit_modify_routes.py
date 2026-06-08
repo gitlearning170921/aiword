@@ -298,10 +298,13 @@ def _fetch_remediation_for_request() -> tuple[Optional[dict[str, str]], Optional
 
 @audit_modify_bp.route("/")
 def audit_modify_page():
-    if not session.get("user_id"):
-        from flask import redirect, url_for
+    from ._integration_common import integration_html_access_wall
 
-        return redirect(url_for("pages.login_page"))
+    blocked = integration_html_access_wall(
+        gate_description="请输入访问密码以进入审核后修改（超级管理员无需账号登录）。",
+    )
+    if blocked is not None:
+        return blocked
     scope = integration_scope_from_request()
     default_page0_report_id = None
     if scope == INTEGRATION_SCOPE_PAGE0:
@@ -323,9 +326,14 @@ def api_audit_modify_integration_bootstrap():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=collection
-    )
+    explicit_org = (request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=30,
@@ -379,13 +387,21 @@ def api_audit_modify_create_job():
     except Exception as e:  # noqa: BLE001
         return jsonify({"message": f"payload 解析失败：{e}"}), 400
 
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=str(payload_obj.get("collection") or "regulations"),
-        upload_ids=[
-            x for x in [upload_id, base_upload_id] if str(x or "").strip()
-        ],
-    )
+    explicit_org = str(
+        payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=str(payload_obj.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+            upload_ids=[
+                x for x in [upload_id, base_upload_id] if str(x or "").strip()
+            ],
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload_obj["collection"] = resolved_collection
+    payload_obj["organizationId"] = org_id
 
     try:
         pid = int(payload_obj.get("project_id") or 0)

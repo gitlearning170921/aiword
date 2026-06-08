@@ -4,23 +4,32 @@
     const batchModalEl = document.getElementById("companyBatchEditModal");
     const linkModalEl = document.getElementById("companyLinkPage1Modal");
     const teamSel = document.getElementById("cpTeamId");
+    const orgSel = document.getElementById("cpOrganizationId");
+    const batchOrgSel = document.getElementById("batchCpOrganizationId");
     const batchTeamSel = document.getElementById("batchCpTeamId");
     const teamsDictList = document.getElementById("teamsDictList");
     const dictEditModalEl = document.getElementById("dictEditModal");
     const selectAllCb = document.getElementById("companyProjectSelectAll");
     const btnBatchEdit = document.getElementById("btnBatchEditCompanyProjects");
     const btnBatchRemove = document.getElementById("btnBatchRemoveCompanyProjects");
+    const projectOrgFilterSel = document.getElementById("companyProjectOrgFilter");
     let teams = [];
+    let organizations = [];
+    let adminOrganizations = [];
+    let activeOrganizationId = "";
     let projectsCache = [];
     const GROUP_BY_STORAGE_KEY = "companyRegistryGroupBy";
     const STAR_FILTER_STORAGE_KEY = "companyRegistryStarFilter";
+    const ORG_FILTER_STORAGE_KEY = "companyRegistryOrgFilter";
     const canOverridePage1Lock = !!window.__PAGE13_SUPER_ADMIN__;
     const TEAM_LOCK_HINT =
-        "页面1 已下发任务，公司管理员不可修改所属项目组；仅超级管理员（页面1·3 访问密码）可改。";
+        "页面1 已下发任务，公司管理员不可修改所属项目组；仅超级管理员（页面4 访问密码）可改。";
     const STATUS_LOCK_HINT =
         "页面1 已下发任务，公司管理员不可在页面0 修改项目状态；请由项目管理员在页面1 修改，或联系超级管理员。";
+    const ORG_LOCK_HINT =
+        "页面1 已绑定任务，不可修改所属公司；仅超级管理员（页面4 访问密码）可改。";
 
-    const COLS = 14;
+    const COLS = 15;
     const EMPTY_COUNTRY_LABEL = "（未填写注册国家）";
     const EMPTY_PRODUCT_TYPE_LABEL = "（未填写产品类型）";
     let registeredCountriesDict = [];
@@ -68,6 +77,15 @@
             .filter(Boolean);
     }
 
+    function isOrganizationIdLocked(project) {
+        if (!project || canOverridePage1Lock) return false;
+        return !!(
+            project.organizationIdLocked ||
+            project.page1UploadTasksLocked ||
+            project.page1HasUploadTasks
+        );
+    }
+
     function isPage1TasksLocked(project) {
         if (!project || canOverridePage1Lock) return false;
         return !!(
@@ -103,6 +121,120 @@
         if (btnBatchRemove) btnBatchRemove.disabled = n === 0;
         const hint = document.getElementById("companyBatchEditHint");
         if (hint) hint.textContent = `已选 ${n} 项；留空表示不修改该字段。`;
+    }
+
+    function fillOrganizationSelect(sel, includeNoChange, selectedId) {
+        if (!sel) return;
+        const keep = selectedId != null ? String(selectedId) : sel.value;
+        sel.innerHTML = "";
+        if (includeNoChange) {
+            const o0 = document.createElement("option");
+            o0.value = "";
+            o0.textContent = "— 不修改 —";
+            sel.appendChild(o0);
+        }
+        (organizations || []).forEach((o) => {
+            const id = String(o.id || "").trim();
+            if (!id) return;
+            const opt = document.createElement("option");
+            opt.value = id;
+            const kc = String(o.knowledgeCollection || "regulations");
+            opt.textContent = `${o.name || id} (${kc})`;
+            sel.appendChild(opt);
+        });
+        if (keep) sel.value = keep;
+        if (organizations.length === 1 && !includeNoChange) {
+            sel.value = String(organizations[0].id || "").trim();
+            sel.disabled = true;
+        }
+    }
+
+    function selectedProjectOrganizationFilter() {
+        const v = String(projectOrgFilterSel?.value || "").trim();
+        return v || "__all__";
+    }
+
+    function fillProjectOrgFilterSelect(selectedId) {
+        if (!projectOrgFilterSel) return;
+        const keep = selectedId != null ? String(selectedId || "").trim() : selectedProjectOrganizationFilter();
+        projectOrgFilterSel.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "__all__";
+        allOpt.textContent = "全部公司（并集）";
+        projectOrgFilterSel.appendChild(allOpt);
+        (organizations || []).forEach((o) => {
+            const id = String(o.id || "").trim();
+            if (!id) return;
+            const opt = document.createElement("option");
+            opt.value = id;
+            const kc = String(o.knowledgeCollection || "regulations");
+            opt.textContent = `${o.name || id} (${kc})`;
+            projectOrgFilterSel.appendChild(opt);
+        });
+        const values = new Set([...projectOrgFilterSel.options].map((x) => String(x.value || "").trim()));
+        const pick = values.has(keep) ? keep : "__all__";
+        projectOrgFilterSel.value = pick;
+        try {
+            window.localStorage.setItem(ORG_FILTER_STORAGE_KEY, pick);
+        } catch (_) {}
+    }
+
+    async function loadOrganizationsContext() {
+        try {
+            const ctx = await apiRequest("/api/company/context");
+            organizations = Array.isArray(ctx?.organizations) ? ctx.organizations : [];
+            activeOrganizationId = String(ctx?.activeOrganizationId || "").trim();
+        } catch (_) {
+            organizations = [];
+            activeOrganizationId = "";
+        }
+        fillOrganizationSelect(orgSel, false, activeOrganizationId);
+        fillOrganizationSelect(batchOrgSel, true, "");
+        let savedFilter = "__all__";
+        try {
+            savedFilter = String(window.localStorage.getItem(ORG_FILTER_STORAGE_KEY) || "__all__").trim() || "__all__";
+        } catch (_) {}
+        fillProjectOrgFilterSelect(savedFilter);
+    }
+
+    async function loadAdminOrganizationsForDict() {
+        if (!document.getElementById("teamsDictList")) return;
+        try {
+            const res = await apiRequest("/api/organizations");
+            adminOrganizations = Array.isArray(res?.organizations) ? res.organizations : [];
+        } catch (_) {
+            adminOrganizations = [];
+        }
+    }
+
+    function renderTeamOrgPicker(selectedIds) {
+        const wrap = document.getElementById("dictEditTeamOrgsWrap");
+        const picker = document.getElementById("dictEditTeamOrgsPicker");
+        if (!wrap || !picker) return;
+        const selected = new Set((selectedIds || []).map((x) => String(x || "").trim()).filter(Boolean));
+        const rows = (adminOrganizations || []).filter((o) => o.isActive !== false);
+        if (!rows.length) {
+            wrap.classList.remove("d-none");
+            picker.innerHTML = '<span class="text-muted">暂无公司，请先在「公司管理」维护</span>';
+            return;
+        }
+        wrap.classList.remove("d-none");
+        picker.innerHTML = rows
+            .map((o) => {
+                const id = String(o.id || "").trim();
+                const checked = selected.has(id) ? " checked" : "";
+                return `<div class="form-check mb-1">
+                    <input class="form-check-input dict-edit-org-cb" type="checkbox" value="${esc(id)}" id="dictEditOrg_${esc(id)}"${checked}>
+                    <label class="form-check-label" for="dictEditOrg_${esc(id)}">${esc(o.name || id)}</label>
+                </div>`;
+            })
+            .join("");
+    }
+
+    function readTeamOrgPickerValues() {
+        return [...document.querySelectorAll("#dictEditTeamOrgsPicker .dict-edit-org-cb:checked")]
+            .map((el) => String(el.value || "").trim())
+            .filter(Boolean);
     }
 
     function fillTeamSelect(sel, includeNoChange, includeClear) {
@@ -177,6 +309,15 @@
         ul.innerHTML = rows
             .map((item) => {
                 const usageText = dictUsageLabel(item);
+                const orgNames =
+                    kind === "team" && Array.isArray(item.organizations) && item.organizations.length
+                        ? item.organizations.map((o) => o.name).join("、")
+                        : "";
+                const orgBadge = orgNames
+                    ? `<span class="badge bg-info text-dark dict-org-badge" title="关联公司">${esc(orgNames)}</span>`
+                    : kind === "team"
+                      ? '<span class="badge bg-light text-muted dict-org-badge">未关联公司</span>'
+                      : "";
                 const usageBadge =
                     item.usageCount > 0
                         ? `<span class="badge bg-secondary dict-usage-badge" title="${esc(usageText)}">已引用 ${item.usageCount}</span>`
@@ -188,10 +329,11 @@
                 return `<li class="list-group-item dict-item-row d-flex justify-content-between align-items-center flex-wrap">
                     <div class="d-flex align-items-center gap-2 flex-wrap">
                         <span class="fw-medium">${esc(item.name)}</span>
+                        ${orgBadge}
                         ${usageBadge}
                     </div>
                     <div class="dict-item-actions btn-group btn-group-sm">
-                        <button type="button" class="btn btn-outline-secondary btn-dict-edit" data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}">编辑</button>
+                        <button type="button" class="btn btn-outline-secondary btn-dict-edit" data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}" data-org-ids="${esc((item.organizationIds || []).join(","))}">编辑</button>
                         <button type="button" class="btn btn-outline-danger btn-dict-delete"${delDisabled}${delTitle} data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}">删除</button>
                     </div>
                 </li>`;
@@ -199,7 +341,9 @@
             .join("");
         ul.querySelectorAll(".btn-dict-edit").forEach((btn) => {
             btn.addEventListener("click", () => {
-                openDictEditModal(btn.dataset.kind, btn.dataset.id, btn.dataset.name);
+                const orgRaw = (btn.dataset.orgIds || "").trim();
+                const orgIds = orgRaw ? orgRaw.split(",").map((x) => x.trim()).filter(Boolean) : [];
+                openDictEditModal(btn.dataset.kind, btn.dataset.id, btn.dataset.name, orgIds);
             });
         });
         ul.querySelectorAll(".btn-dict-delete").forEach((btn) => {
@@ -223,19 +367,22 @@
         });
     }
 
-    function openDictEditModal(kind, id, name) {
+    function openDictEditModal(kind, id, name, organizationIds) {
         if (!dictEditModalEl) return;
         document.getElementById("dictEditKind").value = kind || "";
         document.getElementById("dictEditId").value = id || "";
         document.getElementById("dictEditName").value = name || "";
         const title = document.getElementById("dictEditModalTitle");
         const label = document.getElementById("dictEditNameLabel");
+        const orgWrap = document.getElementById("dictEditTeamOrgsWrap");
         if (kind === "country") {
             if (title) title.textContent = "编辑注册国家";
             if (label) label.textContent = "注册国家名称";
+            if (orgWrap) orgWrap.classList.add("d-none");
         } else {
             if (title) title.textContent = "编辑项目组";
             if (label) label.textContent = "项目组名称";
+            renderTeamOrgPicker(organizationIds || []);
         }
         bootstrap.Modal.getOrCreateInstance(dictEditModalEl).show();
     }
@@ -278,6 +425,9 @@
         fillCpCountrySelect(project?.registeredCountry || "");
         document.getElementById("cpCategory").value = project?.registeredCategory || "";
         document.getElementById("cpTeamId").value = project?.assignedTeamId || "";
+        const orgLocked = isOrganizationIdLocked(project);
+        fillOrganizationSelect(orgSel, false, project?.organizationId || activeOrganizationId);
+        applyFieldLock(orgSel, orgLocked, document.getElementById("cpOrganizationLockHint"), ORG_LOCK_HINT);
         const locked = isPage1TasksLocked(project);
         applyFieldLock(teamSel, locked, document.getElementById("cpTeamLockHint"), TEAM_LOCK_HINT);
         document.getElementById("cpPriority").value = String(project?.priority ?? 2);
@@ -318,6 +468,9 @@
         if (!isPage1TasksLocked(editing)) {
             payload.assignedTeamId = document.getElementById("cpTeamId").value || null;
             payload.status = document.getElementById("cpStatus").value || "active";
+        }
+        if (!isOrganizationIdLocked(editing) && orgSel && !orgSel.disabled) {
+            payload.organizationId = String(orgSel.value || "").trim() || null;
         }
         return payload;
     }
@@ -413,7 +566,12 @@
         if (box) box.innerHTML = '<div class="text-muted small">加载中…</div>';
         if (linkModalEl) new bootstrap.Modal(linkModalEl).show();
         try {
-            const candidates = await apiRequest("/api/company/page1-project-candidates");
+            const orgFilter = selectedProjectOrganizationFilter();
+            const q =
+                orgFilter && orgFilter !== "__all__"
+                    ? `?organizationId=${encodeURIComponent(orgFilter)}`
+                    : "";
+            const candidates = await apiRequest(`/api/company/page1-project-candidates${q}`);
             const linkedIds = new Set(
                 (companyProject.linkedPage1Projects || []).map((x) => x.id)
             );
@@ -575,6 +733,13 @@
                     <input type="text" class="form-control form-control-sm cp-registration-owner-input"
                            data-id="${esc(p.id)}" value="${esc(p.registrationOwner || "")}" placeholder="—">
                 </td>
+                <td class="small">${esc(p.organizationName || "—")}${
+                    isOrganizationIdLocked(p)
+                        ? ' <span class="badge bg-warning text-dark" title="' +
+                          esc(ORG_LOCK_HINT) +
+                          '">已锁定</span>'
+                        : ""
+                }</td>
                 <td>${esc(p.assignedTeamName || "—")}${
                     isPage1TasksLocked(p)
                         ? ' <span class="badge bg-warning text-dark" title="' +
@@ -666,8 +831,11 @@
         if (!displayRows.length) {
             const hint = getStarFilterMode() === "starred"
                 ? "暂无特别关注项目。点击列表左侧 ☆ 可标记关注。"
-                : "暂无项目。可点击「登记新项目」，或先在页面1 创建项目后点「同步已有项目」。";
-            body.innerHTML = `<tr><td colspan="${COLS}" class="text-muted small p-3">${esc(hint)}</td></tr>`;
+                : "暂无项目。可点击「登记新项目」，或在页面1 使用「同步页面0项目」导入所属项目组下的公司总览项目。";
+            body.innerHTML =
+                window.ScopeBar && ScopeBar.emptyTableRow
+                    ? ScopeBar.emptyTableRow(COLS, "page0_projects", [hint])
+                    : `<tr><td colspan="${COLS}" class="text-muted small p-3">${esc(hint)}</td></tr>`;
             return;
         }
         const mode = getGroupByMode();
@@ -692,7 +860,13 @@
         if (!body) return;
         body.innerHTML = `<tr><td colspan="${COLS}" class="text-muted small p-3">加载中…</td></tr>`;
         try {
-            const q = syncLegacy ? "?syncLegacy=1" : "";
+            const params = new URLSearchParams();
+            if (syncLegacy) params.set("syncLegacy", "1");
+            const orgFilter = selectedProjectOrganizationFilter();
+            if (orgFilter && orgFilter !== "__all__") {
+                params.set("organizationId", orgFilter);
+            }
+            const q = params.toString() ? `?${params.toString()}` : "";
             const res = await apiRequest(`/api/company/projects${q}`);
             const { projects, synced } = normalizeProjectsResponse(res);
             renderProjects(projects);
@@ -727,7 +901,9 @@
             document.getElementById("batchCpPriority").value = "";
             document.getElementById("batchCpStatus").value = "";
             if (batchTeamSel) batchTeamSel.value = "";
+            if (batchOrgSel) batchOrgSel.value = "";
             const batchLocked = selectedHasPage1TasksLock();
+            applyFieldLock(batchOrgSel, batchLocked, document.getElementById("batchCpOrganizationLockHint"), ORG_LOCK_HINT);
             applyFieldLock(batchTeamSel, batchLocked, document.getElementById("batchCpTeamLockHint"), TEAM_LOCK_HINT);
             applyFieldLock(
                 document.getElementById("batchCpStatus"),
@@ -766,6 +942,13 @@
                 notify(TEAM_LOCK_HINT, "warning");
                 return;
             }
+            const orgId = batchOrgSel?.value;
+            if (orgId !== "" && !selectedHasPage1TasksLock()) {
+                payload.organizationId = orgId;
+            } else if (orgId !== "" && selectedHasPage1TasksLock()) {
+                notify(ORG_LOCK_HINT, "warning");
+                return;
+            }
             if (batchPtEnable?.checked) {
                 payload.productType = (batchPtInput?.value || "").trim() || null;
             }
@@ -798,16 +981,15 @@
             );
         });
 
-        document.getElementById("btnRefreshCompanyProjects")?.addEventListener("click", () => loadProjects(false));
-        document.getElementById("btnSyncLegacyProjects")?.addEventListener("click", async () => {
+        projectOrgFilterSel?.addEventListener("change", () => {
+            const pick = selectedProjectOrganizationFilter();
             try {
-                const res = await apiRequest("/api/company/projects/sync-legacy", { method: "POST" });
-                notify(res.message || "已同步", "success");
-                await loadProjects(false);
-            } catch (e) {
-                notify(e.message || "同步失败", "danger");
-            }
+                window.localStorage.setItem(ORG_FILTER_STORAGE_KEY, pick);
+            } catch (_) {}
+            loadProjects(false);
         });
+
+        document.getElementById("btnRefreshCompanyProjects")?.addEventListener("click", () => loadProjects(false));
         document.getElementById("btnNewCompanyProject")?.addEventListener("click", () => openModal(null));
         body?.addEventListener("change", (ev) => {
             if (ev.target && ev.target.classList.contains("cp-row-checkbox")) {
@@ -886,18 +1068,25 @@
         const logoutBtn = document.getElementById("companyLogoutBtn");
         try {
             const me = await apiRequest("/api/me");
+            const isPage13Super = Boolean(me?.page13SuperAdmin);
             if (!me?.loggedIn) {
-                window.location.href = `${(window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "")}/login?next=${encodeURIComponent("/company")}`;
-                return;
-            }
-            if (me.user?.adminRole !== "company") {
+                if (isPage13Super) {
+                    if (info) info.textContent = "超级管理员（页面4 访问密码）· 可见全部公司";
+                    if (logoutBtn) logoutBtn.textContent = "退出超级管理员";
+                } else {
+                    window.location.href = `${(window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "")}/login?next=${encodeURIComponent("/company")}`;
+                    return;
+                }
+            } else if (me.user?.adminRole !== "company" && !isPage13Super) {
                 notify("仅公司管理员可访问本页", "danger");
                 return;
-            }
-            const u = me.user || {};
-            const countries = (u.registeredCountries || []).join("、");
-            if (info) {
-                info.textContent = `${u.displayName || u.username || ""}${countries ? " · " + countries : ""}`;
+            } else {
+                const u = me.user || {};
+                const countries = (u.registeredCountries || []).join("、");
+                if (info) {
+                    const roleHint = isPage13Super ? " · 超级管理员" : "";
+                    info.textContent = `${u.displayName || u.username || ""}${countries ? " · " + countries : ""}${roleHint}`;
+                }
             }
         } catch (e) {
             if ((e.message || "").includes("登录")) return;
@@ -917,12 +1106,179 @@
         const filesInput = document.getElementById("companyTrainFiles");
         const uploadBtn = document.getElementById("btnCompanyTrainUpload");
         const hint = document.getElementById("companyTrainHint");
+        const casePanel = document.getElementById("companyTrainCasePanel");
+        const caseModeSel = document.getElementById("companyTrainCaseMode");
+        const existingCaseWrap = document.getElementById("companyTrainExistingCaseWrap");
+        const existingCaseSel = document.getElementById("companyTrainExistingCase");
+        const copyFromWrap = document.getElementById("companyTrainCopyFromWrap");
+        const copyFromSel = document.getElementById("companyTrainCopyFrom");
+        const newCaseFields = document.getElementById("companyTrainNewCaseFields");
         const caseNameInput = document.getElementById("companyTrainCaseName");
+        const caseNameEnInput = document.getElementById("companyTrainCaseNameEn");
+        const productNameInput = document.getElementById("companyTrainProductName");
+        const productNameEnInput = document.getElementById("companyTrainProductNameEn");
+        const docLangSel = document.getElementById("companyTrainDocLang");
+        const regCountrySel = document.getElementById("companyTrainRegCountry");
+        const regCountryEnInput = document.getElementById("companyTrainRegCountryEn");
+        const regTypeSel = document.getElementById("companyTrainRegType");
+        const regComponentSel = document.getElementById("companyTrainRegComponent");
+        const projectFormSel = document.getElementById("companyTrainProjectForm");
+        const scopeInput = document.getElementById("companyTrainScope");
         if (!orgSel || !categorySel || !filesInput || !uploadBtn) return;
+
+        let trainingMeta = { cases: [] };
 
         const setHint = (msg) => {
             if (hint) hint.textContent = msg || "";
         };
+
+        function formatTrainCaseLabel(c) {
+            const name = String(c?.caseName || c?.case_name || c?.name || "").trim() || "—";
+            const product = String(c?.productName || c?.product_name || "").trim();
+            const country = String(c?.registrationCountry || c?.registration_country || "").trim();
+            const lang = String(c?.documentLanguage || c?.document_language || "").trim();
+            const parts = [name];
+            if (product) parts.push(product);
+            if (country) parts.push(country);
+            if (lang) parts.push(lang);
+            return parts.join(" · ");
+        }
+
+        function fillMetaSelect(sel, rows, emptyLabel) {
+            if (!sel) return;
+            const keep = String(sel.value || "").trim();
+            sel.innerHTML = "";
+            if (emptyLabel != null) {
+                const opt = document.createElement("option");
+                opt.value = "";
+                opt.textContent = emptyLabel;
+                sel.appendChild(opt);
+            }
+            (rows || []).forEach((row) => {
+                const val = String(row?.value ?? row?.id ?? row?.name ?? "").trim();
+                if (!val) return;
+                const opt = document.createElement("option");
+                opt.value = val;
+                opt.textContent = String(row?.label ?? row?.name ?? val);
+                sel.appendChild(opt);
+            });
+            const values = new Set([...sel.options].map((o) => String(o.value || "").trim()));
+            if (keep && values.has(keep)) sel.value = keep;
+        }
+
+        function applyTrainingMetaToForm() {
+            fillMetaSelect(docLangSel, trainingMeta.documentLanguages, null);
+            if (docLangSel && !docLangSel.value) docLangSel.value = "zh";
+            const countries = trainingMeta.registrationCountries?.length
+                ? trainingMeta.registrationCountries
+                : (registeredCountriesDict || []).map((name) => ({ value: name, label: name }));
+            fillMetaSelect(regCountrySel, countries, "—");
+            fillMetaSelect(regTypeSel, trainingMeta.registrationTypes, "—");
+            fillMetaSelect(regComponentSel, trainingMeta.registrationComponents, "—");
+            fillMetaSelect(projectFormSel, trainingMeta.projectForms, "—");
+
+            const caseRows = Array.isArray(trainingMeta.cases) ? trainingMeta.cases : [];
+            if (existingCaseSel) {
+                existingCaseSel.innerHTML = caseRows.length
+                    ? caseRows
+                          .map((c) => {
+                              const id = String(c?.id || c?.caseId || "").trim();
+                              return `<option value="${esc(id)}">${esc(formatTrainCaseLabel(c))}</option>`;
+                          })
+                          .join("")
+                    : '<option value="">（暂无已有案例，请新建）</option>';
+            }
+            if (copyFromSel) {
+                copyFromSel.innerHTML = '<option value="">不复制</option>';
+                caseRows.forEach((c) => {
+                    const id = String(c?.id || c?.caseId || "").trim();
+                    if (!id) return;
+                    const opt = document.createElement("option");
+                    opt.value = id;
+                    opt.textContent = formatTrainCaseLabel(c);
+                    copyFromSel.appendChild(opt);
+                });
+            }
+        }
+
+        async function loadTrainingMeta() {
+            const orgId = String(orgSel.value || "").trim();
+            if (!orgId) return;
+            try {
+                trainingMeta = await apiRequest(
+                    `/api/company/training/meta?organizationId=${encodeURIComponent(orgId)}`
+                );
+                applyTrainingMetaToForm();
+            } catch (e) {
+                trainingMeta = { cases: [] };
+                applyTrainingMetaToForm();
+                setHint(e.message || "训练字典加载失败");
+            }
+        }
+
+        function findCaseById(id) {
+            const cid = String(id || "").trim();
+            return (trainingMeta.cases || []).find(
+                (c) => String(c?.id || c?.caseId || "").trim() === cid
+            );
+        }
+
+        function prefillFromCase(c) {
+            if (!c) return;
+            if (caseNameInput) caseNameInput.value = String(c.caseName || c.case_name || "").trim();
+            if (caseNameEnInput) caseNameEnInput.value = String(c.caseNameEn || c.case_name_en || "").trim();
+            if (productNameInput) productNameInput.value = String(c.productName || c.product_name || "").trim();
+            if (productNameEnInput) productNameEnInput.value = String(c.productNameEn || c.product_name_en || "").trim();
+            if (docLangSel) {
+                docLangSel.value = String(c.documentLanguage || c.document_language || "zh").trim() || "zh";
+            }
+            if (regCountrySel) {
+                regCountrySel.value = String(c.registrationCountry || c.registration_country || "").trim();
+            }
+            if (regCountryEnInput) {
+                regCountryEnInput.value = String(c.registrationCountryEn || c.registration_country_en || "").trim();
+            }
+            if (regTypeSel) regTypeSel.value = String(c.registrationType || c.registration_type || "").trim();
+            if (regComponentSel) {
+                regComponentSel.value = String(c.registrationComponent || c.registration_component || "").trim();
+            }
+            if (projectFormSel) projectFormSel.value = String(c.projectForm || c.project_form || "").trim();
+            if (scopeInput) scopeInput.value = String(c.scopeOfApplication || c.scope_of_application || "").trim();
+        }
+
+        function syncCasePanel() {
+            const isCase = String(categorySel.value || "") === "project_case";
+            if (casePanel) casePanel.style.display = isCase ? "" : "none";
+            if (!isCase) return;
+            const mode = String(caseModeSel?.value || "new").trim() || "new";
+            const existing = mode === "existing";
+            if (existingCaseWrap) existingCaseWrap.style.display = existing ? "" : "none";
+            if (copyFromWrap) copyFromWrap.style.display = existing ? "none" : "";
+            if (newCaseFields) newCaseFields.style.display = existing ? "none" : "";
+        }
+
+        function buildProjectCaseCreateBody(copyFromId) {
+            const copyCase = copyFromId ? findCaseById(copyFromId) : null;
+            let projectKey = "";
+            if (copyCase) {
+                projectKey = String(copyCase.projectKey || copyCase.project_key || copyCase.id || "").trim();
+            }
+            return {
+                organizationId: String(orgSel.value || "").trim(),
+                caseName: String(caseNameInput?.value || "").trim(),
+                caseNameEn: String(caseNameEnInput?.value || "").trim(),
+                productName: String(productNameInput?.value || "").trim(),
+                productNameEn: String(productNameEnInput?.value || "").trim(),
+                documentLanguage: String(docLangSel?.value || "zh").trim() || "zh",
+                registrationCountry: String(regCountrySel?.value || "").trim(),
+                registrationCountryEn: String(regCountryEnInput?.value || "").trim(),
+                registrationType: String(regTypeSel?.value || "").trim(),
+                registrationComponent: String(regComponentSel?.value || "").trim(),
+                projectForm: String(projectFormSel?.value || "").trim(),
+                scopeOfApplication: String(scopeInput?.value || "").trim(),
+                projectKey,
+            };
+        }
 
         const loadContext = async () => {
             const ctx = await apiRequest("/api/company/context");
@@ -938,9 +1294,12 @@
             if (active) orgSel.value = active;
             const row = orgs.find((x) => String(x.id || "").trim() === String(orgSel.value || "").trim());
             setHint(row ? `当前知识库：${row.knowledgeCollection || "regulations"}` : "");
+            syncTrainHubOrgSelects(orgs, active);
+            await loadTrainingMeta();
         };
 
         try {
+            await loadRegisteredCountriesDict().catch(() => {});
             await loadContext();
         } catch (e) {
             setHint("");
@@ -958,10 +1317,30 @@
                 });
                 setHint(`当前知识库：${res?.activeKnowledgeCollection || ""}`);
                 notify("已切换当前公司", "success");
+                await loadTrainingMeta();
+                if (projectOrgFilterSel) {
+                    projectOrgFilterSel.value = id;
+                    try {
+                        window.localStorage.setItem(ORG_FILTER_STORAGE_KEY, id);
+                    } catch (_) {}
+                    loadProjects(false);
+                }
+                if (window.ScopeBar && ScopeBar.refresh) ScopeBar.refresh(true);
             } catch (e) {
                 notify(e.message || "切换公司失败", "danger");
             }
         });
+
+        categorySel.addEventListener("change", () => {
+            syncCasePanel();
+            if (String(categorySel.value || "") === "project_case") loadTrainingMeta();
+        });
+        caseModeSel?.addEventListener("change", syncCasePanel);
+        copyFromSel?.addEventListener("change", () => {
+            const cid = String(copyFromSel.value || "").trim();
+            if (cid) prefillFromCase(findCaseById(cid));
+        });
+        syncCasePanel();
 
         uploadBtn.addEventListener("click", async () => {
             const selected = filesInput.files ? Array.from(filesInput.files) : [];
@@ -975,24 +1354,30 @@
             try {
                 let res = null;
                 if (category === "project_case") {
-                    const caseName = String(caseNameInput?.value || "").trim();
-                    if (!caseName) {
-                        notify("分类为项目案例时，请填写案例名称", "warning");
-                        return;
-                    }
-                    const created = await apiRequest("/api/company/training/project-cases/create", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            organizationId: String(orgSel.value || "").trim(),
-                            caseName,
-                            documentLanguage: "zh",
-                        }),
-                    });
-                    const caseId =
-                        Number(created?.upstream?.data?.case_id || created?.upstream?.data?.case?.id || 0) || 0;
-                    if (!caseId) {
-                        throw new Error("创建项目案例失败：未返回 case_id");
+                    let caseId = 0;
+                    const mode = String(caseModeSel?.value || "new").trim() || "new";
+                    if (mode === "existing") {
+                        caseId = Number(String(existingCaseSel?.value || "").trim()) || 0;
+                        if (!caseId) {
+                            notify("请选择已有案例，或切换为「新建案例」", "warning");
+                            return;
+                        }
+                    } else {
+                        const body = buildProjectCaseCreateBody(String(copyFromSel?.value || "").trim());
+                        if (!body.caseName) {
+                            notify("请填写案例名称", "warning");
+                            return;
+                        }
+                        const created = await apiRequest("/api/company/training/project-cases/create", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        });
+                        caseId =
+                            Number(created?.upstream?.data?.case_id || created?.upstream?.data?.case?.id || 0) || 0;
+                        if (!caseId) {
+                            throw new Error("创建项目案例失败：未返回 case_id");
+                        }
                     }
                     const fd = new FormData();
                     fd.append("organizationId", String(orgSel.value || "").trim());
@@ -1002,6 +1387,7 @@
                         method: "POST",
                         body: fd,
                     });
+                    await loadTrainingMeta();
                 } else {
                     const fd = new FormData();
                     fd.append("organizationId", String(orgSel.value || "").trim());
@@ -1073,10 +1459,14 @@
                     kind === "country"
                         ? `/api/company/registered-countries/${id}`
                         : `/api/teams/${id}`;
+                const body = { name };
+                if (kind === "team") {
+                    body.organizationIds = readTeamOrgPickerValues();
+                }
                 await apiRequest(url, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name }),
+                    body: JSON.stringify(body),
                 });
                 bootstrap.Modal.getInstance(dictEditModalEl)?.hide();
                 notify("已更新", "success");
@@ -1088,20 +1478,171 @@
         });
     }
 
+    function syncTrainHubOrgSelects(orgs, activeId) {
+        ["checklistOrgSelect", "knowledgeOrgSelect"].forEach((id) => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            sel.innerHTML = (orgs || [])
+                .map((o) => {
+                    const oid = String(o.id || "").trim();
+                    const kc = String(o.knowledgeCollection || "regulations");
+                    return `<option value="${esc(oid)}">${esc(`${o.name || oid} (${kc})`)}</option>`;
+                })
+                .join("");
+            if (activeId) sel.value = activeId;
+        });
+    }
+
+    function initTrainingHubExtras() {
+        const checklistEditor = document.getElementById("checklistJsonEditor");
+        const checklistHint = document.getElementById("checklistHint");
+        const knowledgeBox = document.getElementById("knowledgeStatusBox");
+        const orgSel = document.getElementById("companyActiveOrgSelect");
+
+        const readHubOrg = () => {
+            const tabCheck = document.getElementById("checklistOrgSelect");
+            const tabKnow = document.getElementById("knowledgeOrgSelect");
+            const activePane = document.querySelector("#trainTabChecklist.show.active,#trainTabChecklist.active")
+                ? tabCheck
+                : tabKnow;
+            return String(
+                (activePane && activePane.value) ||
+                (tabCheck && tabCheck.value) ||
+                (orgSel && orgSel.value) ||
+                ""
+            ).trim();
+        };
+
+        document.getElementById("btnGenerateChecklist")?.addEventListener("click", async () => {
+            const orgId = readHubOrg();
+            if (!orgId) {
+                notify("请先选择公司", "warning");
+                return;
+            }
+            if (checklistHint) checklistHint.textContent = "生成中…";
+            try {
+                const res = await apiRequest("/api/company/training/checklist/generate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: orgId }),
+                });
+                const list = res.checklist || [];
+                if (checklistEditor) {
+                    checklistEditor.value = JSON.stringify(list, null, 2);
+                }
+                if (checklistHint) {
+                    checklistHint.textContent = res.message || `已生成 ${list.length} 条`;
+                }
+                notify(res.message || "审核点已生成", "success");
+            } catch (e) {
+                if (checklistHint) checklistHint.textContent = "";
+                notify(e.message || "生成失败", "danger");
+            }
+        });
+
+        document.getElementById("btnTrainChecklist")?.addEventListener("click", async () => {
+            const orgId = readHubOrg();
+            if (!orgId) {
+                notify("请先选择公司", "warning");
+                return;
+            }
+            let parsed = null;
+            try {
+                parsed = JSON.parse(String(checklistEditor?.value || "").trim() || "[]");
+            } catch (_) {
+                notify("审核点 JSON 格式无效", "warning");
+                return;
+            }
+            if (checklistHint) checklistHint.textContent = "训练入库中…";
+            try {
+                const res = await apiRequest("/api/company/training/checklist/train", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: orgId, checklist: parsed }),
+                });
+                if (checklistHint) checklistHint.textContent = res.message || "已入库";
+                notify(res.message || "审核点已入库", "success");
+            } catch (e) {
+                if (checklistHint) checklistHint.textContent = "";
+                notify(e.message || "入库失败", "danger");
+            }
+        });
+
+        async function refreshKnowledgeStatus() {
+            const orgId = readHubOrg();
+            if (!orgId || !knowledgeBox) return;
+            knowledgeBox.textContent = "加载中…";
+            try {
+                const res = await apiRequest(
+                    `/api/company/training/status?organizationId=${encodeURIComponent(orgId)}`
+                );
+                knowledgeBox.textContent = JSON.stringify(res.status || res, null, 2);
+            } catch (e) {
+                knowledgeBox.textContent = e.message || "加载失败";
+            }
+        }
+
+        document.getElementById("btnRefreshKnowledgeStatus")?.addEventListener("click", refreshKnowledgeStatus);
+        document.getElementById("btnClearKnowledge")?.addEventListener("click", async () => {
+            const orgId = readHubOrg();
+            if (!orgId) {
+                notify("请先选择公司", "warning");
+                return;
+            }
+            if (!window.confirm("确定清空当前公司知识库？此操作不可恢复。")) return;
+            try {
+                await apiRequest("/api/company/training/knowledge/clear", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: orgId }),
+                });
+                notify("知识库已清空", "success");
+                refreshKnowledgeStatus();
+            } catch (e) {
+                notify(e.message || "清空失败", "danger");
+            }
+        });
+
+        document.getElementById("btnTrainDirectory")?.addEventListener("click", async () => {
+            const orgId = readHubOrg();
+            const dirPath = String(document.getElementById("trainDirPath")?.value || "").trim();
+            const category = String(document.getElementById("trainDirCategory")?.value || "regulation");
+            if (!orgId || !dirPath) {
+                notify("请填写公司与目录路径", "warning");
+                return;
+            }
+            try {
+                const res = await apiRequest("/api/company/training/directory", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: orgId, dirPath, category }),
+                });
+                notify(res.message || "目录训练已完成", "success");
+                refreshKnowledgeStatus();
+            } catch (e) {
+                notify(e.message || "目录训练失败", "danger");
+            }
+        });
+
+        document.querySelector('[data-bs-target="#trainTabKnowledge"]')?.addEventListener("shown.bs.tab", refreshKnowledgeStatus);
+    }
+
     function initDictMaintenanceOnly() {
         bindDictMaintenanceEvents();
-        loadRegisteredCountriesDict().then(() => loadTeams());
+        loadAdminOrganizationsForDict().then(() => loadRegisteredCountriesDict()).then(() => loadTeams());
     }
 
     function boot() {
         if (body) {
             initCompanySessionBar();
             initCompanyTrainingPanel();
+            initTrainingHubExtras();
             initStarFilterSelect();
             initGroupBySelect();
             bindEvents();
             bindDictMaintenanceEvents();
             loadRegisteredCountriesDict().then(() => {
+                loadOrganizationsContext();
                 loadTeams();
                 loadProjects(true);
             });

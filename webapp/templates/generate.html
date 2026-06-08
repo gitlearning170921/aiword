@@ -20,6 +20,9 @@
 
 <div class="card mb-4">
     <div class="card-body">
+        <div id="page2ObserverBanner" class="alert alert-warning d-none mb-3 py-2 small mb-0">
+            当前为<strong>只读观察</strong>模式：可查看范围内全部任务记录，不可修改状态或操作文档。
+        </div>
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h5 class="card-title mb-0">我的任务列表</h5>
             <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#tasksFilterRow">
@@ -49,6 +52,20 @@
                         <label class="form-check-label small" for="showHistoryProjects">查看历史项目</label>
                     </div>
                 </div>
+                <div class="col-12 d-none" id="page2ObserverFilterRow">
+                    <div class="row g-2">
+                        <div class="col-md-4 d-none" id="page2ObserverTeamWrap">
+                            <select class="form-select form-select-sm" id="filterObserverTeam">
+                                <option value="">全部项目组</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4" id="page2ObserverUserWrap">
+                            <select class="form-select form-select-sm" id="filterObserverUser">
+                                <option value="">全部人员</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         <p class="text-muted small">以下为分配给您的任务，可直接<span class="page2-completion-hint">标记完成状态</span>{% if feature_flags.FEATURE_PAGE2_UPLOAD_REPLACE %}、填写占位符，或通过「上传/替换」上传模板文件（存 FTP，会覆盖已有文件或链接；原来源为链接时上传后改为文件）{% else %}、填写占位符{% endif %}。支持拖动排序。</p>
@@ -59,6 +76,10 @@
                 <label class="btn btn-outline-secondary" for="myTasksGroupByNone">不分组</label>
                 <input type="radio" class="btn-check" name="myTasksGroupBy" id="myTasksGroupByProject" value="project">
                 <label class="btn btn-outline-secondary" for="myTasksGroupByProject">按项目</label>
+                <input type="radio" class="btn-check d-none page2-observer-group" name="myTasksGroupBy" id="myTasksGroupByTeam" value="team">
+                <label class="btn btn-outline-secondary d-none page2-observer-group" for="myTasksGroupByTeam">按项目组</label>
+                <input type="radio" class="btn-check d-none page2-observer-group" name="myTasksGroupBy" id="myTasksGroupByPerson" value="person">
+                <label class="btn btn-outline-secondary d-none page2-observer-group" for="myTasksGroupByPerson">按人员</label>
             </div>
             <div class="col-toggle-wrap ms-auto">
                 <p class="fw-bold small mb-1 col-toggle-tip">文档通用及签审批信息请打开列设置查看。</p>
@@ -69,7 +90,7 @@
         <div class="table-responsive" style="max-height: 420px; overflow: auto;">
             <table class="table table-bordered table-hover align-middle table-selectable table-compact table-sticky-name-cols" id="myTasksTable" data-col-store-key="colVis_page2_v2">
                 <thead class="table-light">
-                    <tr>
+                    <tr id="myTasksHeadRow">
                         <th data-col="seq">序号</th>
                         <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
                         <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>

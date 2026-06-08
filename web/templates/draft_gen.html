@@ -65,10 +65,10 @@
       <div class="card-header">生成设置（与 aicheckword 初稿页一致）</div>
       <div class="card-body row g-3">
         <div class="col-md-6">
-          <label class="form-label" id="dg_lbl_collection"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">知识库名称</span><span id="dg_pf_collection" class="dg-prefill-tag d-none">已默认</span></label>
-          <input type="search" id="dg_collection_filter" class="form-control form-control-sm mb-1" placeholder="筛选知识库…" autocomplete="off"/>
-          <select id="dg_collection" class="form-select"></select>
-          <div class="form-text">与 aicheckword 侧栏「知识库名称」同一取值；多库时可在 aiword 系统配置增加 <code>AICHECKWORD_DRAFT_COLLECTION_IDS</code>（英文逗号分隔）。</div>
+          <label class="form-label" id="dg_lbl_collection"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">所属公司</span><span id="dg_pf_collection" class="dg-prefill-tag d-none">已默认</span></label>
+          <select id="dg_organization" class="form-select"></select>
+          <div class="form-text">知识库 collection：<code id="dg_collection_display">—</code>（须为已绑定公司的知识库）</div>
+          <input type="hidden" id="dg_collection" value="regulations"/>
         </div>
         <div class="col-md-6 d-flex align-items-end">
           <button type="button" class="btn btn-outline-secondary" id="dg_btn_refresh_bootstrap">刷新列表（案例/模板/项目）</button>
@@ -256,5 +256,6 @@
 </div>
 {% endblock %}
 {% block body_extra %}
+<script src="{{ url_for('static', filename='js/_integration_prefill.js', v=static_version) }}"></script>
 <script src="{{ url_for('static', filename='js/draft_gen.js', v=static_version) }}"></script>
 {% endblock %}

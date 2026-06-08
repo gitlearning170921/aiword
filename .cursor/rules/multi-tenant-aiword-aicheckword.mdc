@@ -11,7 +11,7 @@ alwaysApply: true
 ## 1. 开关与默认行为
 
 - 业务开关键：`FEATURE_MULTI_TENANT`（写入 `webapp/app_settings.SYSTEM_CONFIG_KEYS` 与
-  `FEATURE_FLAG_KEYS`），通过页面3「系统配置」维护；**默认关闭**。
+  `FEATURE_FLAG_KEYS`），通过页面4 · 系统与钉钉「系统配置」维护；**默认关闭**。
 - 关闭时：
   - 所有解析（`tenant_context.resolve_organization_context`）回退到默认组织 + 入参 `preferred_collection`；
   - 出站请求**不发送** `X-Aiword-Company-Id`；
@@ -61,5 +61,5 @@ python scripts/multi_tenant_smoke.py
 
 - 禁止在路由里直接读 `session["active_organization_id"]` 决定 collection；统一走
   `tenant_context.resolve_organization_context(...)`。
-- 禁止把 `FEATURE_MULTI_TENANT` 当成「仅环境变量」开关；只能从页面3 / `app_configs` 读取。
+- 禁止把 `FEATURE_MULTI_TENANT` 当成「仅环境变量」开关；只能从页面4 系统配置 / `app_configs` 读取。
 - 禁止把 `Organization.id` 暴露给 aicheckword 的 Streamlit 用户输入；Streamlit 只能选「name + collection」并由本地 `companies` 表反查。

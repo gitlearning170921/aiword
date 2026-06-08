@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按项目组解析钉钉 webhook/secret（缺失时回退全局配置）。"""
+"""按项目组解析钉钉 webhook/secret（缺失时回退默认项目组，再回退全局配置）。"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -7,6 +7,28 @@ from typing import Iterable
 
 from .authz import project_display_label
 from .models import Project, ProjectTeam, UploadRecord
+
+
+def _default_team_dingtalk_credentials(*, for_scheduler: bool = False) -> tuple[str, str | None]:
+    """互联网产品部（或首个活跃项目组）的 webhook/secret，作为项目组未配置时的默认机器人。"""
+    from .team_data_migration import DEFAULT_TEAM_NAME
+
+    team = (
+        ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True)
+        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
+        .first()
+    )
+    if not team:
+        team = (
+            ProjectTeam.query.filter_by(is_active=True)
+            .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
+            .first()
+        )
+    if not team:
+        return "", None
+    webhook = (getattr(team, "dingtalk_webhook", None) or "").strip()
+    secret = (getattr(team, "dingtalk_secret", None) or "").strip() or None
+    return webhook, secret
 
 
 def _global_dingtalk_credentials(*, for_scheduler: bool = False):
@@ -40,6 +62,9 @@ def resolve_dingtalk_credentials(
             secret = (getattr(team, "dingtalk_secret", None) or "").strip() or None
             if webhook:
                 return webhook, secret, "team"
+    webhook, secret = _default_team_dingtalk_credentials(for_scheduler=for_scheduler)
+    if webhook:
+        return webhook, secret, "default_team"
     webhook, secret = _global_dingtalk_credentials(for_scheduler=for_scheduler)
     return webhook, secret, "global"
 

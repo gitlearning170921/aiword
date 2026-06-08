@@ -38,7 +38,7 @@ _cron_mysql_lock_tls = threading.local()
 
 def _scheduler_instance_branch() -> str:
     """
-    定时钉钉互斥/去重用的「部署分支」标识，来自页面3系统配置 SCHEDULER_INSTANCE_ID。
+    定时钉钉互斥/去重用的「部署分支」标识，来自页面4 系统配置 SCHEDULER_INSTANCE_ID。
     - 留空：与历史一致，共库时同 job 同分钟全库只发一条（多 worker / 多机 HA 去重）。
     - 各套部署填不同值：共库时各套各发一条钉钉。
     """

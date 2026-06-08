@@ -473,7 +473,18 @@
     if (!pf) return;
     pfCountryRoute = pf.country ? classifyRegRouteFromCountry(pf.country) : "";
 
-    if (pf.collection && $(prefix + "_collection")) {
+    if (pf.collection && (b.organizations || []).length) {
+      var matchedOrg = "";
+      (b.organizations || []).forEach(function (o) {
+        if (String(o.knowledgeCollection || "") === String(pf.collection)) matchedOrg = String(o.id || "");
+      });
+      if (matchedOrg && $(organizationSelectId(prefix))) {
+        setSelectValue(organizationSelectId(prefix), matchedOrg);
+        syncCollectionFromOrganization(prefix, matchedOrg, b.organizations);
+      } else if (pf.collection && $(prefix + "_collection")) {
+        setSelectValue(prefix + "_collection", pf.collection);
+      }
+    } else if (pf.collection && $(prefix + "_collection") && $(prefix + "_collection").tagName === "SELECT") {
       setSelectValue(prefix + "_collection", pf.collection);
     }
 
@@ -542,6 +553,96 @@
     }).catch(function () { return pf; });
   }
 
+  function organizationSelectId(prefix) {
+    return prefix + "_organization";
+  }
+
+  function syncCollectionFromOrganization(prefix, orgId, orgs) {
+    var collEl = $(prefix + "_collection");
+    var dispEl = $(prefix + "_collection_display");
+    var kc = "regulations";
+    (orgs || []).forEach(function (o) {
+      if (String(o.id || "") === String(orgId || "")) {
+        kc = String(o.knowledgeCollection || "regulations").trim() || "regulations";
+      }
+    });
+    if (collEl) collEl.value = kc;
+    if (dispEl) dispEl.textContent = kc;
+    return kc;
+  }
+
+  function fillOrganizationSelect(prefix, orgs, activeId) {
+    var sel = $(organizationSelectId(prefix));
+    if (!sel) return "";
+    sel.innerHTML = "";
+    (orgs || []).forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = String(o.id || "");
+      opt.textContent = o.label || o.name || o.id;
+      sel.appendChild(opt);
+    });
+    var pick = String(activeId || "").trim();
+    if (pick) sel.value = pick;
+    else if (orgs && orgs[0]) sel.value = String(orgs[0].id || "");
+    if ((orgs || []).length <= 1) {
+      sel.disabled = true;
+      sel.title = "当前账号仅绑定一家公司";
+    } else {
+      sel.disabled = false;
+      sel.removeAttribute("title");
+    }
+    return syncCollectionFromOrganization(prefix, sel.value, orgs);
+  }
+
+  function readOrganizationId(prefix) {
+    var sel = $(organizationSelectId(prefix));
+    return sel ? String(sel.value || "").trim() : "";
+  }
+
+  function wireOrganizationSelect(prefix, opts) {
+    opts = opts || {};
+    var sel = $(organizationSelectId(prefix));
+    if (!sel || sel.__orgWired) return;
+    sel.__orgWired = true;
+    var apiRoot = String(opts.orgContextRoot || (opts.root || "") + "/audit").replace(/\/+$/, "");
+    sel.addEventListener("change", function () {
+      var oid = String(sel.value || "").trim();
+      var orgs = global["__integrationOrgs_" + prefix] || [];
+      syncCollectionFromOrganization(prefix, oid, orgs);
+      if (!oid) {
+        if (opts.onOrganizationChange) opts.onOrganizationChange(oid);
+        return;
+      }
+      var body = JSON.stringify({ organizationId: oid });
+      var headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
+      var req;
+      if (global.AsyncJob && global.AsyncJob.api) {
+        req = global.AsyncJob.api(apiRoot + "/api/org-context/active", {
+          method: "POST",
+          headers: headers,
+          body: body,
+        });
+      } else {
+        req = fetch(apiRoot + "/api/org-context/active", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: headers,
+          body: body,
+        }).then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (j) {
+            if (!r.ok) throw j;
+            return { ok: true, json: j };
+          });
+        });
+      }
+      Promise.resolve(req).then(function () {
+        if (opts.onOrganizationChange) opts.onOrganizationChange(oid);
+      }).catch(function () {
+        if (opts.onOrganizationChange) opts.onOrganizationChange(oid);
+      });
+    });
+  }
+
   function loadBootstrap(opts) {
     opts = opts || {};
     var prefix = opts.prefix || "aud";
@@ -552,13 +653,18 @@
 
     return enrichPrefillFromUpload(opts.root || "", pf0, uploadBase).then(function (pf) {
     storePagePrefill(prefix, pf);
+    var orgId = readOrganizationId(prefix);
     var collEl = $(prefix + "_collection");
     var coll = (collEl && collEl.value) ? collEl.value.trim() : "";
     if (!coll && pf && pf.collection) coll = pf.collection;
     if (!coll) coll = "regulations";
+    var qs = [];
+    if (orgId) qs.push("organizationId=" + encodeURIComponent(orgId));
+    if (coll) qs.push("collection=" + encodeURIComponent(coll));
+    var bootUrl = apiPath + (qs.length ? "?" + qs.join("&") : "");
 
     return (global.AsyncJob ? global.AsyncJob.api(
-      apiPath + "?collection=" + encodeURIComponent(coll),
+      bootUrl,
       { method: "GET" }
     ) : Promise.resolve({ ok: false })).then(function (x) {
       if (!x.ok || !x.json || !x.json.ok) {
@@ -567,9 +673,32 @@
       }
       var b = x.json;
       global[cacheKey] = b;
+      global["__integrationOrgs_" + prefix] = b.organizations || [];
 
-      fillSelect(prefix + "_collection", b.collections || [], "id", "label", null);
-      if (coll) setSelectValue(prefix + "_collection", coll);
+      if ($(organizationSelectId(prefix))) {
+        fillOrganizationSelect(prefix, b.organizations, b.activeOrganizationId || orgId);
+        wireOrganizationSelect(prefix, {
+          root: opts.root || "",
+          orgContextRoot: opts.orgContextRoot,
+          onOrganizationChange: function () {
+            loadBootstrap(Object.assign({}, opts, {
+              prefill: getPagePrefill(prefix) || parsePrefillFromLocation(),
+            }));
+          },
+        });
+        coll = syncCollectionFromOrganization(
+          prefix,
+          readOrganizationId(prefix) || b.activeOrganizationId,
+          b.organizations
+        );
+      } else if (collEl && collEl.tagName === "SELECT") {
+        fillSelect(prefix + "_collection", b.collections || [], "id", "label", null);
+        if (coll) setSelectValue(prefix + "_collection", coll);
+      } else if (collEl) {
+        collEl.value = b.collection || b.activeKnowledgeCollection || coll;
+        var disp = $(prefix + "_collection_display");
+        if (disp) disp.textContent = collEl.value;
+      }
 
       rememberProjectSelectRows(prefix, b.projects || []);
       fillSelect(projectSelectId(prefix), b.projects || [], "id", "label", PROJECT_EMPTY_OPT);
@@ -661,6 +790,40 @@
     return Object.keys(out).length ? out : null;
   }
 
+  function loadOrganizationContext(opts) {
+    opts = opts || {};
+    var prefix = opts.prefix || "exam";
+    var root = String(opts.root || "").replace(/\/+$/, "");
+    var apiRoot = String(opts.orgContextRoot || root + "/audit").replace(/\/+$/, "");
+    var url = apiRoot + "/api/org-context";
+    var req;
+    if (global.AsyncJob && global.AsyncJob.api) {
+      req = global.AsyncJob.api(url, { method: "GET" }).then(function (x) {
+        return (x && x.json) ? x.json : x;
+      });
+    } else {
+      req = fetch(url, { credentials: "same-origin" }).then(function (r) {
+        return r.json();
+      });
+    }
+    return Promise.resolve(req).then(function (data) {
+      var orgs = (data && data.organizations) || [];
+      global["__integrationOrgs_" + prefix] = orgs;
+      if ($(organizationSelectId(prefix))) {
+        fillOrganizationSelect(prefix, orgs, data && data.activeOrganizationId);
+        wireOrganizationSelect(prefix, {
+          orgContextRoot: apiRoot,
+          onOrganizationChange: opts.onOrganizationChange,
+        });
+      }
+      return data;
+    }).catch(function () {
+      var sel = $(organizationSelectId(prefix));
+      if (sel) sel.innerHTML = '<option value="">公司列表加载失败</option>';
+      return null;
+    });
+  }
+
   global.IntegrationPrefill = {
     $: $,
     parsePrefillFromLocation: parsePrefillFromLocation,
@@ -686,6 +849,11 @@
     parseManualRulesText: parseManualRulesText,
     applyCompanyConfig: applyCompanyConfig,
     readCompanyOverrides: readCompanyOverrides,
+    readOrganizationId: readOrganizationId,
+    syncCollectionFromOrganization: syncCollectionFromOrganization,
+    fillOrganizationSelect: fillOrganizationSelect,
+    wireOrganizationSelect: wireOrganizationSelect,
+    loadOrganizationContext: loadOrganizationContext,
     integrationScopeFromLocation: integrationScopeFromLocation,
     integrationScopeQuery: integrationScopeQuery,
     appendIntegrationScope: appendIntegrationScope,

@@ -67,8 +67,10 @@
       <div class="card-header">生成参数</div>
       <div class="card-body row g-2">
         <div class="col-md-4">
-          <label class="form-label">知识库（collection）</label>
-          <select id="amod_collection" class="form-select"></select>
+          <label class="form-label">所属公司</label>
+          <select id="amod_organization" class="form-select"></select>
+          <div class="form-text">知识库：<code id="amod_collection_display">—</code></div>
+          <input type="hidden" id="amod_collection" value="regulations"/>
         </div>
         <div class="col-md-4">
           <label class="form-label">模板项目案例（审核后修改默认不用）</label>

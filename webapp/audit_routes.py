@@ -50,6 +50,7 @@ from ._integration_common import (
     manual_upload_only_from_request,
     safe_truncate,
     resolve_aicheckword_project_id_for_upload,
+    integration_org_context_response,
     resolve_org_collection_for_integration,
     upload_record_visible_to_user,
     upstream_headers,
@@ -234,10 +235,13 @@ def _fetch_upload_display_name(upload_id: str) -> str:
 
 @audit_bp.route("/")
 def audit_page():
-    if not session.get("user_id"):
-        from flask import redirect, url_for
+    from ._integration_common import integration_html_access_wall
 
-        return redirect(url_for("pages.login_page"))
+    blocked = integration_html_access_wall(
+        gate_description="请输入访问密码以进入文档审核（超级管理员无需账号登录）。",
+    )
+    if blocked is not None:
+        return blocked
     scope = integration_scope_from_request()
     return render_template(
         "audit.html",
@@ -253,9 +257,14 @@ def api_audit_meta():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=collection
-    )
+    explicit_org = (request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=min(30, _audit_timeout()),
@@ -266,10 +275,126 @@ def api_audit_meta():
     return jsonify(payload)
 
 
+@audit_bp.get("/api/prompt-defaults")
+def api_audit_prompt_defaults():
+    err = login_wall()
+    if err:
+        return err
+    from ._integration_common import fetch_audit_prompt_defaults_upstream
+    from .tenant_context import active_organization_id_from_session
+
+    oid = str(request.args.get("organizationId") or active_organization_id_from_session() or "").strip()
+    prompts = fetch_audit_prompt_defaults_upstream(organization_id=oid or None)
+    return jsonify({"ok": True, **prompts})
+
+
+@audit_bp.post("/api/review-text")
+def api_audit_review_text():
+    """粘贴文本审核（同步，直连 aicheckword /review/text）。"""
+    err = login_wall()
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    text = str(data.get("text") or "").strip()
+    if not text:
+        return jsonify({"message": "text 不能为空"}), 400
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        org_id, collection = resolve_org_collection_for_integration(
+            preferred_collection=str(data.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    from .aicheckword_core_proxy import upstream_json_post
+
+    body = dict(data)
+    body["collection"] = collection
+    body.pop("organizationId", None)
+    body.pop("organization_id", None)
+    resp, code = upstream_json_post("review/text", body=body, organization_id=org_id, read_seconds=600)
+    if code != 200:
+        return resp, code
+    payload = resp.get_json()
+    return jsonify({"ok": True, "report": payload.get("upstream"), "organizationId": org_id, "collection": collection})
+
+
+@audit_bp.post("/api/review-kdocs")
+def api_audit_review_kdocs():
+    """金山文档链接审核（同步）。"""
+    err = login_wall()
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    kdocs_url = str(data.get("kdocsUrl") or data.get("kdocs_url") or "").strip()
+    if not kdocs_url and not str(data.get("kdocsDownloadUrl") or data.get("kdocs_download_url") or "").strip():
+        return jsonify({"message": "请提供金山文档链接"}), 400
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        org_id, collection = resolve_org_collection_for_integration(
+            preferred_collection=str(data.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    from .aicheckword_core_proxy import upstream_json_post
+
+    body = {
+        "kdocs_url": kdocs_url,
+        "kdocs_download_url": str(data.get("kdocsDownloadUrl") or data.get("kdocs_download_url") or "").strip(),
+        "file_name": str(data.get("fileName") or data.get("file_name") or "文档.docx").strip(),
+        "collection": collection,
+        "project_id": data.get("projectId") or data.get("project_id"),
+        "aiword_task_id": str(data.get("aiwordTaskId") or data.get("aiword_task_id") or "").strip(),
+    }
+    resp, code = upstream_json_post(
+        "api/integration/review-kdocs",
+        body=body,
+        organization_id=org_id,
+        read_seconds=600,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json()
+    upstream = payload.get("upstream") if isinstance(payload, dict) else {}
+    return jsonify({"ok": True, "result": upstream, "organizationId": org_id, "collection": collection})
+
+
 @audit_bp.get("/api/integration-bootstrap")
 def api_integration_bootstrap():
     """与 ``/api/meta`` 相同，供审核/审核后修改/翻译页统一调用。"""
     return api_audit_meta()
+
+
+@audit_bp.get("/api/org-context")
+def api_audit_org_context():
+    """集成页：可见公司列表与当前选中公司（任意已登录用户）。"""
+    return integration_org_context_response()
+
+
+@audit_bp.post("/api/org-context/active")
+def api_audit_org_context_set_active():
+    err = login_wall()
+    if err:
+        return err
+    from .tenant_context import collection_for_organization, integration_organizations_payload
+
+    data = request.get_json(force=True) or {}
+    target = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    allowed = {str(x.get("id") or "").strip() for x in integration_organizations_payload()}
+    if not target:
+        return jsonify({"message": "缺少 organizationId"}), 400
+    if target not in allowed:
+        return jsonify({"message": "无权切换到该公司"}), 403
+    session["active_organization_id"] = target
+    return jsonify(
+        {
+            "ok": True,
+            "message": "已切换当前公司",
+            "activeOrganizationId": target,
+            "activeKnowledgeCollection": collection_for_organization(target),
+        }
+    )
 
 
 @audit_bp.get("/api/upload-prefill")
@@ -345,11 +470,19 @@ def api_audit_create_job():
         pid = int(payload_obj.get("project_id") or 0)
     except (TypeError, ValueError):
         pid = 0
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=str(payload_obj.get("collection") or "regulations"),
-        upload_ids=upload_ids if has_task_source else None,
-    )
+    explicit_org = str(
+        payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=str(payload_obj.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+            upload_ids=upload_ids if has_task_source else None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload_obj["collection"] = resolved_collection
+    payload_obj["organizationId"] = org_id
 
     if has_task_source and upload_ids:
         pid_guess = resolve_aicheckword_project_id_for_upload(
@@ -420,7 +553,7 @@ def api_audit_create_job():
 
     from ._integration_common import enrich_audit_payload_from_upstream
 
-    enrich_audit_payload_from_upstream(payload_obj)
+    enrich_audit_payload_from_upstream(payload_obj, organization_id=org_id)
 
     uid_session = str(session.get("user_id") or "")
     job_scope = integration_scope_from_request()

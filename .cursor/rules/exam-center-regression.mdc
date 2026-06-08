@@ -30,7 +30,19 @@ alwaysApply: false
 
 ## 4) 每次改动后的必跑检查
 
-1. `python -m py_compile webapp/routes.py webapp/models.py webapp/app_settings.py`
-2. 运行 `python scripts/exam_center_smoke.py`
+1. `python -m py_compile webapp/routes.py webapp/models.py webapp/app_settings.py webapp/exam_scope.py`
+2. 运行 `python scripts/exam_center_smoke.py`（含项目组隔离与超管按公司/项目组切换作用域回归）
 3. 若 smoke fail，禁止宣称“已联调通过”。
 
+## 5) 多租户 / 公司 / 项目组隔离（必守）
+
+- **知识库 collection、老师端题库/录题/下发任务（ExamCenterAssignment）**：仅按 **organization_id（公司）** 过滤；写入时用 `exam_scope.organization_id_for_exam_write()`，空值历史回填默认公司「南京鱼跃软件技术有限公司」。
+- **人员相关（ExamCenterActivity、统计端学员表、练习/考试作答）**：**公司 + 项目组**（UserTeamMembership）；项目管理员下发受众仍须为本组学员。
+- **禁止**在 `_scope_exam_assignment_query` 中按项目组过滤任务；项目组过滤只用于 `_scope_exam_activity_query`。
+- 改动后确认 `repair_exam_historical_data` 仍幂等。
+
+## 6) 冒烟脚本不得留脏数据
+
+- `scripts/exam_center_smoke.py` 必须在 `finally` 中调用 `_purge_exam_smoke_database_artifacts()`，删除 `exam_smoke_*` 账号/项目组、set-100/【测试】Smoke 任务、相关活动与 attempt。
+- **禁止**在 smoke 开头 `delete()` 全表考试记录；只清理本脚本标记的数据。
+- 新增 smoke 用例时，测试数据须可识别（固定 username/team 前缀或 title 标记），并纳入 purge 逻辑。

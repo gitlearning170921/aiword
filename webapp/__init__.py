@@ -1137,6 +1137,10 @@ def ensure_schema(app: Flask):
             pass
 
     def seed_default_organization_and_backfill():
+        from .historical_migration import ensure_historical_migration_gate
+
+        if not ensure_historical_migration_gate(engine):
+            return
         org_id = ""
         with engine.connect() as conn:
             row = conn.execute(
@@ -1180,15 +1184,15 @@ def ensure_schema(app: Flask):
                     {"id": org_id},
                 )
 
+            # 仅对「完全没有任何公司绑定」的账号补默认公司；勿向已配置其它公司的账号追加默认公司。
             miss_rows = conn.execute(
                 text(
                     "SELECT u.id FROM users u "
                     "WHERE NOT EXISTS ("
                     "SELECT 1 FROM user_organization_memberships m "
-                    "WHERE m.user_id = u.id AND m.organization_id = :oid"
+                    "WHERE m.user_id = u.id"
                     ")"
-                ),
-                {"oid": org_id},
+                )
             ).fetchall()
             for row_u in miss_rows:
                 uid = str((row_u[0] or "")).strip()
@@ -1406,10 +1410,11 @@ def create_app() -> Flask:
 
     # 已注释 SQLite 入口，避免搞混当前连接的数据库。当前仅使用 MySQL。
     # default_db_uri = "sqlite:///" + str(project_root / "data" / "aiword.db")
-    default_db_uri = "mysql+pymysql://root:mysql170921@10.26.1.221:13306/aiword?charset=utf8mb4"
+    # Docker/生产：通过 AIWORD_BOOTSTRAP_DATABASE_URL 或 instance/database_url.txt 引导，避免硬编码内网地址
+    default_db_uri = (os.environ.get("AIWORD_BOOTSTRAP_DATABASE_URL") or "").strip()
     from .app_settings import normalize_database_uri_for_engine, resolve_database_uri
 
-    # 数据库 URI：以页面3 系统配置 (app_configs) 为准；不读取环境变量 DATABASE_URL
+    # 数据库 URI：以页面4 系统配置 (app_configs) 为准；不读取环境变量 DATABASE_URL
     db_uri = normalize_database_uri_for_engine(
         resolve_database_uri(project_root, default_db_uri)
     )
@@ -1641,13 +1646,21 @@ def create_app() -> Flask:
 
         run_startup_local_maintenance(app, project_root)
         try:
-            from .team_data_migration import ensure_default_team_data
+            from .historical_migration import (
+                repair_exam_historical_data,
+                run_exam_organization_backfill_if_pending,
+                run_team_data_migration_if_pending,
+            )
 
-            stats = ensure_default_team_data()
-            app.logger.info("team_data_migration done: %s", stats)
+            run_team_data_migration_if_pending()
+            run_exam_organization_backfill_if_pending()
+            repair_exam_historical_data()
+            from .team_organizations import backfill_junction_from_legacy
+
+            backfill_junction_from_legacy()
         except Exception:
             db.session.rollback()
-            app.logger.exception("team_data_migration failed")
+            app.logger.exception("historical_migration failed")
 
     try:
         from .scheduler import init_scheduler

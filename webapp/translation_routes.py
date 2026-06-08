@@ -55,6 +55,7 @@ _VALID_LANGS = ("en", "de", "zh")
 _MAX_FILES_PER_JOB = 5
 _MAX_CORRECT_FILES_PER_JOB = 10
 _SUPPORTED_EXTS = (".docx", ".txt", ".xlsx")
+_UPLOAD_ARCHIVE_EXTS = (".zip", ".tar", ".gz", ".tgz")
 
 
 def _translation_timeout() -> int:
@@ -84,9 +85,14 @@ def api_translate_meta():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=collection
-    )
+    explicit_org = (request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=min(30, _translation_timeout()),
@@ -206,10 +212,13 @@ def _apply_upstream_status(job: TranslationJob, data: dict) -> None:
 
 @translation_bp.route("/")
 def translate_page():
-    if not session.get("user_id"):
-        from flask import redirect, url_for
+    from ._integration_common import integration_html_access_wall
 
-        return redirect(url_for("pages.login_page"))
+    blocked = integration_html_access_wall(
+        gate_description="请输入访问密码以进入文档翻译（超级管理员无需账号登录）。",
+    )
+    if blocked is not None:
+        return blocked
     from ._integration_common import (
         integration_scope_from_request,
         manual_upload_only_from_request,
@@ -259,11 +268,19 @@ def api_translate_create_job():
     if not has_task_source and not has_manual_source:
         return jsonify({"message": "请至少提供一个 upload_ids 或 input_files"}), 400
 
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=str(payload_obj.get("collection") or "regulations"),
-        upload_ids=upload_ids if has_task_source else None,
-    )
+    explicit_org = str(
+        payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=str(payload_obj.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+            upload_ids=upload_ids if has_task_source else None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload_obj["collection"] = resolved_collection
+    payload_obj["organizationId"] = org_id
 
     resolved: list[tuple[str, bytes, str]] = []
     if has_task_source:
@@ -282,24 +299,30 @@ def api_translate_create_job():
             disp = _template_display_filename(rec) or rec.file_name or f"task_{uid}.docx"
             resolved.append((disp, blob, rec.id))
     else:
+        raw_items: list[tuple[str, bytes]] = []
         for f in uploaded_files:
             raw_name = (f.filename or "").strip() or "upload.bin"
             data = f.read()
             if not data:
                 continue
-            resolved.append((raw_name, data, ""))
+            raw_items.append((raw_name, data))
+        from .archive_expand import expand_translation_blobs
+
+        for name, blob in expand_translation_blobs(raw_items):
+            resolved.append((name, blob, ""))
 
     if not resolved:
         return jsonify({"message": "未能取到任何可翻译文件"}), 400
 
-    # 扩展名严格校验（与上游 SUPPORTED_EXTENSIONS 对齐）
+    # 扩展名校验（支持 zip/tar 压缩包，解压后须为可译格式）
     for disp, _blob, _uid in resolved:
         ext = Path(disp).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
             return jsonify(
                 {
                     "message": (
-                        f"不支持翻译该格式：{disp}（仅支持 {list(_SUPPORTED_EXTS)}）"
+                        f"不支持翻译该格式：{disp}（支持 {list(_SUPPORTED_EXTS)}；"
+                        f"压缩包 {list(_UPLOAD_ARCHIVE_EXTS)} 会自动解压）"
                     )
                 }
             ), 400
@@ -665,11 +688,19 @@ def api_translate_correct_create_job():
     if not has_task_source and not has_manual_source:
         return jsonify({"message": "请至少提供一个 upload_ids 或 input_files"}), 400
 
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=str(payload_obj.get("collection") or "regulations"),
-        upload_ids=upload_ids if has_task_source else None,
-    )
+    explicit_org = str(
+        payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=str(payload_obj.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+            upload_ids=upload_ids if has_task_source else None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload_obj["collection"] = resolved_collection
+    payload_obj["organizationId"] = org_id
 
     resolved: list[tuple[str, bytes, str]] = []
     if has_task_source:

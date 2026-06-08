@@ -33,6 +33,7 @@ from .app_settings import get_setting
 from ._integration_common import (
     fetch_draft_page_bootstrap,
     integration_collection_rows,
+    integration_org_context_payload,
     integration_scope_from_request,
     integration_scope_list_filter,
     manual_upload_only_from_request,
@@ -192,9 +193,9 @@ def _resolve_submit_provider(
 
 
 def _login_wall():
-    if not session.get("user_id"):
-        return jsonify({"message": "请先登录", "needsLogin": True}), 401
-    return None
+    from ._integration_common import login_wall
+
+    return login_wall()
 
 
 def _upload_record_visible_to_draft_user(rec: UploadRecord) -> bool:
@@ -633,10 +634,13 @@ def _personal_key_ready(user_id: str, provider: Optional[str] = None) -> tuple[b
 
 @draft_gen_bp.route("/")
 def draft_gen_page():
-    if not session.get("user_id"):
-        from flask import redirect, url_for
+    from ._integration_common import integration_html_access_wall
 
-        return redirect(url_for("pages.login_page"))
+    blocked = integration_html_access_wall(
+        gate_description="请输入访问密码以进入初稿生成（超级管理员无需账号登录）。",
+    )
+    if blocked is not None:
+        return blocked
     scope = integration_scope_from_request()
     return render_template(
         "draft_gen.html",
@@ -797,9 +801,14 @@ def api_draft_bootstrap():
     if err:
         return err
     collection = (request.args.get("collection") or "regulations").strip() or "regulations"
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=collection
-    )
+    explicit_org = (request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     bc_raw = (request.args.get("base_case_id") or "").strip()
     base_case_id: Optional[int] = None
     if bc_raw:
@@ -830,6 +839,10 @@ def api_draft_bootstrap():
     else:
         out["collection"] = resolved_collection
     out["collections"] = integration_collection_rows()
+    org_ctx = integration_org_context_payload()
+    out["organizations"] = org_ctx.get("organizations") or []
+    out["activeOrganizationId"] = org_ctx.get("activeOrganizationId")
+    out["activeKnowledgeCollection"] = org_ctx.get("activeKnowledgeCollection")
     out["metaOk"] = boot_err is None and bool(bootstrap)
     out["metaError"] = boot_err or (None if bootstrap else "page-bootstrap 异常")
     if isinstance(upstream_body, dict):
@@ -1005,6 +1018,7 @@ def api_jobs_list():
                 "summaryLine": " · ".join(summary_parts) if summary_parts else (j.message or "")[:120],
                 "templateCount": len(tpl_list),
                 "inputFileCount": len(in_list),
+                "hasPayloadSnapshot": bool(snap),
             }
         )
     total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
@@ -1017,6 +1031,31 @@ def api_jobs_list():
                 "total": total,
                 "total_pages": total_pages,
             },
+        }
+    )
+
+
+@draft_gen_bp.get("/api/jobs/<local_id>/snapshot")
+def api_job_snapshot(local_id: str):
+    """返回历史任务的 payload 快照，供「相同参数再提交」回填表单。"""
+    err = _login_wall()
+    if err:
+        return err
+    uid = str(session["user_id"])
+    job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
+    if not job:
+        return jsonify({"message": "任务不存在"}), 404
+    snap = job.payload_snapshot_json if isinstance(job.payload_snapshot_json, dict) else {}
+    tpl_raw = job.template_names_json
+    return jsonify(
+        {
+            "ok": True,
+            "snapshot": snap,
+            "templateNames": tpl_raw if isinstance(tpl_raw, list) else [],
+            "collection": job.collection,
+            "baseCaseId": job.base_case_id,
+            "projectId": job.project_id,
+            "inputDisplayNames": job.input_display_names_json if isinstance(job.input_display_names_json, list) else [],
         }
     )
 
@@ -1157,11 +1196,19 @@ def api_jobs_submit():
     payload_obj["aiword_user_id"] = uid
 
     base_ids_ordered = _collect_base_upload_record_ids(payload_obj)
-    org_id, resolved_collection = resolve_org_collection_for_integration(
-        preferred_collection=str(payload_obj.get("collection") or "regulations"),
-        upload_ids=base_ids_ordered,
-    )
+    explicit_org = str(
+        payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=str(payload_obj.get("collection") or "regulations"),
+            explicit_organization_id=explicit_org or None,
+            upload_ids=base_ids_ordered,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     payload_obj["collection"] = resolved_collection
+    payload_obj["organizationId"] = org_id
     if base_ids_ordered:
         pid_guess = resolve_aicheckword_project_id_for_upload(base_ids_ordered[0], user_id=uid)
         try:

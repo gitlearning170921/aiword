@@ -12,7 +12,7 @@ admin_bp = Blueprint("admin", __name__)
 @admin_bp.route("/admin")
 @page4_access_required
 def admin_page():
-    """页面4：须通过页面1·3 访问密码验证（超级管理员）。"""
+    """页面4：须通过页面4 访问密码验证（超级管理员）。"""
     return render_template(
         "admin.html",
         hide_main_nav=False,

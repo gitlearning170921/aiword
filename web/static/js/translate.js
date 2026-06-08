@@ -201,6 +201,9 @@
       var payload = {
         target_lang: ($("tr_target_lang").value || "en").trim() || "en",
         collection: ($("tr_collection").value || "regulations").trim() || "regulations",
+        organizationId: (window.IntegrationPrefill && window.IntegrationPrefill.readOrganizationId
+          ? window.IntegrationPrefill.readOrganizationId("tr")
+          : "") || null,
         provider: ($("tr_provider").value || "").trim() || null,
         use_kb: ($("tr_use_kb").value || "true") === "true",
       };
@@ -537,9 +540,9 @@
         }
       });
     }
-    var coll = $("tr_collection");
-    if (coll) {
-      coll.addEventListener("change", function () {
+    var orgSel = $("tr_organization");
+    if (orgSel) {
+      orgSel.addEventListener("change", function () {
         if (window.IntegrationPrefill && trBootstrapOpts) {
           trBootstrapOpts.prefill = window.IntegrationPrefill.getPagePrefill("tr")
             || window.IntegrationPrefill.parsePrefillFromLocation();

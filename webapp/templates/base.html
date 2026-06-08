@@ -54,6 +54,8 @@
 </nav>
 {% endif %}
 
+<div id="globalScopeBarMount" class="container-fluid px-4 mb-2 d-none" aria-live="polite"></div>
+
 <main class="container-fluid px-4">
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -73,6 +75,7 @@
 </script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
+<script src="{{ url_for('static', filename='js/scope_bar.js', v=static_version) }}"></script>
 {% endif %}
 {% block body_extra %}{% endblock %}
 </body>

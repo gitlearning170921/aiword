@@ -195,6 +195,21 @@ class ProjectTeam(db.Model):
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
+class ProjectTeamOrganization(db.Model):
+    """项目组与公司多对多（系统管理维护；legacy organization_id 仍作首项兼容）。"""
+    __tablename__ = "project_team_organizations"
+    __table_args__ = (UniqueConstraint("team_id", "organization_id", name="uq_team_organization"),)
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    team_id: Mapped[str] = mapped_column(
+        db.String(36), ForeignKey("project_teams.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        db.String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
 class UserTeamMembership(db.Model):
     """用户与项目组多对多。"""
     __tablename__ = "user_team_memberships"

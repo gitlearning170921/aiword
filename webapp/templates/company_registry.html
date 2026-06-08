@@ -13,7 +13,6 @@
     <div class="d-flex gap-2 flex-wrap align-items-center">
         <span id="companyUserInfo" class="badge bg-light text-dark border"></span>
         <button type="button" class="btn btn-sm btn-outline-secondary" id="companyLogoutBtn">退出登录</button>
-        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnSyncLegacyProjects">同步已有项目</button>
         <button type="button" class="btn btn-sm btn-primary" id="btnNewCompanyProject">登记新项目</button>
     </div>
 </div>
@@ -37,6 +36,184 @@
     </div>
 </div>
 
+<div class="card mb-4" id="companyKnowledgeTrainCard">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span>知识库训练（aicheckword）</span>
+        <ul class="nav nav-pills nav-pills-sm gap-1" id="companyTrainTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabFiles" type="button">文件训练</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabChecklist" type="button">审核点</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabKnowledge" type="button">知识库管理</button>
+            </li>
+        </ul>
+    </div>
+    <div class="card-body tab-content">
+        <div class="tab-pane fade show active" id="trainTabFiles" role="tabpanel">
+        <p class="small text-muted mb-3">
+            选择公司后，上传文件将训练到该公司在 aicheckword 中对应的独立知识库（collection）。
+            支持 zip/tar 压缩包（自动解压内部 docx/pdf 等）。训练过程可能耗时较长，请勿关闭页面。
+        </p>
+        <div class="row g-3 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label small mb-1" for="companyActiveOrgSelect">所属公司</label>
+                <select class="form-select form-select-sm" id="companyActiveOrgSelect">
+                    <option value="">加载中…</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1" for="companyTrainCategory">文件分类</label>
+                <select class="form-select form-select-sm" id="companyTrainCategory">
+                    <option value="regulation">法规文件</option>
+                    <option value="program">程序文件</option>
+                    <option value="project_case">项目案例文件</option>
+                    <option value="glossary">词条</option>
+                </select>
+            </div>
+        </div>
+        <div id="companyTrainCasePanel" class="border rounded p-3 mt-3 bg-white" style="display:none">
+            <p class="small text-muted mb-2">项目案例须先创建或选择案例元数据（与 aicheckword 训练页「新建案例」一致），再上传文件训练入库。</p>
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small mb-1" for="companyTrainCaseMode">案例</label>
+                    <select class="form-select form-select-sm" id="companyTrainCaseMode">
+                        <option value="new">新建案例</option>
+                        <option value="existing">训练到已有案例</option>
+                    </select>
+                </div>
+                <div class="col-md-8" id="companyTrainExistingCaseWrap" style="display:none">
+                    <label class="form-label small mb-1" for="companyTrainExistingCase">已有案例</label>
+                    <select class="form-select form-select-sm" id="companyTrainExistingCase">
+                        <option value="">加载中…</option>
+                    </select>
+                </div>
+                <div class="col-md-8" id="companyTrainCopyFromWrap">
+                    <label class="form-label small mb-1" for="companyTrainCopyFrom">复制自现有案例（可选）</label>
+                    <select class="form-select form-select-sm" id="companyTrainCopyFrom">
+                        <option value="">不复制</option>
+                    </select>
+                </div>
+            </div>
+            <div id="companyTrainNewCaseFields">
+                <div class="row g-2">
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1" for="companyTrainCaseName">案例名称 *</label>
+                        <input type="text" class="form-control form-control-sm" id="companyTrainCaseName" placeholder="例如：某某血糖仪二类注册案例">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1" for="companyTrainCaseNameEn">案例名称（英文）</label>
+                        <input type="text" class="form-control form-control-sm" id="companyTrainCaseNameEn" placeholder="e.g. XXX Blood Glucose Meter Class II">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1" for="companyTrainProductName">产品名称</label>
+                        <input type="text" class="form-control form-control-sm" id="companyTrainProductName" placeholder="该过往项目的产品名称">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small mb-1" for="companyTrainProductNameEn">产品名称（英文）</label>
+                        <input type="text" class="form-control form-control-sm" id="companyTrainProductNameEn" placeholder="Product name in English">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainDocLang">案例文档语言</label>
+                        <select class="form-select form-select-sm" id="companyTrainDocLang">
+                            <option value="zh">中文版</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainRegCountry">注册国家</label>
+                        <select class="form-select form-select-sm" id="companyTrainRegCountry">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainRegCountryEn">注册国家（英文）</label>
+                        <input type="text" class="form-control form-control-sm" id="companyTrainRegCountryEn" placeholder="e.g. China, USA">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainRegType">注册类别</label>
+                        <select class="form-select form-select-sm" id="companyTrainRegType">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainRegComponent">注册组成</label>
+                        <select class="form-select form-select-sm" id="companyTrainRegComponent">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="companyTrainProjectForm">项目形态</label>
+                        <select class="form-select form-select-sm" id="companyTrainProjectForm">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small mb-1" for="companyTrainScope">产品适用范围（可选）</label>
+                        <textarea class="form-control form-control-sm" id="companyTrainScope" rows="2" placeholder="该过往项目的适用范围；审核时可据此匹配"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-3">
+            <label class="form-label small mb-1" for="companyTrainFiles">训练文件</label>
+            <input type="file" class="form-control form-control-sm" id="companyTrainFiles" multiple
+                   accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.xls,.ppt,.pptx,.zip,.tar,.gz,.tgz">
+        </div>
+        <div class="mt-3 d-flex gap-2 align-items-center flex-wrap">
+            <button type="button" class="btn btn-sm btn-primary" id="btnCompanyTrainUpload">开始训练</button>
+            <span class="small text-muted" id="companyTrainHint"></span>
+        </div>
+        </div>
+
+        <div class="tab-pane fade" id="trainTabChecklist" role="tabpanel">
+            <p class="small text-muted mb-2">与 aicheckword 第一步「生成审核点清单 → 训练入库」一致。生成后可编辑 JSON，再入库向量化。</p>
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">所属公司</label>
+                    <select class="form-select form-select-sm" id="checklistOrgSelect"></select>
+                </div>
+                <div class="col-md-8 d-flex align-items-end gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="btnGenerateChecklist">AI 生成审核点</button>
+                    <button type="button" class="btn btn-sm btn-primary" id="btnTrainChecklist">训练入库</button>
+                </div>
+            </div>
+            <label class="form-label small mb-1" for="checklistJsonEditor">审核点 JSON（可编辑）</label>
+            <textarea class="form-control font-monospace small" id="checklistJsonEditor" rows="14" placeholder="点击「AI 生成审核点」后在此显示；也可粘贴已有清单 JSON 数组"></textarea>
+            <div class="small text-muted mt-2" id="checklistHint"></div>
+        </div>
+
+        <div class="tab-pane fade" id="trainTabKnowledge" role="tabpanel">
+            <p class="small text-muted mb-2">查看当前 collection 知识库统计；清空操作不可恢复，请谨慎。</p>
+            <div class="row g-2 mb-3">
+                <div class="col-md-4">
+                    <label class="form-label small mb-1">所属公司</label>
+                    <select class="form-select form-select-sm" id="knowledgeOrgSelect"></select>
+                </div>
+                <div class="col-md-8 d-flex align-items-end gap-2 flex-wrap">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshKnowledgeStatus">刷新统计</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="btnClearKnowledge">清空知识库</button>
+                </div>
+            </div>
+            <pre class="small bg-light border rounded p-3 mb-3" id="knowledgeStatusBox" style="max-height:240px;overflow:auto">点击「刷新统计」加载…</pre>
+            <div class="mb-2">
+                <label class="form-label small mb-1" for="trainDirPath">服务器目录训练（可选，须 aicheckword 可访问路径）</label>
+                <div class="input-group input-group-sm">
+                    <input type="text" class="form-control" id="trainDirPath" placeholder="例如 D:/data/regulations 或 /mnt/kb/regulations">
+                    <select class="form-select" id="trainDirCategory" style="max-width:9rem">
+                        <option value="regulation">法规</option>
+                        <option value="program">程序</option>
+                        <option value="project_case">项目案例</option>
+                        <option value="glossary">词条</option>
+                    </select>
+                    <button type="button" class="btn btn-outline-primary" id="btnTrainDirectory">目录训练</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span>全公司项目列表</span>
@@ -46,6 +223,12 @@
                 <select class="form-select form-select-sm" id="companyProjectStarFilter" style="width:auto;min-width:8rem" title="列表筛选">
                     <option value="all">全部项目</option>
                     <option value="starred">仅特别关注</option>
+                </select>
+            </label>
+            <label class="small text-muted mb-0 d-flex align-items-center gap-1">
+                所属公司
+                <select class="form-select form-select-sm" id="companyProjectOrgFilter" style="width:auto;min-width:12rem" title="按公司筛选项目列表">
+                    <option value="__all__">全部公司（并集）</option>
                 </select>
             </label>
             <label class="small text-muted mb-0 d-flex align-items-center gap-1">
@@ -73,6 +256,7 @@
                     <th>产品类型</th>
                     <th>注册国家/类别</th>
                     <th>注册负责人</th>
+                    <th>所属公司</th>
                     <th>项目组</th>
                     <th>优先级</th>
                     <th>状态</th>
@@ -84,7 +268,7 @@
                 </tr>
                 </thead>
                 <tbody id="companyProjectsBody">
-                <tr><td colspan="14" class="text-muted small p-3">加载中…</td></tr>
+                <tr><td colspan="15" class="text-muted small p-3">加载中…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -124,6 +308,13 @@
                     <div class="col-md-6">
                         <label class="form-label small">注册负责人</label>
                         <input type="text" class="form-control form-control-sm" id="cpRegistrationOwner" placeholder="姓名或账号显示名">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">所属公司</label>
+                        <select class="form-select form-select-sm" id="cpOrganizationId">
+                            <option value="">加载中…</option>
+                        </select>
+                        <div id="cpOrganizationLockHint" class="form-text text-warning small d-none"></div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">分配给项目组</label>
@@ -233,6 +424,13 @@
                         </div>
                         <input type="text" class="form-control form-control-sm" id="batchCpProductType"
                                placeholder="勾选上方后填写；留空表示清空产品类型" disabled>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label small">所属公司</label>
+                        <select class="form-select form-select-sm" id="batchCpOrganizationId">
+                            <option value="">— 不修改 —</option>
+                        </select>
+                        <div id="batchCpOrganizationLockHint" class="form-text text-warning small d-none"></div>
                     </div>
                     <div class="col-12">
                         <label class="form-label small">分配给项目组</label>

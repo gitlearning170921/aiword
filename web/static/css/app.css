@@ -82,6 +82,20 @@
     color: #4c5568;
 }
 
+/* 全站作用域条 */
+.scope-bar {
+    background: linear-gradient(120deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 252, 0.98));
+    border-left: 4px solid rgba(13, 110, 253, 0.55) !important;
+}
+.scope-bar-warn-list {
+    font-size: 0.8125rem;
+    color: #856404;
+    margin-top: 0.35rem;
+}
+.scope-empty-hint ul {
+    color: #64748b;
+}
+
 .workflow-steps {
     display: flex;
     gap: 12px;

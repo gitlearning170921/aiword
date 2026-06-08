@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 系统级配置：优先从数据库 app_configs 读取，兼容环境变量（库中无值时回退）。
-页面3「系统配置」维护；敏感项 GET 时脱敏。
+页面4 · 系统与钉钉「系统配置」维护；敏感项 GET 时脱敏。
 """
 from __future__ import annotations
 
@@ -16,18 +16,24 @@ if TYPE_CHECKING:
 SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     (
         "DATABASE_URL",
-        "数据库连接 URI（仅在页面3「系统配置」维护，存入 app_configs；保存时同步 instance/database_url.txt 供冷启动；修改后需重启服务）",
+        "数据库连接 URI（仅在页面4 · 系统与钉钉「系统配置」维护，存入 app_configs；保存时同步 instance/database_url.txt 供冷启动；修改后需重启服务）",
         True,
     ),
     ("SECRET_KEY", "Flask Session 密钥", True),
-    ("BASE_URL", "对外访问根地址（催办链接等，勿以 / 结尾）", False),
-    ("DINGTALK_WEBHOOK", "钉钉群机器人 Webhook", True),
-    ("DINGTALK_SECRET", "钉钉机器人加签 Secret", True),
+    ("BASE_URL", "对外访问根地址（勿以 / 结尾；调试填穿透地址、正式填域名；用于催办链接与生成钉钉回调 URL）", False),
+    ("DINGTALK_WEBHOOK", "催办/定时通知·群机器人 Webhook（全局默认；项目组未配时使用）", True),
+    ("DINGTALK_SECRET", "催办/定时通知·加签 Secret", True),
     ("DINGTALK_TRIGGER_KEYWORDS", "钉钉自动回复触发关键词（英文逗号分隔）", False),
     ("CHATBOT_ENABLED_GROUPS", "钉钉自动回复生效群 ID（英文逗号分隔，空=不限制）", False),
     ("CHATBOT_REPLY_COOLDOWN_SECONDS", "钉钉自动回复单群冷却秒数（默认 10）", False),
     ("CHATBOT_CONFIDENCE_THRESHOLD", "钉钉自动回复最低置信度阈值（默认 0.65）", False),
-    ("CHATBOT_ENABLE", "钉钉自动回复总开关（1=启用，0/空=关闭）", False),
+    ("CHATBOT_ENABLE", "体系记录机器人·自动回复总开关（1=启用，0/空=关闭）", False),
+    (
+        "CHATBOT_DINGTALK_WEBHOOK",
+        "体系记录机器人·群 Webhook（无 sessionWebhook 时发回复用；可与催办填相同地址）",
+        True,
+    ),
+    ("CHATBOT_DINGTALK_SECRET", "体系记录机器人·加签 Secret（与上方 Webhook 配对）", True),
     (
         "CHATBOT_LLM_PROVIDER",
         "钉钉机器人/联调调用 aicheckword 的 LLM 提供方（deepseek / tongyi / ollama / openai / lingyi；"
@@ -37,7 +43,22 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("DINGTALK_APP_KEY", "钉钉工作通知 AppKey", False),
     ("DINGTALK_APP_SECRET", "钉钉工作通知 AppSecret", True),
     ("DINGTALK_AGENT_ID", "钉钉工作通知 AgentId", False),
-    ("PAGE13_ACCESS_PASSWORD", "页面1/3 访问密码", True),
+    (
+        "DINGTALK_CALLBACK_TOKEN",
+        "钉钉 HTTP 回调 Token（开放平台机器人/事件订阅「签名 Token」，3～32 位英文或数字）",
+        True,
+    ),
+    (
+        "DINGTALK_CALLBACK_AES_KEY",
+        "钉钉 HTTP 回调 EncodingAESKey（43 位，开放平台自动生成）",
+        True,
+    ),
+    (
+        "DINGTALK_CALLBACK_OWNER_KEY",
+        "钉钉回调 OwnerKey（企业内部应用填 AppKey/ClientId；留空则复用 DINGTALK_APP_KEY）",
+        False,
+    ),
+    ("PAGE13_ACCESS_PASSWORD", "页面4 访问密码（超级管理员）", True),
     ("INTEGRATION_SECRET", "开放接口校验密钥（INTEGRATION_SECRET）", True),
     ("QUIZ_API_BASE_URL", "考试训练中心后端地址（如 http://127.0.0.1:8000）", False),
     (
@@ -127,7 +148,7 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         False,
     ),
     # 功能开关：1=开启入口；0/空=隐藏入口。
-    # 默认全部关闭（首次升级后入口隐藏），管理员在页面3「系统配置」中按需启用。
+    # 默认全部关闭（首次升级后入口隐藏），管理员在页面4 · 系统与钉钉「系统配置」中按需启用。
     # 「上传/替换」「初稿生成」「审核后修改」「翻译」对应页面2 任务列表中的功能按钮；
     # 「考试训练中心」对应页面1/2/3 顶部「进入考试训练中心」按钮。
     (
@@ -179,7 +200,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_MULTI_TENANT",
 )
 
-# 页面3「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
+# 页面4 · 系统与钉钉「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
 # defaultExpanded=True 的分区默认展开，其余折叠（details 无 open 属性）。
 SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
     {
@@ -206,22 +227,38 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
         ),
     },
     {
-        "id": "dingtalk",
-        "title": "钉钉通知",
-        "hint": "群机器人与工作通知；体系记录自动回复见 CHATBOT_* 与 AICHECKWORD_CHAT_*。配置后可在「钉钉机器人联调」页本地验收（页面3 系统配置区快捷入口）。敏感项留空表示不修改已有值。",
+        "id": "dingtalk_notify",
+        "title": "催办与定时通知",
+        "hint": "自动催办、定时统计、工作通知用；可与「体系记录机器人」填不同 Webhook，填相同地址则实际为同一机器人。",
         "defaultExpanded": True,
         "keys": (
             "DINGTALK_WEBHOOK",
             "DINGTALK_SECRET",
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_AGENT_ID",
+        ),
+    },
+    {
+        "id": "dingtalk_chatbot",
+        "title": "体系记录机器人",
+        "hint": "HTTP 回调接收群消息并自动回复。下方「钉钉回调 URL」由 BASE_URL 自动生成，复制到开放平台即可（钉钉不支持变量）。",
+        "defaultExpanded": True,
+        "keys": (
+            "DINGTALK_CALLBACK_TOKEN",
+            "DINGTALK_CALLBACK_AES_KEY",
+            "DINGTALK_CALLBACK_OWNER_KEY",
+            "CHATBOT_DINGTALK_WEBHOOK",
+            "CHATBOT_DINGTALK_SECRET",
+            "CHATBOT_ENABLE",
             "DINGTALK_TRIGGER_KEYWORDS",
             "CHATBOT_ENABLED_GROUPS",
             "CHATBOT_REPLY_COOLDOWN_SECONDS",
             "CHATBOT_CONFIDENCE_THRESHOLD",
-            "CHATBOT_ENABLE",
             "CHATBOT_LLM_PROVIDER",
-            "DINGTALK_APP_KEY",
-            "DINGTALK_APP_SECRET",
-            "DINGTALK_AGENT_ID",
+            "AICHECKWORD_CHAT_API_BASE",
+            "AICHECKWORD_CHAT_API_KEY",
+            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ),
     },
     {
@@ -253,9 +290,6 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
             "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
             "AICHECKWORD_DRAFT_COLLECTION_IDS",
-            "AICHECKWORD_CHAT_API_BASE",
-            "AICHECKWORD_CHAT_API_KEY",
-            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ),
     },
     {
@@ -310,6 +344,29 @@ def system_config_sections_for_api() -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+CHATBOT_CALLBACK_API_PATH = "/api/dingtalk/chatbot/callback"
+
+
+def chatbot_callback_url_info(base_url: str = "") -> dict[str, Any]:
+    """由 BASE_URL 生成钉钉 HTTP 回调完整 URL（供页面展示与复制）。"""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return {
+            "ready": False,
+            "baseUrl": "",
+            "url": "",
+            "path": CHATBOT_CALLBACK_API_PATH,
+            "hint": "请先在「基础与安全」填写 BASE_URL（调试填穿透地址，正式填域名）",
+        }
+    return {
+        "ready": True,
+        "baseUrl": base,
+        "url": f"{base}{CHATBOT_CALLBACK_API_PATH}",
+        "path": CHATBOT_CALLBACK_API_PATH,
+        "hint": "复制到钉钉开放平台机器人/事件订阅的回调 URL；切换环境时修改 BASE_URL 后重新复制",
+    }
 
 
 def _parse_flag(raw: Optional[str]) -> bool:
@@ -387,6 +444,16 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "DINGTALK_ROBOT_WEBHOOK",
     ),
     "DINGTALK_SECRET": ("DINGTALK_SECRET", "dingtalk_secret", "dingtalkSecret"),
+    "CHATBOT_DINGTALK_WEBHOOK": (
+        "CHATBOT_DINGTALK_WEBHOOK",
+        "chatbot_dingtalk_webhook",
+        "chatbotDingtalkWebhook",
+    ),
+    "CHATBOT_DINGTALK_SECRET": (
+        "CHATBOT_DINGTALK_SECRET",
+        "chatbot_dingtalk_secret",
+        "chatbotDingtalkSecret",
+    ),
     "PAGE13_ACCESS_PASSWORD": (
         "PAGE13_ACCESS_PASSWORD",
         "page13_access_password",
@@ -402,6 +469,9 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "DINGTALK_APP_KEY": ("DINGTALK_APP_KEY", "dingtalk_app_key"),
     "DINGTALK_APP_SECRET": ("DINGTALK_APP_SECRET", "dingtalk_app_secret"),
     "DINGTALK_AGENT_ID": ("DINGTALK_AGENT_ID", "dingtalk_agent_id"),
+    "DINGTALK_CALLBACK_TOKEN": ("DINGTALK_CALLBACK_TOKEN", "dingtalk_callback_token"),
+    "DINGTALK_CALLBACK_AES_KEY": ("DINGTALK_CALLBACK_AES_KEY", "dingtalk_callback_aes_key"),
+    "DINGTALK_CALLBACK_OWNER_KEY": ("DINGTALK_CALLBACK_OWNER_KEY", "dingtalk_callback_owner_key"),
     "QUIZ_API_BASE_URL": ("QUIZ_API_BASE_URL", "quiz_api_base_url", "quizApiBaseUrl"),
     "AICHECKWORD_DRAFT_API_BASE": (
         "AICHECKWORD_DRAFT_API_BASE",
@@ -637,7 +707,7 @@ def _merged_external_value(key: str, roots: list[Path]) -> str:
     """
     库为空时要展示/同步的值：钉钉类优先环境变量；页面密码等优先 config.json。
     """
-    if key in ("DINGTALK_WEBHOOK", "DINGTALK_SECRET"):
+    if key in ("DINGTALK_WEBHOOK", "DINGTALK_SECRET", "CHATBOT_DINGTALK_WEBHOOK", "CHATBOT_DINGTALK_SECRET"):
         v = _first_env_value(key)
         if v:
             return v
@@ -681,7 +751,7 @@ def _bootstrap_database_url_file(project_root: Path) -> Optional[str]:
 def normalize_database_uri_for_engine(uri: str, connect_timeout: int = 10) -> str:
     """
     规范 MySQL 连接 URI 的查询参数。
-    重复 connect_timeout（如页面3 已带 + 启动代码再拼）会被解析为 tuple，导致 db.init_app 失败。
+    重复 connect_timeout（如页面4 已带 + 启动代码再拼）会被解析为 tuple，导致 db.init_app 失败。
     """
     u = (uri or "").strip()
     if not u.startswith("mysql"):
@@ -697,7 +767,7 @@ def normalize_database_uri_for_engine(uri: str, connect_timeout: int = 10) -> st
 
 
 def _persist_database_url_bootstrap_file(project_root: Path, uri: str) -> None:
-    """将页面3 保存的 URI 写入启动缓存（仅由 save_system_settings / resolve 同步，非环境变量）。"""
+    """将页面4 保存的 URI 写入启动缓存（仅由 save_system_settings / resolve 同步，非环境变量）。"""
     val = (uri or "").strip()
     if not val or "****" in val:
         return
@@ -708,7 +778,7 @@ def _persist_database_url_bootstrap_file(project_root: Path, uri: str) -> None:
 
 def _fetch_database_url_from_config_table(database_uri: str) -> Optional[str]:
     """
-    从指定库连接读取 app_configs.DATABASE_URL（页面3 系统配置落库值）。
+    从指定库连接读取 app_configs.DATABASE_URL（页面4 系统配置落库值）。
     用于冷启动：先用启动缓存 URI 连库，再以库内配置为准。
     """
     uri = (database_uri or "").strip()
@@ -741,7 +811,7 @@ def _fetch_database_url_from_config_table(database_uri: str) -> Optional[str]:
 
 def resolve_database_uri(project_root: Path, default_uri: str) -> str:
     """
-    冷启动解析数据库 URI：以页面3 写入 app_configs 的 DATABASE_URL 为唯一业务来源。
+    冷启动解析数据库 URI：以页面4 写入 app_configs 的 DATABASE_URL 为唯一业务来源。
 
     顺序：先「内置默认 URI」、再「启动缓存 database_url.txt」尝试连库并读 app_configs
     （避免启动缓存指向测试库时，抢先读到测试库内错误配置而永远连不上正式库）；
@@ -763,18 +833,18 @@ def resolve_database_uri(project_root: Path, default_uri: str) -> str:
         if from_db:
             from_db = normalize_database_uri_for_engine(from_db)
             _persist_database_url_bootstrap_file(project_root, from_db)
-            log.info("数据库 URI 来自页面3 系统配置 (app_configs)")
+            log.info("数据库 URI 来自页面4 系统配置 (app_configs)")
             return from_db
     if boot:
         log.warning(
             "启动缓存 database_url.txt 指向的库中未找到 DATABASE_URL 配置项，"
-            "暂用该缓存连接；请在页面3 系统配置保存正确 URI 后重启"
+            "暂用该缓存连接；请在页面4 系统配置保存正确 URI 后重启"
         )
         return normalize_database_uri_for_engine(boot)
     if default_uri:
         log.warning(
             "未在 app_configs 中找到 DATABASE_URL，使用内置默认连接；"
-            "请在页面3 系统配置填写并保存数据库连接 URI"
+            "请在页面4 系统配置填写并保存数据库连接 URI"
         )
         return normalize_database_uri_for_engine(default_uri)
     return ""
@@ -794,7 +864,7 @@ def get_setting(key: str, default: str = "", app: Optional["Flask"] = None) -> s
             flask_app = None
 
     if key == "DATABASE_URL":
-        # 仅页面3 系统配置（app_configs）；不回落环境变量或启动缓存文件
+        # 仅页面4 系统配置（app_configs）；不回落环境变量或启动缓存文件
         if flask_app is not None:
             try:
                 with flask_app.app_context():
@@ -1004,7 +1074,7 @@ def ensure_environment_variables_migrated_to_db(
 def sync_database_url_bootstrap_from_app_configs(
     app: "Flask", project_root: Path
 ) -> None:
-    """运行期：将 app_configs 中的 DATABASE_URL 同步到启动缓存文件（与页面3 保存一致）。"""
+    """运行期：将 app_configs 中的 DATABASE_URL 同步到启动缓存文件（与页面4 保存一致）。"""
     v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()
     if v:
         _persist_database_url_bootstrap_file(project_root, v)
@@ -1077,7 +1147,7 @@ def persist_config_json_into_empty_db_keys(
 
 
 def _effective_database_url(app: "Flask", project_root: Path) -> str:
-    """页面3 系统配置中的 DATABASE_URL；未配置时展示当前进程实际连接 URI。"""
+    """页面4 系统配置中的 DATABASE_URL；未配置时展示当前进程实际连接 URI。"""
     v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()
     if v:
         return v
@@ -1089,7 +1159,7 @@ def _effective_database_url(app: "Flask", project_root: Path) -> str:
 
 def get_database_uri(app: Optional["Flask"] = None, project_root: Optional[Path] = None) -> str:
     """
-    供业务/脚本读取：优先 app_configs（页面3），无 Flask 上下文时用 resolve_database_uri。
+    供业务/脚本读取：优先 app_configs（页面4 系统配置），无 Flask 上下文时用 resolve_database_uri。
     """
     if app is not None:
         v = (get_setting("DATABASE_URL", default="", app=app) or "").strip()

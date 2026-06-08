@@ -63,6 +63,12 @@ from .models import (
     ExamGradingJob,
 )
 from . import dingtalk_service
+from .dingtalk_callback_crypto import (
+    DingTalkCallbackCrypto,
+    DingTalkCallbackCryptoError,
+    build_text_reply_json,
+    parse_callback_query_args,
+)
 
 bp = Blueprint("pages", __name__)
 _chatbot_group_last_reply_at: dict[str, float] = {}
@@ -77,6 +83,103 @@ def _dingtalk_secret_opt() -> Optional[str]:
     from .app_settings import get_setting
     s = (get_setting("DINGTALK_SECRET") or "").strip()
     return s or None
+
+
+def _chatbot_dingtalk_webhook_str() -> str:
+    """体系记录机器人发回复用 Webhook（与催办 DINGTALK_WEBHOOK 独立；未配时兼容旧单键部署）。"""
+    from .app_settings import get_setting
+
+    w = (get_setting("CHATBOT_DINGTALK_WEBHOOK") or "").strip()
+    if w:
+        return w
+    return (get_setting("DINGTALK_WEBHOOK") or "").strip()
+
+
+def _chatbot_dingtalk_secret_opt() -> Optional[str]:
+    from .app_settings import get_setting
+
+    s = (get_setting("CHATBOT_DINGTALK_SECRET") or "").strip()
+    if s:
+        return s or None
+    s = (get_setting("DINGTALK_SECRET") or "").strip()
+    return s or None
+
+
+def _dingtalk_callback_crypto_optional() -> Optional[DingTalkCallbackCrypto]:
+    from .app_settings import get_setting
+
+    token = (get_setting("DINGTALK_CALLBACK_TOKEN", default="") or "").strip()
+    aes_key = (get_setting("DINGTALK_CALLBACK_AES_KEY", default="") or "").strip()
+    owner = (
+        get_setting("DINGTALK_CALLBACK_OWNER_KEY", default="")
+        or get_setting("DINGTALK_APP_KEY", default="")
+        or ""
+    ).strip()
+    if not token or not aes_key or not owner:
+        return None
+    try:
+        return DingTalkCallbackCrypto(token, aes_key, owner)
+    except DingTalkCallbackCryptoError:
+        return None
+
+
+def _chatbot_process_incoming_payload(payload: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """处理一条已解密的钉钉消息体；返回 (结果 dict, 错误 message)。"""
+    if not _chatbot_enabled():
+        return {"ignored": "chatbot disabled"}, None
+
+    group_id = _chatbot_extract_group_id(payload)
+    groups = _chatbot_enabled_groups()
+    if groups and group_id and group_id not in groups:
+        return {"ignored": "group not enabled"}, None
+
+    text = _chatbot_extract_text(payload)
+    if not text:
+        return {"ignored": "empty text"}, None
+    if not _chatbot_should_trigger(text):
+        return {"ignored": "trigger not matched"}, None
+    if _chatbot_is_cooldown(group_id):
+        return {"ignored": "cooldown"}, None
+
+    message_id = (
+        str(payload.get("msgId") or payload.get("messageId") or payload.get("eventId") or "").strip()
+        or uuid.uuid4().hex
+    )
+    trigger_type = "at_bot" if "@" in text else "keyword"
+    recent_messages: list[str] = []
+    hist = payload.get("recentMessages")
+    if isinstance(hist, list):
+        recent_messages = [str(x).strip() for x in hist if str(x).strip()][:6]
+
+    reply_data, err = _chatbot_call_aicheckword(
+        query=text,
+        group_id=group_id,
+        message_id=message_id,
+        trigger_type=trigger_type,
+        recent_messages=recent_messages,
+        provider=_chatbot_llm_provider_from_settings(),
+    )
+    if err:
+        return None, err
+
+    need_human = bool(reply_data.get("need_human"))
+    answer = (reply_data.get("answer_summary") or reply_data.get("answer") or "").strip()
+    confidence = float(reply_data.get("confidence") or 0.0)
+    conf_threshold = _chatbot_confidence_threshold()
+    if need_human or confidence < conf_threshold or not answer:
+        answer = "这个问题我先帮你转人工确认，稍后给你准确答复。"
+
+    return (
+        {
+            "success": True,
+            "answer": answer,
+            "need_human": need_human,
+            "confidence": confidence,
+            "session_webhook": str(payload.get("sessionWebhook") or "").strip(),
+            "reply_data": reply_data,
+        },
+        None,
+    )
 
 
 def _resolve_dingtalk_for_team(team_id: str | None) -> tuple[str, Optional[str], str]:
@@ -382,6 +485,12 @@ def _items_from_activity_detail_snapshot(det: ExamCenterActivityDetail | None) -
     return []
 
 
+def _exam_org_scoping_enabled() -> bool:
+    from .exam_scope import exam_org_scoping_enabled
+
+    return exam_org_scoping_enabled()
+
+
 def _resolve_exam_organization_id(
     *,
     explicit_org_id: str | None = None,
@@ -391,10 +500,9 @@ def _resolve_exam_organization_id(
     project_id: str | None = None,
 ) -> str:
     """解析考试中心上游请求应携带的 organization_id。"""
-    from .app_settings import is_multi_tenant_enabled
     from .tenant_context import resolve_organization_context
 
-    if not is_multi_tenant_enabled():
+    if not _exam_org_scoping_enabled():
         return ""
 
     oid = str(explicit_org_id or "").strip()
@@ -443,17 +551,274 @@ def _resolve_exam_organization_id(
         if oid:
             return oid
 
+    from .authz import is_normal_user, is_page13_super_admin, is_project_admin
+
+    if is_page13_super_admin() or is_normal_user() or is_project_admin():
+        from .exam_scope import resolve_active_organization_id
+
+        exam_oid = resolve_active_organization_id(write_session=False)
+        if exam_oid:
+            return exam_oid
+
     oid, _ = resolve_organization_context()
     return str(oid or "").strip()
 
 
 def _current_exam_scope_organization_id() -> str:
-    """当前会话在考试中心的数据作用域 organization_id（单租户返回空串）。"""
-    from .app_settings import is_multi_tenant_enabled
+    """当前会话在考试中心的数据作用域 organization_id（未启用公司体系时返回空串）。"""
+    from .exam_scope import exam_org_scoping_enabled, resolve_active_organization_id
 
-    if not is_multi_tenant_enabled():
+    if not exam_org_scoping_enabled():
         return ""
-    return _resolve_exam_organization_id()
+    return resolve_active_organization_id()
+
+
+def _exam_org_id_sql_clause(org_id: str, column):
+    """公司过滤；organization_id 为空的历史记录在当前公司下仍可见（升级期兼容）。"""
+    oid = str(org_id or "").strip()
+    if not oid:
+        return None
+    from sqlalchemy import or_
+
+    return or_(column == oid, column.is_(None))
+
+
+def _ensure_exam_scope_data_repaired() -> None:
+    """首次查询前幂等补齐考试历史默认公司/项目组（避免启动后仍查不到旧数据）。"""
+    try:
+        from flask import g, has_request_context
+
+        if has_request_context():
+            if getattr(g, "_exam_scope_data_repaired", False):
+                return
+            g._exam_scope_data_repaired = True
+    except Exception:
+        pass
+    try:
+        from .historical_migration import repair_exam_scope_defaults
+
+        repair_exam_scope_defaults()
+    except Exception:
+        try:
+            from . import db
+
+            db.session.rollback()
+        except Exception:
+            pass
+
+
+def _exam_team_scoped_user_ids() -> frozenset[str] | None:
+    from .authz import exam_team_scoped_user_ids
+
+    return exam_team_scoped_user_ids()
+
+
+def _exam_assignment_ids_for_team_scope(
+    uids: frozenset[str],
+    *,
+    org_id: str = "",
+) -> set[str]:
+    """项目组可见的考试任务 id：受众含组内成员，或组内成员已有活动记录。"""
+    if not uids:
+        return set()
+    aud_aids = {
+        str(r.assignment_id).strip()
+        for r in ExamCenterAssignmentAudience.query.filter(
+            ExamCenterAssignmentAudience.user_id.in_(list(uids))
+        ).all()
+        if str(r.assignment_id).strip()
+    }
+    act_q = ExamCenterActivity.query.filter(
+        ExamCenterActivity.user_id.in_(list(uids)),
+        ExamCenterActivity.assignment_id.isnot(None),
+        ExamCenterActivity.assignment_id != "",
+    )
+    org_clause = _exam_org_id_sql_clause(org_id, ExamCenterActivity.organization_id)
+    if org_clause is not None:
+        act_q = act_q.filter(org_clause)
+    act_aids = {
+        str(r.assignment_id).strip()
+        for r in act_q.all()
+        if str(r.assignment_id).strip()
+    }
+    return aud_aids | act_aids
+
+
+def _scope_exam_activity_query(q):
+    """人员相关：当前公司 + 项目组（学员 user_id）过滤 ExamCenterActivity。"""
+    from sqlalchemy import false as sql_false
+
+    _ensure_exam_scope_data_repaired()
+    org_id = _current_exam_scope_organization_id()
+    org_clause = _exam_org_id_sql_clause(org_id, ExamCenterActivity.organization_id)
+    if org_clause is not None:
+        q = q.filter(org_clause)
+    uids = _exam_team_scoped_user_ids()
+    if uids is not None:
+        if not uids:
+            q = q.filter(sql_false())
+        else:
+            q = q.filter(ExamCenterActivity.user_id.in_(list(uids)))
+    return q
+
+
+def _active_exam_team_id_for_observer() -> str:
+    """只读列表展示项目组名时，与当前 session 选中的考试中心项目组一致。"""
+    from .exam_scope import resolve_active_exam_filter_team_id
+
+    tid = resolve_active_exam_filter_team_id()
+    return tid if tid else ""
+
+
+def _scope_exam_assignment_query(q):
+    """下发考试任务：仅按当前公司（organization_id）隔离，不按项目组。"""
+    org_id = _current_exam_scope_organization_id()
+    org_clause = _exam_org_id_sql_clause(org_id, ExamCenterAssignment.organization_id)
+    if org_clause is not None:
+        q = q.filter(org_clause)
+    return q
+
+
+def _exam_activity_in_staff_scope(row: ExamCenterActivity | None) -> bool:
+    if row is None:
+        return False
+    from .authz import exam_row_organization_id_matches, user_in_exam_team_scope
+
+    org_id = _current_exam_scope_organization_id()
+    if not exam_row_organization_id_matches(getattr(row, "organization_id", None), org_id):
+        return False
+    return user_in_exam_team_scope(str(getattr(row, "user_id", "") or ""))
+
+
+def _exam_assignment_in_staff_scope(row: ExamCenterAssignment | None) -> bool:
+    """下发任务：仅校验公司作用域（与项目组无关）。"""
+    if row is None:
+        return False
+    from .authz import exam_row_organization_id_matches
+
+    org_id = _current_exam_scope_organization_id()
+    return exam_row_organization_id_matches(getattr(row, "organization_id", None), org_id)
+
+
+def _validate_exam_audience_user_ids(audience_ids: list[str]) -> str | None:
+    """项目管理员下发考试时，受众须为所属项目组内账号。"""
+    from .authz import user_in_exam_team_scope
+
+    uids = _exam_team_scoped_user_ids()
+    if uids is None:
+        return None
+    bad = [x for x in audience_ids if not user_in_exam_team_scope(x)]
+    if bad:
+        return "考试对象须为所属项目组内人员"
+    return None
+
+
+def _project_teams_for_organization(org_id: str) -> list[ProjectTeam]:
+    """当前公司下启用且已绑定该公司的项目组（考试中心下拉用，不含测试组）。"""
+    from .team_organizations import teams_for_organization
+
+    return teams_for_organization(org_id, active_only=True)
+
+
+def _resolve_default_exam_team_id_for_org(org_id: str) -> str:
+    """默认项目组：互联网产品部（优先匹配当前公司绑定）。"""
+    from .exam_scope import default_exam_team_id_for_org
+
+    return default_exam_team_id_for_org(org_id)
+
+
+def _apply_super_admin_active_exam_team(org_id: str) -> str:
+    """超管：校验 session 中项目组；首次进入默认互联网产品部；可选「全部项目组」。"""
+    from .authz import is_page13_super_admin
+
+    if not is_page13_super_admin():
+        return ""
+    if session.get("exam_team_scope_all"):
+        session.pop("active_exam_team_id", None)
+        return ""
+    allowed = {t["id"] for t in _exam_teams_payload_for_scope(org_id)}
+    active = str(session.get("active_exam_team_id") or "").strip()
+    if active and active in allowed:
+        return active
+    if active and active not in allowed:
+        session.pop("active_exam_team_id", None)
+    default_id = _resolve_default_exam_team_id_for_org(org_id)
+    if default_id and default_id in allowed:
+        session["active_exam_team_id"] = default_id
+        session.pop("exam_team_scope_all", None)
+        return default_id
+    session.pop("active_exam_team_id", None)
+    session.pop("exam_team_scope_all", None)
+    return ""
+
+
+def _exam_teams_payload_for_scope(org_id: str) -> list[dict[str, str]]:
+    """考试中心作用域内可选项目组（超管按当前公司；项目管理员仅所属组）。"""
+    from .authz import is_page13_super_admin, is_project_admin, user_team_ids
+    from .team_organizations import organization_ids_for_team
+
+    oid = str(org_id or "").strip()
+    if is_page13_super_admin():
+        scoped = _project_teams_for_organization(oid)
+    elif is_project_admin():
+        allow = [str(x).strip() for x in user_team_ids() if str(x).strip()]
+        scoped = []
+        seen: set[str] = set()
+        for tid in allow:
+            if oid:
+                linked = organization_ids_for_team(tid)
+                if linked and oid not in linked:
+                    continue
+            t = ProjectTeam.query.get(tid)
+            if not t or not bool(getattr(t, "is_active", True)):
+                continue
+            sid = str(t.id or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            scoped.append(t)
+        scoped.sort(key=lambda x: (int(getattr(x, "sort_order", 0) or 0), str(x.name or "")))
+    else:
+        scoped = []
+    return [{"id": str(t.id), "name": str(t.name or t.id)} for t in scoped]
+
+
+def _sync_project_admin_active_exam_team(org_id: str) -> str:
+    """项目管理员：校验/默认当前公司下的所属项目组。"""
+    from .authz import is_page13_super_admin, is_project_admin
+
+    if is_page13_super_admin() or not is_project_admin():
+        return ""
+    session.pop("exam_team_scope_all", None)
+    allowed = {t["id"] for t in _exam_teams_payload_for_scope(org_id)}
+    if not allowed:
+        session.pop("active_exam_team_id", None)
+        return ""
+    active = str(session.get("active_exam_team_id") or "").strip()
+    if active and active in allowed:
+        return active
+    if active and active not in allowed:
+        session.pop("active_exam_team_id", None)
+    teams = _exam_teams_payload_for_scope(org_id)
+    if teams:
+        pick = str(teams[0].get("id") or "").strip()
+        if pick:
+            session["active_exam_team_id"] = pick
+            return pick
+    return ""
+
+
+def _sync_super_admin_active_exam_team(org_id: str) -> str:
+    """超管切换公司后，剔除非法 active_exam_team_id，并回退默认组。"""
+    from .authz import is_page13_super_admin
+
+    if not is_page13_super_admin():
+        return ""
+    active = str(session.get("active_exam_team_id") or "").strip()
+    allowed = {t["id"] for t in _exam_teams_payload_for_scope(org_id)}
+    if active and active not in allowed:
+        session.pop("active_exam_team_id", None)
+    return _apply_super_admin_active_exam_team(org_id)
 
 
 def _quiz_api_headers(*, organization_id: str | None = None) -> dict[str, str]:
@@ -490,7 +855,7 @@ def _quiz_api_call(
     if not base_url:
         return 503, {
             "code": "QUIZ_API_NOT_CONFIGURED",
-            "message": "未配置考试训练中心后端地址，请在页面3系统配置中设置 QUIZ_API_BASE_URL",
+            "message": "未配置考试训练中心后端地址，请在页面4 · 系统与钉钉「系统配置」中设置 QUIZ_API_BASE_URL",
             "data": None,
             "trace_id": trace_id,
             "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
@@ -1096,8 +1461,12 @@ def _merge_upstream_snapshot_with_submitted_answers(up_root: dict[str, Any], bod
     return out
 
 
-def _log_student_exam_center_activity(
+def _persist_exam_center_activity(
     *,
+    user_id: str,
+    organization_id: str | None,
+    username: str | None,
+    display_name: str | None,
     mode: str,
     exam_track: str | None,
     exam_category: str | None = None,
@@ -1109,29 +1478,16 @@ def _log_student_exam_center_activity(
     upstream_trace_id: str | None,
     result_summary: str | None,
     upstream_result_payload: dict[str, Any] | None = None,
-) -> None:
-    uid = str(session.get("user_id") or "").strip()
+    created_at=None,
+    commit: bool = True,
+) -> str | None:
+    """写入 exam_center_activities（及明细）；返回 activity id。"""
+    uid = str(user_id or "").strip()
     if not uid:
-        try:
-            current_app.logger.warning("exam_center_activity_skip_no_uid_in_session mode=%s", mode)
-        except Exception:
-            pass
-        return
+        return None
     try:
-        # 优先使用当前会话身份，保证记录名与页面2当前登录用户一致
-        s_username = str(session.get("username") or "").strip()
-        s_display_name = str(session.get("display_name") or "").strip()
-        u = User.query.filter_by(id=uid).first()
-        username = s_username or (u.username if u else "")
-        display_name = s_display_name or ((u.display_name or u.username) if u else "")
         row = ExamCenterActivity(
-            organization_id=(
-                _resolve_exam_organization_id(
-                    assignment_id=(assignment_id or "").strip(),
-                    attempt_id=(attempt_id or "").strip(),
-                )
-                or None
-            ),
+            organization_id=(str(organization_id or "").strip() or None),
             user_id=uid,
             username=str(username) if username else None,
             display_name=str(display_name) if display_name else None,
@@ -1146,6 +1502,8 @@ def _log_student_exam_center_activity(
             upstream_trace_id=(upstream_trace_id or "").strip() or None,
             result_summary=(result_summary or "").strip()[:500] or None,
         )
+        if created_at is not None:
+            row.created_at = created_at
         db.session.add(row)
         db.session.flush()
 
@@ -1164,7 +1522,6 @@ def _log_student_exam_center_activity(
                     recommendation=m.get("recommendation"),
                     upstream_payload=safe_pl,
                 )
-                # 明细写入失败不应拖垮主表 INSERT（原先整段 rollback 会变成「看起来像没落库」）
                 with db.session.begin_nested():
                     db.session.add(detail)
             except Exception as detail_exc:
@@ -1180,7 +1537,9 @@ def _log_student_exam_center_activity(
                 except Exception:
                     pass
 
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        return str(row.id)
     except Exception as exc:
         db.session.rollback()
         try:
@@ -1193,6 +1552,141 @@ def _log_student_exam_center_activity(
             )
         except Exception:
             pass
+        return None
+
+
+def _backfill_exam_center_activities_from_attempts() -> int:
+    """历史 exam_attempts 补写 exam_center_activities（旧版 submit-local 未落活动表）。"""
+    from .models import ExamAttempt, User
+    from .tenant_context import default_organization
+
+    dorg = default_organization()
+    default_oid = str(getattr(dorg, "id", "") or "").strip()
+    created = 0
+    for att in ExamAttempt.query.order_by(ExamAttempt.created_at.asc()).all():
+        attempt_key = str(getattr(att, "attempt_id", None) or "").strip()
+        if not attempt_key:
+            continue
+        if ExamCenterActivity.query.filter_by(attempt_id=attempt_key).first():
+            continue
+        uid = str(getattr(att, "user_id", None) or "").strip()
+        if not uid:
+            continue
+        u = User.query.filter_by(id=uid).first()
+        assign_row = ExamCenterAssignment.query.filter_by(
+            assignment_id=str(getattr(att, "assignment_id", None) or "").strip()
+        ).first()
+        set_id_log = str(getattr(assign_row, "set_id", None) or "").strip() or None
+        assignment_label_log = str(getattr(assign_row, "title", None) or "").strip() or None
+        org_id = str(getattr(att, "organization_id", None) or "").strip() or default_oid or None
+        state_l = str(getattr(att, "state", None) or "").strip().lower()
+        gs = "pending" if state_l == "grading" else ("graded" if state_l == "graded" else state_l or "submitted")
+        items_snap = _local_exam_attempt_items_payload(attempt_key, att=att) or []
+        merged_log: dict[str, Any] = {
+            "code": 0,
+            "message": "backfill-from-attempt",
+            "grading_status": gs,
+            "score": getattr(att, "score", None),
+            "total_score": getattr(att, "total_score", None),
+            "correct_count": getattr(att, "correct_count", None),
+            "wrong_count": getattr(att, "wrong_count", None),
+            "data": {
+                "score": getattr(att, "score", None),
+                "total_score": getattr(att, "total_score", None),
+                "correct_count": getattr(att, "correct_count", None),
+                "wrong_count": getattr(att, "wrong_count", None),
+                "grading_status": gs,
+                "attempt_id": attempt_key,
+                "assignment_id": getattr(att, "assignment_id", None),
+                "set_id": set_id_log,
+            },
+            "attempt_items": items_snap,
+            "aiword_backfill_from_attempt_v1": True,
+        }
+        mx = _extract_result_metrics(merged_log)
+        summ = _exam_activity_history_result_text("exam", mx, merged_log.get("message"))
+        ts = getattr(att, "submitted_at", None) or getattr(att, "started_at", None) or getattr(att, "created_at", None)
+        act_id = _persist_exam_center_activity(
+            user_id=uid,
+            organization_id=org_id,
+            username=str(getattr(u, "username", None) or "") or None,
+            display_name=str(getattr(u, "display_name", None) or getattr(u, "username", None) or "") or None,
+            mode="exam",
+            exam_track=str(getattr(att, "exam_track", None) or "").strip() or None,
+            exam_category=str(getattr(att, "exam_category", None) or "").strip() or "daily",
+            set_id=set_id_log,
+            assignment_id=str(getattr(att, "assignment_id", None) or "").strip() or None,
+            assignment_label=assignment_label_log,
+            attempt_id=attempt_key,
+            upstream_http_status=200,
+            upstream_trace_id=None,
+            result_summary=summ,
+            upstream_result_payload=merged_log,
+            created_at=ts,
+            commit=False,
+        )
+        if act_id:
+            created += 1
+    if created:
+        db.session.commit()
+    return created
+
+
+def _log_student_exam_center_activity(
+    *,
+    mode: str,
+    exam_track: str | None,
+    exam_category: str | None = None,
+    set_id: str | None,
+    assignment_id: str | None,
+    assignment_label: str | None,
+    attempt_id: str | None,
+    upstream_http_status: int,
+    upstream_trace_id: str | None,
+    result_summary: str | None,
+    upstream_result_payload: dict[str, Any] | None = None,
+) -> None:
+    from .exam_scope import organization_id_for_exam_write
+
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        try:
+            current_app.logger.warning("exam_center_activity_skip_no_uid_in_session mode=%s", mode)
+        except Exception:
+            pass
+        return
+    s_username = str(session.get("username") or "").strip()
+    s_display_name = str(session.get("display_name") or "").strip()
+    u = User.query.filter_by(id=uid).first()
+    username = s_username or (u.username if u else "")
+    display_name = s_display_name or ((u.display_name or u.username) if u else "")
+    org_id = (
+        organization_id_for_exam_write(
+            _resolve_exam_organization_id(
+                assignment_id=(assignment_id or "").strip(),
+                attempt_id=(attempt_id or "").strip(),
+            )
+        )
+        or None
+    )
+    _persist_exam_center_activity(
+        user_id=uid,
+        organization_id=org_id,
+        username=str(username) if username else None,
+        display_name=str(display_name) if display_name else None,
+        mode=mode,
+        exam_track=exam_track,
+        exam_category=exam_category,
+        set_id=set_id,
+        assignment_id=assignment_id,
+        assignment_label=assignment_label,
+        attempt_id=attempt_id,
+        upstream_http_status=upstream_http_status,
+        upstream_trace_id=upstream_trace_id,
+        result_summary=result_summary,
+        upstream_result_payload=upstream_result_payload,
+        commit=True,
+    )
 
 
 def _extract_assignments_from_quiz_root(root: Any) -> list[dict[str, Any]]:
@@ -2327,34 +2821,55 @@ def _backfill_project_ids() -> None:
     db.session.commit()
 
 
+def _default_project_team_id() -> str | None:
+    from .team_data_migration import DEFAULT_TEAM_NAME
+
+    row = (
+        ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True)
+        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
+        .first()
+    )
+    if row:
+        return str(row.id or "").strip() or None
+    row = (
+        ProjectTeam.query.filter_by(is_active=True)
+        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
+        .first()
+    )
+    return str(row.id or "").strip() if row else None
+
+
 def _ensure_project_row(project_name: str) -> Project | None:
     # 兼容旧数据：project_name 可能是 base name，也可能是展示键(label)
+    from .authz import _invalidate_project_lookup_maps, _project_lookup_maps
+
     label = (project_name or "").strip()
     if not label:
         return None
 
-    # 先按展示键匹配（支持未来：projectId 为空时，仍可“查到已有项目”）
-    for p in Project.query.all():
-        if _project_display_label(p) == label:
-            return p
+    _by_id, by_label, by_name = _project_lookup_maps()
+    existing = by_label.get(label) or by_name.get(label)
+    if existing is not None:
+        return existing
 
+    default_team_id = _default_project_team_id()
     row = Project(
         name=label,
         priority=Project.PRIORITY_MEDIUM,
         status=Project.STATUS_ACTIVE,
         registered_country=None,
         registered_category=None,
+        assigned_team_id=default_team_id,
     )
     db.session.add(row)
     try:
         db.session.commit()
     except Exception:
         db.session.rollback()
-        # commit 失败时返回任意可用行（避免 None 造成后续空指针）
-        for p in Project.query.all():
-            if _project_display_label(p) == label:
-                return p
-        return None
+        _invalidate_project_lookup_maps()
+        _by_id, by_label, by_name = _project_lookup_maps()
+        return by_label.get(label) or by_name.get(label)
+    _invalidate_project_lookup_maps()
     return row
 
 
@@ -3012,6 +3527,10 @@ def _summary_payload():
         q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
         proj_meta,
     )
+    from .authz import filter_upload_records_in_scope, is_page13_super_admin
+
+    if not is_page13_super_admin():
+        uploads = filter_upload_records_in_scope(uploads)
     total_files = len(uploads)
     
     def _rate(done: int, total: int) -> float:
@@ -3144,11 +3663,12 @@ def _summary_payload():
 # ---------- 登录验证装饰器 ----------
 
 def login_required(f):
-    """页面2 等：须登录；页面1·3 访问密码视同超级管理员；公司管理员仅页面0。"""
+    """页面2 等：须登录；页面4 访问密码视同超级管理员；公司管理员仅页面0。"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         from .authz import (
             _company_admin_blocked_response,
+            block_until_super_admin_or_user_id,
             company_registry_enabled,
             is_company_admin,
             is_page13_super_admin,
@@ -3158,13 +3678,9 @@ def login_required(f):
 
         if is_page13_super_admin():
             return f(*args, **kwargs)
-        if not session.get("user_id"):
-            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
-                return jsonify({"message": "请先登录", "needsLogin": True}), 401
-            next_url = request.full_path if request.query_string else request.path
-            if next_url.endswith("?"):
-                next_url = next_url[:-1]
-            return redirect(url_for("pages.login_page", next=next_url or "/generate"))
+        blocked = block_until_super_admin_or_user_id()
+        if blocked is not None:
+            return blocked
         if is_company_admin():
             return _company_admin_blocked_response()
         if company_registry_enabled() and is_project_admin() and not user_team_ids():
@@ -3192,6 +3708,7 @@ def _page13_or_login_required(f):
     def decorated_function(*args, **kwargs):
         from .authz import (
             _company_admin_blocked_response,
+            block_until_super_admin_or_user_id,
             is_company_admin,
             is_page13_super_admin,
         )
@@ -3202,19 +3719,17 @@ def _page13_or_login_required(f):
             if is_company_admin():
                 return _company_admin_blocked_response()
             return f(*args, **kwargs)
-        if not _page13_password_configured():
-            return f(*args, **kwargs)
-        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
-            return jsonify({"message": "需要输入访问密码", "needsPage13Auth": True}), 401
-        next_url = request.path or "/upload"
-        return render_template("page13_gate.html", next_url=next_url, gate_page=True)
+        blocked = block_until_super_admin_or_user_id()
+        if blocked is not None:
+            return blocked
+        return f(*args, **kwargs)
     return decorated_function
 
 
 def _page13_password_configured() -> bool:
-    from .app_settings import get_setting
-    p = get_setting("PAGE13_ACCESS_PASSWORD", default=str(current_app.config.get("PAGE13_ACCESS_PASSWORD") or ""))
-    return bool(p and str(p).strip())
+    from .authz import page13_password_configured
+
+    return page13_password_configured()
 
 
 def super_admin_required(f):
@@ -3232,11 +3747,12 @@ def page4_access_required(f):
 
 
 def page13_access_required(f):
-    """页面1、页面3：默认走账号登录（项目管理员 + 项目组）；page13 密码仅作超级管理员兜底。"""
+    """页面1、页面3：默认走账号登录（项目管理员 + 项目组）；超级管理员仅须访问密码。"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         from .authz import (
             _company_admin_blocked_response,
+            block_until_super_admin_or_user_id,
             company_registry_enabled,
             is_company_admin,
             is_page13_super_admin,
@@ -3262,15 +3778,9 @@ def page13_access_required(f):
                 hide_main_nav=True,
                 gate_page=True,
             ), 403
-        if not session.get("user_id"):
-            if _page13_password_configured() and session.get("page13_authenticated"):
-                return f(*args, **kwargs)
-            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
-                return jsonify({"message": "请先使用项目管理员账号登录", "needsLogin": True}), 401
-            next_url = request.full_path if request.query_string else request.path
-            if next_url.endswith("?"):
-                next_url = next_url[:-1]
-            return redirect(url_for("pages.login_page", next=next_url or "/upload"))
+        blocked = block_until_super_admin_or_user_id()
+        if blocked is not None:
+            return blocked
         if company_registry_enabled():
             if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
                 return jsonify({"message": "页面1/3 仅项目管理员可访问"}), 403
@@ -3301,7 +3811,7 @@ def favicon():
 @bp.route("/")
 def index():
     # 两套用户体系：
-    # - page13（管理员/老师/统计端）：进入页面1/3
+    # - 页面4 访问密码（超级管理员）：进入页面1/3 或考试中心老师/统计端
     # - user_id（学生端/页面2）：进入页面2
     if session.get("user_id"):
         from .authz import role_home_url
@@ -3360,6 +3870,10 @@ def api_go_aiprintword_batch_print():
 def login_page():
     next_url = (request.args.get("next") or "").strip()
     for_company = next_url.startswith("/company") or request.args.get("for") == "company"
+    if session.get("page13_authenticated"):
+        from .authz import resolve_login_redirect
+
+        return redirect(resolve_login_redirect(next_url or None))
     if session.get("user_id"):
         from .authz import resolve_login_redirect
 
@@ -3368,6 +3882,7 @@ def login_page():
         "login.html",
         login_next=next_url or None,
         for_company_registry=for_company,
+        page13_password_configured=_page13_password_configured(),
     )
 
 
@@ -3390,13 +3905,26 @@ def _exam_center_display_user() -> str:
             return name
         return str(session.get("user_id"))
     if session.get("page13_authenticated"):
-        return "页面3已验证"
+        return "超级管理员（页面4）"
     return ""
 
 
 @bp.route("/exam-center")
 def exam_center_page():
-    from .authz import is_exam_center_staff, is_project_admin
+    from .authz import is_company_admin, is_exam_center_staff, is_page13_super_admin, is_project_admin
+
+    if session.get("user_id") and is_company_admin() and not is_page13_super_admin():
+        return (
+            render_template(
+                "error.html",
+                title="无访问权限",
+                message="公司管理员仅可访问页面0（公司总览），无法进入考试训练中心。",
+                back_url=url_for("company.company_registry_page"),
+                back_label="返回页面0",
+                hide_main_nav=True,
+            ),
+            403,
+        )
 
     role_arg = request.args.get("role")
     staff = is_exam_center_staff()
@@ -3417,20 +3945,34 @@ def exam_center_page():
         else:
             allowed_roles.append("student")
     if session.get("page13_authenticated"):
-        for r in ("teacher", "analytics"):
+        for r in ("teacher", "student", "analytics"):
             if r not in allowed_roles:
                 allowed_roles.append(r)
 
     if role in {"teacher", "analytics"}:
         if not staff:
-            if _page13_password_configured() and not session.get("page13_authenticated"):
-                next_url = request.full_path or request.path or "/upload"
-                if next_url.endswith("?"):
-                    next_url = next_url[:-1]
-                return render_template("page13_gate.html", next_url=next_url, gate_page=True)
-    else:
-        if not session.get("user_id"):
+            from .authz import (
+                block_until_super_admin_or_user_id,
+                page13_password_configured,
+                super_admin_password_gate_response,
+            )
+
+            if page13_password_configured():
+                return super_admin_password_gate_response(
+                    gate_description="请输入访问密码以进入考试训练中心老师/统计端（超级管理员可见全部公司与项目组数据）。",
+                )
+            blocked = block_until_super_admin_or_user_id()
+            if blocked is not None:
+                return blocked
+    elif role == "student":
+        if not session.get("user_id") and not is_page13_super_admin():
             return redirect(url_for("pages.login_page"))
+    else:
+        from .authz import block_until_super_admin_or_user_id
+
+        blocked = block_until_super_admin_or_user_id()
+        if blocked is not None:
+            return blocked
 
     return render_template(
         "exam_center.html",
@@ -3439,6 +3981,293 @@ def exam_center_page():
         exam_display_user=_exam_center_display_user(),
         hide_main_nav=(role == "student"),
     )
+
+
+def _exam_allowed_organization_ids_for_scope() -> list[str]:
+    from .exam_scope import allowed_organization_ids
+
+    return allowed_organization_ids()
+
+
+def _exam_scope_organizations_payload() -> list[dict]:
+    from .exam_scope import allowed_organization_ids
+    from .team_organizations import organizations_payload_for_ids
+
+    return organizations_payload_for_ids(allowed_organization_ids())
+
+
+def _exam_student_assigned_teams_payload() -> list[dict[str, str]]:
+    from .authz import user_team_ids
+    from .models import ProjectTeam
+
+    ids = user_team_ids()
+    if not ids:
+        return []
+    rows = (
+        ProjectTeam.query.filter(ProjectTeam.id.in_(ids), ProjectTeam.is_active.is_(True))
+        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc())
+        .all()
+    )
+    by_id = {str(t.id or "").strip(): t for t in rows}
+    out: list[dict[str, str]] = []
+    for tid in ids:
+        t = by_id.get(str(tid or "").strip())
+        if not t:
+            continue
+        out.append({"id": str(t.id or "").strip(), "name": str(t.name or t.id or "").strip()})
+    return out
+
+
+def _exam_student_scope_context_payload() -> dict:
+    """学生端：项目组只读（账号分配）；公司下拉仅展示项目组关联公司。"""
+    from .authz import is_page13_super_admin, user_team_ids
+    from .team_organizations import organization_ids_for_teams, organizations_payload_for_ids
+    from .tenant_context import collection_for_organization
+
+    team_ids = user_team_ids()
+    org_ids = organization_ids_for_teams(team_ids)
+    orgs = organizations_payload_for_ids(org_ids)
+    assigned = _exam_student_assigned_teams_payload()
+    if not orgs:
+        return {
+            "organizations": [],
+            "activeOrganizationId": None,
+            "activeKnowledgeCollection": "regulations",
+            "teams": assigned,
+            "assignedTeams": assigned,
+            "activeTeamId": assigned[0]["id"] if assigned else None,
+            "scopeAllTeams": False,
+            "defaultTeamId": assigned[0]["id"] if assigned else None,
+            "canSwitchTeam": False,
+            "canSwitchOrganization": False,
+            "page13SuperAdmin": is_page13_super_admin(),
+            "message": "当前账号未分配项目组或未关联公司，请联系管理员在页面4配置",
+        }
+    from .exam_scope import resolve_active_organization_id
+
+    active = resolve_active_organization_id()
+    coll = collection_for_organization(active) if active else "regulations"
+    return {
+        "organizations": orgs,
+        "activeOrganizationId": active or None,
+        "activeKnowledgeCollection": coll,
+        "teams": assigned,
+        "assignedTeams": assigned,
+        "activeTeamId": assigned[0]["id"] if assigned else None,
+        "scopeAllTeams": False,
+        "defaultTeamId": assigned[0]["id"] if assigned else None,
+        "canSwitchTeam": False,
+        "canSwitchOrganization": len(orgs) > 1,
+        "page13SuperAdmin": is_page13_super_admin(),
+    }
+
+
+def _exam_project_admin_organization_ids() -> list[str]:
+    from .exam_scope import allowed_organization_ids
+
+    return allowed_organization_ids()
+
+
+def _exam_project_admin_scope_context_payload() -> dict:
+    """项目管理员：展示所属项目组（单组只读/多组可切换）；公司来自项目组关联。"""
+    from .authz import is_page13_super_admin, user_team_ids
+    from .team_organizations import organizations_payload_for_ids
+    from .tenant_context import collection_for_organization
+
+    assigned = _exam_student_assigned_teams_payload()
+    if not user_team_ids():
+        return {
+            "organizations": [],
+            "activeOrganizationId": None,
+            "activeKnowledgeCollection": "regulations",
+            "teams": [],
+            "assignedTeams": [],
+            "activeTeamId": None,
+            "scopeAllTeams": False,
+            "defaultTeamId": None,
+            "canSwitchTeam": False,
+            "canSwitchOrganization": False,
+            "page13SuperAdmin": False,
+            "isProjectAdmin": True,
+            "message": "当前账号未分配项目组，请联系管理员在页面4配置",
+        }
+    org_ids = _exam_project_admin_organization_ids()
+    orgs = organizations_payload_for_ids(org_ids)
+    if not orgs:
+        return {
+            "organizations": [],
+            "activeOrganizationId": None,
+            "activeKnowledgeCollection": "regulations",
+            "teams": assigned,
+            "assignedTeams": assigned,
+            "activeTeamId": assigned[0]["id"] if assigned else None,
+            "scopeAllTeams": False,
+            "defaultTeamId": assigned[0]["id"] if assigned else None,
+            "canSwitchTeam": False,
+            "canSwitchOrganization": False,
+            "page13SuperAdmin": is_page13_super_admin(),
+            "isProjectAdmin": True,
+            "message": "所属项目组未关联任何公司，请超级管理员在页面4维护项目组关联公司",
+        }
+    from .exam_scope import resolve_active_organization_id
+
+    active = resolve_active_organization_id()
+    org_id = active
+    active_team = _sync_project_admin_active_exam_team(org_id)
+    teams = _exam_teams_payload_for_scope(org_id)
+    can_switch_team = len(teams) > 1
+    coll = collection_for_organization(active) if active else "regulations"
+    return {
+        "organizations": orgs,
+        "activeOrganizationId": active or None,
+        "activeKnowledgeCollection": coll,
+        "teams": teams,
+        "assignedTeams": teams if not can_switch_team else [],
+        "activeTeamId": active_team or None,
+        "scopeAllTeams": False,
+        "defaultTeamId": teams[0]["id"] if teams else None,
+        "canSwitchTeam": can_switch_team,
+        "canSwitchOrganization": len(orgs) > 1,
+        "page13SuperAdmin": is_page13_super_admin(),
+        "isProjectAdmin": True,
+    }
+
+
+@bp.get("/api/scope/context")
+def api_scope_context():
+    """全站作用域条：角色、公司/项目组、本页过滤说明与空数据提示。"""
+    from .authz import block_until_super_admin_or_user_id, is_page13_super_admin
+    from .scope_context import infer_page_key, scope_context_payload
+
+    if not is_page13_super_admin() and not session.get("user_id"):
+        blocked = block_until_super_admin_or_user_id()
+        if blocked is not None:
+            return blocked
+    page = str(request.args.get("page") or request.args.get("pageKey") or "").strip()
+    if not page:
+        page = infer_page_key()
+    return jsonify(scope_context_payload(page_key=page))
+
+
+@bp.get("/api/scope/diagnostics")
+@page13_access_required
+def api_scope_diagnostics():
+    """超级管理员：session/绑定/有效过滤诊断。"""
+    from .scope_context import scope_diagnostics_payload
+
+    payload = scope_diagnostics_payload()
+    if not payload.get("ok"):
+        return jsonify(payload), 403
+    return jsonify(payload)
+
+
+@bp.get("/api/exam-center/scope-context")
+@page13_access_required
+def api_exam_scope_context():
+    """考试中心：当前公司与项目组作用域（超管可切换全部主体，数据按所选过滤）。"""
+    from .authz import is_normal_user, is_page13_super_admin, is_project_admin
+    from .tenant_context import integration_org_context_payload
+
+    if not (
+        is_page13_super_admin()
+        or session.get("user_id")
+    ):
+        return jsonify({"message": "请先登录或使用页面4 访问密码"}), 401
+    if is_normal_user():
+        return jsonify(_exam_student_scope_context_payload())
+    if is_project_admin() and not is_page13_super_admin():
+        return jsonify(_exam_project_admin_scope_context_payload())
+    org_payload = integration_org_context_payload()
+    if not org_payload.get("organizations") and org_payload.get("message"):
+        org_payload.setdefault("teams", [])
+        org_payload.setdefault("canSwitchTeam", False)
+        org_payload.setdefault("canSwitchOrganization", False)
+        org_payload.setdefault("page13SuperAdmin", is_page13_super_admin())
+        return jsonify(org_payload)
+    from .exam_scope import resolve_active_organization_id
+
+    org_id = resolve_active_organization_id()
+    active_team = _sync_super_admin_active_exam_team(org_id) if is_page13_super_admin() else ""
+    teams = _exam_teams_payload_for_scope(org_id) if is_page13_super_admin() else []
+    orgs = org_payload.get("organizations") or []
+    return jsonify(
+        {
+            "organizations": orgs,
+            "activeOrganizationId": org_payload.get("activeOrganizationId") or org_id or None,
+            "activeKnowledgeCollection": org_payload.get("activeKnowledgeCollection"),
+            "teams": teams,
+            "activeTeamId": active_team or None,
+            "scopeAllTeams": bool(session.get("exam_team_scope_all")),
+            "defaultTeamId": _resolve_default_exam_team_id_for_org(org_id) or None,
+            "canSwitchTeam": is_page13_super_admin(),
+            "canSwitchOrganization": is_page13_super_admin() or len(orgs) > 1,
+            "page13SuperAdmin": is_page13_super_admin(),
+        }
+    )
+
+
+@bp.post("/api/exam-center/scope-context/organization")
+@page13_access_required
+def api_exam_set_active_organization():
+    """切换考试中心当前公司（写入 session.active_organization_id）。"""
+    from .authz import is_page13_super_admin
+    from .tenant_context import collection_for_organization
+
+    data = request.get_json(force=True) or {}
+    target = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    allowed = {str(x.get("id") or "").strip() for x in _exam_scope_organizations_payload()}
+    if not target:
+        return jsonify({"message": "缺少 organizationId"}), 400
+    if target not in allowed:
+        return jsonify({"message": "无权切换到该公司"}), 403
+    session["active_organization_id"] = target
+    if is_page13_super_admin():
+        session.pop("active_exam_team_id", None)
+        session.pop("exam_team_scope_all", None)
+        _apply_super_admin_active_exam_team(target)
+    else:
+        from .authz import is_project_admin
+
+        if is_project_admin():
+            _sync_project_admin_active_exam_team(target)
+    return jsonify(
+        {
+            "ok": True,
+            "activeOrganizationId": target,
+            "activeKnowledgeCollection": collection_for_organization(target),
+        }
+    )
+
+
+@bp.post("/api/exam-center/scope-context/team")
+@page13_access_required
+def api_exam_set_active_team():
+    """切换考试中心当前项目组（超管可选全部；项目管理员仅限所属组）。"""
+    from .authz import is_page13_super_admin, is_project_admin
+
+    if not (is_page13_super_admin() or is_project_admin()):
+        return jsonify({"message": "无权切换项目组"}), 403
+    data = request.get_json(force=True) or {}
+    team_id = str(data.get("teamId") or data.get("team_id") or "").strip()
+    org_id = _current_exam_scope_organization_id()
+    allowed = {t["id"] for t in _exam_teams_payload_for_scope(org_id)}
+    if is_project_admin() and not is_page13_super_admin():
+        if not team_id:
+            return jsonify({"message": "项目管理员须选择具体项目组"}), 400
+        if team_id not in allowed:
+            return jsonify({"message": "无权选择该项目组"}), 403
+        session["active_exam_team_id"] = team_id
+        session.pop("exam_team_scope_all", None)
+        return jsonify({"ok": True, "activeTeamId": team_id, "scopeAllTeams": False})
+    if team_id:
+        if team_id not in allowed:
+            return jsonify({"message": "无权选择该项目组"}), 403
+        session["active_exam_team_id"] = team_id
+        session.pop("exam_team_scope_all", None)
+    else:
+        session.pop("active_exam_team_id", None)
+        session["exam_team_scope_all"] = True
+    return jsonify({"ok": True, "activeTeamId": team_id or None, "scopeAllTeams": not bool(team_id)})
 
 
 # ---------- 认证 API ----------
@@ -3526,6 +4355,8 @@ def api_me():
             return jsonify({
                 "loggedIn": False,
                 "page13SuperAdmin": True,
+                "page2ViewMode": "super_admin_readonly",
+                "examStudentViewMode": "super_admin_readonly",
                 "homeUrl": role_home_url(),
                 "featureAdminViewer": True,
                 "featureFlags": effective_feature_flags_for_request(),
@@ -3549,11 +4380,16 @@ def api_me():
         user_country_scopes,
     )
 
+    from .observer_view import exam_student_view_mode, page2_view_mode
+
     scopes = user_country_scopes()
     return jsonify({
         "loggedIn": True,
         "homeUrl": role_home_url(),
         "page13SuperAdmin": is_page13_super_admin(),
+        "page2ViewMode": page2_view_mode(),
+        "examStudentViewMode": exam_student_view_mode(),
+        "readOnlyObserver": page2_view_mode() != "normal",
         "user": {
             "id": session.get("user_id"),
             "username": session.get("username"),
@@ -3868,7 +4704,7 @@ def api_exam_teacher_bank_requirements_check():
 @bp.get("/api/exam-center/teacher/system-settings")
 @page13_access_required
 def api_exam_teacher_system_settings_get():
-    """老师端「考试与录题配置」：与页面3同源读写 app_configs，仅返回考试相关键列表。"""
+    """老师端「考试与录题配置」：与页面4 系统配置同源读写 app_configs，仅返回考试相关键列表。"""
     from .app_settings import (
         EXAM_CENTER_TEACHER_SETTINGS_KEYS,
         SYSTEM_CONFIG_KEYS,
@@ -4372,11 +5208,17 @@ def api_exam_teacher_bank_question_delete(question_id: str):
 
 
 def _exam_stats_options_local() -> dict[str, Any]:
+    from .exam_display_labels import (
+        activity_display_names_for_users,
+        human_assignment_label,
+        human_user_label,
+    )
+    from .models import User
+
     org_id = _current_exam_scope_organization_id()
     students_map: dict[str, dict[str, str]] = {}
     try:
-        # 与 _local_stats_overview_all / 按学生表同源：按 user_id 去重，取最近一条活动的展示名
-        q_students = (
+        q_students = _scope_exam_activity_query(
             db.session.query(
                 ExamCenterActivity.user_id,
                 ExamCenterActivity.display_name,
@@ -4385,55 +5227,72 @@ def _exam_stats_options_local() -> dict[str, Any]:
             .filter(ExamCenterActivity.user_id.isnot(None))
             .filter(ExamCenterActivity.user_id != "")
         )
-        if org_id:
-            q_students = q_students.filter(ExamCenterActivity.organization_id == org_id)
         rows = q_students.order_by(ExamCenterActivity.user_id.asc(), ExamCenterActivity.created_at.desc()).all()
         for uid, dname, uname in rows:
             sid = str(uid or "").strip()
             if not sid or sid in students_map:
                 continue
-            label = str(dname or uname or sid).strip() or sid
+            act_disp = str(dname or uname or "").strip()
+            label = human_user_label(sid, activity_display=act_disp)
             students_map[sid] = {"id": sid, "name": label, "label": label}
     except Exception:
         students_map = {}
+    if students_map:
+        try:
+            act_names = activity_display_names_for_users(set(students_map.keys()))
+            uid_list = list(students_map.keys())
+            for u in User.query.filter(User.id.in_(uid_list)).all():
+                sid = str(getattr(u, "id", "") or "").strip()
+                if sid not in students_map:
+                    continue
+                act_disp = act_names.get(sid) or str(
+                    getattr(u, "display_name", None) or getattr(u, "username", None) or ""
+                ).strip()
+                label = human_user_label(sid, activity_display=act_disp)
+                students_map[sid]["name"] = label
+                students_map[sid]["label"] = label
+        except Exception:
+            pass
     students = sorted(students_map.values(), key=lambda x: str(x.get("name") or ""))
     assignments_map: dict[str, dict[str, Any]] = {}
     try:
-        q_assign = (
+        q_assign = _scope_exam_activity_query(
             db.session.query(ExamCenterActivity.assignment_id, ExamCenterActivity.assignment_label)
             .filter(ExamCenterActivity.assignment_id.isnot(None))
             .filter(ExamCenterActivity.assignment_id != "")
         )
-        if org_id:
-            q_assign = q_assign.filter(ExamCenterActivity.organization_id == org_id)
         rows = q_assign.distinct().limit(500).all()
         for aid, alab in rows:
             k = str(aid or "").strip()
             if not k:
                 continue
-            lab = str(alab or "").strip() or k
+            lab = human_assignment_label(k, activity_label=str(alab or "").strip())
             assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": ""}
-        q_local_assign = ExamCenterAssignment.query.filter(
-            or_(
-                ExamCenterAssignment.status.is_(None),
-                ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
+        q_local_assign = _scope_exam_assignment_query(
+            ExamCenterAssignment.query.filter(
+                or_(
+                    ExamCenterAssignment.status.is_(None),
+                    ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
+                )
             )
         )
-        if org_id:
-            q_local_assign = q_local_assign.filter(ExamCenterAssignment.organization_id == org_id)
         local_rows = q_local_assign.limit(500).all()
         for r in local_rows:
             k = str(r.assignment_id or "").strip()
             if not k:
                 continue
-            lab = str(r.title or "").strip() or k
+            lab = human_assignment_label(
+                k,
+                title=str(getattr(r, "title", None) or "").strip(),
+                activity_label=assignments_map.get(k, {}).get("name"),
+            )
             sid = str(getattr(r, "set_id", None) or "").strip()
             assignments_map[k] = {"id": k, "name": lab, "label": lab, "set_id": sid}
         all_aids = [x for x in assignments_map.keys() if x]
         if all_aids:
-            q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(all_aids))
-            if org_id:
-                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            q_rows = _scope_exam_assignment_query(
+                ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(all_aids))
+            )
             for ar in q_rows.all():
                 kk = str(ar.assignment_id or "").strip()
                 if kk in assignments_map:
@@ -4462,9 +5321,7 @@ def _local_stats_for_student(user_id: str) -> dict[str, Any]:
     if not uid:
         return {}
     org_id = _current_exam_scope_organization_id()
-    q_rows = ExamCenterActivity.query.filter_by(user_id=uid)
-    if org_id:
-        q_rows = q_rows.filter(ExamCenterActivity.organization_id == org_id)
+    q_rows = _scope_exam_activity_query(ExamCenterActivity.query.filter_by(user_id=uid))
     rows = q_rows.order_by(ExamCenterActivity.created_at.desc()).all()
     if not rows:
         return {
@@ -4566,9 +5423,7 @@ def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
         if not sid:
             continue
         label = str(s.get("label") or s.get("name") or sid).strip() or sid
-        rows_q = ExamCenterActivity.query.filter_by(user_id=sid)
-        if org_id:
-            rows_q = rows_q.filter(ExamCenterActivity.organization_id == org_id)
+        rows_q = _scope_exam_activity_query(ExamCenterActivity.query.filter_by(user_id=sid))
         rows_u = rows_q.order_by(ExamCenterActivity.created_at.desc()).all()
         ids = [str(r.id) for r in rows_u if getattr(r, "id", None)]
         det_map: dict[str, ExamCenterActivityDetail] = {}
@@ -4611,13 +5466,9 @@ def _local_stats_rows_student_by_mode() -> list[dict[str, Any]]:
 
 def _local_stats_overview_all() -> dict[str, Any]:
     """全库聚合（不按条数截断），与 /stats/mode、按学生聚合口径一致。"""
-    org_id = _current_exam_scope_organization_id()
     pass_score = _exam_pass_score()
-    q_practice = ExamCenterActivity.query.filter_by(mode="practice")
-    q_exam = ExamCenterActivity.query.filter_by(mode="exam")
-    if org_id:
-        q_practice = q_practice.filter(ExamCenterActivity.organization_id == org_id)
-        q_exam = q_exam.filter(ExamCenterActivity.organization_id == org_id)
+    q_practice = _scope_exam_activity_query(ExamCenterActivity.query.filter_by(mode="practice"))
+    q_exam = _scope_exam_activity_query(ExamCenterActivity.query.filter_by(mode="exam"))
     practice_count = q_practice.count()
     exam_act = q_exam.all()
     exam_count = len(exam_act)
@@ -4639,13 +5490,11 @@ def _local_stats_overview_all() -> dict[str, Any]:
     graded_exam_count = pass_count + fail_count
     pass_rate = round((pass_count * 100.0 / graded_exam_count), 2) if graded_exam_count > 0 else None
     try:
-        uq = (
+        uq = _scope_exam_activity_query(
             db.session.query(ExamCenterActivity.user_id)
             .filter(ExamCenterActivity.user_id.isnot(None))
             .filter(ExamCenterActivity.user_id != "")
         )
-        if org_id:
-            uq = uq.filter(ExamCenterActivity.organization_id == org_id)
         urows = uq.distinct().all()
         uid_list = [str(u[0]).strip() for u in urows if u and u[0]]
     except Exception:
@@ -4673,9 +5522,7 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
     pass_score = _exam_pass_score()
     org_id = _current_exam_scope_organization_id()
     try:
-        rq = ExamCenterActivity.query
-        if org_id:
-            rq = rq.filter(ExamCenterActivity.organization_id == org_id)
+        rq = _scope_exam_activity_query(ExamCenterActivity.query)
         rows = rq.order_by(ExamCenterActivity.created_at.desc()).limit(lim).all()
         ids = [str(r.id) for r in rows if getattr(r, "id", None)]
         det_map: dict[str, ExamCenterActivityDetail] = {}
@@ -5001,11 +5848,10 @@ def api_exam_teacher_create_paper():
 @page13_access_required
 def api_exam_teacher_create_assignment():
     req = _json_payload()
-    org_id = _resolve_exam_organization_id(
-        explicit_org_id=str(
-            req.get("organization_id") or req.get("organizationId") or ""
-        ).strip(),
-        project_id=str(req.get("project_id") or req.get("projectId") or "").strip(),
+    from .exam_scope import organization_id_for_exam_write
+
+    org_id = organization_id_for_exam_write(
+        str(req.get("organization_id") or req.get("organizationId") or "").strip()
     )
     due_val, due_update = _parse_assignment_due_from_request(req)
     forward = dict(req) if isinstance(req, dict) else {}
@@ -5137,11 +5983,10 @@ def api_exam_teacher_create_assignment():
 def api_exam_teacher_issue_assignments_modal():
     """老师端弹窗：本地下发考试任务（含受众/截止/目的），学生端仅受众可见。"""
     req = _json_payload()
-    org_id = _resolve_exam_organization_id(
-        explicit_org_id=str(
-            req.get("organization_id") or req.get("organizationId") or ""
-        ).strip(),
-        project_id=str(req.get("project_id") or req.get("projectId") or "").strip(),
+    from .exam_scope import organization_id_for_exam_write
+
+    org_id = organization_id_for_exam_write(
+        str(req.get("organization_id") or req.get("organizationId") or "").strip()
     )
     due_val, due_update = _parse_assignment_due_from_request(req)
     purpose = str(req.get("purpose") or req.get("exam_purpose") or "").strip() or None
@@ -5178,6 +6023,9 @@ def api_exam_teacher_issue_assignments_modal():
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 set_id/items", "data": None, "trace_id": uuid.uuid4().hex}), 400
     if not audience_ids:
         return jsonify({"code": "BAD_REQUEST", "message": "请选择考试对象（至少1人）", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    aud_err = _validate_exam_audience_user_ids(audience_ids)
+    if aud_err:
+        return jsonify({"code": "FORBIDDEN", "message": aud_err, "data": None, "trace_id": uuid.uuid4().hex}), 403
 
     created: list[dict[str, Any]] = []
     try:
@@ -5279,15 +6127,48 @@ def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> t
     return attempts, last_status, last_pl
 
 
+@bp.get("/api/exam-center/teacher/assignable-users")
+@page13_access_required
+def api_exam_teacher_assignable_users():
+    """老师端下发考试：可选人员（按当前公司与项目组作用域过滤）。"""
+    from .authz import exam_team_scoped_user_ids
+    from .user_access import serialize_user_access
+    from .models import UserOrganizationMembership
+
+    users = User.query.order_by(User.display_name.asc(), User.username.asc()).all()
+    org_id = _current_exam_scope_organization_id()
+    if org_id:
+        org_uids = {
+            str(m.user_id).strip()
+            for m in UserOrganizationMembership.query.filter_by(organization_id=org_id).all()
+            if str(m.user_id).strip()
+        }
+        users = [u for u in users if str(u.id or "").strip() in org_uids]
+    scoped = exam_team_scoped_user_ids()
+    if scoped is not None:
+        users = [u for u in users if str(u.id or "").strip() in scoped]
+    return jsonify(
+        {
+            "users": [
+                {
+                    "id": u.id,
+                    "username": u.username,
+                    "displayName": u.display_name,
+                    "display_name": u.display_name,
+                    **serialize_user_access(u),
+                }
+                for u in users
+            ]
+        }
+    )
+
+
 @bp.get("/api/exam-center/teacher/assignments-local")
 @page13_access_required
 def api_teacher_assignments_local_list():
     """老师端：列出 aiword 本地镜像的考试任务。"""
-    org_id = _current_exam_scope_organization_id()
     try:
-        q_rows = ExamCenterAssignment.query
-        if org_id:
-            q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+        q_rows = _scope_exam_assignment_query(ExamCenterAssignment.query)
         rows = q_rows.order_by(ExamCenterAssignment.created_at.desc()).limit(500).all()
     except Exception as e:
         return jsonify(
@@ -5328,8 +6209,7 @@ def api_teacher_get_assignment(assignment_id: str):
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    org_id = _current_exam_scope_organization_id()
-    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+    if not _exam_assignment_in_staff_scope(row):
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     purpose = ""
     try:
@@ -5374,8 +6254,7 @@ def api_teacher_patch_assignment(assignment_id: str):
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    org_id = _current_exam_scope_organization_id()
-    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+    if not _exam_assignment_in_staff_scope(row):
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
 
     if "title" in req:
@@ -5427,6 +6306,9 @@ def api_teacher_patch_assignment(assignment_id: str):
         raw = req.get("audience_user_ids") if "audience_user_ids" in req else req.get("audienceUserIds")
         audience_ids = [str(x).strip() for x in raw] if isinstance(raw, list) else []
         audience_ids = [x for x in audience_ids if x]
+        aud_err = _validate_exam_audience_user_ids(audience_ids)
+        if aud_err:
+            return jsonify({"code": "FORBIDDEN", "message": aud_err, "data": None, "trace_id": uuid.uuid4().hex}), 403
         ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).delete()
         for uid in audience_ids:
             db.session.add(ExamCenterAssignmentAudience(assignment_id=aid, user_id=uid))
@@ -5497,8 +6379,7 @@ def api_teacher_delete_local_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "delete")
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
-    org_id = _current_exam_scope_organization_id()
-    if row and org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+    if row and not _exam_assignment_in_staff_scope(row):
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     if row:
         try:
@@ -5525,8 +6406,7 @@ def api_teacher_unpublish_local_assignment(assignment_id: str):
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "unpublish")
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
-    org_id = _current_exam_scope_organization_id()
-    if row and org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+    if row and not _exam_assignment_in_staff_scope(row):
         return jsonify({"code": "NOT_FOUND", "message": "任务不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     if row:
         try:
@@ -5556,8 +6436,7 @@ def api_teacher_publish_local_assignment(assignment_id: str):
     row = ExamCenterAssignment.query.filter_by(assignment_id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录，无法上架", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    org_id = _current_exam_scope_organization_id()
-    if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+    if not _exam_assignment_in_staff_scope(row):
         return jsonify({"code": "NOT_FOUND", "message": "本地无该任务记录，无法上架", "data": None, "trace_id": uuid.uuid4().hex}), 404
     attempts, last_st, last_pl = _exam_try_upstream_modify_assignment_proxy(aid, "publish")
     try:
@@ -5580,6 +6459,10 @@ def api_teacher_publish_local_assignment(assignment_id: str):
 @bp.post("/api/exam-center/student/practice/generate-set")
 @login_required
 def api_exam_student_generate_practice_set():
+    from .observer_view import exam_student_mutation_allowed, observer_mutation_blocked_response
+
+    if not exam_student_mutation_allowed():
+        return observer_mutation_blocked_response()
     body = _expand_quiz_request_body(_json_payload())
     uid = str(session.get("user_id") or "").strip()
     if uid:
@@ -5592,6 +6475,10 @@ def api_exam_student_generate_practice_set():
 @bp.post("/api/exam-center/student/practice/submit")
 @login_required
 def api_exam_student_submit_practice():
+    from .observer_view import exam_student_mutation_allowed, observer_mutation_blocked_response
+
+    if not exam_student_mutation_allowed():
+        return observer_mutation_blocked_response()
     body = _normalize_practice_submit_upstream_body(_json_payload())
     uid = str(session.get("user_id") or "").strip()
     if uid:
@@ -5774,7 +6661,12 @@ def api_exam_student_assignments_list():
         "quiz/me/assignments",
         "quiz/student/exams",
     ]
-    st, pl, tried = _quiz_try_paths(paths, method="GET", query=request.args.to_dict())
+    st, pl, tried = _quiz_try_paths(
+        paths,
+        method="GET",
+        query=request.args.to_dict(),
+        organization_id=org_id or None,
+    )
     upstream_http_ok = 200 <= int(st) < 300 and isinstance(pl, dict)
     raw_list: list[dict[str, Any]] = []
     if upstream_http_ok:
@@ -5792,8 +6684,9 @@ def api_exam_student_assignments_list():
     if aids:
         try:
             q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids))
-            if org_id:
-                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            org_clause = _exam_org_id_sql_clause(org_id, ExamCenterAssignment.organization_id)
+            if org_clause is not None:
+                q_rows = q_rows.filter(org_clause)
             for ar in q_rows.all():
                 aid_k = str(ar.assignment_id or "").strip()
                 if aid_k:
@@ -5808,8 +6701,9 @@ def api_exam_student_assignments_list():
     if aids:
         try:
             q_rows = ExamCenterAssignment.query.filter(ExamCenterAssignment.assignment_id.in_(aids))
-            if org_id:
-                q_rows = q_rows.filter(ExamCenterAssignment.organization_id == org_id)
+            org_clause = _exam_org_id_sql_clause(org_id, ExamCenterAssignment.organization_id)
+            if org_clause is not None:
+                q_rows = q_rows.filter(org_clause)
             for ar in q_rows.all():
                 aid_k = str(ar.assignment_id or "").strip()
                 if not aid_k:
@@ -5835,8 +6729,9 @@ def api_exam_student_assignments_list():
                     ~ExamCenterAssignment.status.in_(("inactive", "cancelled", "archived", "deleted")),
                 )
             )
-            if org_id:
-                local_q = local_q.filter(ExamCenterAssignment.organization_id == org_id)
+            org_clause = _exam_org_id_sql_clause(org_id, ExamCenterAssignment.organization_id)
+            if org_clause is not None:
+                local_q = local_q.filter(org_clause)
             local_rows = local_q.order_by(ExamCenterAssignment.created_at.desc()).limit(200).all()
             uid_cur = str(session.get("user_id") or "").strip()
             allow_ids: set[str] = set()
@@ -5905,9 +6800,17 @@ def api_exam_student_assignments_list():
 @bp.get("/api/exam-center/student/history")
 @login_required
 def api_exam_student_history():
-    uid = str(session.get("user_id") or "").strip()
-    if not uid:
-        return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+    from .observer_view import (
+        exam_activity_observer_fields,
+        exam_student_view_mode,
+        user_team_filter_options_for_exam,
+    )
+    from sqlalchemy import false as sql_false
+
+    _ensure_exam_scope_data_repaired()
+    view_mode = exam_student_view_mode()
+    team_filter = str(request.args.get("teamId") or request.args.get("team_id") or "").strip()
+    user_filter = str(request.args.get("userId") or request.args.get("user_id") or "").strip()
     try:
         lim = int(str(request.args.get("limit") or "100"))
     except (TypeError, ValueError):
@@ -5919,17 +6822,62 @@ def api_exam_student_history():
         offset = 0
     offset = max(0, offset)
     pass_score = _exam_pass_score()
-    base_q = ExamCenterActivity.query.filter_by(user_id=uid)
-    org_id = _current_exam_scope_organization_id()
-    if org_id:
-        base_q = base_q.filter(ExamCenterActivity.organization_id == org_id)
-    total = base_q.count()
-    rows = (
-        base_q.order_by(ExamCenterActivity.created_at.desc())
-        .offset(offset)
-        .limit(lim)
-        .all()
-    )
+
+    if view_mode == "normal":
+        uid = str(session.get("user_id") or "").strip()
+        if not uid:
+            return jsonify({"code": "UNAUTHORIZED", "message": "未登录", "data": None, "trace_id": uuid.uuid4().hex}), 401
+        base_q = ExamCenterActivity.query.filter_by(user_id=uid)
+        org_id = _current_exam_scope_organization_id()
+        org_clause = _exam_org_id_sql_clause(org_id, ExamCenterActivity.organization_id)
+        if org_clause is not None:
+            base_q = base_q.filter(org_clause)
+        total = base_q.count()
+        rows = (
+            base_q.order_by(ExamCenterActivity.created_at.desc())
+            .offset(offset)
+            .limit(lim)
+            .all()
+        )
+        filter_opts = {"teams": [], "users": []}
+    else:
+        base_q = _scope_exam_activity_query(ExamCenterActivity.query)
+        scoped_uids: set[str] = set()
+        for row in base_q.with_entities(ExamCenterActivity.user_id).distinct().all():
+            uid = row[0] if isinstance(row, (tuple, list)) else row
+            s = str(uid or "").strip()
+            if s:
+                scoped_uids.add(s)
+        filter_opts = user_team_filter_options_for_exam(
+            scoped_uids,
+            include_teams=(view_mode == "super_admin_readonly"),
+        )
+        if user_filter:
+            base_q = base_q.filter(ExamCenterActivity.user_id == user_filter)
+        elif team_filter:
+            scope_tid = _active_exam_team_id_for_observer()
+            if scope_tid and team_filter != scope_tid:
+                base_q = base_q.filter(sql_false())
+            elif not scope_tid:
+                from .models import UserTeamMembership
+
+                team_uids = {
+                    str(m.user_id).strip()
+                    for m in UserTeamMembership.query.filter_by(team_id=team_filter).all()
+                    if str(m.user_id).strip()
+                }
+                if not team_uids:
+                    base_q = base_q.filter(sql_false())
+                else:
+                    base_q = base_q.filter(ExamCenterActivity.user_id.in_(list(team_uids)))
+        total = base_q.count()
+        rows = (
+            base_q.order_by(ExamCenterActivity.created_at.desc())
+            .offset(offset)
+            .limit(lim)
+            .all()
+        )
+
     ids = [str(r.id) for r in rows if getattr(r, "id", None)]
     det_map: dict[str, ExamCenterActivityDetail] = {}
     if ids:
@@ -5941,6 +6889,10 @@ def api_exam_student_history():
         mode_l = (a.mode or "").strip().lower()
         mode_label = "练习" if mode_l == "practice" else ("考试" if mode_l == "exam" else (a.mode or "-"))
         tgt = (a.assignment_label or a.set_id or a.attempt_id or "-") or "-"
+        obs = exam_activity_observer_fields(
+            str(getattr(a, "user_id", "") or ""),
+            preferred_team_id=_active_exam_team_id_for_observer(),
+        )
         records.append(
             {
                 "id": a.id,
@@ -5960,9 +6912,28 @@ def api_exam_student_history():
                 "passed": (d.score is not None and float(d.score) >= pass_score) if d and d.score is not None else None,
                 "weakness": d.weakness if d else None,
                 "recommendation": d.recommendation if d else None,
+                "teamId": obs.get("teamId") or None,
+                "teamName": obs.get("teamName") or None,
+                "userId": obs.get("userId") or None,
+                "displayName": obs.get("displayName") or None,
             }
         )
-    return jsonify({"code": 0, "message": "ok", "data": {"records": records}, "trace_id": uuid.uuid4().hex}), 200
+    has_more = (offset + len(records)) < int(total)
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "records": records,
+                "total": int(total),
+                "has_more": has_more,
+                "viewMode": view_mode,
+                "readOnly": view_mode != "normal",
+                "filterOptions": filter_opts,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
 
 
 @bp.post("/api/exam-center/student/exams/start")
@@ -5990,7 +6961,9 @@ def _assignment_visible_to_user(*, assignment_id: str, user_id: str) -> bool:
         if not row:
             return False
         org_id = _current_exam_scope_organization_id()
-        if org_id and str(getattr(row, "organization_id", "") or "").strip() != org_id:
+        from .authz import exam_row_organization_id_matches
+
+        if not exam_row_organization_id_matches(getattr(row, "organization_id", None), org_id):
             return False
         any_rows = ExamCenterAssignmentAudience.query.filter_by(assignment_id=aid).limit(1).all()
         if not any_rows:
@@ -6399,6 +7372,10 @@ def _local_exam_pull_grading_job_and_persist(aid_raw: str) -> dict[str, Any]:
 @bp.post("/api/exam-center/student/exams/start-local")
 @login_required
 def api_exam_student_start_exam_local():
+    from .observer_view import exam_student_mutation_allowed, observer_mutation_blocked_response
+
+    if not exam_student_mutation_allowed():
+        return observer_mutation_blocked_response()
     body = _json_payload()
     assignment_id = (body.get("assignment_id") or body.get("assignmentId") or "").strip()
     if not assignment_id:
@@ -6486,6 +7463,10 @@ def api_exam_student_start_exam_local():
 @bp.post("/api/exam-center/student/exams/submit-local")
 @login_required
 def api_exam_student_submit_exam_local():
+    from .observer_view import exam_student_mutation_allowed, observer_mutation_blocked_response
+
+    if not exam_student_mutation_allowed():
+        return observer_mutation_blocked_response()
     body = _json_payload()
     attempt_id = str(body.get("attempt_id") or body.get("attemptId") or "").strip()
     if not attempt_id:
@@ -6814,6 +7795,8 @@ def api_exam_activity_detail(activity_id: str):
         uid = str(session.get("user_id") or "").strip()
         if not uid or uid != str(row.user_id or ""):
             return jsonify({"code": "FORBIDDEN", "message": "无权查看该记录", "data": None, "trace_id": uuid.uuid4().hex}), 403
+    elif not _exam_activity_in_staff_scope(row):
+        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     det = ExamCenterActivityDetail.query.filter_by(activity_id=aid).first()
     pass_score = _exam_pass_score()
     return jsonify(
@@ -6923,7 +7906,9 @@ def api_exam_stats_mode():
     if mode not in {"exam", "practice"}:
         return jsonify({"code": "BAD_REQUEST", "message": "mode 仅支持 exam/practice", "data": None, "trace_id": uuid.uuid4().hex}), 400
     pass_score = _exam_pass_score()
-    rows = ExamCenterActivity.query.filter_by(mode=mode).order_by(ExamCenterActivity.created_at.desc()).all()
+    rows = _scope_exam_activity_query(
+        ExamCenterActivity.query.filter_by(mode=mode)
+    ).order_by(ExamCenterActivity.created_at.desc()).all()
     ids = [str(r.id) for r in rows if getattr(r, "id", None)]
     det_map: dict[str, ExamCenterActivityDetail] = {}
     if ids:
@@ -6970,6 +7955,8 @@ def api_exam_activity_delete(activity_id: str):
     row = ExamCenterActivity.query.filter_by(id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    if not _exam_activity_in_staff_scope(row):
+        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
     try:
         ExamCenterActivityDetail.query.filter_by(activity_id=aid).delete()
         ExamCenterActivity.query.filter_by(id=aid).delete()
@@ -6998,7 +7985,12 @@ def api_exam_stats_overview():
 @bp.get("/api/exam-center/stats/student/<student_id>")
 @page13_access_required
 def api_exam_stats_student(student_id: str):
-    local = _local_stats_for_student(student_id)
+    from .authz import user_in_exam_team_scope
+
+    uid = str(student_id or "").strip()
+    if not uid or not user_in_exam_team_scope(uid):
+        return jsonify({"code": "NOT_FOUND", "message": "学生不存在或无权查看", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    local = _local_stats_for_student(uid)
     return jsonify(
         {
             "code": 0,
@@ -7057,7 +8049,9 @@ def api_exam_stats_exam(assignment_id: str):
     aid = str(assignment_id or "").strip()
     if not aid:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 assignment_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
-    rows = ExamCenterActivity.query.filter_by(assignment_id=aid).order_by(ExamCenterActivity.created_at.desc()).all()
+    rows = _scope_exam_activity_query(
+        ExamCenterActivity.query.filter_by(assignment_id=aid)
+    ).order_by(ExamCenterActivity.created_at.desc()).all()
     ids = [str(r.id) for r in rows if getattr(r, "id", None)]
     det_map: dict[str, ExamCenterActivityDetail] = {}
     if ids:
@@ -7232,7 +8226,6 @@ def api_users_update(user_id: str):
             user.can_access_company_registry = True
         else:
             user.can_access_company_registry = False
-    from .authz import sync_user_session
     from .user_access import (
         apply_user_access_fields,
         ensure_role_team_requirement,
@@ -7246,8 +8239,11 @@ def api_users_update(user_id: str):
         return jsonify({"message": str(e)}), 400
     db.session.add(user)
     db.session.commit()
+    db.session.expire(user)
     if session.get("user_id") == user.id:
-        sync_user_session(user)
+        from .authz import _refresh_session_from_user
+
+        _refresh_session_from_user(user)
     else:
         session.pop("country_scopes", None)
     return jsonify({
@@ -7267,12 +8263,15 @@ def api_users_update(user_id: str):
 @bp.delete("/api/users/<user_id>")
 @super_admin_required
 def api_users_delete(user_id: str):
-    from .models import UserCountryScope, UserTeamMembership
+    from .models import UserCountryScope, UserOrganizationMembership, UserTeamMembership
 
     user = User.query.get(user_id)
     if not user:
         return jsonify({"message": "用户不存在"}), 404
     UserTeamMembership.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    UserOrganizationMembership.query.filter_by(user_id=user_id).delete(
+        synchronize_session=False
+    )
     UserCountryScope.query.filter_by(user_id=user_id).delete(synchronize_session=False)
     db.session.delete(user)
     db.session.commit()
@@ -8340,10 +9339,9 @@ def api_uploads_list():
         q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
         proj_meta,
     )
-    from .authz import rbac_enforced, upload_in_scope
+    from .authz import filter_upload_records_in_scope
 
-    if rbac_enforced():
-        records = [r for r in records if upload_in_scope(r)]
+    records = filter_upload_records_in_scope(records)
     upload_ids = [str(r.id) for r in records if getattr(r, "id", None)]
     has_gen: set[str] = set()
     if upload_ids:
@@ -8595,42 +9593,44 @@ def api_upload_update(upload_id: str):
 @bp.get("/api/my-tasks")
 @login_required
 def api_my_tasks():
-    """页面2：普通账号仅本人任务；项目管理员可见本项目组；访问密码超级管理员可见全部。"""
-    from .authz import (
-        is_page13_super_admin,
-        is_project_admin,
-        upload_record_visible_to_user,
+    """页面2：普通账号仅本人任务；超管/项管只读观察全部可见范围，支持项目组/人员筛选。"""
+    from .observer_view import (
+        build_observer_filter_options,
+        page2_query_upload_rows,
+        page2_view_mode,
+        prepare_page2_observer_rows,
     )
 
-    username = session.get("username")
-    display_name = session.get("display_name")
-
     include_history = str(request.args.get("includeHistory") or "").strip() in ("1", "true", "True", "yes", "on")
+    team_filter = str(request.args.get("teamId") or request.args.get("team_id") or "").strip()
+    user_filter = str(request.args.get("userId") or request.args.get("user_id") or "").strip()
     proj_meta = _project_meta_map(auto_create_from_uploads=True)
     ended = {n for n, m in proj_meta.items() if (m.get("status") or "").strip().lower() == Project.STATUS_ENDED}
 
-    if is_page13_super_admin() or is_project_admin():
-        q = UploadRecord.query
-    else:
-        q = UploadRecord.query.filter(
-            db.or_(
-                UploadRecord.assignee_name == username,
-                UploadRecord.assignee_name == display_name,
-                UploadRecord.author == username,
-                UploadRecord.author == display_name,
-            )
+    view_mode = page2_view_mode()
+    rows = page2_query_upload_rows(include_history=include_history, proj_meta=proj_meta, ended=ended)
+    all_metas: list[dict[str, str]] = []
+    if view_mode != "normal":
+        _, all_metas = prepare_page2_observer_rows(rows)
+        filter_opts = build_observer_filter_options(
+            all_metas,
+            include_teams=(view_mode == "super_admin_readonly"),
         )
-    if (not include_history) and ended:
-        q = q.filter(~UploadRecord.project_name.in_(list(ended)))
-    rows = q.order_by(
-        UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()
-    ).all()
-    if is_project_admin() and not is_page13_super_admin():
-        rows = [r for r in rows if upload_record_visible_to_user(r)]
-    records = _sort_upload_records_by_project_priority(rows, proj_meta)
+        rows, all_metas = prepare_page2_observer_rows(
+            rows,
+            team_id=team_filter or None,
+            user_id=user_filter or None,
+        )
+    else:
+        filter_opts = {"teams": [], "users": []}
 
-    return jsonify({
-        "records": [
+    records = _sort_upload_records_by_project_priority(rows, proj_meta)
+    meta_by_id = {str(getattr(r, "id", "") or ""): m for r, m in zip(rows, all_metas)}
+
+    out_records: list[dict[str, Any]] = []
+    for idx, r in enumerate(records):
+        meta = meta_by_id.get(str(r.id or ""), {})
+        out_records.append(
             {
                 "seq": idx + 1,
                 "id": r.id,
@@ -8674,16 +9674,31 @@ def api_my_tasks():
                 "registeredProductName": getattr(r, "registered_product_name", None),
                 "model": getattr(r, "model", None),
                 "registrationVersion": getattr(r, "registration_version", None),
+                "teamId": meta.get("teamId") or None,
+                "teamName": meta.get("teamName") or None,
+                "assigneeUserId": meta.get("assigneeUserId") or None,
+                "assigneeLabel": meta.get("assigneeLabel") or None,
             }
-            for idx, r in enumerate(records)
-        ]
-    })
+        )
+
+    return jsonify(
+        {
+            "viewMode": view_mode,
+            "readOnly": view_mode != "normal",
+            "filterOptions": filter_opts,
+            "records": out_records,
+        }
+    )
 
 
 @bp.patch("/api/uploads/<upload_id>/execution-notes")
 @login_required
 def api_update_execution_notes(upload_id: str):
     """更新执行任务备注（仅页面2可编辑）。"""
+    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+
+    if not page2_mutation_allowed():
+        return observer_mutation_blocked_response()
     from .notify_content import (
         MATTER_COMPLETE_NOTES_INVALID_MSG,
         is_matter_task_upload,
@@ -8760,6 +9775,10 @@ def api_download_upload_template_file(upload_id: str):
 @login_required
 def api_upload_replace_template_file(upload_id: str):
     """页面2：上传模板文件覆盖该任务已有文件或链接，写入 FTP（每条任务仅保留一个文件）。"""
+    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+
+    if not page2_mutation_allowed():
+        return observer_mutation_blocked_response()
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
@@ -8838,6 +9857,10 @@ def api_upload_replace_template_file(upload_id: str):
 @login_required
 def api_update_completion_status(upload_id: str):
     """更新任务的完成状态（页面2使用）。可仅更新文档链接；文件型标记完成需文档；事项型需执行任务备注。"""
+    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+
+    if not page2_mutation_allowed():
+        return observer_mutation_blocked_response()
     from .notify_content import (
         MATTER_COMPLETE_NOTES_INVALID_MSG,
         MATTER_COMPLETE_NOTES_MSG,
@@ -8897,6 +9920,10 @@ def api_update_completion_status(upload_id: str):
 @bp.post("/api/generate")
 @login_required
 def api_generate():
+    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+
+    if not page2_mutation_allowed():
+        return observer_mutation_blocked_response()
     data = request.get_json(force=True) or {}
     upload_id = data.get("uploadId")
     triggered_by = data.get("triggeredBy") or session.get("username", "web")
@@ -9115,17 +10142,74 @@ def api_summary():
 
 # ---------- 项目管理 API ----------
 
+def _sync_company_registry_projects_to_page1() -> int:
+    """从页面0 同步分配到当前账号所属项目组的公司总览项目到页面1（尚无关联时各建一条）。"""
+    from .authz import company_project_in_scope, is_page13_super_admin, user_team_ids
+    from .models import CompanyProject, REGISTRATION_SCOPE_LEGACY
+    from .tenant_context import resolve_organization_context
+
+    org_id, _ = resolve_organization_context()
+    q = CompanyProject.query
+    if org_id:
+        q = q.filter(CompanyProject.organization_id == org_id)
+    if not is_page13_super_admin():
+        team_ids = [str(t).strip() for t in user_team_ids() if str(t).strip()]
+        if not team_ids:
+            return 0
+        q = q.filter(CompanyProject.assigned_team_id.in_(team_ids))
+    rows = [cp for cp in q.order_by(CompanyProject.name.asc()).all() if company_project_in_scope(cp)]
+    n = 0
+    uid = str(session.get("user_id") or "").strip() or None
+    for cp in rows:
+        cp_id = str(cp.id or "").strip()
+        if not cp_id:
+            continue
+        if Project.query.filter(Project.company_project_id == cp_id).first():
+            continue
+        p = Project(
+            organization_id=str(getattr(cp, "organization_id", "") or "").strip() or None,
+            name=cp.name,
+            registered_country=getattr(cp, "registered_country", None),
+            registered_category=getattr(cp, "registered_category", None),
+            product_type=getattr(cp, "product_type", None),
+            assigned_team_id=getattr(cp, "assigned_team_id", None),
+            expected_certification_date=getattr(cp, "expected_certification_date", None),
+            expected_submission_date=getattr(cp, "expected_submission_date", None),
+            progress_description=getattr(cp, "progress_description", None),
+            progress_updated_at=getattr(cp, "progress_updated_at", None),
+            priority=int(cp.priority or CompanyProject.PRIORITY_MEDIUM),
+            status=cp.status or CompanyProject.STATUS_ACTIVE,
+            company_project_id=cp_id,
+            registration_scope=REGISTRATION_SCOPE_LEGACY,
+            created_by_user_id=uid,
+        )
+        db.session.add(p)
+        n += 1
+    if n:
+        db.session.commit()
+    return n
+
+
 def _project_api_item(
     p: Project,
     *,
     prod_hints: dict[str, str] | None = None,
     team_names: dict[str, str] | None = None,
+    org_names: dict[str, str] | None = None,
 ) -> dict:
+    from .project_teams import project_has_page1_upload_tasks
+
     tid = (getattr(p, "assigned_team_id", None) or "").strip()
     teams = team_names or {}
+    org_id = str(getattr(p, "organization_id", "") or "").strip()
+    org_map = org_names or {}
+    org_locked = project_has_page1_upload_tasks(p.id)
     return {
         "id": p.id,
         "companyProjectId": (getattr(p, "company_project_id", None) or None),
+        "organizationId": org_id or None,
+        "organizationName": org_map.get(org_id) if org_id else None,
+        "organizationIdLocked": org_locked,
         "name": p.name,
         "registeredCountry": getattr(p, "registered_country", None),
         "registeredCategory": getattr(p, "registered_category", None),
@@ -9187,7 +10271,52 @@ def api_projects_list():
         pass
     prod_hints = _project_registered_product_name_hints([p.id for p in rows])
     team_names = {t.id: t.name for t in ProjectTeam.query.all()}
-    return jsonify([_project_api_item(p, prod_hints=prod_hints, team_names=team_names) for p in rows])
+    org_ids = {
+        str(getattr(p, "organization_id", "") or "").strip()
+        for p in rows
+        if str(getattr(p, "organization_id", "") or "").strip()
+    }
+    org_names: dict[str, str] = {}
+    if org_ids:
+        from .models import Organization
+
+        org_names = {
+            str(o.id or "").strip(): str(o.name or "").strip() or str(o.id or "").strip()
+            for o in Organization.query.filter(Organization.id.in_(list(org_ids))).all()
+        }
+    return jsonify(
+        [_project_api_item(p, prod_hints=prod_hints, team_names=team_names, org_names=org_names) for p in rows]
+    )
+
+
+@bp.post("/api/projects/sync-from-company-registry")
+@page13_access_required
+def api_projects_sync_from_company_registry():
+    """从页面0 同步「所属项目组」下的公司总览项目到页面1。"""
+    from .authz import is_page13_super_admin, user_team_ids
+
+    if not is_page13_super_admin() and not user_team_ids():
+        return jsonify({"message": "请先在账号管理中分配所属项目组"}), 403
+    try:
+        synced = _sync_company_registry_projects_to_page1()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"同步失败：{e}"}), 500
+    return jsonify(
+        {
+            "message": f"已从页面0 同步 {synced} 个项目到页面1（仅新建尚未关联的页面1 项目）",
+            "synced": synced,
+        }
+    )
+
+
+@bp.get("/api/assignable-organizations")
+@page13_access_required
+def api_assignable_organizations():
+    """页面1 等项目管理可选的所属公司列表（按账号绑定过滤）。"""
+    from .tenant_context import integration_organizations_payload
+
+    return jsonify({"organizations": integration_organizations_payload()})
 
 
 @bp.post("/api/projects")
@@ -9260,6 +10389,25 @@ def api_projects_create_or_update():
             registration_scope=scope,
             created_by_user_id=session.get("user_id"),
         )
+        from .tenant_context import resolve_organization_context
+
+        try:
+            oid, _ = resolve_organization_context()
+        except ValueError as exc:
+            return jsonify({"message": str(exc)}), 403
+        row.organization_id = oid or None
+    if "organizationId" in data or "organization_id" in data:
+        from .company_routes import _resolve_assignable_organization_id
+
+        raw = (
+            data.get("organizationId")
+            if "organizationId" in data
+            else data.get("organization_id")
+        )
+        oid, oid_err = _resolve_assignable_organization_id(raw)
+        if oid_err:
+            return jsonify({"message": oid_err}), 400
+        row.organization_id = oid
     row.priority = priority
     row.status = status
     row.registration_scope = scope
@@ -9274,6 +10422,7 @@ def api_projects_create_or_update():
                 registered_category=registered_category,
                 priority=priority,
                 status=status,
+                organization_id=getattr(row, "organization_id", None),
                 created_by_user_id=session.get("user_id"),
             )
             from .project_registry_sync import apply_payload_to_company, payload_from_api_data
@@ -9376,6 +10525,34 @@ def api_projects_patch(project_id: str):
 
     if rbac_enforced() and not project_in_scope(row):
         return jsonify({"message": "无权修改该项目"}), 403
+
+    if "organizationId" in data or "organization_id" in data:
+        from .company_routes import _resolve_assignable_organization_id
+        from .project_teams import (
+            apply_project_organization_id,
+            project_has_page1_upload_tasks,
+            validate_organization_id_change,
+        )
+
+        raw = (
+            data.get("organizationId")
+            if "organizationId" in data
+            else data.get("organization_id")
+        )
+        new_oid, oid_err = _resolve_assignable_organization_id(raw)
+        if oid_err:
+            return jsonify({"message": oid_err}), 400
+        old_oid = str(getattr(row, "organization_id", "") or "").strip() or None
+        locked = project_has_page1_upload_tasks(row.id)
+        org_err = validate_organization_id_change(
+            old_org_id=old_oid,
+            new_org_id=new_oid,
+            upload_tasks_locked=locked,
+        )
+        if org_err:
+            return jsonify({"message": org_err}), 403
+        if old_oid != new_oid:
+            apply_project_organization_id(row, new_oid)
 
     _apply_page1_registry_fields_and_sync(row, data)
 
@@ -9515,6 +10692,36 @@ def api_projects_batch_update():
             row.registered_country = rc
         if "registeredCategory" in it:
             row.registered_category = (it.get("registeredCategory") or "").strip() or None
+
+        if "organizationId" in it or "organization_id" in it:
+            from .authz import is_page13_super_admin
+            from .company_routes import _resolve_assignable_organization_id
+            from .project_teams import (
+                ORGANIZATION_ID_LOCKED_MSG,
+                apply_project_organization_id,
+                project_has_page1_upload_tasks,
+                validate_organization_id_change,
+            )
+
+            raw = (
+                it.get("organizationId")
+                if "organizationId" in it
+                else it.get("organization_id")
+            )
+            new_oid, oid_err = _resolve_assignable_organization_id(raw)
+            if oid_err:
+                return jsonify({"message": oid_err}), 400
+            old_oid = str(getattr(row, "organization_id", "") or "").strip() or None
+            locked = project_has_page1_upload_tasks(row.id)
+            org_err = validate_organization_id_change(
+                old_org_id=old_oid,
+                new_org_id=new_oid,
+                upload_tasks_locked=locked,
+            )
+            if org_err:
+                return jsonify({"message": org_err}), 403
+            if old_oid != new_oid:
+                apply_project_organization_id(row, new_oid)
 
         _apply_page1_registry_fields_and_sync(row, it)
 
@@ -9656,6 +10863,10 @@ def api_update_notify_template(template_id: str):
 @login_required
 def api_reorder_uploads():
     """更新任务排序"""
+    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+
+    if not page2_mutation_allowed():
+        return observer_mutation_blocked_response()
     data = request.get_json(force=True) or {}
     orders = data.get("orders", [])
     
@@ -9682,6 +10893,17 @@ def api_reorder_uploads():
 def chatbot_test_page():
     """钉钉机器人本地联调页：输入问题→调用 aicheckword→展示生成结果（不发真实钉钉消息）。"""
     return render_template("chatbot_test.html")
+
+
+@bp.get("/api/dingtalk/chatbot/callback-url")
+@page4_access_required
+def api_dingtalk_chatbot_callback_url():
+    """由系统配置 BASE_URL 生成钉钉 HTTP 回调完整 URL，供页面复制到开放平台。"""
+    from .app_settings import chatbot_callback_url_info, get_setting
+
+    base_url = (get_setting("BASE_URL") or "").strip()
+    info = chatbot_callback_url_info(base_url)
+    return jsonify({"success": True, **info})
 
 
 @bp.get("/api/dingtalk/chatbot/llm-settings")
@@ -9808,10 +11030,13 @@ def api_dingtalk_chatbot_test():
 
     sent_result: Optional[dict[str, Any]] = None
     if send_real:
-        webhook = session_webhook or _dingtalk_webhook_str()
-        secret = None if session_webhook else _dingtalk_secret_opt()
+        webhook = session_webhook or _chatbot_dingtalk_webhook_str()
+        secret = None if session_webhook else _chatbot_dingtalk_secret_opt()
         if not webhook:
-            sent_result = {"success": False, "error": "未配置钉钉 Webhook 且未传 session_webhook"}
+            sent_result = {
+                "success": False,
+                "error": "未配置体系记录机器人 Webhook（CHATBOT_DINGTALK_WEBHOOK）且未传 session_webhook",
+            }
         else:
             res = dingtalk_service.send_text_message(delivered_answer, webhook=webhook, secret=secret)
             sent_result = res if isinstance(res, dict) else {"success": False, "error": str(res)}
@@ -9840,99 +11065,104 @@ def api_dingtalk_chatbot_test():
     )
 
 
-@bp.post("/api/dingtalk/chatbot/callback")
-def api_dingtalk_chatbot_callback():
-    """
-    钉钉机器人自动回复回调：
-    - 仅处理体系记录「怎么写」类问题
-    - 问题匹配与回复生成交给 aicheckword（程序文件 category=program）
-    """
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        return jsonify({"success": False, "message": "payload 必须是 JSON 对象"}), 400
-    if not _chatbot_enabled():
-        return jsonify({"success": True, "ignored": "chatbot disabled"})
-
-    group_id = _chatbot_extract_group_id(payload)
-    groups = _chatbot_enabled_groups()
-    if groups and group_id and group_id not in groups:
-        return jsonify({"success": True, "ignored": "group not enabled"})
-
-    text = _chatbot_extract_text(payload)
-    if not text:
-        return jsonify({"success": True, "ignored": "empty text"})
-    if not _chatbot_should_trigger(text):
-        return jsonify({"success": True, "ignored": "trigger not matched"})
-    if _chatbot_is_cooldown(group_id):
-        return jsonify({"success": True, "ignored": "cooldown"})
-
-    message_id = (
-        str(payload.get("msgId") or payload.get("messageId") or payload.get("eventId") or "").strip()
-        or uuid.uuid4().hex
-    )
-    trigger_type = "at_bot" if "@" in text else "keyword"
-    recent_messages = []
-    hist = payload.get("recentMessages")
-    if isinstance(hist, list):
-        recent_messages = [str(x).strip() for x in hist if str(x).strip()][:6]
-
-    reply_data, err = _chatbot_call_aicheckword(
-        query=text,
-        group_id=group_id,
-        message_id=message_id,
-        trigger_type=trigger_type,
-        recent_messages=recent_messages,
-        provider=_chatbot_llm_provider_from_settings(),
-    )
-    if err:
-        current_app.logger.warning("chatbot 调用 aicheckword 失败: %s", err)
-        return jsonify({"success": False, "message": err}), 200
-
-    need_human = bool(reply_data.get("need_human"))
-    answer = (
-        reply_data.get("answer_summary") or reply_data.get("answer") or ""
-    ).strip()
-    confidence = float(reply_data.get("confidence") or 0.0)
-    conf_threshold = _chatbot_confidence_threshold()
-    if need_human or confidence < conf_threshold or not answer:
-        answer = "这个问题我先帮你转人工确认，稍后给你准确答复。"
-
+def _chatbot_deliver_answer(payload: dict[str, Any], answer: str, *, need_human: bool, confidence: float) -> dict[str, Any]:
+    """将答案发到 sessionWebhook 或群 webhook；返回可 JSON 化的结果。"""
     session_webhook = str(payload.get("sessionWebhook") or "").strip()
     if session_webhook:
         res = dingtalk_service.send_text_message(answer, webhook=session_webhook, secret=None)
         ok = bool(res and res.get("success"))
-        return jsonify(
-            {
-                "success": ok,
-                "message": "reply sent" if ok else (res.get("error") or "reply failed"),
-                "need_human": need_human,
-                "confidence": confidence,
-            }
-        ), 200
-
-    # 无 sessionWebhook 时尝试走已配置群 webhook 发送（兼容本地联调）
-    webhook = _dingtalk_webhook_str()
-    secret = _dingtalk_secret_opt()
-    if not webhook:
-        return jsonify(
-            {
-                "success": True,
-                "message": "no sessionWebhook and no DINGTALK_WEBHOOK",
-                "reply": answer,
-                "need_human": need_human,
-                "confidence": confidence,
-            }
-        ), 200
-    res = dingtalk_service.send_text_message(answer, webhook=webhook, secret=secret)
-    ok = bool(res and res.get("success"))
-    return jsonify(
-        {
+        return {
             "success": ok,
             "message": "reply sent" if ok else (res.get("error") or "reply failed"),
             "need_human": need_human,
             "confidence": confidence,
         }
-    ), 200
+    webhook = _chatbot_dingtalk_webhook_str()
+    secret = _chatbot_dingtalk_secret_opt()
+    if not webhook:
+        return {
+            "success": True,
+            "message": "no sessionWebhook and no CHATBOT_DINGTALK_WEBHOOK",
+            "reply": answer,
+            "need_human": need_human,
+            "confidence": confidence,
+        }
+    res = dingtalk_service.send_text_message(answer, webhook=webhook, secret=secret)
+    ok = bool(res and res.get("success"))
+    return {
+        "success": ok,
+        "message": "reply sent" if ok else (res.get("error") or "reply failed"),
+        "need_human": need_human,
+        "confidence": confidence,
+    }
+
+
+@bp.post("/api/dingtalk/chatbot/callback")
+def api_dingtalk_chatbot_callback():
+    """
+    钉钉 HTTP 回调机器人入口（开放平台加密回调 + 明文联调兼容）。
+    配置 DINGTALK_CALLBACK_* 后走加解密；否则按明文 JSON（本地调试）。
+    """
+    crypto = _dingtalk_callback_crypto_optional()
+    if crypto:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify({"success": False, "message": "body 须为 JSON"}), 400
+        encrypt = str(body.get("encrypt") or "").strip()
+        if not encrypt:
+            return jsonify({"success": False, "message": "缺少 encrypt 字段"}), 400
+        sig, ts, nonce = parse_callback_query_args(request.args)
+        try:
+            plain = crypto.verify_and_decrypt(sig, ts, nonce, encrypt)
+        except DingTalkCallbackCryptoError as e:
+            current_app.logger.warning("钉钉回调解密失败: %s", e)
+            return jsonify({"success": False, "message": str(e)}), 403
+        try:
+            payload = json.loads(plain)
+        except json.JSONDecodeError:
+            payload = {"text": {"content": plain}}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        event_type = str(payload.get("EventType") or payload.get("eventType") or "").strip()
+        if event_type in ("check_url", "check_create_suite_url"):
+            return jsonify(crypto.encrypted_response_map("success"))
+
+        result, err = _chatbot_process_incoming_payload(payload)
+        if err:
+            current_app.logger.warning("chatbot 调用 aicheckword 失败: %s", err)
+            return jsonify(crypto.encrypted_response_map("success"))
+        if result and result.get("ignored"):
+            return jsonify(crypto.encrypted_response_map("success"))
+
+        answer = str((result or {}).get("answer") or "").strip()
+        need_human = bool((result or {}).get("need_human"))
+        confidence = float((result or {}).get("confidence") or 0.0)
+        session_webhook = str(payload.get("sessionWebhook") or "").strip()
+
+        if session_webhook:
+            _chatbot_deliver_answer(payload, answer, need_human=need_human, confidence=confidence)
+            return jsonify(crypto.encrypted_response_map("success"))
+
+        reply_plain = build_text_reply_json(answer)
+        return jsonify(crypto.encrypted_response_map(reply_plain))
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "message": "payload 必须是 JSON 对象"}), 400
+
+    result, err = _chatbot_process_incoming_payload(payload)
+    if err:
+        current_app.logger.warning("chatbot 调用 aicheckword 失败: %s", err)
+        return jsonify({"success": False, "message": err}), 200
+    if result and result.get("ignored"):
+        return jsonify({"success": True, "ignored": result["ignored"]})
+
+    answer = str((result or {}).get("answer") or "").strip()
+    need_human = bool((result or {}).get("need_human"))
+    confidence = float((result or {}).get("confidence") or 0.0)
+    out = _chatbot_deliver_answer(payload, answer, need_human=need_human, confidence=confidence)
+    return jsonify(out), 200
 
 
 def _get_notify_template(key: str) -> str:
@@ -10106,11 +11336,18 @@ def api_notify_by_project():
     
     if not project_name:
         return jsonify({"message": "请提供项目名称"}), 400
+
+    from .authz import filter_upload_records_in_scope, is_page13_super_admin, project_label_in_page3_scope
+
+    if not project_label_in_page3_scope(project_name):
+        return jsonify({"message": "无权催办所属项目组以外的项目"}), 403
     
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.project_name == project_name,
         UploadRecord.completion_status.is_(None)
     ).all()
+    if not is_page13_super_admin():
+        pending_uploads = filter_upload_records_in_scope(pending_uploads)
     
     if not pending_uploads:
         return jsonify({"message": f"项目 {project_name} 没有未完成的任务"})
@@ -10124,7 +11361,7 @@ def api_notify_by_project():
     team_id = _resolve_team_id_by_project_name(project_name)
     webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写"}), 400
+        return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
 
     assignees = collect_notify_person_names_from_uploads(pending_uploads)
     task_list_with_links_md = _notify_pending_task_list_md(pending_uploads)
@@ -10181,6 +11418,10 @@ def api_notify_by_author():
         UploadRecord.author == author,
         UploadRecord.completion_status.is_(None)
     ).all()
+    from .authz import filter_upload_records_in_scope, is_page13_super_admin
+
+    if not is_page13_super_admin():
+        pending_uploads = filter_upload_records_in_scope(pending_uploads)
     
     if not pending_uploads:
         return jsonify({"message": f"{author} 没有未完成的任务"})
@@ -10302,11 +11543,18 @@ def api_notify_by_project_author():
     if not project_name or not author:
         return jsonify({"message": "请提供项目名称与编写人员"}), 400
 
+    from .authz import filter_upload_records_in_scope, is_page13_super_admin, project_label_in_page3_scope
+
+    if not project_label_in_page3_scope(project_name):
+        return jsonify({"message": "无权催办所属项目组以外的项目"}), 403
+
     pending_uploads = UploadRecord.query.filter(
         UploadRecord.project_name == project_name,
         UploadRecord.author == author,
         UploadRecord.completion_status.is_(None),
     ).all()
+    if not is_page13_super_admin():
+        pending_uploads = filter_upload_records_in_scope(pending_uploads)
 
     if not pending_uploads:
         return jsonify({
@@ -10401,12 +11649,16 @@ def api_notify_single_task():
     
     if upload.completion_status:
         return jsonify({"message": "该任务已完成，无需催办"})
+    from .authz import is_page13_super_admin, upload_record_visible_to_user
+
+    if not is_page13_super_admin() and not upload_record_visible_to_user(upload):
+        return jsonify({"message": "无权催办所属项目组以外的任务"}), 403
     from .dingtalk_team import resolve_team_id_by_upload
 
     team_id = resolve_team_id_by_upload(upload)
     webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
-        return jsonify({"message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写"}), 400
+        return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
     
     from .notify_content import notify_doc_link_md_for_template
 
@@ -10573,9 +11825,11 @@ def api_put_schedule_config():
 @bp.get("/api/system-settings")
 @super_admin_required
 def api_get_system_settings():
-    """系统配置：默认带出当前生效值（已通过页面1/3 校验；数据库 URI 脱敏）。"""
+    """系统配置：默认带出当前生效值（已通过页面4 超级管理员校验；数据库 URI 脱敏）。"""
     from .app_settings import (
         SYSTEM_CONFIG_KEYS,
+        chatbot_callback_url_info,
+        get_setting,
         persist_config_json_into_empty_db_keys,
         sync_authoritative_sources_into_db,
         system_config_sections_for_api,
@@ -10587,11 +11841,15 @@ def api_get_system_settings():
     sync_authoritative_sources_into_db(project_root, app)
     persist_config_json_into_empty_db_keys(project_root, app)
     keys_meta = [{"key": k, "label": lbl, "sensitive": sens} for k, lbl, sens in SYSTEM_CONFIG_KEYS]
+    base_url = (get_setting("BASE_URL", default="", app=app) or "").strip()
     return jsonify(
         {
             "settings": system_settings_for_api_get(app, project_root),
             "keys": keys_meta,
             "sections": system_config_sections_for_api(),
+            "derived": {
+                "chatbotCallback": chatbot_callback_url_info(base_url),
+            },
         }
     )
 
@@ -10618,7 +11876,7 @@ def api_put_system_settings():
 
 
 @bp.get("/api/system-settings/team-dingtalk")
-@super_admin_required
+@page13_access_required
 def api_get_team_dingtalk_settings():
     from .authz import is_page13_super_admin, is_project_admin, user_team_ids
     from .project_teams import serialize_team_item
@@ -10633,7 +11891,7 @@ def api_get_team_dingtalk_settings():
 
 
 @bp.put("/api/system-settings/team-dingtalk/<team_id>")
-@super_admin_required
+@page13_access_required
 def api_put_team_dingtalk_settings(team_id: str):
     from .authz import is_page13_super_admin, is_project_admin, user_team_ids
     from .project_teams import serialize_team_item
@@ -10672,6 +11930,11 @@ def api_module_cascade_status():
         .limit(20)
         .all()
     )
+    from .authz import is_page13_super_admin, project_label_in_page3_scope
+
+    if not is_page13_super_admin():
+        pending = [r for r in pending if project_label_in_page3_scope(r.project_name)]
+        recent_sent = [r for r in recent_sent if project_label_in_page3_scope(r.project_name)]
     return jsonify({
         "delayMinutes": delay_minutes,
         "pending": [
@@ -10701,6 +11964,10 @@ def api_notify_module_cascade_manual():
     """手动模块级联催办：按项目检查，产品全部完成→催办开发；开发全部完成→催办测试。body 可传 projectName 仅处理该项目。"""
     data = request.get_json(silent=True) or {}
     project_name = (data.get("projectName") or "").strip() or None
+    from .authz import is_page13_super_admin, project_label_in_page3_scope
+
+    if project_name and not is_page13_super_admin() and not project_label_in_page3_scope(project_name):
+        return jsonify({"success": False, "message": "无权对所属项目组以外的项目执行级联催办"}), 403
     try:
         from .scheduler import _run_module_cascade_manual
         _run_module_cascade_manual(project_name=project_name)
@@ -10784,7 +12051,7 @@ def api_notify_test_auto():
         return jsonify({
             "success": False,
             "webhook_configured": False,
-            "message": "未配置钉钉 Webhook，请在页面3「按项目组钉钉配置」或系统配置中填写",
+            "message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉配置」或系统配置「催办与定时通知」中填写",
             "type": test_type or "default",
         }), 400
     content = "【自动催办测试】通道正常。定时任务将按配置时间发送每周任务完成提醒、逾期前一日催告、每两天项目完成情况统计。"

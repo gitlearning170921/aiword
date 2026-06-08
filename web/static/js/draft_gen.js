@@ -1512,7 +1512,9 @@
     _dgAuthorRoleUserTouched = false;
     __page2DidTemplatePrefill = false;
     const collEl = el("dg_collection");
+    const orgEl = el("dg_organization");
     const pf = getPage2Prefill();
+    let orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
     let coll = (collEl && collEl.value) ? collEl.value.trim() : "";
     if (!coll && pf && pf.collection) coll = pf.collection;
     if (!coll) coll = "regulations";
@@ -1520,6 +1522,7 @@
     let bcRaw = bcEl && bcEl.value ? String(bcEl.value).trim() : "";
     if (!bcRaw && pf && pf.base_case_id) bcRaw = String(pf.base_case_id);
     let path = "/draft-gen/api/draft-bootstrap?collection=" + encodeURIComponent(coll || "regulations");
+    if (orgId) path += "&organizationId=" + encodeURIComponent(orgId);
     if (bcRaw) path += "&base_case_id=" + encodeURIComponent(bcRaw);
     return loadIso13485DocNamePairs()
       .then(function () {
@@ -1542,12 +1545,36 @@
         showMsg("上游列表：" + b.metaError + "（下拉可能为空，请检查 aicheckword 与知识库）", true);
       }
 
-      fillSelectThenCache("dg_collection", b.collections || [], "id", "label", null);
-      if (collEl) {
-        var colIds = (b.collections || []).map(function (c) { return String(c.id); });
-        if (colIds.indexOf(coll) >= 0) collEl.value = coll;
-        else if (pf && pf.collection && colIds.indexOf(pf.collection) >= 0) collEl.value = pf.collection;
-        else if (colIds.indexOf("regulations") >= 0) collEl.value = "regulations";
+      var IP = window.IntegrationPrefill;
+      if (orgEl && IP && IP.fillOrganizationSelect) {
+        IP.fillOrganizationSelect("dg", b.organizations || [], b.activeOrganizationId || orgId);
+        if (IP.wireOrganizationSelect) {
+          IP.wireOrganizationSelect("dg", {
+            root: (window.__SCRIPT_ROOT__ || "").replace(/\/+$/, ""),
+            orgContextRoot: ((window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "") + "/audit"),
+            onOrganizationChange: function () {
+              if (el("dg_base_case")) el("dg_base_case").value = "";
+              loadDraftBootstrap();
+            },
+          });
+        }
+        if (collEl) collEl.value = IP.syncCollectionFromOrganization
+          ? IP.syncCollectionFromOrganization("dg", el("dg_organization").value, b.organizations)
+          : (b.collection || b.activeKnowledgeCollection || coll);
+        var disp = el("dg_collection_display");
+        if (disp && collEl) disp.textContent = collEl.value;
+      } else if (collEl && collEl.tagName === "SELECT") {
+        fillSelectThenCache("dg_collection", b.collections || [], "id", "label", null);
+        if (collEl) {
+          var colIds = (b.collections || []).map(function (c) { return String(c.id); });
+          if (colIds.indexOf(coll) >= 0) collEl.value = coll;
+          else if (pf && pf.collection && colIds.indexOf(pf.collection) >= 0) collEl.value = pf.collection;
+          else if (colIds.indexOf("regulations") >= 0) collEl.value = "regulations";
+        }
+      } else if (collEl) {
+        collEl.value = b.collection || b.activeKnowledgeCollection || coll;
+        var disp2 = el("dg_collection_display");
+        if (disp2) disp2.textContent = collEl.value;
       }
 
       fillSelectThenCache("dg_base_case", b.cases || [], "id", "label", { value: "", label: "（请选择模板项目案例）" });
@@ -1586,7 +1613,6 @@
       });
       syncProjectUi();
       [
-        "dg_collection_filter",
         "dg_base_case_filter",
         "dg_doc_lang_filter",
         "dg_strategy_filter",
@@ -1597,7 +1623,7 @@
         var inp = el(fid);
         if (inp) inp.value = "";
       });
-      ["dg_collection", "dg_base_case", "dg_doc_lang", "dg_strategy", "dg_author_role", "dg_project_id"].forEach(
+      ["dg_base_case", "dg_doc_lang", "dg_strategy", "dg_author_role", "dg_project_id"].forEach(
         function (sid) {
           applySelectSearchFilter(sid);
         }
@@ -1744,6 +1770,9 @@
 
   function buildPayload() {
     const coll = el("dg_collection").value.trim() || "regulations";
+    const orgId = (window.IntegrationPrefill && window.IntegrationPrefill.readOrganizationId
+      ? window.IntegrationPrefill.readOrganizationId("dg")
+      : (el("dg_organization") && el("dg_organization").value) || "").trim();
     const bc = parseInt(el("dg_base_case").value.trim() || "0", 10) || 0;
     const scope = (el("dg_template_scope") && el("dg_template_scope").value) || "selected";
     const tplList = (lastBootstrap && lastBootstrap.templates) ? lastBootstrap.templates.map(function (t) { return t.id; }) : [];
@@ -1761,6 +1790,7 @@
     var providerVal = ((el("dg_provider") && el("dg_provider").value) || "").trim();
     const payload = {
       collection: coll,
+      organizationId: orgId || null,
       base_case_id: bc,
       provider: providerVal || null,
       document_language: el("dg_doc_lang").value,
@@ -2051,6 +2081,42 @@
     window.location.href = root + "/draft-gen/api/jobs/" + encodeURIComponent(localId) + "/download";
   }
 
+  function applyJobSnapshot(jobId) {
+    if (!jobId) return;
+    api("/draft-gen/api/jobs/" + encodeURIComponent(jobId) + "/snapshot", { method: "GET" }).then(function (x) {
+      if (!x.ok || !x.json || !x.json.ok) {
+        showMsg((x.json && x.json.message) || "加载快照失败", true);
+        return;
+      }
+      var snap = x.json.snapshot || {};
+      if (snap.base_case_id != null && el("dg_base_case")) el("dg_base_case").value = String(snap.base_case_id);
+      if (snap.project_id != null && el("dg_project_id")) {
+        el("dg_project_id").value = String(snap.project_id);
+        if (el("dg_project_mode")) el("dg_project_mode").value = "existing";
+      }
+      if (snap.document_language && el("dg_doc_lang")) el("dg_doc_lang").value = snap.document_language;
+      if (snap.collection && el("dg_collection")) el("dg_collection").value = snap.collection;
+      if (snap.inplace_patch != null && el("dg_inplace")) el("dg_inplace").value = snap.inplace_patch ? "1" : "0";
+      var tplNames = x.json.templateNames || snap.template_file_names || [];
+      if (Array.isArray(tplNames) && tplNames.length) {
+        if (el("dg_template_scope")) el("dg_template_scope").value = "selected";
+        document.querySelectorAll('input[name="dg_tpl_cb"]').forEach(function (cb) {
+          cb.checked = tplNames.indexOf(cb.value) >= 0;
+        });
+        applyTemplateCheckboxFilter();
+        updateTemplateSelectionSummary();
+      }
+      var inNames = x.json.inputDisplayNames || [];
+      showMsg(
+        "已回填历史参数（案例/项目/模板等）。请重新选择输入文件"
+          + (inNames.length ? "（上次：" + inNames.slice(0, 3).join("、") + (inNames.length > 3 ? "…" : "") + "）" : "")
+          + " 后提交。",
+        false
+      );
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
   function loadJobList() {
     api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10&" + dgIntegrationScopeQuery(), { method: "GET" }).then(function (x) {
       const tb = el("dg_job_rows");
@@ -2097,6 +2163,14 @@
           });
           tdOp.appendChild(b);
         }
+        if (j.hasPayloadSnapshot) {
+          const rb = document.createElement("button");
+          rb.type = "button";
+          rb.className = "btn btn-sm btn-outline-success ms-1";
+          rb.textContent = "相同参数";
+          rb.addEventListener("click", function () { applyJobSnapshot(j.id || ""); });
+          tdOp.appendChild(rb);
+        }
         tr.appendChild(tdOp);
         tb.appendChild(tr);
       });
@@ -2113,7 +2187,6 @@
   }
 
   var FILTER_SELECT_IDS = [
-    "dg_collection",
     "dg_base_case",
     "dg_doc_lang",
     "dg_strategy",
@@ -2192,8 +2265,8 @@
       _dgJobsPage += 1;
       loadJobList();
     });
-    var c0 = el("dg_collection");
-    if (c0) c0.addEventListener("change", function () {
+    var org0 = el("dg_organization");
+    if (org0) org0.addEventListener("change", function () {
       if (el("dg_base_case")) el("dg_base_case").value = "";
       loadDraftBootstrap();
     });

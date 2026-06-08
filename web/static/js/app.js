@@ -1149,6 +1149,8 @@ async function initUploadPage() {
     const saveAllProjectsBtn = document.getElementById("saveAllProjectsBtn");
     const filterProjectName = document.getElementById("filterProjectName");
     const filterProjectStatus = document.getElementById("filterProjectStatus");
+    const filterProjectOrganization = document.getElementById("filterProjectOrganization");
+    const PAGE1_ORG_FILTER_STORAGE_KEY = "page1ProjectOrgFilter";
     const clearProjectFilterBtn = document.getElementById("clearProjectFilterBtn");
     const openNewProjectModalBtn = document.getElementById("openNewProjectModalBtn");
     const newProjectModalEl = document.getElementById("newProjectModal");
@@ -1164,21 +1166,84 @@ async function initUploadPage() {
         if (!projectsManageBody) return;
         const nameKey = String(filterProjectName?.value || "").trim().toLowerCase();
         const st = String(filterProjectStatus?.value || "").trim().toLowerCase();
+        const orgFilter = String(filterProjectOrganization?.value || "__all__").trim() || "__all__";
         projectsManageBody.querySelectorAll("tr[data-project-id]").forEach((tr) => {
             const name = String(tr.dataset.projectName || "").toLowerCase();
             const status = String(tr.dataset.projectStatus || "").toLowerCase();
+            const orgId = String(tr.dataset.organizationId || "").trim();
             const okName = !nameKey || name.includes(nameKey);
             const okStatus = !st || status === st;
-            tr.classList.toggle("d-none", !(okName && okStatus));
+            const okOrg = orgFilter === "__all__" || !orgFilter || orgId === orgFilter;
+            tr.classList.toggle("d-none", !(okName && okStatus && okOrg));
         });
+        const visible = projectsManageBody.querySelectorAll("tr[data-project-id]:not(.d-none)").length;
+        const total = projectsManageBody.querySelectorAll("tr[data-project-id]").length;
+        let hintRow = projectsManageBody.querySelector("tr.scope-filter-empty-row");
+        if (total > 0 && visible === 0) {
+            const colspan = 12;
+            const html =
+                window.ScopeBar && ScopeBar.emptyTableRow
+                    ? ScopeBar.emptyTableRow(colspan, "page1_projects", ["当前筛选条件下无匹配项目，请放宽「所属公司/状态/名称」筛选。"])
+                    : `<tr><td colspan="${colspan}" class="text-muted small">当前筛选条件下无匹配项目</td></tr>`;
+            if (!hintRow) {
+                projectsManageBody.insertAdjacentHTML(
+                    "beforeend",
+                    html.replace("<tr>", '<tr class="scope-filter-empty-row">')
+                );
+                hintRow = projectsManageBody.querySelector("tr.scope-filter-empty-row");
+            }
+            if (hintRow) hintRow.classList.remove("d-none");
+        } else if (hintRow) {
+            hintRow.remove();
+        }
     };
+
+    function fillPage1OrgFilterSelect(orgs, selectedId) {
+        if (!filterProjectOrganization) return;
+        let keep = selectedId != null ? String(selectedId || "").trim() : String(filterProjectOrganization.value || "__all__").trim();
+        if (!selectedId) {
+            try {
+                keep = String(window.localStorage.getItem(PAGE1_ORG_FILTER_STORAGE_KEY) || "__all__").trim() || "__all__";
+            } catch (_) {}
+        }
+        filterProjectOrganization.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "__all__";
+        allOpt.textContent = "全部公司（并集）";
+        filterProjectOrganization.appendChild(allOpt);
+        (orgs || []).forEach((o) => {
+            const id = String(o.id || "").trim();
+            if (!id) return;
+            const opt = document.createElement("option");
+            opt.value = id;
+            opt.textContent = String(o.label || o.name || id);
+            filterProjectOrganization.appendChild(opt);
+        });
+        const values = new Set([...filterProjectOrganization.options].map((x) => String(x.value || "").trim()));
+        const pick = values.has(keep) ? keep : "__all__";
+        filterProjectOrganization.value = pick;
+        try {
+            window.localStorage.setItem(PAGE1_ORG_FILTER_STORAGE_KEY, pick);
+        } catch (_) {}
+    }
 
     const loadProjectsManage = async () => {
         if (!projectsManageBody) return;
         try {
+            await loadAssignableOrganizations();
+            fillPage1OrgFilterSelect(assignableOrganizationsCache || []);
             const rows = await App.request("/api/projects");
             projectsMetaCache = rows || [];
             projectsManageBody.innerHTML = "";
+            if (!rows || !rows.length) {
+                const emptyHtml =
+                    window.ScopeBar && ScopeBar.emptyTableRow
+                        ? ScopeBar.emptyTableRow(12, "page1_projects")
+                        : '<tr><td colspan="12" class="text-muted small">暂无页面1 项目</td></tr>';
+                projectsManageBody.innerHTML = emptyHtml;
+                updateBatchProjectsBtnState();
+                return;
+            }
             (rows || []).forEach((p) => {
                 const tr = document.createElement("tr");
                 const esc = (s) =>
@@ -1189,9 +1254,12 @@ async function initUploadPage() {
                         .replace(/"/g, "&quot;");
                 const pr = Number.isFinite(Number(p.priority)) ? Number(p.priority) : 2;
                 const st = (p.status || "active");
+                const orgLocked = !!p.organizationIdLocked && !page13SuperAdminFlag;
                 tr.dataset.projectId = esc(p.id);
                 tr.dataset.projectName = String(p.name || "");
                 tr.dataset.projectStatus = String(p.status || "");
+                tr.dataset.organizationId = String(p.organizationId || "");
+                tr.dataset.organizationLocked = orgLocked ? "1" : "0";
                 const linkHint = p.companyProjectId
                     ? ' <span class="badge bg-secondary" title="已关联页面0">总览</span>' : "";
                 tr.innerHTML = `
@@ -1203,6 +1271,7 @@ async function initUploadPage() {
                     <td>
                         <input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—">
                     </td>
+                    <td>${buildProjectOrganizationSelectHtml(p.organizationId, orgLocked)}</td>
                     <td>
                         <input type="text" class="form-control form-control-sm project-product-type-input" value="${esc(p.productType || "")}" placeholder="—">
                     </td>
@@ -1253,20 +1322,25 @@ async function initUploadPage() {
                     const certInput = tr ? tr.querySelector(".project-cert-date-input") : null;
                     const subInput = tr ? tr.querySelector(".project-submit-date-input") : null;
                     const progInput = tr ? tr.querySelector(".project-progress-input") : null;
+                    const orgInput = tr ? tr.querySelector(".project-organization-select") : null;
+                    const bodyPayload = {
+                        priority: prEl ? Number(prEl.value) : 2,
+                        status: stEl ? stEl.value : "active",
+                        registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
+                        registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                        productType: ptInput ? (ptInput.value || "").trim() : null,
+                        expectedCertificationDate: certInput ? certInput.value || null : null,
+                        expectedSubmissionDate: subInput ? subInput.value || null : null,
+                        progressDescription: progInput ? (progInput.value || "").trim() : null,
+                    };
+                    if (orgInput && !orgInput.disabled) {
+                        bodyPayload.organizationId = String(orgInput.value || "").trim() || null;
+                    }
                     try {
                         await App.request(`/api/projects/${id}`, {
                             method: "PATCH",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                                priority: prEl ? Number(prEl.value) : 2,
-                                status: stEl ? stEl.value : "active",
-                                registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
-                                registeredCategory: catInput ? (catInput.value || "").trim() : null,
-                                productType: ptInput ? (ptInput.value || "").trim() : null,
-                                expectedCertificationDate: certInput ? certInput.value || null : null,
-                                expectedSubmissionDate: subInput ? subInput.value || null : null,
-                                progressDescription: progInput ? (progInput.value || "").trim() : null,
-                            }),
+                            body: JSON.stringify(bodyPayload),
                         });
                         App.notify("项目已更新（已与页面0 同步）", "success");
                         // 单个保存时不要刷新整张表/任务列表，避免把页面1录入块中已填内容冲掉。
@@ -1336,6 +1410,15 @@ async function initUploadPage() {
         }
     };
     document.getElementById("refreshProjectsBtn")?.addEventListener("click", loadProjectsManage);
+    document.getElementById("syncCompanyRegistryProjectsBtn")?.addEventListener("click", async () => {
+        try {
+            const res = await App.request("/api/projects/sync-from-company-registry", { method: "POST" });
+            App.notify(res.message || `已同步 ${res.synced || 0} 个项目`, "success");
+            await loadProjectsManage();
+        } catch (e) {
+            App.notify(e.message || "同步失败", "danger");
+        }
+    });
     openNewProjectModalBtn?.addEventListener("click", async () => {
         if (!newProjectModalEl) return;
         await loadRegisteredCountriesDict(true).catch(() => {});
@@ -1432,8 +1515,9 @@ async function initUploadPage() {
             const certInput = tr.querySelector(".project-cert-date-input");
             const subInput = tr.querySelector(".project-submit-date-input");
             const progInput = tr.querySelector(".project-progress-input");
+            const orgInput = tr.querySelector(".project-organization-select");
             if (!id || !prEl || !stEl) return;
-            payload.push({
+            const item = {
                 id,
                 priority: Number(prEl.value),
                 status: stEl.value,
@@ -1443,7 +1527,11 @@ async function initUploadPage() {
                 expectedCertificationDate: certInput ? certInput.value || null : null,
                 expectedSubmissionDate: subInput ? subInput.value || null : null,
                 progressDescription: progInput ? (progInput.value || "").trim() : null,
-            });
+            };
+            if (orgInput && !orgInput.disabled) {
+                item.organizationId = String(orgInput.value || "").trim() || null;
+            }
+            payload.push(item);
         });
         if (!payload.length) { App.notify("没有可保存的项目", "warning"); return; }
         try {
@@ -1481,16 +1569,39 @@ async function initUploadPage() {
         }
     });
 
-    [filterProjectName, filterProjectStatus].forEach((el) => {
+    [filterProjectName, filterProjectStatus, filterProjectOrganization].forEach((el) => {
         el?.addEventListener("input", applyProjectsFilter);
         el?.addEventListener("change", applyProjectsFilter);
+    });
+    filterProjectOrganization?.addEventListener("change", () => {
+        try {
+            window.localStorage.setItem(
+                PAGE1_ORG_FILTER_STORAGE_KEY,
+                String(filterProjectOrganization.value || "__all__").trim() || "__all__"
+            );
+        } catch (_) {}
+        applyProjectsFilter();
     });
     clearProjectFilterBtn?.addEventListener("click", () => {
         if (filterProjectName) filterProjectName.value = "";
         if (filterProjectStatus) filterProjectStatus.value = "";
+        if (filterProjectOrganization) {
+            filterProjectOrganization.value = "__all__";
+            try {
+                window.localStorage.setItem(PAGE1_ORG_FILTER_STORAGE_KEY, "__all__");
+            } catch (_) {}
+        }
         applyProjectsFilter();
     });
-    loadProjectsManage();
+
+    App.request("/api/me")
+        .then((res) => {
+            page13SuperAdminFlag = !!res?.page13SuperAdmin;
+            loadProjectsManage();
+        })
+        .catch(() => {
+            loadProjectsManage();
+        });
 
     try {
         await loadTaskTypes();
@@ -1928,6 +2039,40 @@ async function initUploadPage() {
 
 let registeredCountriesDictCache = null;
 let organizationsCache = null;
+let assignableOrganizationsCache = null;
+let page13SuperAdminFlag = false;
+
+async function loadAssignableOrganizations(force) {
+    if (!force && assignableOrganizationsCache) return assignableOrganizationsCache;
+    try {
+        const res = await App.request("/api/assignable-organizations");
+        assignableOrganizationsCache = Array.isArray(res?.organizations) ? res.organizations : [];
+    } catch (_) {
+        assignableOrganizationsCache = assignableOrganizationsCache || [];
+    }
+    return assignableOrganizationsCache;
+}
+
+function buildProjectOrganizationSelectHtml(selectedId, locked) {
+    const orgs = assignableOrganizationsCache || [];
+    const sid = String(selectedId || "").trim();
+    if (!orgs.length) {
+        return `<span class="small text-muted">—</span>`;
+    }
+    const disabled = locked || orgs.length === 1 ? " disabled" : "";
+    const opts = orgs
+        .map((o) => {
+            const id = String(o.id || "").trim();
+            const label = String(o.label || o.name || id);
+            const sel = id === sid ? " selected" : "";
+            return `<option value="${id.replace(/"/g, "&quot;")}"${sel}>${label.replace(/</g, "&lt;")}</option>`;
+        })
+        .join("");
+    const lockBadge = locked
+        ? ' <span class="badge bg-warning text-dark" title="已绑定任务，仅超级管理员可改">锁定</span>'
+        : "";
+    return `<select class="form-select form-select-sm project-organization-select"${disabled}>${opts}</select>${lockBadge}`;
+}
 
 async function loadRegisteredCountriesDict(force) {
     if (!force && registeredCountriesDictCache) {
@@ -3200,6 +3345,14 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
     };
     
     tbody.innerHTML = "";
+    if (!lastRenderedRecords.length) {
+        const emptyRow =
+            window.ScopeBar && ScopeBar.emptyTableRow
+                ? ScopeBar.emptyTableRow(27, "page1_records")
+                : '<tr><td colspan="27" class="text-muted small text-center py-4">暂无任务记录</td></tr>';
+        tbody.insertAdjacentHTML("beforeend", emptyRow);
+        return;
+    }
     if (groupBy === "none") {
         lastRenderedRecords.forEach((r, idx) => {
             const tr = makeRow(r, idx);
@@ -4115,6 +4268,121 @@ let lastRenderedMyTasks = [];
 let myTasksSortKey = "projectPriority";
 let myTasksSortDir = "desc";
 let myTasksCollapsedGroups = new Set();
+let page2ReadOnly = false;
+let page2ViewMode = "normal";
+
+function syncPage2TableHeader() {
+    const headRow = document.getElementById("myTasksHeadRow");
+    if (!headRow) return;
+    const seqTh = headRow.querySelector('th[data-col="seq"]');
+    if (!seqTh) return;
+    const showTeam = page2ReadOnly && page2ViewMode === "super_admin_readonly";
+    const showPerson = page2ReadOnly;
+
+    let thTeam = document.getElementById("thPage2ObserverTeam");
+    let thPerson = document.getElementById("thPage2ObserverPerson");
+
+    if (showTeam) {
+        if (!thTeam) {
+            thTeam = document.createElement("th");
+            thTeam.id = "thPage2ObserverTeam";
+            thTeam.className = "page2-observer-th";
+            thTeam.dataset.col = "observerTeam";
+            thTeam.textContent = "项目组";
+        }
+        if (thTeam.parentElement !== headRow || thTeam.previousElementSibling !== seqTh) {
+            seqTh.insertAdjacentElement("afterend", thTeam);
+        }
+    } else if (thTeam) {
+        thTeam.remove();
+    }
+
+    const anchorAfterTeam = showTeam ? document.getElementById("thPage2ObserverTeam") : seqTh;
+    if (showPerson && anchorAfterTeam) {
+        if (!thPerson) {
+            thPerson = document.createElement("th");
+            thPerson.id = "thPage2ObserverPerson";
+            thPerson.className = "page2-observer-th";
+            thPerson.dataset.col = "observerPerson";
+            thPerson.textContent = "负责人";
+        }
+        if (thPerson.parentElement !== headRow || thPerson.previousElementSibling !== anchorAfterTeam) {
+            anchorAfterTeam.insertAdjacentElement("afterend", thPerson);
+        }
+    } else if (thPerson) {
+        thPerson.remove();
+    }
+}
+
+function page2TableColSpan() {
+    let span = 25;
+    if (page2ReadOnly && page2ViewMode === "super_admin_readonly") span += 1;
+    if (page2ReadOnly) span += 1;
+    return span;
+}
+
+function applyPage2ObserverChrome() {
+    const banner = document.getElementById("page2ObserverBanner");
+    const filterRow = document.getElementById("page2ObserverFilterRow");
+    const teamWrap = document.getElementById("page2ObserverTeamWrap");
+    const hint = document.querySelector(".page2-completion-hint");
+    const desc = document.querySelector(".card-body > p.text-muted.small");
+    document.querySelectorAll(".page2-observer-group").forEach((el) => {
+        el.classList.toggle("d-none", !page2ReadOnly);
+    });
+    if (banner) banner.classList.toggle("d-none", !page2ReadOnly);
+    if (filterRow) filterRow.classList.toggle("d-none", !page2ReadOnly);
+    if (teamWrap) {
+        teamWrap.classList.toggle("d-none", page2ViewMode !== "super_admin_readonly");
+    }
+    if (hint) {
+        hint.textContent = page2ReadOnly ? "完成状态（只读）" : "请及时更新完成状态";
+    }
+    if (desc && page2ReadOnly) {
+        desc.textContent = "以下为观察范围内全部人员任务，仅可查看与筛选，不可修改或操作。";
+    }
+    syncPage2TableHeader();
+    const filterCollapse = document.getElementById("tasksFilterRow");
+    if (filterCollapse && page2ReadOnly) {
+        filterCollapse.classList.add("show");
+    }
+}
+
+function initPage2ObserverFilters(filterOptions) {
+    const teamSel = document.getElementById("filterObserverTeam");
+    const userSel = document.getElementById("filterObserverUser");
+    const opts = filterOptions || { teams: [], users: [] };
+    if (teamSel) {
+        const cur = teamSel.value;
+        teamSel.innerHTML = '<option value="">全部项目组</option>';
+        (opts.teams || []).forEach((t) => {
+            const opt = document.createElement("option");
+            opt.value = t.id || "";
+            opt.textContent = t.name || t.id || "";
+            teamSel.appendChild(opt);
+        });
+        if (cur) teamSel.value = cur;
+    }
+    if (userSel) {
+        const cur = userSel.value;
+        userSel.innerHTML = '<option value="">全部人员</option>';
+        (opts.users || []).forEach((u) => {
+            const opt = document.createElement("option");
+            opt.value = u.id || "";
+            opt.textContent = u.label || u.id || "";
+            userSel.appendChild(opt);
+        });
+        if (cur) userSel.value = cur;
+    }
+    if (teamSel && !teamSel._observerBound) {
+        teamSel._observerBound = true;
+        teamSel.addEventListener("change", () => { if (typeof loadMyTasks === "function") loadMyTasks(); });
+    }
+    if (userSel && !userSel._observerBound) {
+        userSel._observerBound = true;
+        userSel.addEventListener("change", () => { if (typeof loadMyTasks === "function") loadMyTasks(); });
+    }
+}
 
 async function initGeneratePage() {
     const myTasksBody = document.getElementById("myTasksBody");
@@ -4126,6 +4394,8 @@ async function initGeneratePage() {
 
     if (!myTasksBody) return;
 
+    syncPage2TableHeader();
+
     // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
     if (showHistoryEl) showHistoryEl.checked = false;
 
@@ -4135,11 +4405,11 @@ async function initGeneratePage() {
     App.request("/api/me").then((res) => {
         if (userInfo) {
             if (res.page13SuperAdmin && !res.loggedIn) {
-                userInfo.textContent = "超级管理员（访问密码）";
+                userInfo.textContent = "超级管理员（页面4 访问密码）";
             } else if (res.loggedIn) {
                 let label = `欢迎，${res.user.displayName || res.user.username}`;
                 if (res.page13SuperAdmin) {
-                    label += "（超级管理员）";
+                    label += "（超级管理员 · 页面4）";
                 } else if (res.user.adminRole === "project") {
                     label += "（项目管理员）";
                 } else if (res.user.isAdmin || res.featureAdminViewer) {
@@ -4161,9 +4431,21 @@ async function initGeneratePage() {
     const loadMyTasks = async () => {
         try {
             const showHistory = !!showHistoryEl?.checked;
-            const url = showHistory ? "/api/my-tasks?includeHistory=1" : "/api/my-tasks";
+            const params = new URLSearchParams();
+            if (showHistory) params.set("includeHistory", "1");
+            const teamSel = document.getElementById("filterObserverTeam");
+            const userSel = document.getElementById("filterObserverUser");
+            if (teamSel?.value) params.set("teamId", teamSel.value);
+            if (userSel?.value) params.set("userId", userSel.value);
+            const qs = params.toString();
+            const url = qs ? `/api/my-tasks?${qs}` : "/api/my-tasks";
             const res = await App.request(url);
+            page2ReadOnly = !!res.readOnly;
+            page2ViewMode = res.viewMode || "normal";
+            initPage2ObserverFilters(res.filterOptions || { teams: [], users: [] });
+            applyPage2ObserverChrome();
             myTasksCache = res.records || [];
+            ensurePage2ColumnToggle();
             
             if (myTasksCache.length === 0) {
                 noTasksAlert?.classList.remove("d-none");
@@ -4387,8 +4669,12 @@ function renderMyTasksTable(records) {
     const myTasksBody = document.getElementById("myTasksBody");
     const placeholderModal = document.getElementById("placeholderModal");
     if (!myTasksBody) return;
+    syncPage2TableHeader();
     lastRenderedMyTasks = records || [];
     const groupBy = (document.querySelector('input[name="myTasksGroupBy"]:checked') || {}).value || "none";
+    const colSpan = page2TableColSpan();
+    const showTeamCol = page2ReadOnly && page2ViewMode === "super_admin_readonly";
+    const showPersonCol = page2ReadOnly;
     
     const addOneRow = (r, idx, groupKey, groupIndex, collapsed) => {
         const tr = document.createElement("tr");
@@ -4424,20 +4710,41 @@ function renderMyTasksTable(records) {
         const approver = (r.approver != null && r.approver !== "") ? r.approver : "-";
         const isMatterRow = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
         const execNotesPlaceholder = isMatterRow ? "请填写事项完成情况" : "执行备注";
+        const execNotesVal = (r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes) : "";
+        const execNotesCell = page2ReadOnly
+            ? `<span title="${_escTitle(execNotesVal)}">${execNotesVal || "-"}</span>`
+            : `<input type="text" class="form-control form-control-sm execution-notes-input" placeholder="${execNotesPlaceholder}" data-id="${r.id}" value="${execNotesVal.replace(/"/g, "&quot;")}">`;
+        const linkCellFinal = page2ReadOnly
+            ? (r.hasLinks && firstLink ? `<a href="${firstLink}" target="_blank" class="text-primary small">打开</a>` : "-")
+            : linkCellHtml;
+        const seqCellHtml = page2ReadOnly
+            ? `<td class="seq-cell">${idx + 1}</td>`
+            : `<td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>`;
+        const opCellHtml = page2ReadOnly
+            ? '<span class="small text-muted">只读</span>'
+            : _buildPage2ActionButtonsHtml(r);
+        const teamCol = showTeamCol
+            ? `<td data-col="observerTeam" title="${_escTitle(r.teamName)}">${(r.teamName || "-")}</td>`
+            : "";
+        const personCol = showPersonCol
+            ? `<td data-col="observerPerson" title="${_escTitle(r.assigneeLabel || r.assigneeName)}">${(r.assigneeLabel || r.assigneeName || "-")}</td>`
+            : "";
         tr.innerHTML = `
-            <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>
+            ${seqCellHtml}
+            ${teamCol}
+            ${personCol}
             <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
             <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceTd}</td>
-            <td class="task-link-cell">${linkCellHtml}</td>
+            <td class="task-link-cell">${linkCellFinal}</td>
             <td>${dueDateHtml}</td>
             <td title="${_escTitle(r.businessSide)}">${(r.businessSide != null && r.businessSide !== "") ? r.businessSide : "-"}</td>
             <td title="${_escTitle(r.product)}">${(r.product != null && r.product !== "") ? r.product : "-"}</td>
             <td title="${_escTitle(r.country)}">${(r.country != null && r.country !== "") ? r.country : "-"}</td>
             <td data-wrap style="max-width:180px" title="${_escTitle(r.notes)}">${_renderNotesHtml(r.notes)}</td>
-            <td><input type="text" class="form-control form-control-sm execution-notes-input" placeholder="${execNotesPlaceholder}" data-id="${r.id}" value="${(r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes).replace(/"/g, "&quot;") : ""}"></td>
+            <td>${execNotesCell}</td>
             <td class="completion-status-cell"></td>
             <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
             <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
@@ -4449,11 +4756,12 @@ function renderMyTasksTable(records) {
             <td title="${_escTitle(r.registeredProductName)}">${(r.registeredProductName != null && r.registeredProductName !== "") ? r.registeredProductName : "-"}</td>
             <td title="${_escTitle(r.model)}">${(r.model != null && r.model !== "") ? r.model : "-"}</td>
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
-            <td class="col-op">
-                ${_buildPage2ActionButtonsHtml(r)}
-            </td>
+            <td class="col-op">${opCellHtml}</td>
         `;
         const statusCell = tr.querySelector(".completion-status-cell");
+        if (page2ReadOnly) {
+            statusCell.textContent = r.completionStatus || "未完成";
+        } else {
         const statusSelect = createCompletionStatusSelect(r.completionStatus, r.id);
         statusCell.appendChild(statusSelect);
         statusSelect.addEventListener("change", async () => {
@@ -4556,6 +4864,7 @@ function renderMyTasksTable(records) {
             const url = buildIntegrationUrlFromRecord(r, "/translate/", { upload_id: r.id });
             window.open(url, "_blank", "noopener");
         });
+        }
         myTasksBody.appendChild(tr);
     };
     
@@ -4574,17 +4883,30 @@ function renderMyTasksTable(records) {
         if (ended.length > 0) {
             const sep = document.createElement("tr");
             sep.className = "bg-light";
-            sep.innerHTML = `<td colspan="25"><strong>历史项目</strong>（已结束项目）</td>`;
+            sep.innerHTML = `<td colspan="${colSpan}"><strong>历史项目</strong>（已结束项目）</td>`;
             myTasksBody.appendChild(sep);
             ended.forEach((r) => addOneRow(r, idx++));
         }
     } else {
-        const keyFn = groupBy === "project" ? (r) => r.projectName : (r) => r.author;
-        const label = groupBy === "project" ? "项目" : "编写人";
+        let keyFn;
+        let label;
+        if (groupBy === "team") {
+            keyFn = (r) => r.teamName || r.teamId || "（未分配项目组）";
+            label = "项目组";
+        } else if (groupBy === "person") {
+            keyFn = (r) => r.assigneeLabel || r.assigneeName || r.author || "（未分配人员）";
+            label = "人员";
+        } else if (groupBy === "project") {
+            keyFn = (r) => r.projectName;
+            label = "项目";
+        } else {
+            keyFn = (r) => r.author;
+            label = "编写人";
+        }
         const groupMap = new Map();
         const groupMeta = new Map(); // key -> {priority, status}
         lastRenderedMyTasks.forEach((r) => {
-            const k = keyFn(r) || "";
+            const k = keyFn(r) || "（空）";
             if (!groupMap.has(k)) groupMap.set(k, []);
             groupMap.get(k).push(r);
             if (groupBy === "project" && !groupMeta.has(k)) {
@@ -4596,6 +4918,9 @@ function renderMyTasksTable(records) {
         });
 
         const sortedKeys = [...groupMap.keys()].sort((a, b) => {
+            if (groupBy === "team" || groupBy === "person") {
+                return String(a || "").localeCompare(String(b || ""), "zh");
+            }
             if (groupBy !== "project") return String(a || "").localeCompare(String(b || ""), "zh");
             const ma = groupMeta.get(a) || { priority: 0, status: "active" };
             const mb = groupMeta.get(b) || { priority: 0, status: "active" };
@@ -4618,16 +4943,16 @@ function renderMyTasksTable(records) {
                 historyInserted = true;
                 const sep = document.createElement("tr");
                 sep.className = "bg-light";
-                sep.innerHTML = `<td colspan="25"><strong>历史项目</strong>（已结束项目）</td>`;
+                sep.innerHTML = `<td colspan="${colSpan}"><strong>历史项目</strong>（已结束项目）</td>`;
                 myTasksBody.appendChild(sep);
             }
             const collapsed = myTasksCollapsedGroups.has(key);
             const headerTr = document.createElement("tr");
-            headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
+            headerTr.className = "group-header-row table-secondary" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
             const prLabel = groupBy === "project" ? (arr[0]?.projectPriorityLabel ? `【${arr[0].projectPriorityLabel}】` : "") : "";
-            headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${prLabel}${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="${colSpan}" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> <strong>${label}：${prLabel}${key || "（空）"}</strong> <span class="text-muted">(${arr.length}条)</span></td>`;
             headerTr.style.cursor = "pointer";
             myTasksBody.appendChild(headerTr);
             arr.forEach((r) => { addOneRow(r, globalIdx++, key, gidx, collapsed); });
@@ -4646,17 +4971,19 @@ function renderMyTasksTable(records) {
         });
     }
     
-    initDragSort(myTasksBody, async (orders) => {
-        try {
-            await App.request("/api/uploads/reorder", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ orders }),
-            });
-        } catch (e) {
-            App.notify(e.message, "danger");
-        }
-    });
+    if (!page2ReadOnly) {
+        initDragSort(myTasksBody, async (orders) => {
+            try {
+                await App.request("/api/uploads/reorder", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ orders }),
+                });
+            } catch (e) {
+                App.notify(e.message, "danger");
+            }
+        });
+    }
     scheduleSyncStickyNameColumns(document.getElementById("myTasksTable"));
 }
 
@@ -4767,22 +5094,38 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
         ],
     },
     {
-        id: "dingtalk",
-        title: "钉钉通知",
-        hint: "群机器人与工作通知；体系记录自动回复见 CHATBOT_* 与 AICHECKWORD_CHAT_*。配置后可在「钉钉机器人联调」页本地验收（页面3 系统配置区快捷入口）。敏感项留空表示不修改已有值。",
+        id: "dingtalk_notify",
+        title: "催办与定时通知",
+        hint: "自动催办、定时统计、工作通知用；可与「体系记录机器人」填不同 Webhook，填相同地址则实际为同一机器人。",
         defaultExpanded: true,
         keys: [
             "DINGTALK_WEBHOOK",
             "DINGTALK_SECRET",
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_AGENT_ID",
+        ],
+    },
+    {
+        id: "dingtalk_chatbot",
+        title: "体系记录机器人",
+        hint: "HTTP 回调自动回复。下方「钉钉回调 URL」由 BASE_URL 自动生成，复制到开放平台即可（钉钉不支持变量）。",
+        defaultExpanded: true,
+        keys: [
+            "DINGTALK_CALLBACK_TOKEN",
+            "DINGTALK_CALLBACK_AES_KEY",
+            "DINGTALK_CALLBACK_OWNER_KEY",
+            "CHATBOT_DINGTALK_WEBHOOK",
+            "CHATBOT_DINGTALK_SECRET",
+            "CHATBOT_ENABLE",
             "DINGTALK_TRIGGER_KEYWORDS",
             "CHATBOT_ENABLED_GROUPS",
             "CHATBOT_REPLY_COOLDOWN_SECONDS",
             "CHATBOT_CONFIDENCE_THRESHOLD",
-            "CHATBOT_ENABLE",
             "CHATBOT_LLM_PROVIDER",
-            "DINGTALK_APP_KEY",
-            "DINGTALK_APP_SECRET",
-            "DINGTALK_AGENT_ID",
+            "AICHECKWORD_CHAT_API_BASE",
+            "AICHECKWORD_CHAT_API_KEY",
+            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ],
     },
     {
@@ -4814,9 +5157,6 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
             "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
             "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
             "AICHECKWORD_DRAFT_COLLECTION_IDS",
-            "AICHECKWORD_CHAT_API_BASE",
-            "AICHECKWORD_CHAT_API_KEY",
-            "AICHECKWORD_CHAT_TIMEOUT_SECONDS",
         ],
     },
     {
@@ -4828,13 +5168,126 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
     },
 ];
 
+const CHATBOT_CALLBACK_API_PATH = "/api/dingtalk/chatbot/callback";
+
+function _normalizePublicBaseUrl(raw) {
+    const s = String(raw || "").trim();
+    if (!s || s === "(不变)" || s === "******") return "";
+    return s.replace(/\/+$/, "");
+}
+
+function _buildChatbotCallbackUrl(baseUrlRaw) {
+    const base = _normalizePublicBaseUrl(baseUrlRaw);
+    if (!base) return "";
+    return `${base}${CHATBOT_CALLBACK_API_PATH}`;
+}
+
+function _renderChatbotCallbackUrlBlockHtml(url, opts) {
+    const idPrefix = (opts && opts.idPrefix) || "sysCfg";
+    const esc = _escHtmlSysCfg;
+    const blockId = `${idPrefix}ChatbotCallbackPanel`;
+    if (!url) {
+        return `<div id="${blockId}" class="sys-cfg-callback-url alert alert-warning py-2 px-3 mb-2 small">
+<strong>钉钉回调 URL（待生成）</strong>
+<p class="mb-1 mt-1">请先在「基础与安全」填写 <code>BASE_URL</code>（调试填穿透地址，正式填域名；勿以 <code>/</code> 结尾），保存后此处会生成完整 URL。</p>
+<p class="mb-0 text-muted">钉钉开放平台不支持变量；切换环境时改 BASE_URL 后重新复制到钉钉即可。</p>
+</div>`;
+    }
+    return `<div id="${blockId}" class="sys-cfg-callback-url alert alert-light border py-2 px-3 mb-2 small">
+<strong>钉钉回调 URL（复制到开放平台）</strong>
+<p class="mb-1 mt-1 text-muted">由当前 <code>BASE_URL</code> 自动生成。调试与正式请分别填写对应 BASE_URL 并复制到钉钉。</p>
+<div class="input-group input-group-sm">
+<input type="text" class="form-control font-monospace sys-cfg-callback-url-value" readonly value="${esc(url)}">
+<button type="button" class="btn btn-outline-primary sys-cfg-copy-callback-btn" data-copy-url="${esc(url)}">复制</button>
+</div>
+</div>`;
+}
+
+async function _copyChatbotCallbackUrl(btn) {
+    const url = (btn && btn.getAttribute("data-copy-url")) || "";
+    if (!url) {
+        App.notify("请先在 BASE_URL 中填写对外地址", "warning");
+        return;
+    }
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(url);
+        } else {
+            const ta = document.createElement("textarea");
+            ta.value = url;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        }
+        App.notify("回调 URL 已复制", "success");
+    } catch (e) {
+        App.notify((e && e.message) || "复制失败，请手动选中复制", "danger");
+    }
+}
+
+function _bindChatbotCallbackCopyButtons(root) {
+    if (!root) return;
+    root.querySelectorAll(".sys-cfg-copy-callback-btn").forEach((btn) => {
+        if (btn.dataset.copyBound === "1") return;
+        btn.dataset.copyBound = "1";
+        btn.addEventListener("click", () => {
+            _copyChatbotCallbackUrl(btn);
+        });
+    });
+}
+
+function _syncChatbotCallbackUrlPanels(container, baseUrlRaw) {
+    if (!container) return;
+    const url = _buildChatbotCallbackUrl(baseUrlRaw);
+    container.querySelectorAll(".sys-cfg-callback-url").forEach((el) => {
+        const idPrefix =
+            el.id && el.id.indexOf("admin") === 0 ? "admin" : "sysCfg";
+        el.outerHTML = _renderChatbotCallbackUrlBlockHtml(url, { idPrefix });
+    });
+    _bindChatbotCallbackCopyButtons(container);
+}
+
+function _bindChatbotCallbackUrlLiveUpdate(container, settings) {
+    if (!container) return;
+    const baseInput = container.querySelector('.sys-cfg-input[data-key="BASE_URL"]');
+    const refresh = () => {
+        const baseVal = baseInput ? baseInput.value : settings.BASE_URL || "";
+        _syncChatbotCallbackUrlPanels(container, baseVal);
+    };
+    if (baseInput) {
+        baseInput.addEventListener("input", refresh);
+    }
+    _bindChatbotCallbackCopyButtons(container);
+}
+
+async function refreshAdminChatbotCallbackUrlPanel() {
+    const panel = document.getElementById("adminChatbotCallbackUrlPanel");
+    if (!panel) return;
+    try {
+        const res = await App.request("/api/dingtalk/chatbot/callback-url");
+        panel.innerHTML = _renderChatbotCallbackUrlBlockHtml(res.url || "", {
+            idPrefix: "admin",
+        });
+        _bindChatbotCallbackCopyButtons(panel.parentElement || panel);
+    } catch (e) {
+        panel.innerHTML =
+            '<div class="alert alert-warning py-2 px-3 mb-0 small">回调 URL 加载失败：' +
+            _escHtmlSysCfg((e && e.message) || String(e)) +
+            "</div>";
+    }
+}
+
 /** 单条系统配置输入框 HTML */
 function _renderSystemSettingFieldHtml(k, settings) {
     const raw = settings[k.key] != null ? String(settings[k.key]) : "";
     const showVal = _escHtmlSysCfg(raw);
     const isDb = k.key === "DATABASE_URL";
     const unchanged = raw === "(不变)" || raw === "******";
-    const webhookLike = k.key === "DINGTALK_WEBHOOK";
+    const webhookLike = k.key === "DINGTALK_WEBHOOK" || k.key === "CHATBOT_DINGTALK_WEBHOOK";
     const typ =
         k.sensitive && !unchanged && raw && !webhookLike
             ? "password"
@@ -4867,14 +5320,20 @@ function _renderSystemSettingsFormHtml(keys, settings, sections) {
                 const fields = fieldKeys.map((name) => keyMap[name]).filter(Boolean);
                 const root = String(window.__SCRIPT_ROOT__ || "").replace(/\/$/, "");
                 const chatbotTestHref = `${root}/chatbot-test`;
+                const callbackBlockHtml =
+                    sec.id === "dingtalk_chatbot"
+                        ? _renderChatbotCallbackUrlBlockHtml(
+                              _buildChatbotCallbackUrl(settings.BASE_URL || "")
+                          )
+                        : "";
                 const sectionToolsHtml =
-                    sec.id === "dingtalk"
+                    sec.id === "dingtalk_chatbot"
                         ? `<div class="sys-cfg-section-tools mb-2">
-<a class="btn btn-sm btn-outline-primary" href="${esc(chatbotTestHref)}">打开钉钉机器人联调页</a>
-<span class="small text-muted ms-2">本地模拟 @/关键词触发，验证 aicheckword 回复</span>
+<a class="btn btn-sm btn-outline-primary" href="${esc(chatbotTestHref)}" target="_blank" rel="noopener">打开钉钉机器人联调页</a>
+<span class="small text-muted ms-2">本地模拟 @/关键词，不依赖钉钉回调</span>
 </div>`
                         : "";
-                if (!fields.length && !sectionToolsHtml) return "";
+                if (!fields.length && !sectionToolsHtml && !callbackBlockHtml) return "";
                 const openAttr = sec.defaultExpanded ? " open" : "";
                 const hintHtml = sec.hint
                     ? `<p class="sys-cfg-section-hint small text-muted mb-2">${esc(sec.hint)}</p>`
@@ -4888,6 +5347,7 @@ function _renderSystemSettingsFormHtml(keys, settings, sections) {
 <span class="sys-cfg-section-count">${fields.length} 项</span>
 </summary>
 ${hintHtml}
+${callbackBlockHtml}
 ${sectionToolsHtml}
 <div class="row g-2 sys-cfg-section-fields">${fieldsHtml}</div>
 </details>`;
@@ -4991,6 +5451,7 @@ function initDashboardPage() {
                 return;
             }
             container.innerHTML = _renderSystemSettingsFormHtml(keys, settings, sections);
+            _bindChatbotCallbackUrlLiveUpdate(container, settings);
         } catch (e) {
             console.error(e);
             const escE = (s) =>
@@ -5099,6 +5560,7 @@ function initDashboardPage() {
             });
             App.notify("系统配置已保存", "success");
             await loadSystemSettings();
+            refreshAdminChatbotCallbackUrlPanel().catch(() => {});
             if (typeof window.__dashboardReloadSchedule === "function") {
                 window.__dashboardReloadSchedule();
             }
@@ -5980,6 +6442,20 @@ function scheduleSyncStickyNameColumns(table) {
     requestAnimationFrame(() => syncStickyNameColumns(table));
 }
 
+let page2ColumnToggleKey = "";
+
+function ensurePage2ColumnToggle() {
+    const table = document.getElementById("myTasksTable");
+    if (!table) return;
+    const headRow = document.getElementById("myTasksHeadRow");
+    const key = headRow
+        ? Array.from(headRow.querySelectorAll("th[data-col]")).map((th) => th.dataset.col).join(",")
+        : "";
+    if (key === page2ColumnToggleKey) return;
+    page2ColumnToggleKey = key;
+    initColumnToggle("colToggleBtn2", "colToggleMenu2", "myTasksTable");
+}
+
 function initColumnToggle(btnId, menuId, tableId) {
     const btn = document.getElementById(btnId);
     const menu = document.getElementById(menuId);
@@ -5990,7 +6466,8 @@ function initColumnToggle(btnId, menuId, tableId) {
     if (!ths.length) return;
 
     const colNames = {
-        seq: "序号", projectName: "项目名称", projectCode: "项目编号",
+        seq: "序号", observerTeam: "项目组", observerPerson: "负责人",
+        projectName: "项目名称", projectCode: "项目编号",
         fileName: "文件名称", taskType: "任务类型", belongingModule: "所属模块",
         source: "来源", fileVersion: "文件版本号", author: "编写人员",
         dueDate: "截止日期", docDisplayDate: "文档体现日期", businessSide: "影响业务方",
@@ -6298,6 +6775,10 @@ function initAdminPage() {
     initEditUserMobile();
     loadUsersList();
     initDashboardPage();
+    refreshAdminChatbotCallbackUrlPanel().catch(() => {});
+    document.getElementById("tab-system-btn")?.addEventListener("click", () => {
+        refreshAdminChatbotCallbackUrlPanel().catch(() => {});
+    });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -6314,6 +6795,5 @@ document.addEventListener("DOMContentLoaded", async () => {
     initAdminPage();
 
     initColumnToggle("colToggleBtn1", "colToggleMenu1", "recordsTable");
-    initColumnToggle("colToggleBtn2", "colToggleMenu2", "myTasksTable");
     initColumnToggle("colToggleBtn3", "colToggleMenu3", "detailTable");
 });

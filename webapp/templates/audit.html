@@ -19,6 +19,24 @@
     <div class="card mb-3">
       <div class="card-header">来源</div>
       <div class="card-body">
+        <div class="mb-2">
+          <label class="form-label small">来源类型</label>
+          <div class="d-flex flex-wrap gap-3">
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_files" value="files" checked>
+              <label class="form-check-label" for="aud_source_files">文件 / 任务</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_text" value="text">
+              <label class="form-check-label" for="aud_source_text">粘贴文本</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_kdocs" value="kdocs">
+              <label class="form-check-label" for="aud_source_kdocs">金山文档链接</label>
+            </div>
+          </div>
+        </div>
+        <div id="aud_source_files_panel">
         <div class="row g-2">
           {% if not manual_upload_only %}
           <div class="col-md-6">
@@ -33,6 +51,18 @@
             <input type="file" id="aud_files_picker" class="form-control" multiple accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md"/>
             <div class="form-text" id="aud_files_count">未选择</div>
           </div>
+        </div>
+        </div>
+        <div id="aud_source_text_panel" class="d-none">
+          <label class="form-label">待审文本</label>
+          <textarea id="aud_review_text" class="form-control font-monospace" rows="8" placeholder="粘贴待审核正文…"></textarea>
+          <input type="text" id="aud_review_text_filename" class="form-control form-control-sm mt-2" placeholder="虚拟文件名（如 待审文档.docx）" value="待审文档.docx">
+        </div>
+        <div id="aud_source_kdocs_panel" class="d-none">
+          <label class="form-label">金山文档链接</label>
+          <input type="url" id="aud_kdocs_url" class="form-control mb-2" placeholder="https://… 查看链接">
+          <input type="url" id="aud_kdocs_download_url" class="form-control mb-2" placeholder="下载链接（可选，有则用于提取正文/批注）">
+          <input type="text" id="aud_kdocs_filename" class="form-control form-control-sm" placeholder="文件名" value="文档.docx">
         </div>
       </div>
     </div>
@@ -49,8 +79,10 @@
           </select>
         </div>
         <div class="col-md-4">
-          <label class="form-label">知识库（collection）</label>
-          <select id="aud_collection" class="form-select"></select>
+          <label class="form-label">所属公司</label>
+          <select id="aud_organization" class="form-select"></select>
+          <div class="form-text">知识库 collection：<code id="aud_collection_display">—</code></div>
+          <input type="hidden" id="aud_collection" value="regulations"/>
         </div>
         <div class="col-md-4">
           <label class="form-label"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">aicheckword 项目</span><span id="aud_pf_project" class="dg-prefill-tag d-none">已匹配</span></label>
@@ -89,6 +121,24 @@
         <div class="col-md-4">
           <label class="form-label">项目形态</label>
           <select id="aud_project_form" class="form-select"></select>
+        </div>
+        <div class="col-12">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="aud_auto_match_case" checked>
+            <label class="form-check-label" for="aud_auto_match_case">自动匹配过往项目案例（与 aicheckword 第三步一致）</label>
+          </div>
+        </div>
+        <div class="col-12">
+          <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#aud_prompts_panel" aria-expanded="false">高级：审核提示词</button>
+          <div class="collapse mt-2" id="aud_prompts_panel">
+            <label class="form-label small">系统提示词</label>
+            <textarea id="aud_system_prompt" class="form-control font-monospace small mb-2" rows="4" placeholder="留空则使用 aicheckword 库内默认"></textarea>
+            <label class="form-label small">用户提示词模板</label>
+            <textarea id="aud_user_prompt" class="form-control font-monospace small mb-2" rows="4" placeholder="支持 {context}、{file_name}、{document_content}"></textarea>
+            <label class="form-label small">额外说明</label>
+            <textarea id="aud_extra_instructions" class="form-control font-monospace small" rows="2"></textarea>
+            <div class="form-text">打开面板时自动从 aicheckword 加载当前默认；提交时随请求发送。</div>
+          </div>
         </div>
       </div>
     </div>

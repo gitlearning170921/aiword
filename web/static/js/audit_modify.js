@@ -188,6 +188,9 @@
     }
     var payload = {
       collection: ($("amod_collection").value || "regulations").trim() || "regulations",
+      organizationId: (window.IntegrationPrefill && window.IntegrationPrefill.readOrganizationId
+        ? window.IntegrationPrefill.readOrganizationId("amod")
+        : "") || null,
       provider: ($("amod_provider").value || "").trim() || null,
       document_language: ($("amod_document_language").value || "").trim(),
       inplace_patch: true,
@@ -456,9 +459,9 @@
         IP.rematchProjectFromTask("amod", amodBootstrapOpts);
       });
     }
-    var coll = $("amod_collection");
-    if (coll) {
-      coll.addEventListener("change", function () {
+    var orgSel = $("amod_organization");
+    if (orgSel) {
+      orgSel.addEventListener("change", function () {
         IP.loadBootstrap(Object.assign({}, amodBootstrapOpts, {
           prefill: IP.getPagePrefill("amod") || IP.parsePrefillFromLocation(),
         }));

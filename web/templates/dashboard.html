@@ -4,7 +4,8 @@
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
         <h1>页面3 · 统计面板</h1>
-        <p>实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+        <p class="mb-1">实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+        <p class="small text-muted mb-0">项目管理员仅统计<strong>所属项目组</strong>下绑定项目；催办按项目组 webhook 发送，未配置时使用「互联网产品部」机器人。</p>
     </div>
     {% if feature_flags.FEATURE_EXAM_CENTER %}
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='analytics') }}">进入考试训练中心</a>
@@ -236,6 +237,30 @@
                 </thead>
                 <tbody id="detailTableBody"></tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4" id="teamDingtalkCard">
+    <div class="card-body">
+        <h6 class="form-section-title mb-2">催办 · 按项目组钉钉</h6>
+        <p class="small text-muted mb-3">不同项目组可配置独立催办机器人；留空时催办将使用「系统配置 → 催办与定时通知」中的全局 Webhook 或默认项目组。</p>
+        <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label small mb-1" for="teamDingtalkTeamId">项目组</label>
+                <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label small mb-1" for="teamDingtalkWebhook">Webhook</label>
+                <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="https://oapi.dingtalk.com/robot/send?...">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1" for="teamDingtalkSecret">Secret（可选）</label>
+                <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="修改时填写，留空不变">
+            </div>
+            <div class="col-md-1">
+                <button type="button" class="btn btn-sm btn-primary w-100" id="saveTeamDingtalkBtn">保存</button>
+            </div>
         </div>
     </div>
 </div>

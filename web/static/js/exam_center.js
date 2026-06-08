@@ -11,6 +11,13 @@
             .replace(/"/g, "&quot;");
     }
 
+    function examEmptyRow(colspan, contextKey, extraLines) {
+        if (window.ScopeBar && ScopeBar.emptyTableRow) {
+            return ScopeBar.emptyTableRow(colspan, contextKey, extraLines);
+        }
+        return '<tr><td colspan="' + Number(colspan || 1) + '" class="text-muted small">暂无数据</td></tr>';
+    }
+
     /** 详情/历史列表分数条整数化。 */
     function roundScoreIntForSlash(x) {
         var n = Number(x);
@@ -38,6 +45,41 @@
     function pickAssignmentSetId(it) {
         if (!it || typeof it !== "object") return "";
         return String(it.set_id || it.setId || it.quiz_set_id || it.quizSetId || "").trim();
+    }
+
+    function isLikelyOpaqueId(s) {
+        var t = String(s == null ? "" : s).trim();
+        if (!t) return true;
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) {
+            return true;
+        }
+        if (t.length >= 32 && /^[0-9a-f-]+$/i.test(t)) return true;
+        return false;
+    }
+
+    /** 筛选项下拉展示名：优先中文名/业务名，不回退到 UUID 等内部 id。 */
+    function pickHumanOptionLabel(it, kind) {
+        if (!it || typeof it !== "object") {
+            if (kind === "team") return "未命名项目组";
+            if (kind === "assignment") return "未命名考试任务";
+            return "未知用户";
+        }
+        var fields;
+        if (kind === "team") {
+            fields = [it.name, it.label, it.teamName, it.team_name];
+        } else if (kind === "assignment") {
+            fields = [it.name, it.label, it.title, it.assignment_label, it.assignmentLabel];
+        } else {
+            fields = [it.label, it.name, it.displayName, it.display_name, it.username];
+        }
+        for (var i = 0; i < fields.length; i++) {
+            var c = String(fields[i] == null ? "" : fields[i]).trim();
+            if (c && !isLikelyOpaqueId(c)) return c;
+        }
+        if (kind === "user" && it.username) return String(it.username).trim();
+        if (kind === "team") return "未命名项目组";
+        if (kind === "assignment") return "未命名考试任务";
+        return "未知用户";
     }
 
     /** 从 aiword 代理返回中取出法规提示业务对象（兼容嵌套 data）。 */
@@ -531,13 +573,250 @@
     }
 
     function readTeacherQuizCollection() {
-        var el = document.getElementById("teacherBankCollection");
-        var v = el ? String(el.value || "").trim() : "";
-        return v || "regulations";
+        var collEl = document.getElementById("exam_collection");
+        if (collEl && String(collEl.value || "").trim()) return String(collEl.value).trim();
+        var hidden = document.getElementById("teacherBankCollection");
+        if (hidden && String(hidden.value || "").trim()) return String(hidden.value).trim();
+        return window.__examActiveCollection || "regulations";
+    }
+
+    function resetExamScopeSubFilters() {
+        var ctx = window.__examScopeContext || {};
+        var userSel = document.getElementById("studentObserverUserFilter");
+        var teamSel = document.getElementById("studentObserverTeamFilter");
+        var statsStudent = document.getElementById("statsStudentId");
+        var statsAssignment = document.getElementById("statsAssignmentId");
+        if (userSel) userSel.value = "";
+        if (teamSel && !teamSel.classList.contains("d-none")) {
+            teamSel.value = ctx.scopeAllTeams ? "" : String(ctx.activeTeamId || "");
+        } else if (teamSel) {
+            teamSel.value = "";
+        }
+        if (statsStudent) statsStudent.value = "";
+        if (statsAssignment) statsAssignment.value = "";
+    }
+
+    function reloadExamCenterAfterOrgChange() {
+        resetExamScopeSubFilters();
+        if (typeof window.__examLoadTeacherIngestJobs === "function") window.__examLoadTeacherIngestJobs();
+        if (typeof window.__examLoadTeacherReviewJobs === "function") window.__examLoadTeacherReviewJobs();
+        if (typeof window.__examLoadTeacherSets === "function") window.__examLoadTeacherSets();
+        if (typeof window.__examLoadTeacherBankQuestions === "function") window.__examLoadTeacherBankQuestions();
+        if (typeof window.__examLoadTeacherIssuedAssignments === "function") window.__examLoadTeacherIssuedAssignments();
+        if (typeof window.__examLoadStatsOverview === "function") window.__examLoadStatsOverview();
+        if (typeof window.__examLoadStatsRecentActivity === "function") window.__examLoadStatsRecentActivity();
+        if (typeof window.__examLoadStudentBoardTable === "function") window.__examLoadStudentBoardTable();
+        if (typeof window.__examLoadStudentModeTable === "function") window.__examLoadStudentModeTable();
+        if (typeof window.__examLoadModeCompare === "function") window.__examLoadModeCompare();
+        if (typeof window.__examLoadStatsOptions === "function") window.__examLoadStatsOptions();
+        if (typeof window.__examLoadStudentHistory === "function") window.__examLoadStudentHistory(false);
+        if (typeof window.__examLoadStudentAssignments === "function") window.__examLoadStudentAssignments();
+    }
+
+    function postExamActiveOrganization(orgId) {
+        return apiRequest("/api/exam-center/scope-context/organization", "POST", {
+            organizationId: orgId || "",
+        });
+    }
+
+    function postExamActiveTeam(teamId) {
+        return apiRequest("/api/exam-center/scope-context/team", "POST", { teamId: teamId || "" });
+    }
+
+    function fillExamOrganizationSelect(orgs, activeId, message) {
+        var sel = document.getElementById("exam_organization");
+        if (!sel) return;
+        var isSuper = !!(window.__examScopeContext && window.__examScopeContext.page13SuperAdmin);
+        sel.innerHTML = "";
+        if (!orgs || !orgs.length) {
+            var emptyOpt = document.createElement("option");
+            emptyOpt.value = "";
+            emptyOpt.textContent = message || "暂无可用公司";
+            sel.appendChild(emptyOpt);
+            sel.disabled = true;
+            sel.title = message || "暂无可用公司";
+            return;
+        }
+        orgs.forEach(function (o) {
+            var opt = document.createElement("option");
+            opt.value = String(o.id || "");
+            opt.textContent = o.label || o.name || o.id || "";
+            sel.appendChild(opt);
+        });
+        var pick = String(activeId || "").trim();
+        if (pick) sel.value = pick;
+        else if (orgs[0]) sel.value = String(orgs[0].id || "");
+        var scopeCtx = window.__examScopeContext || {};
+        var canSwitchOrg = scopeCtx.canSwitchOrganization;
+        if (canSwitchOrg === undefined) {
+            canSwitchOrg = isSuper || orgs.length > 1;
+        }
+        if (!canSwitchOrg) {
+            sel.disabled = true;
+            sel.title = isSuper
+                ? "当前无可切换公司"
+                : orgs.length <= 1
+                  ? "当前账号仅关联一家公司"
+                  : "不可切换公司";
+        } else {
+            sel.disabled = false;
+            sel.removeAttribute("title");
+        }
+        var IP = window.IntegrationPrefill;
+        if (IP && typeof IP.syncCollectionFromOrganization === "function") {
+            IP.syncCollectionFromOrganization("exam", sel.value, orgs);
+        }
+        var legacy = document.getElementById("teacherBankCollection");
+        if (legacy) legacy.value = readTeacherQuizCollection();
+    }
+
+    function wireExamOrganizationSelect() {
+        var sel = document.getElementById("exam_organization");
+        if (!sel || sel.__examOrgWired) return;
+        sel.__examOrgWired = true;
+        sel.addEventListener("change", function () {
+            var oid = String(sel.value || "").trim();
+            var orgs = window.__integrationOrgs_exam || [];
+            var IP = window.IntegrationPrefill;
+            if (IP && typeof IP.syncCollectionFromOrganization === "function") {
+                IP.syncCollectionFromOrganization("exam", oid, orgs);
+            }
+            if (!oid) return;
+            postExamActiveOrganization(oid)
+                .then(function (res) {
+                    if (res && res.__http_status && res.__http_status >= 400) {
+                        alert((res && res.message) || "切换公司失败");
+                        return loadExamOrganizationContext();
+                    }
+                    return postExamActiveTeam("").then(function () {
+                        return loadExamOrganizationContext();
+                    });
+                })
+                .then(function () {
+                    reloadExamCenterAfterOrgChange();
+                });
+        });
+    }
+
+    function applyExamScopeContext(ctx) {
+        ctx = ctx || {};
+        window.__examScopeContext = ctx;
+        if (ctx.__http_status && ctx.__http_status >= 400) {
+            fillExamOrganizationSelect([], null, ctx.message || "公司列表加载失败");
+            fillExamTeamSelect(ctx);
+            return ctx;
+        }
+        var orgs = ctx.organizations || [];
+        window.__integrationOrgs_exam = orgs;
+        window.__examScopeContext = ctx;
+        fillExamOrganizationSelect(orgs, ctx.activeOrganizationId, ctx.message);
+        fillExamTeamSelect(ctx);
+        if (ctx.activeKnowledgeCollection) {
+            var collEl = document.getElementById("exam_collection");
+            var dispEl = document.getElementById("exam_collection_display");
+            if (collEl) collEl.value = ctx.activeKnowledgeCollection;
+            if (dispEl) dispEl.textContent = ctx.activeKnowledgeCollection;
+        }
+        window.__examActiveCollection = readTeacherQuizCollection();
+        if (window.ScopeBar && ScopeBar.refresh) ScopeBar.refresh(true);
+        return ctx;
+    }
+
+    function fillExamTeamSelect(ctx) {
+        var wrap = document.getElementById("exam_team_wrap");
+        var sel = document.getElementById("exam_team");
+        var readonlyEl = document.getElementById("exam_team_readonly");
+        if (!wrap || !sel) return;
+        var assigned = (ctx && (ctx.assignedTeams || (!ctx.canSwitchTeam ? ctx.teams : null))) || [];
+        if (ctx && !ctx.canSwitchTeam && assigned.length) {
+            wrap.classList.remove("d-none");
+            sel.classList.add("d-none");
+            if (readonlyEl) {
+                readonlyEl.classList.remove("d-none");
+                readonlyEl.textContent = assigned.map(function (t) { return t.name || t.id; }).join("、");
+                readonlyEl.title = ctx.isProjectAdmin
+                    ? "当前账号所属项目组（由管理员在页面4分配）"
+                    : "项目组由管理员在账号管理中分配，不可自行切换";
+            }
+            return;
+        }
+        if (readonlyEl) {
+            readonlyEl.classList.add("d-none");
+            readonlyEl.textContent = "";
+        }
+        sel.classList.remove("d-none");
+        if (!ctx || !ctx.canSwitchTeam) {
+            wrap.classList.add("d-none");
+            return;
+        }
+        wrap.classList.remove("d-none");
+        sel.innerHTML = "";
+        if (ctx.page13SuperAdmin) {
+            var allOpt = document.createElement("option");
+            allOpt.value = "";
+            allOpt.textContent = "全部项目组（当前公司）";
+            sel.appendChild(allOpt);
+        }
+        (ctx.teams || []).forEach(function (t) {
+            var opt = document.createElement("option");
+            opt.value = String(t.id || "");
+            opt.textContent = pickHumanOptionLabel(t, "team");
+            sel.appendChild(opt);
+        });
+        if (ctx.canSwitchTeam && !(ctx.teams || []).length) {
+            var hint = document.createElement("option");
+            hint.value = "";
+            hint.disabled = true;
+            hint.textContent = ctx.isProjectAdmin
+                ? "（当前公司下暂无您所属的项目组）"
+                : "（当前公司下暂无项目组，将按公司维度展示）";
+            sel.appendChild(hint);
+        }
+        sel.value = ctx.scopeAllTeams ? "" : (ctx.activeTeamId ? String(ctx.activeTeamId) : "");
+        sel.title = ctx.isProjectAdmin ? "切换后仅展示所选项目组的考试记录" : sel.title || "";
+        if (!sel.__examTeamWired) {
+            sel.__examTeamWired = true;
+            sel.addEventListener("change", function () {
+                postExamActiveTeam(sel.value || "")
+                    .then(function () {
+                        return loadExamOrganizationContext();
+                    })
+                    .then(function () {
+                        reloadExamCenterAfterOrgChange();
+                    });
+            });
+        }
+    }
+
+    function loadExamOrganizationContext() {
+        var root = scriptRoot();
+        return apiRequest("/api/exam-center/scope-context", "GET")
+            .then(function (ctx) {
+                applyExamScopeContext(ctx);
+                wireExamOrganizationSelect();
+                return ctx;
+            })
+            .catch(function () {
+                fillExamOrganizationSelect([], null, "公司列表加载失败");
+                var IP = window.IntegrationPrefill;
+                if (IP && typeof IP.loadOrganizationContext === "function") {
+                    return IP.loadOrganizationContext({
+                        prefix: "exam",
+                        root: root,
+                        orgContextRoot: root + "/audit",
+                        onOrganizationChange: function () {
+                            window.__examActiveCollection = readTeacherQuizCollection();
+                            reloadExamCenterAfterOrgChange();
+                        },
+                    }).then(function () {
+                        window.__examActiveCollection = readTeacherQuizCollection();
+                    });
+                }
+            });
     }
 
     function readStudentQuizCollection() {
-        return "regulations";
+        return readTeacherQuizCollection();
     }
 
     function readProjectCaseId(which) {
@@ -737,7 +1016,7 @@
         } catch (eScrollApi) {}
     }
 
-    /** 老师端「考试与录题配置」：与页面3同源 GET/PUT /api/system-settings（键列表由专用 GET 过滤）。 */
+    /** 老师端「考试与录题配置」：与页面4 系统配置同源 GET/PUT /api/system-settings（键列表由专用 GET 过滤）。 */
     function bindExamTeacherSystemSettings(renderRaw) {
         var modal = document.getElementById("examTeacherSystemSettingsModal");
         var formEl = document.getElementById("examTeacherSystemSettingsForm");
@@ -785,7 +1064,7 @@
                 var settings = res.settings || {};
                 if (!keys.length) {
                     formEl.innerHTML =
-                        '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项，请确认页面1/3访问密码已通过。</div></div>';
+                        '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项，请先在页面4 完成访问密码验证（超级管理员）。</div></div>';
                     return;
                 }
                 formEl.innerHTML = keys
@@ -1429,7 +1708,7 @@
             if (!assignModalUsers) return;
             assignModalUsers.innerHTML = '<div class="text-muted small">加载中…</div>';
             try {
-                var resp = await apiRequest("/api/users", "GET");
+                var resp = await apiRequest("/api/exam-center/teacher/assignable-users", "GET");
                 if (resp && resp.__ok === false) {
                     assignModalUsers.innerHTML = '<div class="text-danger small">' + escHtml(resp.message || "加载失败") + "</div>";
                     return;
@@ -3074,7 +3353,144 @@
         var elHistMeta = document.getElementById("studentHistoryMeta");
         var tbodyHist = document.getElementById("studentHistoryBody");
         var studentHistoryCache = [];
+        var studentReadOnly = false;
+        var studentViewMode = "normal";
         var HISTORY_PAGE = 80;
+
+        function studentHistoryShowTeam() {
+            return studentReadOnly && studentViewMode === "super_admin_readonly";
+        }
+
+        function studentHistoryShowPerson() {
+            return !!studentReadOnly;
+        }
+
+        function studentHistoryColSpan() {
+            var n = 4;
+            if (studentHistoryShowTeam()) n += 1;
+            if (studentHistoryShowPerson()) n += 1;
+            return n;
+        }
+
+        function syncStudentHistoryTableHeader() {
+            var headRow = document.getElementById("studentHistoryHeadRow");
+            if (!headRow) return;
+            headRow.querySelectorAll("th.student-observer-col").forEach(function (el) {
+                el.remove();
+            });
+            var showTeam = studentHistoryShowTeam();
+            var showPerson = studentHistoryShowPerson();
+            var anchor = headRow.querySelector("th[data-col='histTime']");
+            if (!anchor) {
+                anchor = headRow.children[0];
+            }
+            var thTeam = document.getElementById("thStudentObserverTeam");
+            var thPerson = document.getElementById("thStudentObserverPerson");
+            if (showTeam && anchor) {
+                if (!thTeam) {
+                    thTeam = document.createElement("th");
+                    thTeam.id = "thStudentObserverTeam";
+                    thTeam.className = "student-observer-th";
+                    thTeam.dataset.col = "observerTeam";
+                    thTeam.textContent = "项目组";
+                }
+                if (thTeam.parentElement !== headRow || thTeam.nextElementSibling !== anchor) {
+                    headRow.insertBefore(thTeam, anchor);
+                }
+            } else if (thTeam) {
+                thTeam.remove();
+            }
+            anchor = headRow.querySelector("th[data-col='histTime']") || headRow.children[0];
+            if (showPerson && anchor) {
+                if (!thPerson) {
+                    thPerson = document.createElement("th");
+                    thPerson.id = "thStudentObserverPerson";
+                    thPerson.className = "student-observer-th";
+                    thPerson.dataset.col = "observerPerson";
+                    thPerson.textContent = "人员";
+                }
+                var insertBefore = showTeam ? document.getElementById("thStudentObserverTeam") : anchor;
+                if (insertBefore && (thPerson.parentElement !== headRow || thPerson.nextElementSibling !== anchor)) {
+                    headRow.insertBefore(thPerson, anchor);
+                }
+            } else if (thPerson) {
+                thPerson.remove();
+            }
+        }
+
+        function applyStudentObserverChrome() {
+            var banner = document.getElementById("studentObserverBanner");
+            if (banner) banner.classList.toggle("d-none", !studentReadOnly);
+            document.querySelectorAll(".student-write-only").forEach(function (el) {
+                el.classList.toggle("d-none", !!studentReadOnly);
+            });
+            var teamSel = document.getElementById("studentObserverTeamFilter");
+            var userSel = document.getElementById("studentObserverUserFilter");
+            var groupSel = document.getElementById("studentHistoryGroupBy");
+            if (teamSel) {
+                var ctx = window.__examScopeContext || {};
+                var showInnerTeam =
+                    studentReadOnly &&
+                    studentViewMode === "super_admin_readonly" &&
+                    !!ctx.scopeAllTeams;
+                teamSel.classList.toggle("d-none", !showInnerTeam);
+            }
+            if (userSel) {
+                userSel.classList.toggle("d-none", !studentReadOnly);
+            }
+            if (groupSel) {
+                groupSel.classList.toggle("d-none", !studentReadOnly);
+            }
+            syncStudentHistoryTableHeader();
+        }
+
+        function initStudentObserverFilters(filterOptions) {
+            var opts = filterOptions || { teams: [], users: [] };
+            var teamSel = document.getElementById("studentObserverTeamFilter");
+            var userSel = document.getElementById("studentObserverUserFilter");
+            if (teamSel) {
+                var curT = teamSel.value;
+                teamSel.innerHTML = '<option value="">全部项目组</option>';
+                (opts.teams || []).forEach(function (t) {
+                    var opt = document.createElement("option");
+                    opt.value = t.id || "";
+                    opt.textContent = pickHumanOptionLabel(t, "team");
+                    teamSel.appendChild(opt);
+                });
+                if (curT) teamSel.value = curT;
+                if (!teamSel._bound) {
+                    teamSel._bound = true;
+                    teamSel.addEventListener("change", function () {
+                        loadStudentHistory(false);
+                    });
+                }
+            }
+            if (userSel) {
+                var curU = userSel.value;
+                userSel.innerHTML = '<option value="">全部人员</option>';
+                (opts.users || []).forEach(function (u) {
+                    var opt = document.createElement("option");
+                    opt.value = u.id || "";
+                    opt.textContent = pickHumanOptionLabel(u, "user");
+                    userSel.appendChild(opt);
+                });
+                if (curU) userSel.value = curU;
+                if (!userSel._bound) {
+                    userSel._bound = true;
+                    userSel.addEventListener("change", function () {
+                        loadStudentHistory(false);
+                    });
+                }
+            }
+            var groupSel = document.getElementById("studentHistoryGroupBy");
+            if (groupSel && !groupSel._bound) {
+                groupSel._bound = true;
+                groupSel.addEventListener("change", function () {
+                    renderStudentHistoryTable();
+                });
+            }
+        }
+
         var resultPre = document.getElementById("examApiResult");
         var selStudentTrack = document.getElementById("studentExamTrack");
         var inputStudentCount = document.getElementById("studentSetSize");
@@ -4462,7 +4878,7 @@
                 }
                 var list = data && data.data && data.data.assignments ? data.data.assignments : [];
                 if (!Array.isArray(list) || !list.length) {
-                    tbodyAssign.innerHTML = '<tr><td colspan="6" class="text-muted small">暂无考试任务（等待老师下发）。</td></tr>';
+                    tbodyAssign.innerHTML = examEmptyRow(6, "exam_teacher_assignments");
                     return;
                 }
                 tbodyAssign.innerHTML = "";
@@ -4588,8 +5004,10 @@
             if (!tbodyHist) return;
             var selM = document.getElementById("studentHistoryFilterMode");
             var selR = document.getElementById("studentHistoryFilterResult");
+            var selG = document.getElementById("studentHistoryGroupBy");
             var modeF = selM && selM.value ? String(selM.value).trim().toLowerCase() : "";
             var resF = selR && selR.value ? String(selR.value).trim().toLowerCase() : "";
+            var groupBy = studentReadOnly && selG && selG.value ? String(selG.value).trim() : "none";
             var list = studentHistoryCache.filter(function (r) {
                 if (!r) return false;
                 if (modeF && String(r.mode || "").trim().toLowerCase() !== modeF) return false;
@@ -4598,6 +5016,8 @@
                 if (resF === "pending") return r.passed !== true && r.passed !== false;
                 return true;
             });
+            var colSpan = studentHistoryColSpan();
+            syncStudentHistoryTableHeader();
             if (!list.length) {
                 var hint = "";
                 if (studentHistoryCache.length) {
@@ -4608,13 +5028,23 @@
                 }
                 tbodyHist.innerHTML =
                     hint +
-                    '<tr><td colspan="4" class="text-muted small">无匹配记录（请调整筛选或刷新）。</td></tr>';
+                    '<tr><td colspan="' +
+                    colSpan +
+                    '" class="text-muted small">无匹配记录（请调整筛选或刷新）。</td></tr>';
                 return;
             }
             tbodyHist.innerHTML = "";
-            list.forEach(function (r) {
+            var renderRow = function (r) {
                 var tr = document.createElement("tr");
+                var teamTd = studentHistoryShowTeam()
+                    ? '<td class="small">' + escSt(r.teamName || "-") + "</td>"
+                    : "";
+                var personTd = studentHistoryShowPerson()
+                    ? '<td class="small">' + escSt(r.displayName || "-") + "</td>"
+                    : "";
                 tr.innerHTML =
+                    teamTd +
+                    personTd +
                     '<td class="small">' +
                     escSt(r.created_at || "-") +
                     "</td>" +
@@ -4627,8 +5057,8 @@
                     '<td class="small">' +
                     historyResultCellHtml(r) +
                     "</td>";
-                if (r && r.id) {
-                    var td = tr.querySelectorAll("td")[3];
+                if (r && r.id && !studentReadOnly) {
+                    var td = tr.querySelectorAll("td")[colSpan - 1];
                     if (td) {
                         var btn = document.createElement("button");
                         btn.type = "button";
@@ -4645,14 +5075,50 @@
                     }
                 }
                 tbodyHist.appendChild(tr);
-            });
+            };
+            if (groupBy === "team" || groupBy === "person") {
+                var groups = {};
+                list.forEach(function (r) {
+                    var k =
+                        groupBy === "team"
+                            ? r.teamName || r.teamId || "（未分配项目组）"
+                            : r.displayName || r.userId || "（未分配人员）";
+                    if (!groups[k]) groups[k] = [];
+                    groups[k].push(r);
+                });
+                Object.keys(groups)
+                    .sort()
+                    .forEach(function (k) {
+                        var hdr = document.createElement("tr");
+                        hdr.className = "table-secondary";
+                        hdr.innerHTML =
+                            '<td colspan="' +
+                            colSpan +
+                            '" class="small fw-bold">' +
+                            escSt((groupBy === "team" ? "项目组：" : "人员：") + k) +
+                            " (" +
+                            groups[k].length +
+                            ")</td>";
+                        tbodyHist.appendChild(hdr);
+                        groups[k].forEach(renderRow);
+                    });
+            } else {
+                list.forEach(renderRow);
+            }
         }
 
         function syncStudentHistoryChrome(total, loaded, hasMore) {
             if (elHistMeta) {
                 var t = Number(total);
                 var l = Number(loaded);
-                if (Number.isFinite(t) && t >= 0 && Number.isFinite(l) && l >= 0) {
+                if (studentReadOnly) {
+                    elHistMeta.textContent =
+                        "只读观察：共 " +
+                        (Number.isFinite(t) && t >= 0 ? t : loaded) +
+                        " 条记录（已加载 " +
+                        (Number.isFinite(l) && l >= 0 ? l : loaded) +
+                        " 条）。可按项目组/人员筛选与分组。";
+                } else if (Number.isFinite(t) && t >= 0 && Number.isFinite(l) && l >= 0) {
                     elHistMeta.textContent =
                         "共 " +
                         t +
@@ -4678,13 +5144,15 @@
             }
             try {
                 var offset = doAppend ? studentHistoryCache.length : 0;
-                var data = await apiRequest(
-                    "/api/exam-center/student/history?limit=" +
-                        String(HISTORY_PAGE) +
-                        "&offset=" +
-                        String(offset),
-                    "GET"
-                );
+                var histQs = "limit=" + String(HISTORY_PAGE) + "&offset=" + String(offset);
+                var teamF = document.getElementById("studentObserverTeamFilter");
+                var userF = document.getElementById("studentObserverUserFilter");
+                var scopeCtx = window.__examScopeContext || {};
+                if (teamF && teamF.value && scopeCtx.scopeAllTeams) {
+                    histQs += "&teamId=" + encodeURIComponent(teamF.value);
+                }
+                if (userF && userF.value) histQs += "&userId=" + encodeURIComponent(userF.value);
+                var data = await apiRequest("/api/exam-center/student/history?" + histQs, "GET");
                 if (data && data.__ok === false) {
                     tbodyHist.innerHTML =
                         '<tr><td colspan="4" class="text-danger small">' +
@@ -4695,6 +5163,10 @@
                     return;
                 }
                 var recs = data && data.data && data.data.records ? data.data.records : [];
+                studentReadOnly = !!(data && data.data && data.data.readOnly);
+                studentViewMode = (data && data.data && data.data.viewMode) || "normal";
+                initStudentObserverFilters((data && data.data && data.data.filterOptions) || { teams: [], users: [] });
+                applyStudentObserverChrome();
                 var total =
                     data && data.data && data.data.total != null ? Number(data.data.total) : NaN;
                 var hasMore = !!(data && data.data && data.data.has_more);
@@ -4710,7 +5182,7 @@
                 syncStudentHistoryChrome(total, studentHistoryCache.length, hasMore);
                 if (!studentHistoryCache.length) {
                     tbodyHist.innerHTML =
-                        '<tr><td colspan="4" class="text-muted small">暂无记录（提交练习/考试成功后会在此落库）。</td></tr>';
+                        examEmptyRow(4, "exam_student_history");
                     return;
                 }
                 renderStudentHistoryTable();
@@ -5084,11 +5556,11 @@
             if (!it || typeof it !== "object") return;
             var id = String(it.id || it.assignment_id || it.assignmentId || "").trim();
             if (!id) return;
-            var name = String(it.name || it.label || id);
-            var sid = pickAssignmentSetId(it);
+            var isAssignment = selectEl.id === "statsAssignmentId";
+            var name = pickHumanOptionLabel(it, isAssignment ? "assignment" : "user");
             var opt = document.createElement("option");
             opt.value = id;
-            opt.textContent = sid ? name + " · 套题 " + sid : name;
+            opt.textContent = name;
             selectEl.appendChild(opt);
         });
         if (old) {
@@ -5550,7 +6022,7 @@
                 var recs = data && data.data && data.data.records ? data.data.records : [];
                 statsRecentActivityCache = recs;
                 if (!recs.length) {
-                    tbodyRecent.innerHTML = '<tr><td colspan="5" class="text-muted small">暂无记录。</td></tr>';
+                    tbodyRecent.innerHTML = examEmptyRow(5, "exam_student_history");
                     return;
                 }
                 renderStatsRecentActivityTable();
@@ -5609,7 +6081,7 @@
                 var rows = d.rows && Array.isArray(d.rows) ? d.rows : [];
                 if (!rows.length) {
                     tbodyStudentBoard.innerHTML =
-                        '<tr><td colspan="9" class="text-muted small">暂无学生活动数据（或尚未同步到本地）。</td></tr>';
+                        examEmptyRow(9, "exam_analytics");
                     return;
                 }
                 tbodyStudentBoard.innerHTML = "";
@@ -5700,7 +6172,7 @@
                 var rows = d.rows && Array.isArray(d.rows) ? d.rows : [];
                 if (!rows.length) {
                     tbodyStudentMode.innerHTML =
-                        '<tr><td colspan="7" class="text-muted small">暂无数据（无学生活动或尚未同步到本地）。</td></tr>';
+                        examEmptyRow(7, "exam_analytics");
                     return;
                 }
                 tbodyStudentMode.innerHTML = "";
@@ -5894,6 +6366,7 @@
         }
 
         refreshExamCenterUserDisplay();
+        loadExamOrganizationContext();
         bindRoleSwitch(ctx, function (role) {
             if (role === "teacher") {
                 if (typeof window.__examLoadTeacherIngestJobs === "function") {

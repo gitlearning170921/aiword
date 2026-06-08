@@ -1,0 +1,6 @@
+# 本地部署 secrets 与备份产物（勿提交）
+.env
+backup/
+dist/
+*.tar
+*.zip

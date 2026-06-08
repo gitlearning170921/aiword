@@ -1,0 +1,83 @@
+# 生产部署：仅使用预构建镜像，不在服务器上 build
+# 用法：docker compose -f docker-compose.prod.yml up -d
+# 镜像由本机 build-images + export-images 生成，经 docker load 导入
+
+name: aiword-stack
+
+services:
+  aiword:
+    image: ${AIWORD_IMAGE:?set AIWORD_IMAGE in .env}
+    container_name: aiword
+    ports:
+      - "${AIWORD_PUBLISH_PORT:-5000}:5000"
+    env_file:
+      - .env
+    environment:
+      AIWORD_CONSOLE_LOG: ${AIWORD_CONSOLE_LOG:-1}
+      AIWORD_LOG_LEVEL: ${AIWORD_LOG_LEVEL:-INFO}
+    volumes:
+      - aiword_instance:/app/instance
+      - aiword_uploads:/app/uploads
+      - aiword_outputs:/app/outputs
+    depends_on:
+      aicheckword:
+        condition: service_healthy
+    networks:
+      - appnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/api/integration/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  aicheckword:
+    image: ${AICHECKWORD_IMAGE:?set AICHECKWORD_IMAGE in .env}
+    container_name: aicheckword
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - aicheck_knowledge:/app/knowledge_store
+      - aicheck_uploads:/app/uploads
+      - aicheck_training:/app/training_docs
+    networks:
+      - appnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  nginx:
+    profiles: ["nginx"]
+    image: nginx:1.27-alpine
+    container_name: aiword-nginx
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      aiword:
+        condition: service_healthy
+    networks:
+      - appnet
+    restart: unless-stopped
+
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  aiword_instance:
+  aiword_uploads:
+  aiword_outputs:
+  aicheck_knowledge:
+  aicheck_uploads:
+  aicheck_training:
