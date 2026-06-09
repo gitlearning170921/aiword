@@ -66,12 +66,14 @@ class User(db.Model):
     password_hash: Mapped[str] = mapped_column(db.String(128), nullable=False)
     display_name: Mapped[Optional[str]] = mapped_column(db.String(128))
     mobile: Mapped[Optional[str]] = mapped_column(db.String(32))
-    #: 页面2 管理员：不受系统配置功能开关限制，始终显示全部操作入口与说明文案。
+    #: 已废弃：页面4 仅超级管理员（访问密码）可进入，不再通过账号授权。
     is_admin: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False)
     #: 分级管理：none / project / company（默认 none）
     admin_role: Mapped[str] = mapped_column(db.String(16), nullable=False, default="none")
     #: 可访问页面0（公司总览）；公司管理员默认可访问，亦可单独勾选
     can_access_company_registry: Mapped[bool] = mapped_column(default=False)
+    #: 账号级功能权限覆盖：{FEATURE_*: true|false}；缺省键表示跟随系统配置
+    feature_permissions_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime, default=now_local, onupdate=now_local

@@ -11,7 +11,7 @@
         {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
         <a class="btn btn-outline-success btn-sm me-2" href="{{ url_for('draft_gen.draft_gen_page') }}">初稿生成</a>
         {% endif %}
-        {% if feature_flags.FEATURE_EXAM_CENTER %}
+        {% if feature_flags.FEATURE_PAGE2_EXAM_CENTER %}
         <a class="btn btn-outline-primary btn-sm me-2" href="{{ url_for('pages.exam_center_page', role='student') }}">进入考试训练中心</a>
         {% endif %}
         <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>

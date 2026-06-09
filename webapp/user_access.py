@@ -121,6 +121,8 @@ def ensure_role_team_requirement(user: User, data: dict) -> None:
 
 
 def serialize_user_access(user: User) -> dict[str, Any]:
+    from .user_feature_permissions import serialize_user_feature_permissions
+
     return {
         "canAccessCompanyRegistry": bool(
             getattr(user, "can_access_company_registry", False)
@@ -136,6 +138,7 @@ def serialize_user_access(user: User) -> dict[str, Any]:
             for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
             if str(m.organization_id).strip()
         ],
+        **serialize_user_feature_permissions(user),
     }
 
 
@@ -158,3 +161,86 @@ def apply_user_access_fields(user: User, data: dict) -> None:
         raw = data.get("organizationIds")
         if isinstance(raw, list):
             set_user_organization_memberships(user.id, raw)
+    from .user_feature_permissions import parse_feature_permissions_field, write_user_feature_permissions
+
+    fp = parse_feature_permissions_field(data)
+    if fp is not None:
+        write_user_feature_permissions(user, fp or None)
+
+
+def _serialize_task_author_user(user: User) -> dict[str, Any]:
+    dn = (getattr(user, "display_name", None) or "").strip()
+    un = (getattr(user, "username", None) or "").strip()
+    mobile = (getattr(user, "mobile", None) or "").strip() or None
+    return {
+        "id": user.id,
+        "username": un,
+        "displayName": dn or None,
+        "mobile": mobile,
+    }
+
+
+def _resolve_project_for_author_pick(project_id: Optional[str]) -> Optional["Project"]:
+    from .models import Project
+
+    pid = (project_id or "").strip()
+    if not pid:
+        return None
+    proj = Project.query.get(pid)
+    if proj is not None:
+        return proj
+    return Project.query.filter_by(name=pid).first()
+
+
+def list_task_author_candidates(
+    *,
+    project_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+    current_user_id: Optional[str] = None,
+) -> list[User]:
+    """任务录入「编写人员」候选：项目绑定项目组成员，并始终包含当前登录用户。"""
+    from flask import session
+
+    from .authz import is_page13_super_admin, user_team_ids
+
+    uid = (current_user_id or session.get("user_id") or "").strip()
+    resolved_team = (team_id or "").strip()
+    if project_id:
+        proj = _resolve_project_for_author_pick(project_id)
+        if proj is not None:
+            tid = (getattr(proj, "assigned_team_id", None) or "").strip()
+            if tid:
+                resolved_team = tid
+
+    user_ids: set[str] = set()
+    if uid:
+        user_ids.add(uid)
+
+    if resolved_team:
+        rows = UserTeamMembership.query.filter_by(team_id=resolved_team).all()
+        for m in rows:
+            mid = str(getattr(m, "user_id", "") or "").strip()
+            if mid:
+                user_ids.add(mid)
+    elif is_page13_super_admin():
+        return (
+            User.query.order_by(User.display_name.asc(), User.username.asc()).all()
+        )
+    else:
+        for tid in user_team_ids():
+            for m in UserTeamMembership.query.filter_by(team_id=tid).all():
+                mid = str(getattr(m, "user_id", "") or "").strip()
+                if mid:
+                    user_ids.add(mid)
+
+    if not user_ids:
+        if uid:
+            u = User.query.get(uid)
+            return [u] if u is not None else []
+        return []
+
+    return (
+        User.query.filter(User.id.in_(sorted(user_ids)))
+        .order_by(User.display_name.asc(), User.username.asc())
+        .all()
+    )

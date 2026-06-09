@@ -43,19 +43,17 @@
     overflow: hidden;
 }
 
-/* 页面2顶部右侧按钮区域置于装饰之上，确保可点击 */
-.hero-bar .d-flex.justify-content-between .text-end {
-    position: relative;
-    z-index: 2;
-}
-#heroBarActions {
+/* 页面2/0 等 hero-bar 右侧操作区置于装饰层之上，确保可点击 */
+.hero-bar .d-flex.justify-content-between .text-end,
+#heroBarActions,
+.hero-bar-actions {
     position: relative;
     z-index: 10;
 }
-/* 其它页面 hero-bar 右侧按钮也应可点击（避免被 ::after 装饰层遮挡） */
-.hero-bar > a.btn,
-.hero-bar > .btn,
-.hero-bar a.btn {
+/* hero-bar 内所有按钮（含嵌套 div 内的 button/a）避免被 ::after 装饰层遮挡 */
+.hero-bar .btn,
+.hero-bar a.btn,
+.hero-bar button.btn {
     position: relative;
     z-index: 10;
 }
@@ -68,6 +66,7 @@
     width: 220px;
     height: 220px;
     background: radial-gradient(circle, rgba(13,110,253,0.25) 0%, transparent 60%);
+    pointer-events: none;
 }
 
 .hero-bar h1 {

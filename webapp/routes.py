@@ -427,12 +427,13 @@ def _chatbot_call_aicheckword(
 
 def _quiz_api_base_url() -> str:
     from .app_settings import get_setting
+    from ._integration_common import resolve_integration_api_base
 
     raw = get_setting(
         "QUIZ_API_BASE_URL",
         default=str(current_app.config.get("QUIZ_API_BASE_URL") or ""),
     )
-    return (raw or "").strip().rstrip("/")
+    return resolve_integration_api_base((raw or "").strip())
 
 
 def _quiz_api_timeout_seconds() -> int:
@@ -629,7 +630,7 @@ def _exam_assignment_ids_for_team_scope(
         if str(r.assignment_id).strip()
     }
     act_q = ExamCenterActivity.query.filter(
-        ExamCenterActivity.user_id.in_(list(uids)),
+        ExamCenterActivity.user_id.in_(list(_expand_exam_activity_user_keys(uids))),
         ExamCenterActivity.assignment_id.isnot(None),
         ExamCenterActivity.assignment_id != "",
     )
@@ -642,6 +643,18 @@ def _exam_assignment_ids_for_team_scope(
         if str(r.assignment_id).strip()
     }
     return aud_aids | act_aids
+
+
+def _expand_exam_activity_user_keys(user_keys: frozenset[str] | set[str] | list[str]) -> set[str]:
+    from .exam_display_labels import exam_activity_user_id_match_keys
+
+    out: set[str] = set()
+    for k in user_keys or []:
+        s = str(k or "").strip()
+        if not s:
+            continue
+        out.update(exam_activity_user_id_match_keys(s))
+    return out
 
 
 def _scope_exam_activity_query(q):
@@ -658,7 +671,8 @@ def _scope_exam_activity_query(q):
         if not uids:
             q = q.filter(sql_false())
         else:
-            q = q.filter(ExamCenterActivity.user_id.in_(list(uids)))
+            expanded = _expand_exam_activity_user_keys(uids)
+            q = q.filter(ExamCenterActivity.user_id.in_(list(expanded)))
     return q
 
 
@@ -688,6 +702,26 @@ def _exam_activity_in_staff_scope(row: ExamCenterActivity | None) -> bool:
     if not exam_row_organization_id_matches(getattr(row, "organization_id", None), org_id):
         return False
     return user_in_exam_team_scope(str(getattr(row, "user_id", "") or ""))
+
+
+def _exam_activity_deletable_by_staff(row: ExamCenterActivity | None) -> bool:
+    """删除权限：超管可删当前公司内任意记录；项目管理员仅可删所属项目组学员记录。"""
+    if row is None:
+        return False
+    from .authz import exam_row_organization_id_matches, is_page13_super_admin, is_project_admin
+    from .exam_scope import activity_user_belongs_to_teams, project_admin_team_ids_for_org
+
+    org_id = _current_exam_scope_organization_id()
+    if not exam_row_organization_id_matches(getattr(row, "organization_id", None), org_id):
+        return False
+    if is_page13_super_admin():
+        return True
+    if not is_project_admin():
+        return False
+    pa_teams = project_admin_team_ids_for_org(org_id)
+    if not pa_teams:
+        return False
+    return activity_user_belongs_to_teams(str(getattr(row, "user_id", "") or ""), pa_teams)
 
 
 def _exam_assignment_in_staff_scope(row: ExamCenterAssignment | None) -> bool:
@@ -3868,20 +3902,14 @@ def api_go_aiprintword_batch_print():
 
 @bp.route("/login")
 def login_page():
-    next_url = (request.args.get("next") or "").strip()
-    for_company = next_url.startswith("/company") or request.args.get("for") == "company"
-    if session.get("page13_authenticated"):
-        from .authz import resolve_login_redirect
+    if request.args:
+        return redirect(url_for("pages.login_page"))
+    if session.get("page13_authenticated") or session.get("user_id"):
+        from .authz import role_home_url
 
-        return redirect(resolve_login_redirect(next_url or None))
-    if session.get("user_id"):
-        from .authz import resolve_login_redirect
-
-        return redirect(resolve_login_redirect(next_url or None))
+        return redirect(role_home_url())
     return render_template(
         "login.html",
-        login_next=next_url or None,
-        for_company_registry=for_company,
         page13_password_configured=_page13_password_configured(),
     )
 
@@ -3973,6 +4001,8 @@ def exam_center_page():
         blocked = block_until_super_admin_or_user_id()
         if blocked is not None:
             return blocked
+
+    session["exam_center_active_role"] = role
 
     return render_template(
         "exam_center.html",
@@ -4287,8 +4317,8 @@ def api_login():
     user = User.query.filter_by(username=username).first()
     if not user or not user.check_password(password):
         return jsonify({"message": "用户名或密码错误，请核对账号与密码后重试"}), 401
-    from .authz import company_registry_enabled, resolve_login_redirect, role_home_url, sync_user_session
-    from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT
+    from .authz import company_registry_enabled, role_home_url, sync_user_session
+    from .models import ADMIN_ROLE_PROJECT
 
     sync_user_session(user)
     role = session.get("admin_role") or "none"
@@ -4302,32 +4332,16 @@ def api_login():
                     "needsTeamAssignment": True,
                 }
             ), 403
-    for_company = bool(
-        data.get("forCompanyRegistry")
-        or data.get("for") == "company"
-        or (data.get("next") or "").strip().startswith("/company")
-    )
-    if for_company and role != ADMIN_ROLE_COMPANY:
-        session.clear()
-        return jsonify(
-            {
-                "message": "该账号不是公司管理员，无法登录公司总览。请在页面1 将分级角色设为「公司管理员」。",
-                "needsCompanyAdmin": True,
-            }
-        ), 403
 
-    next_url = (data.get("next") or "").strip() or None
     home = role_home_url()
-    redirect_url = resolve_login_redirect(next_url)
     return jsonify({
         "message": "登录成功",
         "homeUrl": home,
-        "redirectUrl": redirect_url,
+        "redirectUrl": home,
         "user": {
             "id": user.id,
             "username": user.username,
             "displayName": user.display_name,
-            "isAdmin": bool(getattr(user, "is_admin", False)),
             "adminRole": role,
             "teamIds": list(session.get("team_ids") or []),
             "canAccessCompanyRegistry": bool(session.get("can_access_company_registry")),
@@ -4363,11 +4377,6 @@ def api_me():
                 "companyRegistryEnabled": company_registry_enabled(),
             })
         return jsonify({"loggedIn": False})
-    is_admin = bool(session.get("is_admin"))
-    if not is_admin and session.get("user_id"):
-        u = User.query.get(session.get("user_id"))
-        is_admin = bool(u and getattr(u, "is_admin", False))
-        session["is_admin"] = is_admin
     from .app_settings import effective_feature_flags_for_request
 
     from .authz import (
@@ -4394,14 +4403,13 @@ def api_me():
             "id": session.get("user_id"),
             "username": session.get("username"),
             "displayName": session.get("display_name"),
-            "isAdmin": is_admin,
             "adminRole": current_admin_role(),
             "teamIds": list(session.get("team_ids") or []),
             "canAccessCompanyRegistry": is_company_registry_user(),
             "isProjectAdmin": is_project_admin(),
             "registeredCountries": list(scopes or []),
         },
-        "featureAdminViewer": bool(session.get("page13_authenticated")) or is_admin or is_project_admin(),
+        "featureAdminViewer": bool(session.get("page13_authenticated")),
         "featureFlags": effective_feature_flags_for_request(),
         "companyRegistryEnabled": company_registry_enabled(),
     })
@@ -5208,52 +5216,24 @@ def api_exam_teacher_bank_question_delete(question_id: str):
 
 
 def _exam_stats_options_local() -> dict[str, Any]:
-    from .exam_display_labels import (
-        activity_display_names_for_users,
-        human_assignment_label,
-        human_user_label,
-    )
-    from .models import User
+    from .exam_display_labels import exam_user_filter_options, human_assignment_label, normalize_user_key
 
     org_id = _current_exam_scope_organization_id()
-    students_map: dict[str, dict[str, str]] = {}
+    student_keys: set[str] = set()
     try:
         q_students = _scope_exam_activity_query(
-            db.session.query(
-                ExamCenterActivity.user_id,
-                ExamCenterActivity.display_name,
-                ExamCenterActivity.username,
-            )
+            db.session.query(ExamCenterActivity.user_id)
             .filter(ExamCenterActivity.user_id.isnot(None))
             .filter(ExamCenterActivity.user_id != "")
         )
-        rows = q_students.order_by(ExamCenterActivity.user_id.asc(), ExamCenterActivity.created_at.desc()).all()
-        for uid, dname, uname in rows:
-            sid = str(uid or "").strip()
-            if not sid or sid in students_map:
-                continue
-            act_disp = str(dname or uname or "").strip()
-            label = human_user_label(sid, activity_display=act_disp)
-            students_map[sid] = {"id": sid, "name": label, "label": label}
+        for row in q_students.distinct().all():
+            uid = row[0] if isinstance(row, (tuple, list)) else row
+            nk = normalize_user_key(str(uid or ""))
+            if nk:
+                student_keys.add(nk)
     except Exception:
-        students_map = {}
-    if students_map:
-        try:
-            act_names = activity_display_names_for_users(set(students_map.keys()))
-            uid_list = list(students_map.keys())
-            for u in User.query.filter(User.id.in_(uid_list)).all():
-                sid = str(getattr(u, "id", "") or "").strip()
-                if sid not in students_map:
-                    continue
-                act_disp = act_names.get(sid) or str(
-                    getattr(u, "display_name", None) or getattr(u, "username", None) or ""
-                ).strip()
-                label = human_user_label(sid, activity_display=act_disp)
-                students_map[sid]["name"] = label
-                students_map[sid]["label"] = label
-        except Exception:
-            pass
-    students = sorted(students_map.values(), key=lambda x: str(x.get("name") or ""))
+        student_keys = set()
+    students = exam_user_filter_options(student_keys)
     assignments_map: dict[str, dict[str, Any]] = {}
     try:
         q_assign = _scope_exam_activity_query(
@@ -5545,7 +5525,13 @@ def _exam_stats_recent_activity_local(limit: int) -> list[dict[str, Any]]:
             d = det_map.get(str(a.id))
             mode = str(a.mode or "").strip().lower()
             mode_label = "练习" if mode == "practice" else ("考试" if mode == "exam" else mode or "-")
-            who = (a.display_name or a.username or a.user_id or "-").strip() or "-"
+            from .exam_display_labels import human_user_label
+
+            who = human_user_label(
+                str(getattr(a, "user_id", "") or ""),
+                activity_display=str(getattr(a, "display_name", None) or "").strip() or None,
+                activity_username=str(getattr(a, "username", None) or "").strip() or None,
+            )
             tgt = (a.assignment_label or a.set_id or a.attempt_id or "-") or "-"
             res = (a.result_summary or "").strip() or "-"
             tid = str(getattr(a, "attempt_id", None) or "").strip()
@@ -5611,7 +5597,13 @@ def api_exam_stats_recent_activity():
     want_uid = str(request.args.get("student_id") or request.args.get("user_id") or "").strip()
     want_aid = str(request.args.get("assignment_id") or "").strip()
     if want_uid:
-        recs = [x for x in recs if str((x or {}).get("user_id") or "").strip() == want_uid]
+        from .exam_display_labels import exam_activity_user_id_match_keys
+
+        match_keys = exam_activity_user_id_match_keys(want_uid)
+        if match_keys:
+            recs = [x for x in recs if str((x or {}).get("user_id") or "").strip() in match_keys]
+        else:
+            recs = []
     if want_aid:
         recs = [x for x in recs if str((x or {}).get("assignment_id") or "").strip() == want_aid]
     return jsonify(
@@ -6131,22 +6123,11 @@ def _exam_try_upstream_modify_assignment_proxy(assignment_id: str, op: str) -> t
 @page13_access_required
 def api_exam_teacher_assignable_users():
     """老师端下发考试：可选人员（按当前公司与项目组作用域过滤）。"""
-    from .authz import exam_team_scoped_user_ids
+    from .exam_scope import exam_teacher_assignable_users
     from .user_access import serialize_user_access
-    from .models import UserOrganizationMembership
 
-    users = User.query.order_by(User.display_name.asc(), User.username.asc()).all()
     org_id = _current_exam_scope_organization_id()
-    if org_id:
-        org_uids = {
-            str(m.user_id).strip()
-            for m in UserOrganizationMembership.query.filter_by(organization_id=org_id).all()
-            if str(m.user_id).strip()
-        }
-        users = [u for u in users if str(u.id or "").strip() in org_uids]
-    scoped = exam_team_scoped_user_ids()
-    if scoped is not None:
-        users = [u for u in users if str(u.id or "").strip() in scoped]
+    users = exam_teacher_assignable_users(org_id=org_id or None)
     return jsonify(
         {
             "users": [
@@ -6843,17 +6824,25 @@ def api_exam_student_history():
     else:
         base_q = _scope_exam_activity_query(ExamCenterActivity.query)
         scoped_uids: set[str] = set()
+        from .exam_display_labels import normalize_user_key
+
         for row in base_q.with_entities(ExamCenterActivity.user_id).distinct().all():
             uid = row[0] if isinstance(row, (tuple, list)) else row
-            s = str(uid or "").strip()
-            if s:
-                scoped_uids.add(s)
+            nk = normalize_user_key(str(uid or ""))
+            if nk:
+                scoped_uids.add(nk)
         filter_opts = user_team_filter_options_for_exam(
             scoped_uids,
             include_teams=(view_mode == "super_admin_readonly"),
         )
         if user_filter:
-            base_q = base_q.filter(ExamCenterActivity.user_id == user_filter)
+            from .exam_display_labels import exam_activity_user_id_match_keys
+
+            match_keys = exam_activity_user_id_match_keys(user_filter)
+            if match_keys:
+                base_q = base_q.filter(ExamCenterActivity.user_id.in_(list(match_keys)))
+            else:
+                base_q = base_q.filter(sql_false())
         elif team_filter:
             scope_tid = _active_exam_team_id_for_observer()
             if scope_tid and team_filter != scope_tid:
@@ -6866,10 +6855,15 @@ def api_exam_student_history():
                     for m in UserTeamMembership.query.filter_by(team_id=team_filter).all()
                     if str(m.user_id).strip()
                 }
-                if not team_uids:
+                expanded_uids: set[str] = set()
+                from .exam_display_labels import exam_activity_user_id_match_keys
+
+                for tu in team_uids:
+                    expanded_uids.update(exam_activity_user_id_match_keys(tu))
+                if not expanded_uids:
                     base_q = base_q.filter(sql_false())
                 else:
-                    base_q = base_q.filter(ExamCenterActivity.user_id.in_(list(team_uids)))
+                    base_q = base_q.filter(ExamCenterActivity.user_id.in_(list(expanded_uids)))
         total = base_q.count()
         rows = (
             base_q.order_by(ExamCenterActivity.created_at.desc())
@@ -6892,6 +6886,8 @@ def api_exam_student_history():
         obs = exam_activity_observer_fields(
             str(getattr(a, "user_id", "") or ""),
             preferred_team_id=_active_exam_team_id_for_observer(),
+            activity_display=str(getattr(a, "display_name", None) or "").strip() or None,
+            activity_username=str(getattr(a, "username", None) or "").strip() or None,
         )
         records.append(
             {
@@ -7034,6 +7030,38 @@ def _attach_student_local_exam_statuses(uid_cur: str, normalized: list[dict[str,
                 r["exam_task_closed_for_student"] = False
                 r["student_exam_needs_submit"] = True
                 r["student_exam_finalized"] = False
+
+
+def _subjective_answer_text_from_item(it: ExamAttemptItem) -> str:
+    ua_raw = None
+    if isinstance(it.user_answer, dict):
+        ua_raw = it.user_answer.get("value")
+    ua_txt = str(ua_raw or "").strip() if ua_raw is not None else ""
+    if not ua_txt and isinstance(it.user_answer, dict):
+        ua_txt = " ".join(
+            str(v).strip()
+            for v in it.user_answer.values()
+            if v is not None and str(v).strip()
+        ).strip()
+    return ua_txt
+
+
+def _cap_subjective_score_by_answer_text(score: float, ua_text: str) -> float:
+    """空答/过短/明显不全时封顶，避免 LLM 误给高分。"""
+    sc = max(0.0, min(1.0, float(score)))
+    txt = str(ua_text or "").strip()
+    if not txt:
+        return 0.0
+    n = len(txt)
+    if n < 8:
+        return 0.0
+    if n < 30:
+        return min(sc, 0.15)
+    if n < 80:
+        return min(sc, 0.35)
+    if n < 150:
+        return min(sc, 0.65)
+    return sc
 
 
 def _attempt_items_total_score_100(rows: list[ExamAttemptItem]) -> tuple[float, int, int]:
@@ -7315,11 +7343,19 @@ def _local_exam_pull_grading_job_and_persist(aid_raw: str) -> dict[str, Any]:
                 qid = str(it.question_id or "").strip()
                 x = by_q.get(qid) or {}
                 sc = x.get("score")
+                ua_txt = _subjective_answer_text_from_item(it)
                 try:
-                    it.subjective_score = max(0.0, min(1.0, float(sc))) if sc is not None else None
+                    if sc is not None:
+                        sc_f = _cap_subjective_score_by_answer_text(float(sc), ua_txt)
+                        if not ua_txt:
+                            it.subjective_reason = (str(x.get("reason") or "") or "未作答或答案为空")[:2000]
+                        it.subjective_score = sc_f
+                    else:
+                        it.subjective_score = None
                 except Exception:
                     it.subjective_score = None
-                it.subjective_reason = str(x.get("reason") or "")[:2000] or None
+                if not str(it.subjective_reason or "").strip():
+                    it.subjective_reason = str(x.get("reason") or "")[:2000] or None
                 it.subjective_recommendation = str(x.get("recommendation") or "")[:2000] or None
                 ev = x.get("evidence_used") or x.get("evidenceUsed") or []
                 it.evidence_used = ev if isinstance(ev, list) else None
@@ -7948,18 +7984,36 @@ def api_exam_stats_mode():
 @bp.delete("/api/exam-center/activity/<activity_id>")
 @page13_access_required
 def api_exam_activity_delete(activity_id: str):
-    """老师端删除学生练习/考试记录（同时删除明细快照）。"""
+    """老师端删除学生练习/考试记录（超级管理员 / 项目管理员）。"""
+    from .authz import is_page13_super_admin, is_project_admin
+
     aid = (activity_id or "").strip()
     if not aid:
         return jsonify({"code": "BAD_REQUEST", "message": "缺少 activity_id", "data": None, "trace_id": uuid.uuid4().hex}), 400
+    if not (is_page13_super_admin() or is_project_admin()):
+        return jsonify(
+            {"code": "FORBIDDEN", "message": "仅超级管理员或项目管理员可删除记录", "data": None, "trace_id": uuid.uuid4().hex}
+        ), 403
     row = ExamCenterActivity.query.filter_by(id=aid).first()
     if not row:
         return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
-    if not _exam_activity_in_staff_scope(row):
-        return jsonify({"code": "NOT_FOUND", "message": "记录不存在", "data": None, "trace_id": uuid.uuid4().hex}), 404
+    if not _exam_activity_deletable_by_staff(row):
+        msg = (
+            "无权删除该记录（项目管理员仅可删除所属项目组学员的记录）"
+            if is_project_admin() and not is_page13_super_admin()
+            else "无权删除该记录（不在当前公司范围内）"
+        )
+        return jsonify({"code": "FORBIDDEN", "message": msg, "data": None, "trace_id": uuid.uuid4().hex}), 403
     try:
+        attempt_id = str(getattr(row, "attempt_id", None) or "").strip()
         ExamCenterActivityDetail.query.filter_by(activity_id=aid).delete()
         ExamCenterActivity.query.filter_by(id=aid).delete()
+        if attempt_id:
+            from .models import ExamAttempt, ExamAttemptItem, ExamGradingJob
+
+            ExamAttemptItem.query.filter_by(attempt_id=attempt_id).delete()
+            ExamGradingJob.query.filter_by(attempt_id=attempt_id).delete()
+            ExamAttempt.query.filter_by(attempt_id=attempt_id).delete()
         db.session.commit()
     except Exception as e:
         db.session.rollback()
@@ -8119,6 +8173,29 @@ def api_exam_center_health():
 
 # ---------- 用户管理 API（页面1管理账号） ----------
 
+
+@bp.get("/api/task-author-candidates")
+@page13_access_required
+def api_task_author_candidates():
+    """任务录入编写人员下拉：项目绑定项目组成员 + 当前登录用户。"""
+    from .authz import is_page13_super_admin, project_in_scope, rbac_enforced
+    from .models import Project
+    from .user_access import _serialize_task_author_user, list_task_author_candidates
+
+    project_id = (
+        request.args.get("projectId") or request.args.get("project_id") or ""
+    ).strip()
+    team_id = (request.args.get("teamId") or request.args.get("team_id") or "").strip()
+    if project_id:
+        proj = _resolve_project_for_author_pick(project_id)
+        if proj is None:
+            return jsonify({"message": "项目不存在"}), 404
+        if rbac_enforced() and not is_page13_super_admin() and not project_in_scope(proj):
+            return jsonify({"message": "无权访问该项目"}), 403
+    users = list_task_author_candidates(project_id=project_id or None, team_id=team_id or None)
+    return jsonify({"users": [_serialize_task_author_user(u) for u in users]})
+
+
 @bp.get("/api/users")
 @page13_access_required
 def api_users_list():
@@ -8132,7 +8209,6 @@ def api_users_list():
                 "username": u.username,
                 "displayName": u.display_name,
                 "mobile": getattr(u, "mobile", None) or None,
-                "isAdmin": bool(getattr(u, "is_admin", False)),
                 "adminRole": (getattr(u, "admin_role", None) or "none").strip() or "none",
                 "createdAt": u.created_at.isoformat() if u.created_at else None,
                 **serialize_user_access(u),
@@ -8152,7 +8228,6 @@ def api_users_create():
     from .notify_content import format_mobile_for_storage
 
     mobile = format_mobile_for_storage(data.get("mobile"))
-    is_admin = bool(data.get("isAdmin"))
     from .models import ADMIN_ROLES
 
     admin_role = (data.get("adminRole") or "none").strip()
@@ -8167,7 +8242,7 @@ def api_users_create():
         username=username,
         display_name=display_name,
         mobile=mobile,
-        is_admin=is_admin,
+        is_admin=False,
         admin_role=admin_role,
     )
     user.set_password(password)
@@ -8194,7 +8269,6 @@ def api_users_create():
             "username": user.username,
             "displayName": user.display_name,
             "mobile": user.mobile,
-            "isAdmin": bool(getattr(user, "is_admin", False)),
             "adminRole": getattr(user, "admin_role", None) or "none",
             **serialize_user_access(user),
         },
@@ -8204,7 +8278,7 @@ def api_users_create():
 @bp.patch("/api/users/<user_id>")
 @super_admin_required
 def api_users_update(user_id: str):
-    """更新用户显示名称、手机号（钉钉 @ 用）、管理员标记"""
+    """更新用户显示名称、手机号（钉钉 @ 用）、分级角色与权限"""
     user = User.query.get(user_id)
     if not user:
         return jsonify({"message": "用户不存在"}), 404
@@ -8215,8 +8289,6 @@ def api_users_update(user_id: str):
         user.display_name = (data["displayName"] or "").strip() or None
     if "mobile" in data:
         user.mobile = format_mobile_for_storage(data.get("mobile"))
-    if "isAdmin" in data:
-        user.is_admin = bool(data.get("isAdmin"))
     if "adminRole" in data:
         from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLES
 
@@ -8253,11 +8325,58 @@ def api_users_update(user_id: str):
             "username": user.username,
             "displayName": user.display_name,
             "mobile": user.mobile,
-            "isAdmin": bool(getattr(user, "is_admin", False)),
             "adminRole": getattr(user, "admin_role", None) or "none",
             **serialize_user_access(user),
         },
     })
+
+
+@bp.post("/api/users/batch-feature-permissions")
+@super_admin_required
+def api_users_batch_feature_permissions():
+    """批量设置多个账号的功能权限（仅合并指定项，未选字段保持各账号原值）。"""
+    data = request.get_json(force=True) or {}
+    user_ids = data.get("userIds")
+    if not isinstance(user_ids, list) or not user_ids:
+        return jsonify({"message": "请至少选择一个账号"}), 400
+    from .user_feature_permissions import (
+        apply_feature_permission_patch,
+        parse_batch_feature_permission_patch,
+        read_user_feature_permissions,
+        write_user_feature_permissions,
+    )
+
+    try:
+        patch = parse_batch_feature_permission_patch(data)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    if not patch:
+        return jsonify({"message": "请至少选择一项要修改的功能权限"}), 400
+
+    ids = [str(x).strip() for x in user_ids if str(x).strip()]
+    users = User.query.filter(User.id.in_(ids)).all() if ids else []
+    found = {u.id for u in users}
+    missing = [i for i in ids if i not in found]
+    if missing:
+        return jsonify({"message": f"账号不存在：{missing[0]}"}), 404
+
+    updated = 0
+    for user in users:
+        merged = apply_feature_permission_patch(read_user_feature_permissions(user), patch)
+        write_user_feature_permissions(user, merged or None)
+        db.session.add(user)
+        updated += 1
+    db.session.commit()
+
+    cur_uid = session.get("user_id")
+    if cur_uid and str(cur_uid) in found:
+        from .authz import _refresh_session_from_user
+
+        u = User.query.get(cur_uid)
+        if u:
+            _refresh_session_from_user(u)
+
+    return jsonify({"message": f"已更新 {updated} 个账号的功能权限", "updated": updated})
 
 
 @bp.delete("/api/users/<user_id>")

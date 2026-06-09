@@ -48,12 +48,9 @@ const App = {
             } catch (readError) {}
             
             if (response.status === 401 && data && data.needsLogin) {
-                const loginPath = (root || "") + "/login";
-                if (window.location.pathname !== loginPath) {
-                    const onCompany = (window.location.pathname || "").includes("/company");
-                    window.location.href = onCompany
-                        ? `${loginPath}?next=${encodeURIComponent(window.location.pathname || "/company")}`
-                        : loginPath;
+                const loginPath = _appPath("/login");
+                if (!_isLoginPath()) {
+                    window.location.href = loginPath;
                 }
                 throw new Error("需要登录");
             }
@@ -491,6 +488,7 @@ function _populateProjectNameSelect(selectEl, selectedName) {
         opt.dataset.registeredCategory = p.registeredCategory || "";
         opt.dataset.baseName = p.name || "";
         opt.dataset.projectKey = p.projectKey || p.name || "";
+        opt.dataset.assignedTeamId = p.assignedTeamId || "";
         selectEl.appendChild(opt);
     });
     if (current) {
@@ -774,6 +772,7 @@ function appendProjectEntryBlockFromSavedProject(projectName, options) {
     const opt = sel?.options?.[sel.selectedIndex];
     const pk = (opt?.dataset?.projectKey || opt?.dataset?.baseName || name).trim();
     _applyProjectMetaToBlock(block, _loadProjectMetaForEntry(selectValue || name, pk));
+    refreshAuthorPickersInProjectBlock(block);
     _updateProjectBlockTaskRowCount(block);
     if (opts.scroll !== false) {
         block.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -800,6 +799,7 @@ function _bindProjectEntryBlock(block) {
         if (countryInputEl && regCountry && !(countryInputEl.value || "").trim()) {
             countryInputEl.value = regCountry;
         }
+        refreshAuthorPickersInProjectBlock(block);
         _updateProjectBlockTaskRowCount(block);
     });
 
@@ -1055,7 +1055,7 @@ function createTaskRowUnderProject(projectBlock) {
     });
     const authorHost = tr.querySelector(".task-author-picker-host");
     mountAuthorPicker(authorHost, {
-        showQuickAdd: true,
+        showQuickAdd: !!page13SuperAdminFlag,
         hooks: {
             onChange: () => {
                 const pb = tr.closest(".project-block");
@@ -1126,6 +1126,15 @@ async function initUploadPage() {
     const showHistoryEl = document.getElementById("showHistoryProjectsPage1");
 
     if (!projectBlocksContainer) return;
+
+    await refreshEffectiveFeatureFlags();
+
+    try {
+        const meRes = await App.request("/api/me");
+        page13SuperAdminFlag = !!meRes?.page13SuperAdmin;
+    } catch (_) {}
+
+    await loadAuthorCandidates().catch(() => {});
 
     await loadRegisteredCountriesDict().catch(() => {});
     refreshNewProjectCountrySelect();
@@ -1421,8 +1430,12 @@ async function initUploadPage() {
     });
     openNewProjectModalBtn?.addEventListener("click", async () => {
         if (!newProjectModalEl) return;
-        await loadRegisteredCountriesDict(true).catch(() => {});
+        await Promise.all([
+            loadRegisteredCountriesDict(true).catch(() => {}),
+            loadAssignableOrganizations(true).catch(() => {}),
+        ]);
         refreshNewProjectCountrySelect();
+        fillNewProjectOrganizationSelect();
         const incWrap = document.getElementById("newProjectIncludeCompanyWrap");
         if (incWrap && window.__COMPANY_REGISTRY_ENABLED__) {
             incWrap.style.display = "";
@@ -1435,26 +1448,43 @@ async function initUploadPage() {
         const stEl = document.getElementById("newProjectStatus");
         const rcEl = document.getElementById("newProjectRegisteredCountry");
         const catEl = document.getElementById("newProjectRegisteredCategory");
+        const orgEl = document.getElementById("newProjectOrganizationId");
         const name = (nameEl?.value || "").trim();
         if (!name) { App.notify("请输入项目名称", "warning"); return; }
+        const orgId = orgEl && !orgEl.disabled ? (orgEl.value || "").trim() : "";
+        const orgs = assignableOrganizationsCache || [];
+        if (orgs.length > 1 && !orgId) {
+            App.notify("请选择所属公司", "warning");
+            return;
+        }
         try {
+            const payload = {
+                name,
+                priority: prEl ? Number(prEl.value) : 2,
+                status: stEl ? stEl.value : "active",
+                registeredCountry: rcEl ? (rcEl.value || "").trim() : null,
+                registeredCategory: catEl ? (catEl.value || "").trim() : null,
+                includeInCompanyRegistry: !!document.getElementById("newProjectIncludeCompany")?.checked,
+                productType: (document.getElementById("newProjectProductType")?.value || "").trim() || null,
+                expectedCertificationDate: document.getElementById("newProjectCertDate")?.value || null,
+                expectedSubmissionDate: document.getElementById("newProjectSubmitDate")?.value || null,
+                progressDescription: (document.getElementById("newProjectProgress")?.value || "").trim() || null,
+            };
+            if (orgId) payload.organizationId = orgId;
             await App.request("/api/projects", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    name,
-                    priority: prEl ? Number(prEl.value) : 2,
-                    status: stEl ? stEl.value : "active",
-                    registeredCountry: rcEl ? (rcEl.value || "").trim() : null,
-                    registeredCategory: catEl ? (catEl.value || "").trim() : null,
-                    includeInCompanyRegistry: !!document.getElementById("newProjectIncludeCompany")?.checked,
-                    productType: (document.getElementById("newProjectProductType")?.value || "").trim() || null,
-                    expectedCertificationDate: document.getElementById("newProjectCertDate")?.value || null,
-                    expectedSubmissionDate: document.getElementById("newProjectSubmitDate")?.value || null,
-                    progressDescription: (document.getElementById("newProjectProgress")?.value || "").trim() || null,
-                }),
+                body: JSON.stringify(payload),
             });
             if (nameEl) nameEl.value = "";
+            if (catEl) catEl.value = "";
+            if (document.getElementById("newProjectProductType")) {
+                document.getElementById("newProjectProductType").value = "";
+            }
+            ["newProjectCertDate", "newProjectSubmitDate", "newProjectProgress"].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.value = "";
+            });
             bootstrap.Modal.getInstance(newProjectModalEl)?.hide();
             App.notify("项目已创建", "success");
             loadProjectsManage();
@@ -1630,6 +1660,7 @@ async function initUploadPage() {
                 _applyProjectMetaToBlock(curr, _loadProjectMetaForEntry(prevVal, pk));
             }
             _updateProjectBlockTaskRowCount(curr);
+            refreshAuthorPickersInProjectBlock(curr);
         }
     });
 
@@ -2024,7 +2055,7 @@ async function initUploadPage() {
     initConfigManagement();
     loadRecordsList();
     refreshSavedProjectPickSelect();
-    loadUsersList();
+    loadAuthorCandidates().catch(() => {});
     initRecordsFilter();
     initRecordsTableSort();
     initEditUserMobile();
@@ -2248,6 +2279,44 @@ function refreshNewProjectCountrySelect() {
     sel.innerHTML = buildRegisteredCountryOptionsHtml(prev, true);
 }
 
+function fillNewProjectOrganizationSelect() {
+    const sel = document.getElementById("newProjectOrganizationId");
+    if (!sel) return;
+    const orgs = assignableOrganizationsCache || [];
+    const filterSel = document.getElementById("filterProjectOrganization");
+    const filterOrg =
+        filterSel && filterSel.value && filterSel.value !== "__all__"
+            ? String(filterSel.value).trim()
+            : "";
+    sel.innerHTML = "";
+    if (!orgs.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "—";
+        sel.appendChild(opt);
+        sel.disabled = true;
+        return;
+    }
+    if (orgs.length > 1) {
+        const empty = document.createElement("option");
+        empty.value = "";
+        empty.textContent = "— 请选择 —";
+        sel.appendChild(empty);
+    }
+    orgs.forEach((o) => {
+        const opt = document.createElement("option");
+        opt.value = String(o.id || "").trim();
+        opt.textContent = String(o.label || o.name || opt.value);
+        sel.appendChild(opt);
+    });
+    sel.disabled = orgs.length === 1;
+    if (orgs.length === 1) {
+        sel.value = String(orgs[0].id || "").trim();
+    } else if (filterOrg && [...sel.options].some((o) => o.value === filterOrg)) {
+        sel.value = filterOrg;
+    }
+}
+
 async function loadProjectTeamsForPickers() {
     try {
         const res = await App.request("/api/project-teams");
@@ -2255,6 +2324,186 @@ async function loadProjectTeamsForPickers() {
     } catch (_) {
         return [];
     }
+}
+
+const USER_FEATURE_PERM_GROUPS = [
+    {
+        title: "页面1",
+        defs: [
+            { key: "FEATURE_PAGE1_DRAFT_GEN", label: "初稿生成" },
+            { key: "FEATURE_PAGE1_AUDIT", label: "文档审核" },
+            { key: "FEATURE_PAGE1_AUDIT_MODIFY", label: "审核后修改" },
+            { key: "FEATURE_PAGE1_TRANSLATE", label: "文档翻译" },
+            { key: "FEATURE_PAGE1_EXAM_CENTER", label: "考试训练中心" },
+            { key: "FEATURE_PAGE1_SIGN", label: "去签字" },
+            { key: "FEATURE_PAGE1_PRINT", label: "去打印" },
+        ],
+    },
+    {
+        title: "页面2",
+        defs: [
+            { key: "FEATURE_PAGE2_UPLOAD_REPLACE", label: "上传/替换" },
+            { key: "FEATURE_PAGE2_DRAFT_GEN", label: "初稿生成" },
+            { key: "FEATURE_PAGE2_AUDIT_MODIFY", label: "审核后修改" },
+            { key: "FEATURE_PAGE2_TRANSLATE", label: "文档翻译" },
+            { key: "FEATURE_PAGE2_EXAM_CENTER", label: "考试训练中心" },
+        ],
+    },
+];
+
+/** @deprecated 兼容旧引用；请用 USER_FEATURE_PERM_GROUPS */
+const USER_FEATURE_PERM_DEFS = USER_FEATURE_PERM_GROUPS.flatMap((g) => g.defs);
+
+function _renderUserFeaturePermSelects(container, permissions, selectClass) {
+    if (!container) return;
+    const perms = permissions && typeof permissions === "object" ? permissions : {};
+    const cls = selectClass || "user-feature-perm";
+    container.innerHTML = USER_FEATURE_PERM_GROUPS.map((group) => {
+        const fields = group.defs.map(({ key, label }) => {
+            let sel = "inherit";
+            if (Object.prototype.hasOwnProperty.call(perms, key)) {
+                sel = perms[key] ? "allow" : "deny";
+            }
+            return (
+                `<div class="col-md-6"><label class="form-label small mb-0">${label}</label>` +
+                `<select class="form-select form-select-sm ${cls}" data-key="${key}">` +
+                `<option value="inherit"${sel === "inherit" ? " selected" : ""}>跟随系统</option>` +
+                `<option value="allow"${sel === "allow" ? " selected" : ""}>允许</option>` +
+                `<option value="deny"${sel === "deny" ? " selected" : ""}>禁止</option>` +
+                `</select></div>`
+            );
+        }).join("");
+        return (
+            `<div class="col-12"><div class="small fw-semibold text-muted mb-1">${group.title}</div></div>` +
+            fields
+        );
+    }).join("");
+}
+
+function renderUserFeaturePermissionFields(container, permissions) {
+    _renderUserFeaturePermSelects(container, permissions, "user-feature-perm");
+}
+
+function collectUserFeaturePermissions(container) {
+    if (!container) return undefined;
+    const out = {};
+    let has = false;
+    container.querySelectorAll("select.user-feature-perm").forEach((sel) => {
+        const key = sel.getAttribute("data-key");
+        if (!key) return;
+        if (sel.value === "allow") {
+            out[key] = true;
+            has = true;
+        } else if (sel.value === "deny") {
+            out[key] = false;
+            has = true;
+        }
+    });
+    return has ? out : null;
+}
+
+function renderBatchUserFeaturePermissionFields(container) {
+    if (!container) return;
+    container.innerHTML = USER_FEATURE_PERM_GROUPS.map((group) => {
+        const fields = group.defs.map(({ key, label }) => (
+            `<div class="col-md-6"><label class="form-label small mb-0">${label}</label>` +
+            `<select class="form-select form-select-sm user-feature-perm-batch" data-key="${key}">` +
+            `<option value="skip" selected>不修改</option>` +
+            `<option value="inherit">跟随系统</option>` +
+            `<option value="allow">允许</option>` +
+            `<option value="deny">禁止</option>` +
+            `</select></div>`
+        )).join("");
+        return (
+            `<div class="col-12"><div class="small fw-semibold text-muted mb-1">${group.title}</div></div>` +
+            fields
+        );
+    }).join("");
+}
+
+function collectBatchUserFeaturePermissionPatches(container) {
+    if (!container) return null;
+    const out = {};
+    let has = false;
+    container.querySelectorAll("select.user-feature-perm-batch").forEach((sel) => {
+        const key = sel.getAttribute("data-key");
+        if (!key || sel.value === "skip") return;
+        out[key] = sel.value;
+        has = true;
+    });
+    return has ? out : null;
+}
+
+function selectedUserRowIds() {
+    const tbody = document.getElementById("usersTableBody");
+    if (!tbody) return [];
+    return [...tbody.querySelectorAll(".user-row-checkbox:checked")]
+        .map((cb) => cb.dataset.id)
+        .filter(Boolean);
+}
+
+function updateBatchUsersFeatureBtnState() {
+    const btn = document.getElementById("btnBatchUserFeaturePerms");
+    if (!btn) return;
+    const n = selectedUserRowIds().length;
+    btn.disabled = n === 0;
+}
+
+function initBatchUserFeaturePermissions() {
+    const openBtn = document.getElementById("btnBatchUserFeaturePerms");
+    const modalEl = document.getElementById("batchUserFeaturePermsModal");
+    const saveBtn = document.getElementById("saveBatchUserFeaturePermsBtn");
+    const container = document.getElementById("batchUserFeaturePermissions");
+    const hint = document.getElementById("batchUserFeaturePermsHint");
+    const selectAll = document.getElementById("usersSelectAll");
+    if (!openBtn || !modalEl || !saveBtn || !container) return;
+
+    renderBatchUserFeaturePermissionFields(container);
+
+    selectAll?.addEventListener("change", () => {
+        const checked = !!selectAll.checked;
+        document.querySelectorAll("#usersTableBody .user-row-checkbox").forEach((cb) => {
+            cb.checked = checked;
+        });
+        updateBatchUsersFeatureBtnState();
+    });
+
+    openBtn.addEventListener("click", () => {
+        const ids = selectedUserRowIds();
+        if (!ids.length) {
+            App.notify("请先勾选账号", "warning");
+            return;
+        }
+        if (hint) hint.textContent = `已选 ${ids.length} 个账号`;
+        renderBatchUserFeaturePermissionFields(container);
+        new bootstrap.Modal(modalEl).show();
+    });
+
+    saveBtn.addEventListener("click", async () => {
+        const ids = selectedUserRowIds();
+        if (!ids.length) {
+            App.notify("请先勾选账号", "warning");
+            return;
+        }
+        const patches = collectBatchUserFeaturePermissionPatches(container);
+        if (!patches) {
+            App.notify("请至少选择一项要修改的功能权限", "warning");
+            return;
+        }
+        try {
+            const res = await App.request("/api/users/batch-feature-permissions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userIds: ids, featurePermissionPatches: patches }),
+            });
+            App.notify(res.message || "已批量更新", "success");
+            bootstrap.Modal.getInstance(modalEl)?.hide();
+            if (selectAll) selectAll.checked = false;
+            loadUsersList();
+        } catch (e) {
+            App.notify(e.message || "批量更新失败", "danger");
+        }
+    });
 }
 
 
@@ -2268,23 +2517,30 @@ function initEditUserMobile() {
         const displayName = (document.getElementById("editUserDisplayName")?.value || "").trim();
         const adminRole = document.getElementById("editUserAdminRole")?.value || "none";
         try {
+            const body = {
+                mobile: mobile || null,
+                displayName: displayName || null,
+                adminRole,
+                organizationIds: getTagMultiPickerValues(
+                    document.getElementById("editUserOrganizationsPicker")
+                ),
+                registeredCountries: getTagMultiPickerValues(
+                    document.getElementById("editUserCountriesPicker")
+                ),
+                teamIds: getTagMultiPickerValues(
+                    document.getElementById("editUserTeamsPicker")
+                ),
+            };
+            const fp = collectUserFeaturePermissions(
+                document.getElementById("editUserFeaturePermissions")
+            );
+            if (fp !== null) {
+                body.featurePermissions = fp;
+            }
             await App.request(`/api/users/${id}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    mobile: mobile || null,
-                    displayName: displayName || null,
-                    adminRole,
-                    organizationIds: getTagMultiPickerValues(
-                        document.getElementById("editUserOrganizationsPicker")
-                    ),
-                    registeredCountries: getTagMultiPickerValues(
-                        document.getElementById("editUserCountriesPicker")
-                    ),
-                    teamIds: getTagMultiPickerValues(
-                        document.getElementById("editUserTeamsPicker")
-                    ),
-                }),
+                body: JSON.stringify(body),
             });
             App.notify("账号已更新");
             bootstrap.Modal.getInstance(modalEl)?.hide();
@@ -2318,7 +2574,7 @@ function initRecordsTableSort() {
 }
 
 async function openEditRecordModal(r) {
-    if (!usersListCache.length) await loadUsersList();
+    await loadAuthorCandidates({ projectId: r.projectId || "" });
     ensureEditRecordAuthorPicker();
     document.getElementById("editRecordId").value = r.id;
     const prjIdEl = document.getElementById("editRecordProjectId");
@@ -2442,21 +2698,27 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
         hintEl.className = "form-text small text-muted";
         return;
     }
-    App.request("/api/users")
-        .then((res) => {
-            const users = res.users || [];
-            const name = assigneeName.trim();
-            const user = findUserForAuthorLabel(users, name);
-            if (user && user.mobile && String(user.mobile).trim()) {
-                const mobile = String(user.mobile).trim();
-                const masked = mobile.length > 4 ? mobile.slice(0, 3) + "****" + mobile.slice(-4) : mobile;
-                hintEl.textContent = "已配置手机号：" + masked + "，催办时可@";
-                hintEl.className = "form-text small text-success";
-            } else {
-                hintEl.textContent = "该负责人未在账号管理中填写手机号，催办无法@成功。请先在账号管理中添加并填写手机号。";
-                hintEl.className = "form-text small text-warning";
-            }
-        })
+    const name = assigneeName.trim();
+    const applyHint = (users) => {
+        const user = findUserForAuthorLabel(users, name);
+        if (user && user.mobile && String(user.mobile).trim()) {
+            const mobile = String(user.mobile).trim();
+            const masked = mobile.length > 4 ? mobile.slice(0, 3) + "****" + mobile.slice(-4) : mobile;
+            hintEl.textContent = "已配置手机号：" + masked + "，催办时可@";
+            hintEl.className = "form-text small text-success";
+        } else {
+            hintEl.textContent = "该负责人未在账号管理中填写手机号，催办无法@成功。请先在账号管理中添加并填写手机号。";
+            hintEl.className = "form-text small text-warning";
+        }
+    };
+    const cached = authorCandidatesCache;
+    if (cached.length) {
+        applyHint(cached);
+        return;
+    }
+    const projectId = (document.getElementById("editRecordProjectId")?.value || "").trim();
+    loadAuthorCandidates({ projectId })
+        .then((users) => applyHint(users || []))
         .catch(() => {
             hintEl.textContent = "无法加载账号信息";
             hintEl.className = "form-text small text-muted";
@@ -2811,7 +3073,7 @@ function initBatchEditRecords() {
         }
         const batchEditProjectCodeEl = document.getElementById("batchEditProjectCode");
         if (batchEditProjectCodeEl) batchEditProjectCodeEl.value = sameProjectCode ? projectCodeVal : "";
-        if (!usersListCache.length) await loadUsersList();
+        await loadAuthorCandidates({ projectId: first?.projectId || "" });
         ensureBatchEditAuthorPicker();
         setAuthorPickerValue("batchEditAuthorPicker", sameAuthor ? authorVal : "");
         document.getElementById("batchEditAssignee").value = sameAssignee ? assigneeVal : "";
@@ -3304,8 +3566,15 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             : "需先有已保存模板、文档链接或已生成文档";
         // 事项型任务：隐藏文档流转相关按钮（去签字/去打印）。
         const _isMatterRow = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
-        const goSignBtnHtml = _isMatterRow ? "" : `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>`;
-        const goPrintBtnHtml = _isMatterRow ? "" : `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>`;
+        const goSignBtnHtml = !_isMatterRow && _page1Feature("FEATURE_PAGE1_SIGN")
+            ? `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-sign me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去签字</button>`
+            : "";
+        const goPrintBtnHtml = !_isMatterRow && _page1Feature("FEATURE_PAGE1_PRINT")
+            ? `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>`
+            : "";
+        const auditBtnHtml = _page1Feature("FEATURE_PAGE1_AUDIT")
+            ? `<button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="aicheckword 单文档审核">单审</button>`
+            : "";
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
@@ -3335,7 +3604,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
-                <button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="aicheckword 单文档审核">单审</button>
+                ${auditBtnHtml}
                 ${goSignBtnHtml}
                 ${goPrintBtnHtml}
                 <button class="btn btn-sm btn-outline-danger btn-delete-task" data-id="${r.id}">删除</button>
@@ -3566,6 +3835,60 @@ function loadRecordsList() {
 }
 
 let usersListCache = [];
+let authorCandidatesCache = [];
+
+function _projectIdForAuthorPick(projectId) {
+    return String(projectId || "").trim();
+}
+
+function _teamIdForProjectBlock(block) {
+    const sel = block?.querySelector?.(".project-name");
+    const pid = (sel?.value || "").trim();
+    if (pid) {
+        const meta = (projectsMetaCache || []).find((p) => String(p.id || "").trim() === pid);
+        const tid = String(meta?.assignedTeamId || "").trim();
+        if (tid) return tid;
+        const opt = sel?.options?.[sel.selectedIndex];
+        const fromOpt = String(opt?.dataset?.assignedTeamId || "").trim();
+        if (fromOpt) return fromOpt;
+    }
+    return "";
+}
+
+function loadAuthorCandidates(opts) {
+    const options = opts || {};
+    const projectId = _projectIdForAuthorPick(options.projectId);
+    const teamId = String(options.teamId || "").trim();
+    const qs = new URLSearchParams();
+    if (projectId) qs.set("projectId", projectId);
+    else if (teamId) qs.set("teamId", teamId);
+    const url = qs.toString()
+        ? `/api/task-author-candidates?${qs.toString()}`
+        : "/api/task-author-candidates";
+    return App.request(url)
+        .then((res) => {
+            authorCandidatesCache = Array.isArray(res?.users) ? res.users : [];
+            refreshAllAuthorPickers();
+            return authorCandidatesCache;
+        })
+        .catch((e) => {
+            authorCandidatesCache = authorCandidatesCache || [];
+            App.notify(e.message || "加载编写人员列表失败", "danger");
+            return authorCandidatesCache;
+        });
+}
+
+function refreshAuthorPickersInProjectBlock(block) {
+    if (!block) return Promise.resolve();
+    const sel = block.querySelector(".project-name");
+    const projectId = (sel?.value || "").trim();
+    return loadAuthorCandidates({ projectId });
+}
+
+function _authorPickSourceList(opts) {
+    if (opts && Array.isArray(opts.users)) return opts.users;
+    return authorCandidatesCache.length ? authorCandidatesCache : [];
+}
 
 function _escUserCell(s) {
     return String(s ?? "")
@@ -3579,7 +3902,8 @@ function _getUsersFilterValues() {
     return {
         keyword: (document.getElementById("filterUserKeyword")?.value || "").trim().toLowerCase(),
         mobile: (document.getElementById("filterUserMobile")?.value || "").trim(),
-        admin: (document.getElementById("filterUserAdmin")?.value || "").trim(),
+        adminRole: (document.getElementById("filterUserAdminRole")?.value || "").trim(),
+        organizationId: (document.getElementById("filterUserOrganization")?.value || "").trim(),
     };
 }
 
@@ -3591,10 +3915,31 @@ function _filterUsersList(users) {
             if (!hay.includes(f.keyword)) return false;
         }
         if (f.mobile && !(u.mobile || "").includes(f.mobile)) return false;
-        if (f.admin === "yes" && !u.isAdmin) return false;
-        if (f.admin === "no" && u.isAdmin) return false;
+        if (f.adminRole && (u.adminRole || "none") !== f.adminRole) return false;
+        if (f.organizationId) {
+            const orgIds = (u.organizationIds || []).map((id) => String(id || "").trim());
+            if (!orgIds.includes(f.organizationId)) return false;
+        }
         return true;
     });
+}
+
+function _refreshUsersOrganizationFilter() {
+    const sel = document.getElementById("filterUserOrganization");
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部公司</option>';
+    (organizationsCache || [])
+        .filter((o) => o.isActive !== false)
+        .forEach((o) => {
+            const opt = document.createElement("option");
+            opt.value = String(o.id || "").trim();
+            opt.textContent = o.name || o.id || "";
+            sel.appendChild(opt);
+        });
+    if (cur && [...sel.options].some((o) => o.value === cur)) {
+        sel.value = cur;
+    }
 }
 
 function _updateUsersListCountHint(total, shown) {
@@ -3610,27 +3955,24 @@ function _updateUsersListCountHint(total, shown) {
 function renderUsersList() {
     const tbody = document.getElementById("usersTableBody");
     if (!tbody) return;
+    const selectAll = document.getElementById("usersSelectAll");
+    if (selectAll) selectAll.checked = false;
     const filtered = _filterUsersList(usersListCache);
     _updateUsersListCountHint(usersListCache.length, filtered.length);
     tbody.innerHTML = "";
     if (!filtered.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="9" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
+        tr.innerHTML = `<td colspan="8" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
         tbody.appendChild(tr);
+        updateBatchUsersFeatureBtnState();
         return;
     }
     filtered.forEach((u) => {
         const tr = document.createElement("tr");
-        const adminBadge = u.isAdmin
-            ? '<span class="badge bg-primary">是</span>'
-            : '<span class="text-muted">否</span>';
+        tr.dataset.userId = u.id || "";
         const roleLabels = { none: "无", project: "项目", company: "公司" };
         const roleBadge = `<span class="badge bg-secondary">${_escUserCell(roleLabels[u.adminRole] || u.adminRole || "无")}</span>`;
         const displayName = (u.displayName || "").trim() || "-";
-        const p0On = u.adminRole === "company";
-        const p0Badge = p0On
-            ? '<span class="badge bg-warning text-dark">公司管理员</span>'
-            : '<span class="text-muted">—</span>';
         const orgNames = (u.organizationIds || [])
             .map((oid) => organizationNameById(oid))
             .filter(Boolean);
@@ -3641,39 +3983,25 @@ function renderUsersList() {
             ? _escUserCell((u.registeredCountries || []).join("、"))
             : '<span class="text-muted">—</span>';
         tr.innerHTML = `
+            <td><input type="checkbox" class="form-check-input user-row-checkbox" data-id="${_escUserCell(u.id)}"></td>
             <td>${_escUserCell(u.username)}</td>
             <td>${_escUserCell(displayName)}</td>
             <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
-            <td>${adminBadge}</td>
             <td>${roleBadge}</td>
-            <td>${p0Badge}</td>
             <td class="small">${orgText}</td>
             <td class="small">${countries}</td>
             <td class="text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-info btn-check-at me-1" data-username="${_escUserCell(u.username)}">检查@</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary btn-edit-mobile me-1" data-id="${u.id}" data-username="${_escUserCell(u.username)}" data-display-name="${_escUserCell(u.displayName || "")}" data-mobile="${_escUserCell(u.mobile || "")}" data-admin-role="${_escUserCell(u.adminRole || "none")}">编辑</button>
-                <button type="button" class="btn btn-sm btn-outline-primary btn-toggle-admin me-1" data-id="${u.id}" data-admin="${u.isAdmin ? "1" : "0"}">${u.isAdmin ? "取消管理员" : "设为管理员"}</button>
                 <button type="button" class="btn btn-sm btn-outline-danger btn-delete-user" data-id="${u.id}">删除</button>
             </td>
         `;
         tbody.appendChild(tr);
     });
-    tbody.querySelectorAll(".btn-toggle-admin").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-            const next = btn.dataset.admin !== "1";
-            try {
-                await App.request(`/api/users/${btn.dataset.id}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ isAdmin: next }),
-                });
-                App.notify(next ? "已设为管理员" : "已取消管理员");
-                loadUsersList();
-            } catch (e) {
-                App.notify(e.message || "更新失败", "danger");
-            }
-        });
+    tbody.querySelectorAll(".user-row-checkbox").forEach((cb) => {
+        cb.addEventListener("change", updateBatchUsersFeatureBtnState);
     });
+    updateBatchUsersFeatureBtnState();
     tbody.querySelectorAll(".btn-delete-user").forEach((btn) => {
         btn.addEventListener("click", async () => {
             if (!confirm("确定要删除此用户吗？")) return;
@@ -3733,6 +4061,10 @@ function renderUsersList() {
                     .map((t) => ({ value: t.id, label: t.name })),
                 emptyHint: "未选择项目组",
             });
+            renderUserFeaturePermissionFields(
+                document.getElementById("editUserFeaturePermissions"),
+                u?.featurePermissions
+            );
             const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
             modal.show();
         });
@@ -3741,19 +4073,27 @@ function renderUsersList() {
 
 function loadUsersList() {
     const tbody = document.getElementById("usersTableBody");
-    if (!tbody) return Promise.resolve();
+    const hasAuthorPickers = !!document.querySelector(".author-picker, .task-author-picker-host");
 
-    return Promise.all([loadOrganizationsDict(true), App.request("/api/users")])
+    const fetchUsers = Promise.all([loadOrganizationsDict(true), App.request("/api/users")])
         .then(([, res]) => {
             usersListCache = res.users || [];
-            renderUsersList();
-            refreshAllAuthorPickers();
+            if (tbody) {
+                _refreshUsersOrganizationFilter();
+                renderUsersList();
+            }
+            if (hasAuthorPickers && !authorCandidatesCache.length) {
+                loadAuthorCandidates().catch(() => {});
+            }
         })
         .catch((e) => App.notify(e.message || "加载用户失败", "danger"));
+
+    if (!tbody) return fetchUsers;
+    return fetchUsers;
 }
 
 function initUsersListFilter() {
-    ["filterUserKeyword", "filterUserMobile", "filterUserAdmin"].forEach((id) => {
+    ["filterUserKeyword", "filterUserMobile", "filterUserAdminRole", "filterUserOrganization"].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
         el.addEventListener("input", renderUsersList);
@@ -3773,9 +4113,9 @@ function userAuthorPickHaystack(u) {
     return `${un} ${dn}`.toLowerCase();
 }
 
-function filterUsersForAuthorPick(keyword) {
+function filterUsersForAuthorPick(keyword, opts) {
     const k = (keyword || "").trim().toLowerCase();
-    const list = Array.isArray(usersListCache) ? usersListCache : [];
+    const list = _authorPickSourceList(opts);
     if (!k) return list.slice();
     return list.filter((u) => userAuthorPickHaystack(u).includes(k));
 }
@@ -3787,7 +4127,7 @@ function fillAuthorSelectOptions(selectEl, opts) {
     const selected = (options.selected != null ? String(options.selected) : selectEl.value || "").trim();
     const placeholder = options.placeholder || "— 请选择编写人 —";
     const allowLegacy = options.allowLegacy !== false;
-    const list = filterUsersForAuthorPick(filter);
+    const list = filterUsersForAuthorPick(filter, { users: options.users });
     selectEl.innerHTML = "";
     const emptyOpt = document.createElement("option");
     emptyOpt.value = "";
@@ -3861,7 +4201,9 @@ function mountAuthorPicker(host, opts) {
         btn.textContent = "+";
         btn.addEventListener("click", () => {
             const lab = selectEl.value.trim();
-            const hit = (usersListCache || []).find((u) => userAuthorPickLabel(u) === lab);
+            const hit = (authorCandidatesCache || []).find(
+                (u) => userAuthorPickLabel(u) === lab
+            );
             window.__authorPickerPendingSelect = selectEl;
             const quickUsername = document.getElementById("quickUsername");
             if (quickUsername) quickUsername.value = hit?.username || lab;
@@ -3937,13 +4279,11 @@ async function submitCreateUserForm() {
     const passwordInput = document.getElementById("newPassword");
     const displayNameInput = document.getElementById("newDisplayName");
     const mobileInput = document.getElementById("newMobile");
-    const isAdminInput = document.getElementById("newUserIsAdmin");
     const payload = {
         username: (usernameInput?.value || "").trim(),
         password: (passwordInput?.value || "").trim(),
         displayName: displayNameInput ? (displayNameInput.value || "").trim() || null : null,
         mobile: mobileInput ? (mobileInput.value || "").trim() || null : null,
-        isAdmin: !!(isAdminInput && isAdminInput.checked),
         adminRole: document.getElementById("newUserAdminRole")?.value || "none",
         organizationIds: getTagMultiPickerValues(
             document.getElementById("newUserOrganizationsPicker")
@@ -3951,6 +4291,12 @@ async function submitCreateUserForm() {
         registeredCountries: getTagMultiPickerValues(
             document.getElementById("newUserCountriesPicker")
         ),
+        teamIds: getTagMultiPickerValues(
+            document.getElementById("newUserTeamsPicker")
+        ),
+        featurePermissions: collectUserFeaturePermissions(
+            document.getElementById("newUserFeaturePermissions")
+        ) ?? {},
     };
     if (!payload.username || !payload.password) {
         App.notify("用户名和密码不能为空", "warning");
@@ -3995,6 +4341,18 @@ function initCreateUserModal() {
                 .map((o) => ({ value: o.id, label: o.name })),
             emptyHint: "未选择公司",
         });
+        const teams = await loadProjectTeamsForPickers();
+        setTagMultiPicker(document.getElementById("newUserTeamsPicker"), {
+            values: [],
+            options: teams
+                .filter((t) => t.isActive !== false)
+                .map((t) => ({ value: t.id, label: t.name })),
+            emptyHint: "未选择项目组",
+        });
+        renderUserFeaturePermissionFields(
+            document.getElementById("newUserFeaturePermissions"),
+            null
+        );
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
         setTimeout(() => document.getElementById("newUsername")?.focus(), 200);
     });
@@ -4045,8 +4403,12 @@ function initQuickUserForm() {
             const newLabel =
                 result.user?.displayName || result.user?.username || payload.username || "";
             await loadUsersList();
+            await loadAuthorCandidates().catch(() => {});
             if (window.__authorPickerPendingSelect) {
-                fillAuthorSelectOptions(window.__authorPickerPendingSelect, { selected: newLabel });
+                fillAuthorSelectOptions(window.__authorPickerPendingSelect, {
+                    selected: newLabel,
+                    users: authorCandidatesCache,
+                });
                 window.__authorPickerPendingSelect = null;
             }
             bootstrap.Modal.getInstance(document.getElementById("quickUserModal"))?.hide();
@@ -4230,32 +4592,24 @@ function initLoginPage() {
     const form = document.getElementById("loginForm");
     if (!form) return;
 
-    const params = new URLSearchParams(window.location.search);
-    const nextRaw = (params.get("next") || "").trim();
-    const forCompany =
-        Boolean(window.__LOGIN_FOR_COMPANY__) ||
-        nextRaw.startsWith("/company") ||
-        params.get("for") === "company";
+    if (window.location.search) {
+        window.location.replace(_appPath("/login"));
+        return;
+    }
 
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const payload = {
             username: document.getElementById("loginUsername").value.trim(),
             password: document.getElementById("loginPassword").value,
-            forCompanyRegistry: forCompany,
         };
-        if (nextRaw) payload.next = nextRaw;
         try {
             const res = await App.request("/api/login", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-            if (forCompany && res?.user?.adminRole !== "company") {
-                App.notify("该账号不是公司管理员", "danger");
-                return;
-            }
-            const dest = _appPath(res?.redirectUrl || res?.homeUrl || "/generate");
+            const dest = _appPath(res?.homeUrl || res?.redirectUrl || "/generate");
             window.location.href = dest;
         } catch (error) {
             App.notify(error.message, "danger");
@@ -4401,8 +4755,9 @@ async function initGeneratePage() {
 
     await loadCompletionStatuses();
     await loadTaskTypes();
+    await refreshEffectiveFeatureFlags();
 
-    App.request("/api/me").then((res) => {
+    App.request("/api/me").then(async (res) => {
         if (userInfo) {
             if (res.page13SuperAdmin && !res.loggedIn) {
                 userInfo.textContent = "超级管理员（页面4 访问密码）";
@@ -4412,8 +4767,6 @@ async function initGeneratePage() {
                     label += "（超级管理员 · 页面4）";
                 } else if (res.user.adminRole === "project") {
                     label += "（项目管理员）";
-                } else if (res.user.isAdmin || res.featureAdminViewer) {
-                    label += "（管理员）";
                 }
                 userInfo.textContent = label;
             }
@@ -4600,6 +4953,24 @@ function bindPage2TemplateFileUpload(tr, r) {
             App.notify(e.message || "上传失败", "danger");
         }
     });
+}
+
+/** 从 /api/me 刷新当前账号生效的功能开关（全局 ∧ 账号权限）。 */
+async function refreshEffectiveFeatureFlags() {
+    try {
+        const res = await App.request("/api/me");
+        if (res?.featureFlags && typeof res.featureFlags === "object") {
+            window.__FEATURE_FLAGS__ = res.featureFlags;
+            return res.featureFlags;
+        }
+    } catch (_) { /* ignore */ }
+    return window.__FEATURE_FLAGS__ || {};
+}
+
+/** 读取页面1 功能开关（上传/任务列表）。 */
+function _page1Feature(name) {
+    const flags = window.__FEATURE_FLAGS__ || {};
+    return !!flags[name];
 }
 
 /** 读取页面2 功能开关：与系统配置「FEATURE_PAGE2_*」一致；未注入时按关闭处理。 */
@@ -5065,16 +5436,31 @@ function _escHtmlSysCfg(s) {
 /** 后端未返回 sections 时的前端分区（与 app_settings.SYSTEM_CONFIG_SECTIONS 一致） */
 const CLIENT_SYSTEM_CONFIG_SECTIONS = [
     {
-        id: "feature_flags",
-        title: "功能开关",
-        hint: "控制页面2 操作按钮与考试训练中心入口；填 1 开启，留空或 0 关闭。",
+        id: "page1_feature_flags",
+        title: "页面1 功能开关",
+        hint: "页面0/1/3 文档工具与考试中心、任务列表签字/打印/单审；填 1 开启。账号权限见「账号管理」· 页面1 分组。",
+        defaultExpanded: true,
+        keys: [
+            "FEATURE_PAGE1_DRAFT_GEN",
+            "FEATURE_PAGE1_AUDIT",
+            "FEATURE_PAGE1_AUDIT_MODIFY",
+            "FEATURE_PAGE1_TRANSLATE",
+            "FEATURE_PAGE1_EXAM_CENTER",
+            "FEATURE_PAGE1_SIGN",
+            "FEATURE_PAGE1_PRINT",
+        ],
+    },
+    {
+        id: "page2_feature_flags",
+        title: "页面2 功能开关",
+        hint: "页面2 任务行按钮与考试中心入口；填 1 开启。账号权限见「账号管理」· 页面2 分组。",
         defaultExpanded: true,
         keys: [
             "FEATURE_PAGE2_UPLOAD_REPLACE",
             "FEATURE_PAGE2_DRAFT_GEN",
             "FEATURE_PAGE2_AUDIT_MODIFY",
             "FEATURE_PAGE2_TRANSLATE",
-            "FEATURE_EXAM_CENTER",
+            "FEATURE_PAGE2_EXAM_CENTER",
         ],
     },
     {
@@ -6773,6 +7159,7 @@ function initAdminPage() {
     initUsersListFilter();
     initConfigManagement();
     initEditUserMobile();
+    initBatchUserFeaturePermissions();
     loadUsersList();
     initDashboardPage();
     refreshAdminChatbotCallbackUrlPanel().catch(() => {});

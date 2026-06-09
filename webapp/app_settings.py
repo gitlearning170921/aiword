@@ -147,10 +147,42 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "定时任务实例标识（多套部署共库时填不同值则各发一条钉钉；单套部署留空）",
         False,
     ),
-    # 功能开关：1=开启入口；0/空=隐藏入口。
-    # 默认全部关闭（首次升级后入口隐藏），管理员在页面4 · 系统与钉钉「系统配置」中按需启用。
-    # 「上传/替换」「初稿生成」「审核后修改」「翻译」对应页面2 任务列表中的功能按钮；
-    # 「考试训练中心」对应页面1/2/3 顶部「进入考试训练中心」按钮。
+    # 功能开关：1=开启入口；0/空=隐藏。页面1（上传/任务管理）与页面2（我的任务）分开配置。
+    (
+        "FEATURE_PAGE1_DRAFT_GEN",
+        "页面1功能开关 · 初稿生成（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_AUDIT",
+        "页面1功能开关 · 文档审核（页面0/1 文档工具、任务列表单审；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_AUDIT_MODIFY",
+        "页面1功能开关 · 审核后修改（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_TRANSLATE",
+        "页面1功能开关 · 文档翻译（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_EXAM_CENTER",
+        "页面1功能开关 · 考试训练中心入口（页面1/3 顶部；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_SIGN",
+        "页面1功能开关 · 去签字 / 批量去签字（跳转 aiprintword；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_PRINT",
+        "页面1功能开关 · 去打印 / 批量去打印（跳转 aiprintword；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
     (
         "FEATURE_PAGE2_UPLOAD_REPLACE",
         "页面2功能开关 · 上传/替换（1=显示按钮；空或0=隐藏。默认隐藏）",
@@ -158,7 +190,7 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ),
     (
         "FEATURE_PAGE2_DRAFT_GEN",
-        "页面2功能开关 · 初稿生成（同时控制顶部「初稿生成」入口；1=显示；空或0=隐藏。默认隐藏）",
+        "页面2功能开关 · 初稿生成（任务行按钮；1=显示；空或0=隐藏。默认隐藏）",
         False,
     ),
     (
@@ -172,8 +204,19 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         False,
     ),
     (
+        "FEATURE_PAGE2_EXAM_CENTER",
+        "页面2功能开关 · 考试训练中心入口（页面2 顶部；1=显示；空或0=隐藏。默认隐藏）",
+        False,
+    ),
+    # 旧版单一开关（仍可读，用于兼容未迁移的配置；新部署请用上方页面1/2 分项）
+    (
+        "FEATURE_PAGE2_AUDIT",
+        "【已废弃·兼容】原共用审核开关（未单独配置页面1审核时回退读取；勿新增）",
+        False,
+    ),
+    (
         "FEATURE_EXAM_CENTER",
-        "考试训练中心入口开关（页面1/2/3 顶部「进入考试训练中心」按钮；1=显示；空或0=隐藏。默认隐藏）",
+        "【已废弃·兼容】原共用考试中心开关（未单独配置页面1/2 考试时回退读取；勿新增）",
         False,
     ),
     (
@@ -191,24 +234,58 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
 
 # 功能开关键集合（前端 feature_flags 注入用）。顺序与含义同 SYSTEM_CONFIG_KEYS 中的注释。
 FEATURE_FLAG_KEYS: tuple[str, ...] = (
+    "FEATURE_PAGE1_DRAFT_GEN",
+    "FEATURE_PAGE1_AUDIT",
+    "FEATURE_PAGE1_AUDIT_MODIFY",
+    "FEATURE_PAGE1_TRANSLATE",
+    "FEATURE_PAGE1_EXAM_CENTER",
+    "FEATURE_PAGE1_SIGN",
+    "FEATURE_PAGE1_PRINT",
     "FEATURE_PAGE2_UPLOAD_REPLACE",
     "FEATURE_PAGE2_DRAFT_GEN",
     "FEATURE_PAGE2_AUDIT_MODIFY",
     "FEATURE_PAGE2_TRANSLATE",
+    "FEATURE_PAGE2_EXAM_CENTER",
+    "FEATURE_PAGE2_AUDIT",
     "FEATURE_EXAM_CENTER",
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
+)
+
+PAGE1_FEATURE_FLAG_KEYS: tuple[str, ...] = (
+    "FEATURE_PAGE1_DRAFT_GEN",
+    "FEATURE_PAGE1_AUDIT",
+    "FEATURE_PAGE1_AUDIT_MODIFY",
+    "FEATURE_PAGE1_TRANSLATE",
+    "FEATURE_PAGE1_EXAM_CENTER",
+    "FEATURE_PAGE1_SIGN",
+    "FEATURE_PAGE1_PRINT",
+)
+
+PAGE2_FEATURE_FLAG_KEYS: tuple[str, ...] = (
+    "FEATURE_PAGE2_UPLOAD_REPLACE",
+    "FEATURE_PAGE2_DRAFT_GEN",
+    "FEATURE_PAGE2_AUDIT_MODIFY",
+    "FEATURE_PAGE2_TRANSLATE",
+    "FEATURE_PAGE2_EXAM_CENTER",
 )
 
 # 页面4 · 系统与钉钉「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
 # defaultExpanded=True 的分区默认展开，其余折叠（details 无 open 属性）。
 SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
     {
-        "id": "feature_flags",
-        "title": "功能开关",
-        "hint": "控制页面2 操作按钮与考试训练中心入口；填 1 开启，留空或 0 关闭。",
+        "id": "page1_feature_flags",
+        "title": "页面1 功能开关",
+        "hint": "页面0/1/3 文档工具与考试中心、任务列表签字/打印/单审；填 1 开启。账号级权限见页面4「账号管理」· 页面1 分组。",
         "defaultExpanded": True,
-        "keys": FEATURE_FLAG_KEYS,
+        "keys": PAGE1_FEATURE_FLAG_KEYS,
+    },
+    {
+        "id": "page2_feature_flags",
+        "title": "页面2 功能开关",
+        "hint": "页面2 任务行按钮（上传/替换、初稿、审核后修改、翻译）与考试中心入口；填 1 开启。账号级权限见「账号管理」· 页面2 分组。",
+        "defaultExpanded": True,
+        "keys": PAGE2_FEATURE_FLAG_KEYS,
     },
     {
         "id": "core",
@@ -377,46 +454,212 @@ def _parse_flag(raw: Optional[str]) -> bool:
     return s in {"1", "true", "yes", "on", "y", "t"}
 
 
+def _feature_flag_configured_in_db(key: str, app: Optional["Flask"] = None) -> bool:
+    """系统配置中是否已显式保存过该功能开关（含填 0 关闭）。"""
+    from . import db
+    from .models import AppConfig
+
+    flask_app = app
+    if flask_app is None:
+        try:
+            from flask import current_app
+
+            flask_app = current_app._get_current_object()
+        except RuntimeError:
+            flask_app = None
+    if flask_app is None:
+        return False
+    try:
+        with flask_app.app_context():
+            row = AppConfig.query.filter_by(config_key=key).first()
+            return row is not None and row.config_value is not None
+    except Exception:
+        return False
+
+
+def _apply_legacy_global_feature_flags(
+    flags: dict[str, bool], app: Optional["Flask"] = None
+) -> None:
+    """未迁移的旧共用开关：仅当页面1/2 新键从未在系统配置中保存过时，才从旧键或 page2 回退。"""
+    page1_from_page2 = (
+        ("FEATURE_PAGE1_DRAFT_GEN", "FEATURE_PAGE2_DRAFT_GEN"),
+        ("FEATURE_PAGE1_AUDIT_MODIFY", "FEATURE_PAGE2_AUDIT_MODIFY"),
+        ("FEATURE_PAGE1_TRANSLATE", "FEATURE_PAGE2_TRANSLATE"),
+    )
+    for page1_key, page2_key in page1_from_page2:
+        if _feature_flag_configured_in_db(page1_key, app):
+            continue
+        if not flags.get(page1_key) and flags.get(page2_key):
+            flags[page1_key] = True
+    if not _feature_flag_configured_in_db("FEATURE_PAGE1_AUDIT", app):
+        if not flags.get("FEATURE_PAGE1_AUDIT") and flags.get("FEATURE_PAGE2_AUDIT"):
+            flags["FEATURE_PAGE1_AUDIT"] = True
+    if not _feature_flag_configured_in_db("FEATURE_PAGE1_EXAM_CENTER", app):
+        if not flags.get("FEATURE_PAGE1_EXAM_CENTER") and flags.get("FEATURE_EXAM_CENTER"):
+            flags["FEATURE_PAGE1_EXAM_CENTER"] = True
+    if not _feature_flag_configured_in_db("FEATURE_PAGE2_EXAM_CENTER", app):
+        if not flags.get("FEATURE_PAGE2_EXAM_CENTER") and flags.get("FEATURE_EXAM_CENTER"):
+            flags["FEATURE_PAGE2_EXAM_CENTER"] = True
+    flags["FEATURE_EXAM_CENTER"] = bool(
+        flags.get("FEATURE_PAGE1_EXAM_CENTER") or flags.get("FEATURE_PAGE2_EXAM_CENTER")
+    )
+
+
 def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]:
-    """返回当前数据库内 5 个功能开关的布尔值，便于注入 Jinja / 前端。"""
+    """返回当前数据库内功能开关布尔值，便于注入 Jinja / 前端。"""
     out: dict[str, bool] = {}
     for key in FEATURE_FLAG_KEYS:
         out[key] = _parse_flag(get_setting(key, default="", app=app))
+    _apply_legacy_global_feature_flags(out, app)
     return out
 
 
 def is_feature_admin_viewer() -> bool:
-    """页面2 功能开关管理员视角：页面1/3 已验证，或管理员/分级管理员账号。"""
+    """兼容旧名：仅页面4 访问密码超级管理员视为功能全开（不含账号 is_admin / 分级角色）。"""
     try:
-        from flask import has_request_context, session
-    except Exception:
-        return False
-    if not has_request_context():
-        return False
-    if session.get("page13_authenticated"):
-        return True
-    uid = session.get("user_id")
-    if not uid:
-        return False
-    try:
-        from .models import User, ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT
+        from .authz import is_page13_super_admin
 
-        u = User.query.get(uid)
-        if not u:
-            return False
-        if getattr(u, "is_admin", False):
-            return True
-        role = (getattr(u, "admin_role", None) or "none").strip()
-        return role in (ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT)
+        return is_page13_super_admin()
     except Exception:
         return False
 
 
 def effective_feature_flags_for_request(app: Optional["Flask"] = None) -> dict[str, bool]:
-    """当前请求生效的功能开关（管理员始终视为全开）。"""
+    """当前请求生效的功能开关：全局配置 ∧ 账号覆盖；仅超级管理员（页面4 访问密码）全开。"""
     if is_feature_admin_viewer():
         return {k: True for k in FEATURE_FLAG_KEYS}
-    return feature_flags_for_template(app)
+    global_flags = feature_flags_for_template(app)
+    try:
+        from flask import session
+
+        uid = str(session.get("user_id") or "").strip()
+    except Exception:
+        uid = ""
+    if not uid:
+        return global_flags
+    try:
+        from . import db
+        from .models import User
+        from .user_feature_permissions import merge_user_feature_flags, read_user_feature_permissions
+
+        user = db.session.get(User, uid) if uid else None
+        if user is None:
+            user = User.query.filter_by(id=uid).first()
+        if user is not None:
+            db.session.refresh(user)
+        return merge_user_feature_flags(global_flags, read_user_feature_permissions(user))
+    except Exception:
+        pass
+    return global_flags
+
+
+def is_effective_feature_enabled(key: str, app: Optional["Flask"] = None) -> bool:
+    flags = effective_feature_flags_for_request(app)
+    return bool(flags.get(key))
+
+
+def feature_gate_response_any(*feature_keys: str):
+    """任一分项开关对本账号生效则放行（用于页面1/2 共用集成路由）。"""
+    for key in feature_keys:
+        if is_effective_feature_enabled(key):
+            return None
+    if feature_keys:
+        return feature_gate_response(feature_keys[0])
+    return None
+
+
+def feature_gate_response(feature_key: str):
+    """功能未开放时返回 Flask 响应；开放则返回 None。"""
+    if is_effective_feature_enabled(feature_key):
+        return None
+    from flask import jsonify, render_template, request
+
+    from .user_feature_permissions import USER_FEATURE_LABELS
+
+    label = USER_FEATURE_LABELS.get(feature_key, feature_key)
+    message = f"「{label}」功能未对本账号开放（请确认系统配置已开启，且账号未被单独禁止）"
+    path = (request.path or "").lower()
+    wants_json = (
+        path.startswith("/api/")
+        or request.is_json
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
+    if wants_json:
+        return jsonify({"message": message, "featureDisabled": True, "featureKey": feature_key}), 403
+    return (
+        render_template(
+            "error.html",
+            title="功能未开放",
+            message=message,
+            hide_main_nav=False,
+            gate_page=False,
+        ),
+        403,
+    )
+
+
+def register_exam_center_feature_gate(app: "Flask") -> None:
+    @app.before_request
+    def _integration_feature_gate():
+        from flask import request
+
+        path = (request.path or "").lower()
+        root = (request.script_root or "").lower().rstrip("/")
+        rel = path[len(root) :] if root and path.startswith(root) else path
+        if rel.startswith("/draft-gen"):
+            return feature_gate_response_any(
+                "FEATURE_PAGE1_DRAFT_GEN", "FEATURE_PAGE2_DRAFT_GEN"
+            )
+        if rel.startswith("/audit-modify"):
+            return feature_gate_response_any(
+                "FEATURE_PAGE1_AUDIT_MODIFY", "FEATURE_PAGE2_AUDIT_MODIFY"
+            )
+        if rel.startswith("/audit"):
+            return feature_gate_response_any("FEATURE_PAGE1_AUDIT")
+        if rel.startswith("/translate"):
+            return feature_gate_response_any(
+                "FEATURE_PAGE1_TRANSLATE", "FEATURE_PAGE2_TRANSLATE"
+            )
+        if rel.startswith("/go/sign") or rel.startswith("/api/go/batch-sign"):
+            return feature_gate_response("FEATURE_PAGE1_SIGN")
+        if rel.startswith("/go/print") or rel.startswith("/api/go/batch-print"):
+            return feature_gate_response("FEATURE_PAGE1_PRINT")
+        if rel.startswith("/exam-center"):
+            role = (request.args.get("role") or "").strip().lower()
+            if role in ("analytics", "teacher"):
+                return feature_gate_response("FEATURE_PAGE1_EXAM_CENTER")
+            if role == "student":
+                return feature_gate_response("FEATURE_PAGE2_EXAM_CENTER")
+            return feature_gate_response_any(
+                "FEATURE_PAGE1_EXAM_CENTER", "FEATURE_PAGE2_EXAM_CENTER"
+            )
+        if rel.startswith("/api/exam-center"):
+            from flask import session
+
+            active_role = str(session.get("exam_center_active_role") or "").strip().lower()
+            if active_role in ("analytics", "teacher"):
+                return feature_gate_response("FEATURE_PAGE1_EXAM_CENTER")
+            if active_role == "student":
+                return feature_gate_response("FEATURE_PAGE2_EXAM_CENTER")
+            return feature_gate_response_any(
+                "FEATURE_PAGE1_EXAM_CENTER", "FEATURE_PAGE2_EXAM_CENTER"
+            )
+        return None
+
+
+def attach_integration_blueprint_gates(
+    draft_gen_bp: Any,
+    audit_bp: Any,
+    audit_modify_bp: Any,
+    translation_bp: Any,
+) -> None:
+    """已弃用：门禁改由 register_exam_center_feature_gate 统一按路径处理。"""
+    del draft_gen_bp, audit_bp, audit_modify_bp, translation_bp
+
+
+def register_integration_feature_gates(app: "Flask") -> None:
+    register_exam_center_feature_gate(app)
 
 
 def is_multi_tenant_enabled(app: Optional["Flask"] = None) -> bool:

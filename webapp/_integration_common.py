@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import socket
 from typing import Any, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from flask import current_app, jsonify, request, session
@@ -32,6 +34,75 @@ from .tenant_context import (
 # 与 draft_generation_routes 保持同步的"读超时上限"
 INTEGRATION_READ_TIMEOUT_MAX_SECONDS = 72 * 3600
 
+# Docker Compose 服务名；在本机非容器环境通常无法 DNS 解析，需回退 localhost
+_DOCKER_INTERNAL_UPSTREAM_HOSTS = frozenset({"aicheckword"})
+
+
+def resolve_integration_api_base(raw: str) -> str:
+    """解析 aicheckword 根地址；Docker 主机名在本机开发时自动回退 127.0.0.1。"""
+    base = (raw or "").strip().rstrip("/")
+    if not base:
+        return ""
+    try:
+        parsed = urlparse(base)
+    except Exception:
+        return base
+    host = (parsed.hostname or "").strip().lower()
+    if host not in _DOCKER_INTERNAL_UPSTREAM_HOSTS:
+        return base
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        return base
+    except OSError:
+        pass
+    new_host = "127.0.0.1"
+    if port and port not in (80, 443):
+        new_netloc = f"{new_host}:{port}"
+    else:
+        new_netloc = new_host
+    fallback = urlunparse(
+        (
+            parsed.scheme or "http",
+            new_netloc,
+            parsed.path or "",
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    ).rstrip("/")
+    try:
+        current_app.logger.info(
+            "aicheckword 地址 %s 在本机不可解析，已自动改用 %s（Docker 部署请保持服务名 aicheckword）",
+            base,
+            fallback,
+        )
+    except RuntimeError:
+        pass
+    return fallback
+
+
+def format_upstream_request_error(exc: Exception, base: str = "") -> str:
+    """将 requests 异常转为可操作的提示（含本地开发 / Docker 配置说明）。"""
+    msg = str(exc)
+    base_l = (base or "").lower()
+    hint = ""
+    if "aicheckword" in msg and (
+        "getaddrinfo failed" in msg
+        or "nameresolutionerror" in msg.lower()
+        or "failed to resolve" in msg.lower()
+    ):
+        hint = (
+            " 当前为 Docker 内部主机名 aicheckword，在本机直接运行 aiword 时无法解析。"
+            "请在页面4「系统配置」将 QUIZ_API_BASE_URL 与 AICHECKWORD_DRAFT_API_BASE"
+            " 设为 http://127.0.0.1:8000（端口与 aicheckword 一致），或确认 aicheckword 容器已启动且端口已映射。"
+        )
+    elif ("127.0.0.1" in base_l or "localhost" in base_l) and (
+        "connection refused" in msg.lower() or "actively refused" in msg.lower()
+    ):
+        hint = " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。"
+    return f"上游请求失败：{exc}.{hint}" if hint else f"上游请求失败：{exc}"
+
 
 def integration_api_base() -> str:
     raw = (
@@ -39,7 +110,7 @@ def integration_api_base() -> str:
         or get_setting("QUIZ_API_BASE_URL", default="")
         or str(current_app.config.get("QUIZ_API_BASE_URL") or "")
     ).strip()
-    return raw.rstrip("/")
+    return resolve_integration_api_base(raw)
 
 
 def integration_read_timeout(setting_key: str, default: int = 600) -> int:
@@ -93,7 +164,6 @@ def integration_html_access_wall(
     from flask import redirect, session, url_for
 
     from .authz import (
-        gate_next_url,
         is_page13_super_admin,
         page13_password_configured,
         super_admin_password_gate_response,
@@ -103,7 +173,7 @@ def integration_html_access_wall(
         return None
     if page13_password_configured():
         return super_admin_password_gate_response(gate_description=gate_description)
-    return redirect(url_for("pages.login_page", next=gate_next_url()))
+    return redirect(url_for("pages.login_page"))
 
 
 def login_wall():
@@ -138,7 +208,7 @@ def fetch_upstream_common_bootstrap(
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
-        return None, f"上游请求失败：{e}"
+        return None, format_upstream_request_error(e, base)
     if r.status_code != 200:
         return None, f"上游 HTTP {r.status_code}"
     try:
@@ -214,7 +284,7 @@ def fetch_draft_page_bootstrap(
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
-        return None, f"上游请求失败：{e}", None
+        return None, format_upstream_request_error(e, base), None
     try:
         body = r.json()
     except Exception:
@@ -327,7 +397,7 @@ def upstream_get_json(
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
-        return None, f"上游请求失败：{e}"
+        return None, format_upstream_request_error(e, base)
     if r.status_code != 200:
         detail = r.text[:500]
         try:
@@ -367,7 +437,7 @@ def upstream_post_json(
             timeout=integration_requests_timeout(read_seconds=read_timeout_seconds),
         )
     except requests.RequestException as e:
-        return None, f"上游请求失败：{e}"
+        return None, format_upstream_request_error(e, base)
     if r.status_code != 200:
         detail = r.text[:500]
         try:

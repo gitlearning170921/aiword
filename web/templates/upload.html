@@ -6,9 +6,30 @@
         <h1>页面1 · 模板上传与任务管理</h1>
         <p>批量录入任务信息，支持上传模板文件（含与 aicheckword 一致的 .zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
-    {% if feature_flags.FEATURE_EXAM_CENTER %}
+    {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
     {% endif %}
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">文档工具</div>
+    <div class="card-body">
+        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从本页任务列表带入（与页面0 文档工具相同）。</p>
+        <div class="d-flex flex-wrap gap-2">
+            {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
+            <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_AUDIT %}
+            <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_AUDIT_MODIFY %}
+            <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
+            <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
+            {% endif %}
+        </div>
+    </div>
 </div>
 
 <div class="card mb-4">
@@ -77,7 +98,7 @@
 
         <!-- 新增项目弹窗 -->
         <div class="modal fade" id="newProjectModal" tabindex="-1">
-            <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h6 class="modal-title">新增项目</h6>
@@ -86,24 +107,26 @@
                     <div class="modal-body">
                         <div class="mb-2">
                             <label class="form-label small mb-0">项目名称 *</label>
-                            <input type="text" class="form-control form-control-sm" id="newProjectName" placeholder="输入项目名称...">
+                            <input type="text" class="form-control form-control-sm" id="newProjectName" placeholder="输入项目名称…">
                         </div>
-                        <div class="row g-2 mb-1">
+                        <div class="row g-2 mb-2">
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">注册国家</label>
                                 <select class="form-select form-select-sm" id="newProjectRegisteredCountry">
                                     <option value="">—</option>
                                 </select>
-                                <p class="form-text small text-muted mb-0">选项来自注册国家字典，维护请联系管理员处理</p>
+                                <p class="form-text small text-muted mb-0">选项来自注册国家字典</p>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">注册类别</label>
                                 <input type="text" class="form-control form-control-sm" id="newProjectRegisteredCategory" placeholder="如 类别A / 类别B">
                             </div>
                         </div>
-                        <div class="form-check mb-2" id="newProjectIncludeCompanyWrap" style="display:none">
-                            <input class="form-check-input" type="checkbox" id="newProjectIncludeCompany">
-                            <label class="form-check-label small" for="newProjectIncludeCompany">纳入公司总览（页面0 可见）</label>
+                        <div class="mb-2">
+                            <label class="form-label small mb-0">所属公司</label>
+                            <select class="form-select form-select-sm" id="newProjectOrganizationId">
+                                <option value="">—</option>
+                            </select>
                         </div>
                         <div class="mb-2">
                             <label class="form-label small mb-0">产品类型</label>
@@ -123,7 +146,7 @@
                             <label class="form-label small mb-0">进度描述</label>
                             <textarea class="form-control form-control-sm" id="newProjectProgress" rows="2" placeholder="可选"></textarea>
                         </div>
-                        <div class="row g-2">
+                        <div class="row g-2 mb-2">
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">优先级</label>
                                 <select class="form-select form-select-sm" id="newProjectPriority">
@@ -139,6 +162,10 @@
                                     <option value="ended">已结束</option>
                                 </select>
                             </div>
+                        </div>
+                        <div class="form-check mb-0" id="newProjectIncludeCompanyWrap" style="display:none">
+                            <input class="form-check-input" type="checkbox" id="newProjectIncludeCompany">
+                            <label class="form-check-label small" for="newProjectIncludeCompany">纳入公司总览（页面0 可见）</label>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -297,8 +324,13 @@
                 <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
             </div>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
+            {% if feature_flags.FEATURE_PAGE1_SIGN %}
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchGoSignBtn" disabled>批量去签字</button>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_PRINT %}
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchGoPrintBtn" disabled>批量去打印</button>
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_AUDIT %}
             <div class="btn-group ms-2" role="group" aria-label="aicheckword 集成">
                 <button type="button" class="btn btn-sm btn-outline-primary" id="batchAuditBtn" disabled title="对所选任务调用 aicheckword 单文档审核">批量审核（aicheckword）</button>
                 <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">
@@ -310,6 +342,7 @@
                     <li><a class="dropdown-item" href="#" data-audit-mode="traceability">跨文档可追溯性（traceability · ≥2）</a></li>
                 </ul>
             </div>
+            {% endif %}
             <div class="btn-group ms-2">
                 <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle" id="selectByProjectBtn" data-bs-toggle="dropdown" aria-expanded="false">按项目选择</button>
                 <ul class="dropdown-menu dropdown-menu-end" id="selectByProjectMenu" aria-labelledby="selectByProjectBtn"></ul>

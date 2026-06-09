@@ -10,10 +10,9 @@
         <p class="text-muted mb-1">公司总览项目单独存储，可<strong>一对多</strong>关联多个页面1 项目。「移出总览」只删除公司层记录并解除关联，页面1/2/3 不变。</p>
         <p class="small text-muted mb-0">当前可见范围（注册国家）：<strong>{{ country_scope_label }}</strong></p>
     </div>
-    <div class="d-flex gap-2 flex-wrap align-items-center">
+    <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center">
         <span id="companyUserInfo" class="badge bg-light text-dark border"></span>
         <button type="button" class="btn btn-sm btn-outline-secondary" id="companyLogoutBtn">退出登录</button>
-        <button type="button" class="btn btn-sm btn-primary" id="btnNewCompanyProject">登记新项目</button>
     </div>
 </div>
 
@@ -22,14 +21,16 @@
     <div class="card-body">
         <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从页面1/2 任务带入。</p>
         <div class="d-flex flex-wrap gap-2">
-            {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
+            {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
             <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
             {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_AUDIT %}
             <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
-            {% if feature_flags.FEATURE_PAGE2_AUDIT_MODIFY %}
+            {% endif %}
+            {% if feature_flags.FEATURE_PAGE1_AUDIT_MODIFY %}
             <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE2_TRANSLATE %}
+            {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
             <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
             {% endif %}
         </div>
@@ -243,6 +244,7 @@
             <button type="button" class="btn btn-sm btn-outline-primary" id="btnBatchEditCompanyProjects" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-outline-danger" id="btnBatchRemoveCompanyProjects" disabled>移出总览</button>
             <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshCompanyProjects">刷新</button>
+            <button type="button" class="btn btn-sm btn-primary" id="btnNewCompanyProject">登记新项目</button>
         </div>
     </div>
     <div class="card-body p-0">

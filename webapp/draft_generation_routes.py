@@ -198,6 +198,30 @@ def _login_wall():
     return login_wall()
 
 
+def _session_user_id() -> str:
+    return str(session.get("user_id") or "")
+
+
+def _account_user_id_wall():
+    """超管仅访问密码、无 user_id 时：只读 API 可用，写入/个人任务须账号登录。"""
+    uid = _session_user_id()
+    if uid:
+        return None, uid
+    from .authz import is_page13_super_admin
+
+    if is_page13_super_admin():
+        return (
+            jsonify(
+                {
+                    "message": "超级管理员（仅访问密码）请使用账号登录后再保存 LLM 设置或提交/查看个人初稿任务",
+                    "needsLogin": True,
+                }
+            ),
+            403,
+        ), ""
+    return jsonify({"message": "请先登录", "needsLogin": True}), 401, ""
+
+
 def _upload_record_visible_to_draft_user(rec: UploadRecord) -> bool:
     from ._integration_common import upload_record_visible_to_user
 
@@ -371,12 +395,9 @@ def api_task_base_hint():
 
 
 def _draft_api_base() -> str:
-    raw = (
-        get_setting("AICHECKWORD_DRAFT_API_BASE", default="")
-        or get_setting("QUIZ_API_BASE_URL", default="")
-        or str(current_app.config.get("QUIZ_API_BASE_URL") or "")
-    ).strip()
-    return raw.rstrip("/")
+    from ._integration_common import integration_api_base
+
+    return integration_api_base()
 
 
 def _draft_timeout() -> int:
@@ -691,7 +712,7 @@ def api_llm_settings_get():
     err = _login_wall()
     if err:
         return err
-    uid = str(session["user_id"])
+    uid = _session_user_id()
     row = _load_user_credential(uid)
     if not row:
         return jsonify(_llm_settings_payload_for_user(uid, configured=False))
@@ -703,6 +724,9 @@ def api_llm_settings_post():
     err = _login_wall()
     if err:
         return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
     _refresh_upstream_interop_if_stale(force=True)
     data = request.get_json(force=True) or {}
     provider = (data.get("provider") or "deepseek").strip().lower()
@@ -732,7 +756,6 @@ def api_llm_settings_post():
             }
         ), 400
 
-    uid = str(session["user_id"])
     row = _load_user_credential(uid)
     if not row:
         row = UserLlmCredential(user_id=uid, provider=provider)
@@ -959,7 +982,7 @@ def api_jobs_list():
     page = max(1, page)
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
-    uid = str(session["user_id"])
+    uid = _session_user_id()
     scope = integration_scope_from_request()
     q = DraftGenerationJob.query.filter_by(user_id=uid).filter(
         or_(
@@ -1041,7 +1064,7 @@ def api_job_snapshot(local_id: str):
     err = _login_wall()
     if err:
         return err
-    uid = str(session["user_id"])
+    uid = _session_user_id()
     job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
     if not job:
         return jsonify({"message": "任务不存在"}), 404
@@ -1143,7 +1166,9 @@ def api_jobs_submit():
     err = _login_wall()
     if err:
         return err
-    uid = str(session["user_id"])
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
     base = _draft_api_base()
     if not base:
         return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
@@ -1338,7 +1363,7 @@ def api_job_status(local_id: str):
     err = _login_wall()
     if err:
         return err
-    uid = str(session["user_id"])
+    uid = _session_user_id()
     job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
     if not job:
         return jsonify({"message": "任务不存在"}), 404
@@ -1390,7 +1415,7 @@ def api_job_download(local_id: str):
     err = _login_wall()
     if err:
         return err
-    uid = str(session["user_id"])
+    uid = _session_user_id()
     job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
     if not job or not job.upstream_job_id:
         return jsonify({"message": "任务不存在或未提交上游"}), 404

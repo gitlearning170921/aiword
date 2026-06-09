@@ -596,6 +596,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
 ---
 
+## 系统测试
+
+QA 回归请参阅 **[docs/系统测试手册.md](docs/系统测试手册.md)**（权限、公司/项目组、知识库与 aicheckword 集成端到端用例）。
+
 ## 常见问题
 
 ### Q0: 另一台服务器报 `TemplateNotFound: upload.html`

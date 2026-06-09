@@ -406,6 +406,55 @@ def repair_project_admins_without_team() -> int:
     return linked
 
 
+def repair_exam_activity_user_identity() -> int:
+    """规范化活动 user_id，并清理 display_name/username 中的 UUID/括号 id（幂等）。"""
+    from . import db
+    from .exam_display_labels import (
+        looks_like_opaque_id,
+        normalize_user_key,
+        resolve_user_record,
+        user_preferred_label,
+    )
+    from .models import ExamCenterActivity, User
+
+    fixed = 0
+    for a in ExamCenterActivity.query.all():
+        raw_uid = str(getattr(a, "user_id", "") or "").strip()
+        nk = normalize_user_key(raw_uid)
+        u = resolve_user_record(nk or raw_uid)
+        canon = str(getattr(u, "id", "") or nk or "").strip()
+        if canon and raw_uid and raw_uid != canon:
+            a.user_id = canon
+            fixed += 1
+        for field in ("display_name", "username"):
+            val = str(getattr(a, field, "") or "").strip()
+            if not val or not looks_like_opaque_id(val):
+                continue
+            if u:
+                pref = user_preferred_label(u)
+            else:
+                pref = ""
+            if pref and not looks_like_opaque_id(pref):
+                setattr(a, field, pref)
+                fixed += 1
+    for u in User.query.all():
+        for field in ("display_name", "username"):
+            val = str(getattr(u, field, "") or "").strip()
+            if not val or not looks_like_opaque_id(val):
+                continue
+            other = "username" if field == "display_name" else "display_name"
+            alt = str(getattr(u, other, "") or "").strip()
+            if alt and not looks_like_opaque_id(alt):
+                if field == "display_name":
+                    u.display_name = alt
+                else:
+                    u.username = alt
+                fixed += 1
+    if fixed:
+        db.session.commit()
+    return fixed
+
+
 def repair_exam_scope_defaults() -> None:
     """查询前可安全重复执行：默认公司/项目组绑定，不删除测试项目组。"""
     repair_exam_null_organization_ids()
@@ -415,6 +464,7 @@ def repair_exam_scope_defaults() -> None:
     repair_exam_participants_default_team()
     repair_project_admins_without_team()
     repair_users_without_team_membership()
+    repair_exam_activity_user_identity()
     try:
         from .routes import _backfill_exam_center_activities_from_attempts
 

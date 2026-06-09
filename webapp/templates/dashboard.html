@@ -7,7 +7,7 @@
         <p class="mb-1">实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
         <p class="small text-muted mb-0">项目管理员仅统计<strong>所属项目组</strong>下绑定项目；催办按项目组 webhook 发送，未配置时使用「互联网产品部」机器人。</p>
     </div>
-    {% if feature_flags.FEATURE_EXAM_CENTER %}
+    {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='analytics') }}">进入考试训练中心</a>
     {% endif %}
 </div>

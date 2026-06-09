@@ -301,7 +301,7 @@ def block_until_super_admin_or_user_id(*, for_api: bool | None = None):
         return super_admin_password_gate_response()
     if is_api:
         return jsonify({"message": "请先登录", "needsLogin": True}), 401
-    return redirect(url_for("pages.login_page", next=gate_next_url()))
+    return redirect(url_for("pages.login_page"))
 
 
 def super_admin_required(fn: Callable):
@@ -519,7 +519,16 @@ def user_in_exam_team_scope(user_id: str | None) -> bool:
     if scoped is None:
         return True
     uid = str(user_id or "").strip()
-    return bool(uid and uid in scoped)
+    if not uid:
+        return False
+    if uid in scoped:
+        return True
+    from .exam_display_labels import resolve_user_record
+
+    u = resolve_user_record(uid)
+    if u and str(getattr(u, "id", "") or "").strip() in scoped:
+        return True
+    return False
 
 
 def filter_upload_records_in_scope(records: list[UploadRecord]) -> list[UploadRecord]:
@@ -627,7 +636,7 @@ def _refresh_session_from_user(user: User) -> None:
     session["user_id"] = user.id
     session["username"] = user.username
     session["display_name"] = user.display_name or user.username
-    session["is_admin"] = bool(getattr(user, "is_admin", False))
+    session["is_admin"] = False
     role = (getattr(user, "admin_role", None) or ADMIN_ROLE_NONE).strip()
     session["admin_role"] = role if role in ADMIN_ROLES else ADMIN_ROLE_NONE
     session["team_ids"] = [

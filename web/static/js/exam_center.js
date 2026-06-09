@@ -47,11 +47,50 @@
         return String(it.set_id || it.setId || it.quiz_set_id || it.quizSetId || "").trim();
     }
 
+    function normalizeUserKey(raw) {
+        var s = String(raw == null ? "" : raw).trim();
+        var open = "([{<\uFF08\u3010\uFF3B\u300A\u300C\u300E\"'\u201C\u2018";
+        var close = ")]}>\uFF09\u3011\uFF3D\u300B\u300D\u300F\"'\u201D\u2019";
+        var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+        for (var pass = 0; pass < 4; pass++) {
+            var changed = false;
+            if (s.length >= 2 && open.indexOf(s.charAt(0)) >= 0 && close.indexOf(s.charAt(s.length - 1)) >= 0) {
+                var inner = s.slice(1, -1).trim();
+                if (inner) {
+                    s = inner;
+                    changed = true;
+                }
+            }
+            var m = s.match(uuidRe);
+            if (m) {
+                var compact = s.replace(/[^0-9a-f]/gi, "");
+                var emb = m[0].replace(/-/g, "");
+                if (compact === emb || /^[0-9a-f-]{36}$/i.test(s)) {
+                    s = m[0];
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+        return s;
+    }
+
     function isLikelyOpaqueId(s) {
         var t = String(s == null ? "" : s).trim();
         if (!t) return true;
+        var nk = normalizeUserKey(t);
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nk)) {
+            return true;
+        }
         if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) {
             return true;
+        }
+        var m = t.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+        if (m) {
+            var compact = t.replace(/[^0-9a-f]/gi, "");
+            if (compact === m[0].replace(/-/g, "") || t.length <= m[0].length + 4) {
+                return true;
+            }
         }
         if (t.length >= 32 && /^[0-9a-f-]+$/i.test(t)) return true;
         return false;
@@ -76,7 +115,13 @@
             var c = String(fields[i] == null ? "" : fields[i]).trim();
             if (c && !isLikelyOpaqueId(c)) return c;
         }
-        if (kind === "user" && it.username) return String(it.username).trim();
+        if (kind === "user" && it.username) {
+            var un = String(it.username).trim();
+            if (un && !isLikelyOpaqueId(un)) return un;
+        }
+        if (kind === "user" && it.id && !isLikelyOpaqueId(String(it.id))) {
+            return String(it.id).trim();
+        }
         if (kind === "team") return "未命名项目组";
         if (kind === "assignment") return "未命名考试任务";
         return "未知用户";
@@ -3468,10 +3513,23 @@
             if (userSel) {
                 var curU = userSel.value;
                 userSel.innerHTML = '<option value="">全部人员</option>';
+                var seenUserIds = {};
                 (opts.users || []).forEach(function (u) {
+                    if (!u || typeof u !== "object") return;
+                    var uid = normalizeUserKey(u.userId || u.id);
+                    if (!uid || seenUserIds[uid]) return;
+                    var lbl = String(u.label || u.name || u.display_name || u.displayName || "").trim();
+                    var un = String(u.username || "").trim();
+                    if ((!lbl || isLikelyOpaqueId(lbl)) && un && !isLikelyOpaqueId(un)) lbl = un;
+                    if (!lbl || isLikelyOpaqueId(lbl)) lbl = pickHumanOptionLabel(u, "user");
+                    if (!lbl || isLikelyOpaqueId(lbl) || lbl === "未知用户") return;
+                    seenUserIds[uid] = true;
                     var opt = document.createElement("option");
-                    opt.value = u.id || "";
-                    opt.textContent = pickHumanOptionLabel(u, "user");
+                    opt.value = uid;
+                    opt.textContent = lbl;
+                    if (un && un !== lbl && !isLikelyOpaqueId(un)) {
+                        opt.title = un;
+                    }
                     userSel.appendChild(opt);
                 });
                 if (curU) userSel.value = curU;
@@ -5976,6 +6034,14 @@
                             if (!ok) return;
                             var d2 = await apiRequest("/api/exam-center/activity/" + encodeURIComponent(String(r.id)), "DELETE");
                             render(d2);
+                            if (!d2 || d2.__ok === false || (d2.code != null && Number(d2.code) !== 0)) {
+                                window.alert(String((d2 && d2.message) || "删除失败"));
+                                return;
+                            }
+                            statsRecentActivityCache = (statsRecentActivityCache || []).filter(function (x) {
+                                return String((x && x.id) || "") !== String(r.id || "");
+                            });
+                            renderStatsRecentActivityTable();
                             loadStatsRecentActivity();
                             if (typeof window.__examLoadStatsOverview === "function") {
                                 window.__examLoadStatsOverview();

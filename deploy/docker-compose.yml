@@ -40,6 +40,8 @@ services:
       context: ../../aicheckword
       dockerfile: Dockerfile
     container_name: aicheckword
+    ports:
+      - "${AICHECKWORD_PUBLISH_PORT:-8000}:8000"
     expose:
       - "8000"
     env_file:

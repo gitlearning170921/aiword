@@ -1041,29 +1041,27 @@
                 notify(e.message || "保存关联失败", "danger");
             }
         });
+    }
 
-        document.getElementById("btnAddTeam")?.addEventListener("click", async () => {
-            const name = (document.getElementById("newTeamName").value || "").trim();
-            if (!name) {
-                notify("请输入组名", "warning");
-                return;
-            }
+    function companyLoginUrl() {
+        const root = (window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "");
+        return `${root}/login`;
+    }
+
+    function wireCompanyLogoutButton() {
+        const logoutBtn = document.getElementById("companyLogoutBtn");
+        if (!logoutBtn || logoutBtn.getAttribute("data-wired") === "1") return;
+        logoutBtn.setAttribute("data-wired", "1");
+        logoutBtn.addEventListener("click", async () => {
             try {
-                await apiRequest("/api/teams", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name }),
-                });
-                document.getElementById("newTeamName").value = "";
-                await loadTeams();
-                notify("已添加", "success");
-            } catch (e) {
-                notify(e.message || "添加失败", "danger");
-            }
+                await apiRequest("/api/logout", { method: "POST" });
+            } catch (_) { /* ignore */ }
+            window.location.href = companyLoginUrl();
         });
     }
 
     async function initCompanySessionBar() {
+        wireCompanyLogoutButton();
         const info = document.getElementById("companyUserInfo");
         const logoutBtn = document.getElementById("companyLogoutBtn");
         try {
@@ -1074,12 +1072,11 @@
                     if (info) info.textContent = "超级管理员（页面4 访问密码）· 可见全部公司";
                     if (logoutBtn) logoutBtn.textContent = "退出超级管理员";
                 } else {
-                    window.location.href = `${(window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "")}/login?next=${encodeURIComponent("/company")}`;
+                    window.location.href = companyLoginUrl();
                     return;
                 }
             } else if (me.user?.adminRole !== "company" && !isPage13Super) {
                 notify("仅公司管理员可访问本页", "danger");
-                return;
             } else {
                 const u = me.user || {};
                 const countries = (u.registeredCountries || []).join("、");
@@ -1092,12 +1089,6 @@
             if ((e.message || "").includes("登录")) return;
             if (info) info.textContent = "";
         }
-        logoutBtn?.addEventListener("click", async () => {
-            try {
-                await apiRequest("/api/logout", { method: "POST" });
-            } catch (_) { /* ignore */ }
-            window.location.href = `${(window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "")}/login?next=${encodeURIComponent("/company")}`;
-        });
     }
 
     async function initCompanyTrainingPanel() {
@@ -1446,6 +1437,26 @@
         document.getElementById("btnRefreshTeamDict")?.addEventListener("click", () => {
             loadTeams();
         });
+        document.getElementById("btnAddTeam")?.addEventListener("click", async () => {
+            const name = (document.getElementById("newTeamName")?.value || "").trim();
+            if (!name) {
+                notify("请输入组名", "warning");
+                return;
+            }
+            try {
+                await apiRequest("/api/teams", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name }),
+                });
+                const nameInput = document.getElementById("newTeamName");
+                if (nameInput) nameInput.value = "";
+                await loadTeams();
+                notify("已添加", "success");
+            } catch (e) {
+                notify(e.message || "添加失败", "danger");
+            }
+        });
         document.getElementById("btnSaveDictEdit")?.addEventListener("click", async () => {
             const kind = (document.getElementById("dictEditKind")?.value || "").trim();
             const id = (document.getElementById("dictEditId")?.value || "").trim();
@@ -1634,6 +1645,7 @@
 
     function boot() {
         if (body) {
+            wireCompanyLogoutButton();
             initCompanySessionBar();
             initCompanyTrainingPanel();
             initTrainingHubExtras();

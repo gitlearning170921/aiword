@@ -125,20 +125,29 @@
                 <div class="card-body">
                     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
                         <h5 class="card-title mb-0">账号管理（页面2 登录）</h5>
-                        <button type="button" class="btn btn-success btn-sm" id="btnOpenCreateUserModal">创建账号</button>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <button type="button" class="btn btn-outline-primary btn-sm" id="btnBatchUserFeaturePerms" disabled>批量功能权限</button>
+                            <button type="button" class="btn btn-success btn-sm" id="btnOpenCreateUserModal">创建账号</button>
+                        </div>
                     </div>
                     <div class="row g-2 mb-2">
-                        <div class="col-md-5">
+                        <div class="col-md-4">
                             <input type="text" class="form-control form-control-sm" id="filterUserKeyword" placeholder="筛选：用户名 / 显示名称">
                         </div>
                         <div class="col-md-4">
                             <input type="text" class="form-control form-control-sm" id="filterUserMobile" placeholder="筛选：手机号">
                         </div>
-                        <div class="col-md-3">
-                            <select class="form-select form-select-sm" id="filterUserAdmin">
-                                <option value="">全部账号</option>
-                                <option value="yes">仅管理员</option>
-                                <option value="no">仅普通账号</option>
+                        <div class="col-md-2">
+                            <select class="form-select form-select-sm" id="filterUserAdminRole">
+                                <option value="">全部分级角色</option>
+                                <option value="none">无</option>
+                                <option value="project">项目管理员</option>
+                                <option value="company">公司管理员</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-select form-select-sm" id="filterUserOrganization">
+                                <option value="">全部公司</option>
                             </select>
                         </div>
                     </div>
@@ -147,12 +156,11 @@
                         <table class="table table-sm table-bordered table-hover align-middle mb-0">
                             <thead class="table-light">
                                 <tr>
+                                    <th style="width:36px"><input type="checkbox" class="form-check-input" id="usersSelectAll" title="全选当前列表"></th>
                                     <th>用户名</th>
                                     <th>显示名称</th>
                                     <th>手机号</th>
-                                    <th>管理员</th>
                                     <th>分级角色</th>
-                                    <th>页面0</th>
                                     <th>所属公司</th>
                                     <th>国家维度</th>
                                     <th>操作</th>
@@ -345,10 +353,6 @@
                         <label class="form-label small mb-0">手机号</label>
                         <input type="text" class="form-control form-control-sm" id="newMobile" autocomplete="off">
                     </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input" type="checkbox" id="newUserIsAdmin" value="1">
-                        <label class="form-check-label small" for="newUserIsAdmin">管理员（页面2 不受功能开关限制）</label>
-                    </div>
                     <div class="mb-2">
                         <label class="form-label small mb-0">分级角色</label>
                         <select class="form-select form-select-sm" id="newUserAdminRole">
@@ -364,6 +368,15 @@
                     <div class="mb-0">
                         <label class="form-label small mb-0">页面0 · 注册国家维度（公司管理员）</label>
                         <div id="newUserCountriesPicker" class="tag-multi-picker"></div>
+                    </div>
+                    <div class="mb-0 mt-2">
+                        <label class="form-label small mb-0">所属项目组（项目管理员）</label>
+                        <div id="newUserTeamsPicker" class="tag-multi-picker"></div>
+                    </div>
+                    <div class="mb-0 mt-2 border-top pt-2">
+                        <label class="form-label small mb-0">功能权限</label>
+                        <p class="form-text small mb-2">页面1 与页面2 分项独立：须先在「系统配置」对应分区开启全局开关；选「跟随系统」表示不因本账号单独限制。仅超级管理员不受限。</p>
+                        <div id="newUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
                     </div>
                 </form>
             </div>
@@ -416,7 +429,32 @@
                     <label class="form-label small">所属项目组（项目管理员）</label>
                     <div id="editUserTeamsPicker" class="tag-multi-picker"></div>
                 </div>
+                <div class="mb-2 border-top pt-2">
+                    <label class="form-label small">功能权限</label>
+                    <p class="form-text small mb-2">页面1 与页面2 分项独立：须先在「系统配置」对应分区开启全局开关；选「跟随系统」表示不因本账号单独限制。仅超级管理员不受限。</p>
+                    <div id="editUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
+                </div>
                 <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="batchUserFeaturePermsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">批量设置功能权限</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted mb-2" id="batchUserFeaturePermsHint">已选 0 个账号</p>
+                <p class="form-text small mb-2">页面1 与页面2 分项独立。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。须先在「系统配置」对应分区开启全局开关。</p>
+                <div id="batchUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" id="saveBatchUserFeaturePermsBtn">应用到所选账号</button>
             </div>
         </div>
     </div>

@@ -175,6 +175,59 @@ def user_ids_for_team_ids(team_ids: set[str]) -> frozenset[str]:
     )
 
 
+def exam_teacher_assignable_users(*, org_id: str | None = None) -> list:
+    """老师端下发考试可选人员：优先按当前项目组；超管「全部组」时再按公司下项目组 ∪ 直绑公司账号。"""
+    from .models import User, UserOrganizationMembership
+
+    users = User.query.order_by(User.display_name.asc(), User.username.asc()).all()
+    scoped = None
+    try:
+        from .authz import exam_team_scoped_user_ids
+
+        scoped = exam_team_scoped_user_ids()
+    except Exception:
+        scoped = None
+    if scoped is not None:
+        return [u for u in users if str(u.id or "").strip() in scoped]
+
+    oid = str(org_id or "").strip()
+    if not oid:
+        return list(users)
+
+    team_ids = {
+        str(t.id).strip()
+        for t in teams_for_organization(oid, active_only=True)
+        if str(getattr(t, "id", "") or "").strip()
+    }
+    allowed = set(user_ids_for_team_ids(team_ids))
+    allowed |= {
+        str(m.user_id).strip()
+        for m in UserOrganizationMembership.query.filter_by(organization_id=oid).all()
+        if str(m.user_id).strip()
+    }
+    if not allowed:
+        return []
+    return [u for u in users if str(u.id or "").strip() in allowed]
+
+
+def activity_user_belongs_to_teams(user_key: str, team_ids: set[str]) -> bool:
+    """活动 user_id（可能是 id / username / 中文名）是否属于指定项目组。"""
+    from .exam_display_labels import exam_activity_user_id_match_keys, resolve_user_record
+
+    key = str(user_key or "").strip()
+    if not key or not team_ids:
+        return False
+    allowed = user_ids_for_team_ids(set(team_ids))
+    if not allowed:
+        return False
+    keys = exam_activity_user_id_match_keys(key)
+    if keys & allowed:
+        return True
+    u = resolve_user_record(key)
+    cid = str(getattr(u, "id", "") or "").strip()
+    return bool(cid and cid in allowed)
+
+
 def organization_id_for_exam_write(explicit: str | None = None) -> str:
     """写入考试任务/活动时使用的 company id（空则当前 scope → 默认南京鱼跃）。"""
     oid = str(explicit or "").strip()

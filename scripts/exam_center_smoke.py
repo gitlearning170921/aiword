@@ -286,6 +286,7 @@ def run_exam_team_scope_regression(app, c) -> None:
     old_registry = ""
     user_ids: list[str] = []
     pa_a_id = stu_a_id = stu_b_id = org_id = team_a_id = team_b_id = pa_username = pa_display = ""
+    act_a_id = act_b_id = ""
 
     with app.app_context():
         old_registry = _get_config_value("FEATURE_COMPANY_REGISTRY")
@@ -309,8 +310,10 @@ def run_exam_team_scope_regression(app, c) -> None:
         user_ids = [pa_a_id, stu_a_id, stu_b_id]
 
         _delete_smoke_activities_for_users(user_ids)
-        _add_exam_activity(user=stu_a, org_id=org_id, mode="practice")
-        _add_exam_activity(user=stu_b, org_id=org_id, mode="exam")
+        act_a = _add_exam_activity(user=stu_a, org_id=org_id, mode="practice")
+        act_b = _add_exam_activity(user=stu_b, org_id=org_id, mode="exam")
+        act_a_id = str(act_a.id)
+        act_b_id = str(act_b.id)
         db.session.commit()
 
     try:
@@ -356,6 +359,9 @@ def run_exam_team_scope_regression(app, c) -> None:
         assert r4.status_code == 200, r4.get_json()
         overview = (r4.get_json() or {}).get("data") or {}
         assert int(overview.get("students_total") or 0) == 1, overview
+
+        r_del_b_forbidden = c.delete(f"/api/exam-center/activity/{act_b_id}")
+        assert r_del_b_forbidden.status_code == 403, r_del_b_forbidden.get_json()
 
         with c.session_transaction() as s:
             s["page13_authenticated"] = True
@@ -468,6 +474,40 @@ def run_exam_team_scope_regression(app, c) -> None:
         }
         assert stu_a_id in pa_ids2 and stu_b_id not in pa_ids2, r7.get_json()
 
+        r_hist = c.get("/api/exam-center/student/history?limit=20")
+        assert r_hist.status_code == 200, r_hist.get_json()
+        hist_j = r_hist.get_json() or {}
+        assert hist_j.get("data", {}).get("readOnly") is True, hist_j
+        users_opts = (hist_j.get("data") or {}).get("filterOptions", {}).get("users") or []
+        labels = {
+            str(u.get("label") or u.get("name") or "")
+            for u in users_opts
+            if isinstance(u, dict)
+        }
+        assert any("exam_smoke_stu_a" in x or "stu_a" in x.lower() for x in labels), {
+            "student_observer_user_labels": users_opts,
+        }
+        assert not any(x.strip() == "未知用户" for x in labels if x), users_opts
+        import re
+
+        _uuid_in_label = re.compile(
+            r"^\(?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)?$",
+            re.I,
+        )
+        assert not any(_uuid_in_label.match(str(x).strip()) for x in labels if x), users_opts
+
+        from webapp.exam_display_labels import exam_user_filter_options, looks_like_opaque_id
+
+        dup_opts = exam_user_filter_options(
+            {
+                stu_a_id,
+                f"({stu_a_id})",
+                f"（{stu_a_id}）",
+            }
+        )
+        assert len(dup_opts) == 1, dup_opts
+        assert not looks_like_opaque_id(str(dup_opts[0].get("label") or "")), dup_opts
+
         smoke_assign_id = SMOKE_ASSIGNMENT_ID
         with app.app_context():
             from webapp.models import ExamCenterAssignmentAudience
@@ -508,6 +548,33 @@ def run_exam_team_scope_regression(app, c) -> None:
 
         r_scope_super = c.get("/api/exam-center/scope-context")
         assert r_scope_super.status_code == 200, r_scope_super.get_json()
+
+        with c.session_transaction() as s:
+            s["page13_authenticated"] = True
+            s.pop("user_id", None)
+            s.pop("admin_role", None)
+            s.pop("team_ids", None)
+            s["active_organization_id"] = org_id
+            s["active_exam_team_id"] = team_a_id
+            s.pop("exam_team_scope_all", None)
+
+        r_del_sa = c.delete(f"/api/exam-center/activity/{act_b_id}")
+        assert r_del_sa.status_code == 200, r_del_sa.get_json()
+        assert (r_del_sa.get_json() or {}).get("code") == 0, r_del_sa.get_json()
+
+        with c.session_transaction() as s:
+            s.pop("page13_authenticated", None)
+            s["user_id"] = pa_a_id
+            s["username"] = pa_username
+            s["display_name"] = pa_display
+            s["admin_role"] = ADMIN_ROLE_PROJECT
+            s["active_organization_id"] = org_id
+            s["organization_ids"] = [org_id]
+            s["team_ids"] = [team_a_id]
+
+        r_del_a = c.delete(f"/api/exam-center/activity/{act_a_id}")
+        assert r_del_a.status_code == 200, r_del_a.get_json()
+        assert (r_del_a.get_json() or {}).get("code") == 0, r_del_a.get_json()
     finally:
         with app.app_context():
             _purge_exam_smoke_database_artifacts()
@@ -746,6 +813,8 @@ def run() -> None:
             run_exam_team_scope_regression(app, c)
             checks.append("team_scope_project_admin_cannot_see_other_team")
             checks.append("super_admin_scoped_by_company_and_team")
+            checks.append("activity_delete_project_admin_team_bound")
+            checks.append("activity_delete_super_admin_cross_team")
 
         print("ALL_OK", ",".join(checks))
     finally:

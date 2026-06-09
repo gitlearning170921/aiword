@@ -962,6 +962,12 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE users ADD COLUMN can_access_company_registry INTEGER NOT NULL DEFAULT 0",
         ddl_other="ALTER TABLE users ADD COLUMN can_access_company_registry TINYINT(1) NOT NULL DEFAULT 0",
     )
+    ensure_column(
+        "users",
+        "feature_permissions_json",
+        ddl_sqlite="ALTER TABLE users ADD COLUMN feature_permissions_json TEXT",
+        ddl_other="ALTER TABLE users ADD COLUMN feature_permissions_json JSON NULL",
+    )
 
     insp_rbac2 = inspect(engine)
     rbac_tables2 = insp_rbac2.get_table_names()
@@ -1486,7 +1492,7 @@ def create_app() -> Flask:
 
     @app.context_processor
     def _inject_feature_flags():
-        """注入页面2功能开关（管理员视角全开），供模板 {% if feature_flags.xxx %} 使用。"""
+        """注入功能开关（仅超级管理员全开），供模板 {% if feature_flags.xxx %} 使用。"""
         try:
             from .app_settings import effective_feature_flags_for_request
 
@@ -1623,6 +1629,10 @@ def create_app() -> Flask:
 
         app.register_blueprint(company_bp)
         register_admin_blueprint(app)
+
+        from .app_settings import register_exam_center_feature_gate
+
+        register_exam_center_feature_gate(app)
 
         db.create_all()
         init_default_configs()

@@ -8,7 +8,12 @@ from typing import Any, Optional
 import requests
 from flask import jsonify
 
-from ._integration_common import integration_api_base, integration_requests_timeout, upstream_headers
+from ._integration_common import (
+    format_upstream_request_error,
+    integration_api_base,
+    integration_requests_timeout,
+    upstream_headers,
+)
 
 
 def upstream_unconfigured_response():
@@ -36,7 +41,7 @@ def upstream_form_post(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游请求失败：{exc}"}), 502
+        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
     try:
         body = resp.json()
     except Exception:
@@ -67,7 +72,7 @@ def upstream_json_post(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游请求失败：{exc}"}), 502
+        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
     try:
         payload = resp.json()
     except Exception:
@@ -98,7 +103,7 @@ def upstream_get(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游请求失败：{exc}"}), 502
+        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
     try:
         payload = resp.json()
     except Exception:

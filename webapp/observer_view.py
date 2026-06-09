@@ -213,33 +213,49 @@ def user_team_filter_options_for_exam(
     *,
     include_teams: bool,
 ) -> dict[str, list[dict[str, str]]]:
-    if not user_ids:
-        return {"teams": [], "users": []}
-    from .exam_display_labels import activity_display_names_for_users, human_team_name, human_user_label
+    from .exam_display_labels import exam_user_filter_options, human_team_name, normalize_user_key
 
     user_teams, _, team_names = _build_user_team_maps()
-    activity_names = activity_display_names_for_users(user_ids)
-    users = User.query.filter(User.id.in_(list(user_ids))).all()
-    user_by_id = {str(u.id): u for u in users if getattr(u, "id", None)}
+    candidate_keys: set[str] = {
+        normalize_user_key(x) for x in (user_ids or []) if normalize_user_key(x)
+    }
+
+    # 观察模式下拉：除活动表 user_id 外，补齐当前 scope 内项目组成员（避免仅有 UUID 无姓名）
+    try:
+        from .exam_scope import (
+            project_admin_team_ids_for_org,
+            resolve_active_exam_filter_team_id,
+            resolve_active_organization_id,
+            user_ids_for_team_ids,
+        )
+        from .team_organizations import teams_for_organization
+
+        org_id = resolve_active_organization_id(write_session=False)
+        team_id = resolve_active_exam_filter_team_id(org_id=org_id)
+        scope_team_ids: set[str] = set()
+        if team_id is None:
+            scope_team_ids = {str(t.id) for t in teams_for_organization(org_id, active_only=True) if str(t.id or "").strip()}
+        elif team_id:
+            scope_team_ids = {team_id}
+        else:
+            scope_team_ids = set(project_admin_team_ids_for_org(org_id))
+        if scope_team_ids:
+            candidate_keys.update(user_ids_for_team_ids(scope_team_ids))
+    except Exception:
+        pass
+
+    users_out = exam_user_filter_options(candidate_keys)
     teams: list[dict[str, str]] = []
-    users_out: list[dict[str, str]] = []
     seen_t: set[str] = set()
-    for uid in sorted(user_ids):
-        u = user_by_id.get(uid)
-        act_label = activity_names.get(uid) or ""
-        if not act_label and u:
-            act_label = str(getattr(u, "display_name", None) or getattr(u, "username", None) or "").strip()
-        label = human_user_label(uid, activity_display=act_label)
-        users_out.append({"id": uid, "label": label, "name": label})
-        if not include_teams:
-            continue
-        for tid in user_teams.get(uid) or []:
-            if tid in seen_t:
-                continue
-            seen_t.add(tid)
-            teams.append({"id": tid, "name": human_team_name(tid, name_cache=team_names)})
-    teams.sort(key=lambda x: x.get("name") or "")
-    users_out.sort(key=lambda x: x.get("label") or "")
+    if include_teams:
+        for u in users_out:
+            canonical = str(u.get("userId") or u.get("id") or "").strip()
+            for tid in user_teams.get(canonical) or []:
+                if tid in seen_t:
+                    continue
+                seen_t.add(tid)
+                teams.append({"id": tid, "name": human_team_name(tid, name_cache=team_names)})
+        teams.sort(key=lambda x: x.get("name") or "")
     return {"teams": teams, "users": users_out}
 
 
@@ -247,18 +263,34 @@ def exam_activity_observer_fields(
     user_id: str,
     *,
     preferred_team_id: str | None = None,
+    activity_display: str | None = None,
+    activity_username: str | None = None,
 ) -> dict[str, str]:
-    uid = str(user_id or "").strip()
+    from .exam_display_labels import human_user_label, normalize_user_key, resolve_user_record
+
+    uid = normalize_user_key(user_id)
     if not uid:
         return {"teamId": "", "teamName": "", "userId": "", "displayName": ""}
-    from .team_data_migration import DEFAULT_TEAM_NAME
 
     user_teams, _, team_names = _build_user_team_maps()
-    u = User.query.get(uid)
-    label = str(getattr(u, "display_name", None) or getattr(u, "username", None) or uid).strip()
-    tids = user_teams.get(uid) or []
+    u = resolve_user_record(uid)
+    canonical_uid = str(getattr(u, "id", None) or uid).strip()
+    act_disp = str(activity_display or "").strip() or None
+    act_user = str(activity_username or "").strip() or None
+    if not act_disp and u:
+        act_disp = str(getattr(u, "display_name", None) or "").strip() or None
+    if not act_user and u:
+        act_user = str(getattr(u, "username", "") or "").strip() or None
+    label = human_user_label(
+        uid,
+        activity_display=act_disp,
+        activity_username=act_user,
+    )
+    tids = user_teams.get(canonical_uid) or user_teams.get(uid) or []
     pref = str(preferred_team_id or "").strip()
     tid = ""
+    from .team_data_migration import DEFAULT_TEAM_NAME
+
     if pref:
         tid = pref
     else:
@@ -275,6 +307,6 @@ def exam_activity_observer_fields(
     return {
         "teamId": tid,
         "teamName": team_label,
-        "userId": uid,
+        "userId": canonical_uid,
         "displayName": label,
     }
