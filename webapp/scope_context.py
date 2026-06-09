@@ -148,11 +148,11 @@ def _empty_reason_hints(page_key: str, *, org_count: int, team_count: int) -> li
             hints.append("若列表为空，可尝试切换「所属公司」或选择「全部公司（并集）」")
         return hints
     if not org_count and not is_company_admin():
-        hints.append("账号未绑定任何公司，请联系管理员在页面4「账号管理」配置所属公司")
+        hints.append("账号未绑定公司，相关列表可能为空")
     if rbac_enforced() and is_project_admin() and not team_count:
-        hints.append("账号未分配项目组，请联系管理员在页面4「账号管理」配置所属项目组")
+        hints.append("账号未分配项目组，相关列表可能为空")
     if rbac_enforced() and is_normal_user() and not team_count:
-        hints.append("账号未分配项目组，页面1 项目与任务可能无法显示")
+        hints.append("未分配项目组，部分列表可能为空")
     if page_key == "page0" and is_company_admin():
         scopes = user_country_scopes()
         if scopes:
@@ -162,8 +162,8 @@ def _empty_reason_hints(page_key: str, *, org_count: int, team_count: int) -> li
     if page_key == "exam":
         if is_normal_user() and not team_count:
             hints.append("学生端需先分配项目组并关联公司，否则无法加载考试任务")
-        elif is_project_admin() and team_count > 1:
-            hints.append("可在考试中心顶部切换项目组查看不同组的数据")
+        elif is_project_admin() and team_count:
+            hints.append("更换所属项目组后将看不到原项目组的数据；每人仅绑定一个项目组")
     if page_key == "page2" and is_normal_user():
         hints.append("若为空，请确认已在页面1 创建/分配任务，且编写人与当前账号一致")
     return hints
@@ -207,7 +207,7 @@ def scope_context_payload(*, page_key: str | None = None) -> dict[str, Any]:
 
     warnings: list[str] = []
     msg = str(org_payload.get("message") or "").strip()
-    if msg:
+    if msg and is_page13_super_admin():
         warnings.append(msg)
 
     scope_summary_parts: list[str] = [f"角色：{role_label}"]
@@ -264,7 +264,7 @@ def scope_context_payload(*, page_key: str | None = None) -> dict[str, Any]:
         "emptyReasons": _empty_reason_hints(page, org_count=len(allowed_org_ids), team_count=len(team_ids)),
         "warnings": warnings,
         "canSwitchOrganization": len(orgs) > 1 or is_page13_super_admin(),
-        "canSwitchTeam": bool(is_page13_super_admin() or (is_project_admin() and len(teams) > 1)),
+        "canSwitchTeam": bool(is_page13_super_admin()),
         "diagnosticsAvailable": bool(is_page13_super_admin()),
         "countryScopes": user_country_scopes() if is_company_registry_user() else None,
     }

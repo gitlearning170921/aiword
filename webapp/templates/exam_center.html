@@ -71,7 +71,9 @@
             <span class="ms-2">当前用户：<span class="fw-bold" id="examCurrentUserLabel">{{ exam_display_user or "—" }}</span></span>
             {% endif %}
         </div>
+        {% if is_page13_super_admin %}
         <div id="examChromeProxyHint" class="small text-muted {% if exam_role == 'student' %}d-none{% endif %}">后端接口统一走 aiword 代理；考试与录题相关参数可在老师端「考试与录题配置」中维护（与页面4 系统配置同源写入数据库）。</div>
+        {% endif %}
         <div class="mt-2 d-flex flex-wrap gap-2 align-items-end">
             <div style="min-width: 14rem;">
                 <label class="form-label small mb-1" for="exam_organization">所属公司（知识库）</label>

@@ -70,7 +70,79 @@
         };
     }
 
+    function dictDeleteConfirmMessage(kind, name, item) {
+        const usage = (item && item.usage) || {};
+        const parts = [];
+        if (usage.companyProjects) {
+            parts.push(
+                `${usage.companyProjects} 个公司总览项目的${kind === "country" ? "注册国家" : "项目组归属"}`
+            );
+        }
+        if (usage.projects) {
+            parts.push(`${usage.projects} 个页面1 项目的${kind === "country" ? "注册国家" : "项目组归属"}`);
+        }
+        if (kind === "country" && usage.userScopes) {
+            parts.push(`${usage.userScopes} 条账号国家维度绑定`);
+        }
+        if (kind === "team" && usage.userMemberships) {
+            parts.push(`${usage.userMemberships} 条账号项目组绑定`);
+        }
+        const label = kind === "country" ? `注册国家「${name || ""}」` : `项目组「${name || ""}」`;
+        if (!parts.length) {
+            return `确定删除${label}？`;
+        }
+        return `当前操作${label}及其关联的 ${parts.join("、")} 都会被删除，是否确认？`;
+    }
+
+    function projectHasPage1Tasks(project) {
+        return !!(
+            project &&
+            (project.organizationIdLocked ||
+                project.page1UploadTasksLocked ||
+                project.page1HasUploadTasks)
+        );
+    }
+
+    function companyProjectCascadeConfirmMessage(editing, payload) {
+        if (!editing || !canOverridePage1Lock || !projectHasPage1Tasks(editing)) return "";
+        const msgs = [];
+        const orgChanged =
+            payload.organizationId !== undefined &&
+            String(payload.organizationId || "").trim() !== String(editing.organizationId || "").trim();
+        const teamChanged =
+            payload.assignedTeamId !== undefined &&
+            String(payload.assignedTeamId || "").trim() !== String(editing.assignedTeamId || "").trim();
+        if (orgChanged) {
+            msgs.push("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务");
+        }
+        if (teamChanged) {
+            msgs.push("所属项目组及关联页面1 项目");
+        }
+        if (!msgs.length) return "";
+        return `当前操作${msgs.join("与")}都会被更新，是否确认？`;
+    }
+
+    function batchCompanyProjectCascadeConfirmMessage(ids, payload) {
+        if (!canOverridePage1Lock || !ids.length) return "";
+        const selected = projectsCache.filter((p) => ids.includes(p.id));
+        if (!selected.some(projectHasPage1Tasks)) return "";
+        const orgChanged = payload.organizationId !== undefined && String(payload.organizationId || "").trim() !== "";
+        const teamChanged = payload.assignedTeamId !== undefined;
+        const msgs = [];
+        if (orgChanged) {
+            msgs.push("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务");
+        }
+        if (teamChanged) {
+            msgs.push("所属项目组及关联页面1 项目");
+        }
+        if (!msgs.length) return "";
+        const n = selected.filter(projectHasPage1Tasks).length;
+        const scope = n > 1 ? `已选 ${n} 个含任务项目的` : "该项目的";
+        return `当前操作${scope}${msgs.join("与")}都会被更新，是否确认？`;
+    }
+
     function selectedProjectIds() {
+        const body = document.getElementById("companyProjectsBody");
         if (!body) return [];
         return [...body.querySelectorAll(".cp-row-checkbox:checked")]
             .map((cb) => cb.dataset.id)
@@ -322,11 +394,11 @@
                     item.usageCount > 0
                         ? `<span class="badge bg-secondary dict-usage-badge" title="${esc(usageText)}">已引用 ${item.usageCount}</span>`
                         : '<span class="badge bg-light text-muted dict-usage-badge">未引用</span>';
-                const delDisabled = item.canDelete === false ? " disabled" : "";
-                const delTitle = item.canDelete === false
-                    ? ` title="${esc(usageText ? `已绑定：${usageText}` : "已有绑定数据，不可删除")}"`
-                    : "";
-                return `<li class="list-group-item dict-item-row d-flex justify-content-between align-items-center flex-wrap">
+                const delTitle =
+                    item.usageCount > 0
+                        ? ` title="${esc(dictDeleteConfirmMessage(kind, item.name, item))}"`
+                        : "";
+                return `<li class="list-group-item dict-item-row d-flex justify-content-between align-items-center flex-wrap" data-dict-id="${esc(item.id)}">
                     <div class="d-flex align-items-center gap-2 flex-wrap">
                         <span class="fw-medium">${esc(item.name)}</span>
                         ${orgBadge}
@@ -334,7 +406,7 @@
                     </div>
                     <div class="dict-item-actions btn-group btn-group-sm">
                         <button type="button" class="btn btn-outline-secondary btn-dict-edit" data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}" data-org-ids="${esc((item.organizationIds || []).join(","))}">编辑</button>
-                        <button type="button" class="btn btn-outline-danger btn-dict-delete"${delDisabled}${delTitle} data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}">删除</button>
+                        <button type="button" class="btn btn-outline-danger btn-dict-delete"${delTitle} data-kind="${esc(kind)}" data-id="${esc(item.id)}" data-name="${esc(item.name)}" data-usage-count="${Number(item.usageCount) || 0}">删除</button>
                     </div>
                 </li>`;
             })
@@ -348,15 +420,26 @@
         });
         ul.querySelectorAll(".btn-dict-delete").forEach((btn) => {
             btn.addEventListener("click", async () => {
-                if (btn.disabled) return;
                 const { kind, id, name } = btn.dataset;
-                if (!id || !window.confirm(`确定删除「${name || ""}」？`)) return;
+                if (!id) return;
+                const usageCount = Number(btn.dataset.usageCount || 0);
+                const list = kind === "country" ? registeredCountriesDictFull : teams;
+                const item = (list || []).find((x) => String(x.id) === String(id)) || {
+                    name,
+                    usageCount,
+                };
+                const msg = dictDeleteConfirmMessage(kind, name, item);
+                if (!window.confirm(msg)) return;
                 try {
                     const url =
                         kind === "country"
                             ? `/api/company/registered-countries/${id}`
                             : `/api/teams/${id}`;
-                    await apiRequest(url, { method: "DELETE" });
+                    await apiRequest(url, {
+                        method: "DELETE",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ cascade: usageCount > 0 }),
+                    });
                     notify("已删除", "success");
                     if (kind === "country") await loadRegisteredCountriesDict();
                     else await loadTeams();
@@ -706,11 +789,15 @@
     }
 
     function renderGroupHeaderRow(header) {
-        const indent = header.level === 2 ? " ps-4" : "";
+        const subCls = header.level === 2 ? " cp-group-header--sub" : "";
         const badge = `<span class="text-muted fw-normal ms-1">(${header.count})</span>`;
-        return `<tr class="cp-group-header table-secondary">
-            <td colspan="${COLS}" class="small fw-semibold${indent}">${esc(header.title)}：${esc(header.label)}${badge}</td>
+        return `<tr class="cp-group-header">
+            <td colspan="${COLS}" class="small fw-semibold${subCls}">${esc(header.title)}：${esc(header.label)}${badge}</td>
         </tr>`;
+    }
+
+    function renderLockBadge(hint, label) {
+        return `<span class="badge bg-warning text-dark" title="${esc(hint)}">${esc(label || "已锁定")}</span>`;
     }
 
     function renderStarCell(p) {
@@ -723,43 +810,28 @@
 
     function renderProjectRow(p) {
         const rowCls = p.isStarred ? " cp-row-starred" : "";
+        const orgBadges = isOrganizationIdLocked(p) ? renderLockBadge(ORG_LOCK_HINT, "已锁定") : "";
+        const teamBadges = isPage1TasksLocked(p) ? renderLockBadge(TEAM_LOCK_HINT, "已锁定") : "";
+        const statusBadges = isPage1TasksLocked(p) ? renderLockBadge(STATUS_LOCK_HINT, "状态锁定") : "";
         return `<tr data-project-id="${esc(p.id)}" class="${rowCls.trim()}">
-                <td class="text-center">${renderStarCell(p)}</td>
-                <td><input type="checkbox" class="form-check-input cp-row-checkbox" data-id="${esc(p.id)}"></td>
-                <td>${esc(p.name)}</td>
-                <td>${esc(p.productType || "—")}</td>
-                <td class="small">${esc(p.registeredCountry || "—")} / ${esc(p.registeredCategory || "—")}</td>
+                <td class="text-center align-middle">${renderStarCell(p)}</td>
+                <td class="text-center align-middle"><input type="checkbox" class="form-check-input cp-row-checkbox" data-id="${esc(p.id)}"></td>
+                <td class="cp-cell-text fw-medium">${esc(p.name)}</td>
+                <td class="cp-cell-text">${esc(p.productType || "—")}</td>
+                <td class="cp-cell-text"><span>${esc(p.registeredCountry || "—")}</span><span class="cp-cell-meta">${esc(p.registeredCategory || "—")}</span></td>
                 <td>
                     <input type="text" class="form-control form-control-sm cp-registration-owner-input"
                            data-id="${esc(p.id)}" value="${esc(p.registrationOwner || "")}" placeholder="—">
                 </td>
-                <td class="small">${esc(p.organizationName || "—")}${
-                    isOrganizationIdLocked(p)
-                        ? ' <span class="badge bg-warning text-dark" title="' +
-                          esc(ORG_LOCK_HINT) +
-                          '">已锁定</span>'
-                        : ""
-                }</td>
-                <td>${esc(p.assignedTeamName || "—")}${
-                    isPage1TasksLocked(p)
-                        ? ' <span class="badge bg-warning text-dark" title="' +
-                          esc(TEAM_LOCK_HINT) +
-                          '">已锁定</span>'
-                        : ""
-                }</td>
-                <td>${esc(p.priorityLabel || p.priority)}</td>
-                <td>${esc(p.statusLabel || p.status)}${
-                    isPage1TasksLocked(p)
-                        ? ' <span class="badge bg-warning text-dark" title="' +
-                          esc(STATUS_LOCK_HINT) +
-                          '">状态锁定</span>'
-                        : ""
-                }</td>
-                <td class="small">${esc(p.expectedCertificationDate || "—")}</td>
-                <td class="small">${esc(p.expectedSubmissionDate || "—")}</td>
-                <td class="small text-truncate" style="max-width:200px" title="${esc(p.progressDescription || "")}">${esc(p.progressDescription || "—")}</td>
-                <td class="small">${Number(p.linkedPage1Count) || 0} 个</td>
-                <td class="text-nowrap">
+                <td class="cp-cell-text"><div class="cp-cell-badges"><span>${esc(p.organizationName || "—")}</span>${orgBadges}</div></td>
+                <td class="cp-cell-text"><div class="cp-cell-badges"><span>${esc(p.assignedTeamName || "—")}</span>${teamBadges}</div></td>
+                <td class="cp-cell-text">${esc(p.priorityLabel || p.priority)}</td>
+                <td class="cp-cell-text"><div class="cp-cell-badges"><span>${esc(p.statusLabel || p.status)}</span>${statusBadges}</div></td>
+                <td class="cp-cell-text text-nowrap">${esc(p.expectedCertificationDate || "—")}</td>
+                <td class="cp-cell-text text-nowrap">${esc(p.expectedSubmissionDate || "—")}</td>
+                <td class="cp-cell-text cp-progress-cell" title="${esc(p.progressDescription || "")}">${esc(p.progressDescription || "—")}</td>
+                <td class="text-center cp-cell-text">${Number(p.linkedPage1Count) || 0}</td>
+                <td class="cp-actions-cell text-end">
                     <button type="button" class="btn btn-sm btn-outline-secondary btn-link-cp" data-id="${esc(p.id)}">关联</button>
                     <button type="button" class="btn btn-sm btn-outline-primary btn-edit-cp" data-id="${esc(p.id)}">编辑</button>
                     <button type="button" class="btn btn-sm btn-outline-danger btn-remove-cp" data-id="${esc(p.id)}">移出</button>
@@ -958,6 +1030,8 @@
                 notify("请至少选择一项要修改的字段", "warning");
                 return;
             }
+            const cascadeMsg = batchCompanyProjectCascadeConfirmMessage(ids, payload);
+            if (cascadeMsg && !window.confirm(cascadeMsg)) return;
             try {
                 const res = await apiRequest("/api/company/projects/batch", {
                     method: "POST",
@@ -1003,6 +1077,9 @@
                 return;
             }
             const id = (document.getElementById("cpEditId").value || "").trim();
+            const editing = id ? projectsCache.find((x) => x.id === id) : null;
+            const cascadeMsg = companyProjectCascadeConfirmMessage(editing, payload);
+            if (cascadeMsg && !window.confirm(cascadeMsg)) return;
             try {
                 if (id) {
                     await apiRequest(`/api/company/projects/${id}`, {

@@ -46,6 +46,7 @@ from ._integration_common import (
     integration_requests_timeout,
     integration_scope_from_request,
     integration_scope_list_filter,
+    integration_organization_list_filter,
     login_wall,
     manual_upload_only_from_request,
     safe_truncate,
@@ -921,6 +922,7 @@ def api_audit_jobs_list():
     scope = integration_scope_from_request()
     q = AuditJob.query.filter_by(user_id=uid)
     q = integration_scope_list_filter(q, AuditJob, scope)
+    q = integration_organization_list_filter(q, AuditJob)
     total = q.count()
     rows = (
         q

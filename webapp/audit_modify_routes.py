@@ -47,6 +47,7 @@ from ._integration_common import (
     integration_requests_timeout,
     integration_scope_from_request,
     integration_scope_list_filter,
+    integration_organization_list_filter,
     latest_audit_report_id_for_scope,
     login_wall,
     manual_upload_only_from_request,
@@ -562,6 +563,30 @@ def api_audit_modify_create_job():
 
     uid_session = str(session.get("user_id") or "")
     job_scope = integration_scope_from_request()
+    audit_modify_snap = {
+        k: payload_obj.get(k)
+        for k in (
+            "collection",
+            "base_case_id",
+            "project_id",
+            "document_language",
+            "registration_country",
+            "registration_type",
+            "registration_component",
+            "project_form",
+            "provider",
+            "draft_strategy",
+            "inplace_patch",
+            "save_as_case",
+            "skip_case_template_text",
+            "docx_track_changes",
+            "audit_remediation_by_target",
+            "template_file_names",
+            "base_files_by_target",
+        )
+    }
+    if base_upload_id:
+        audit_modify_snap["base_upload_id"] = base_upload_id
     # 本地 job：复用 DraftGenerationJob，标记 source=audit_modify
     local_job = DraftGenerationJob(
         user_id=uid_session,
@@ -574,28 +599,7 @@ def api_audit_modify_create_job():
         template_names_json=list(target_names),
         input_display_names_json=[upload_name],
         integration_scope=job_scope,
-        payload_snapshot_json={
-            k: payload_obj.get(k)
-            for k in (
-                "collection",
-                "base_case_id",
-                "project_id",
-                "document_language",
-                "registration_country",
-                "registration_type",
-                "registration_component",
-                "project_form",
-                "provider",
-                "draft_strategy",
-                "inplace_patch",
-                "save_as_case",
-                "skip_case_template_text",
-                "docx_track_changes",
-                "audit_remediation_by_target",
-                "template_file_names",
-                "base_files_by_target",
-            )
-        },
+        payload_snapshot_json=audit_modify_snap,
         message="提交中…",
         source="audit_modify",
     )
@@ -702,6 +706,7 @@ def api_audit_modify_jobs_list():
     scope = integration_scope_from_request()
     q = DraftGenerationJob.query.filter_by(user_id=uid, source="audit_modify")
     q = integration_scope_list_filter(q, DraftGenerationJob, scope)
+    q = integration_organization_list_filter(q, DraftGenerationJob)
     total = q.count()
     rows = (
         q

@@ -1,0 +1,9 @@
+# Docker 生产镜像专用（不含 PyInstaller；Windows exe 打包仍用 requirements.txt）
+python-docx>=0.8.11
+openpyxl>=3.1.0
+Flask>=3.0.0
+Flask-SQLAlchemy>=3.1.1
+PyMySQL>=1.1.0
+APScheduler>=3.10.0
+cryptography>=42.0.0
+requests>=2.31.0

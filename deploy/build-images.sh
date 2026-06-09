@@ -17,12 +17,20 @@ fi
 
 command -v docker >/dev/null || { echo "请先安装 Docker"; exit 1; }
 
+export DOCKER_BUILDKIT=1
+
 AIWORD_IMAGE="aiword:${VERSION}"
 AICHECKWORD_IMAGE="aicheckword:${VERSION}"
 
-echo "==> platform=${PLATFORM}"
-docker build --platform "${PLATFORM}" -t "${AIWORD_IMAGE}" -f "${AIWORD_ROOT}/Dockerfile" "${AIWORD_ROOT}"
-docker build --platform "${PLATFORM}" -t "${AICHECKWORD_IMAGE}" -f "${AICHECKWORD_ROOT}/Dockerfile" "${AICHECKWORD_ROOT}"
+echo "==> platform=${PLATFORM} (parallel, BuildKit=1)"
+
+docker build --platform "${PLATFORM}" -t "${AIWORD_IMAGE}" -f "${AIWORD_ROOT}/Dockerfile" "${AIWORD_ROOT}" &
+pid_aiword=$!
+docker build --platform "${PLATFORM}" -t "${AICHECKWORD_IMAGE}" -f "${AICHECKWORD_ROOT}/Dockerfile" "${AICHECKWORD_ROOT}" &
+pid_aicheckword=$!
+
+wait "${pid_aiword}"
+wait "${pid_aicheckword}"
 
 docker tag "${AIWORD_IMAGE}" aiword:local
 docker tag "${AICHECKWORD_IMAGE}" aicheckword:local
@@ -31,6 +39,7 @@ mkdir -p "${SCRIPT_DIR}/dist"
 cat > "${SCRIPT_DIR}/dist/manifest-${VERSION}.txt" <<EOF
 version=${VERSION}
 platform=${PLATFORM}
+buildkit=1
 built_at=$(date '+%Y-%m-%d %H:%M:%S')
 aiword_image=${AIWORD_IMAGE}
 aicheckword_image=${AICHECKWORD_IMAGE}

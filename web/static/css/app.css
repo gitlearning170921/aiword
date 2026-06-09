@@ -711,6 +711,48 @@ tr.cp-row-starred > td {
 }
 
 /* 页面1 · 任务录入：项目信息固定、任务表区域可滚动且表头固定 */
+.task-entry-card {
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(180deg, #fafbfc 0%, #fff 120px);
+}
+.task-entry-card-header .card-title {
+    color: #0f172a;
+    font-weight: 700;
+}
+.task-entry-quick-pick {
+    border: 1px dashed rgba(13, 110, 253, 0.35);
+    background: rgba(13, 110, 253, 0.04);
+}
+.project-block {
+    overflow: hidden;
+    border-radius: 12px !important;
+    border: 1px solid rgba(15, 23, 42, 0.1) !important;
+}
+.project-entry-block-head {
+    background: linear-gradient(90deg, rgba(13, 110, 253, 0.08), rgba(13, 110, 253, 0.02));
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.project-entry-layer-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+.project-entry-layer-badge--project {
+    color: #0b5ed7;
+    background: rgba(13, 110, 253, 0.12);
+}
+.project-entry-layer-badge--task {
+    color: #0f766e;
+    background: rgba(20, 184, 166, 0.14);
+}
+.project-entry-task-panel {
+    background: #fbfcfe;
+    border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
 .project-block .project-entry-meta-panel {
     position: sticky;
     top: 0;
@@ -748,15 +790,54 @@ tr.cp-row-starred > td {
     position: sticky;
     top: 0;
     z-index: 12;
-    background: #f8f9fa;
+    background: #eef2ff;
+    color: #1e293b;
+    font-size: 0.78rem;
+    font-weight: 700;
     box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
 }
 .project-block .project-entry-task-table thead tr.project-entry-head-row2 th {
     position: sticky;
     top: 2.4rem;
     z-index: 11;
-    background: #f8f9fa;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 0.72rem;
     box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
+}
+.project-block .project-entry-task-table td {
+    vertical-align: middle;
+    background: #fff;
+}
+.project-block .project-entry-task-table .form-control,
+.project-block .project-entry-task-table .form-select {
+    min-width: 6.5rem;
+    border-color: rgba(15, 23, 42, 0.12);
+}
+.project-block .project-entry-task-table .form-control:focus,
+.project-block .project-entry-task-table .form-select:focus {
+    border-color: rgba(13, 110, 253, 0.45);
+    box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.12);
+}
+.task-record-modal .modal-header {
+    background: linear-gradient(180deg, #f8fafc, #fff);
+}
+.task-record-section {
+    padding: 0.85rem 1rem;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 10px;
+    background: #fbfcfe;
+}
+.task-record-section + .task-record-section {
+    margin-top: 0.75rem;
+}
+.task-record-section-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 0.65rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
 .project-block .project-entry-task-table .task-row-select-col {
     width: 2rem;
@@ -846,5 +927,172 @@ tr.cp-row-starred > td {
 }
 .dict-item-list .dict-item-actions {
     flex-shrink: 0;
+}
+
+/* 页面0 · 全公司项目列表 */
+.company-projects-card-header {
+    padding-top: 0.85rem;
+    padding-bottom: 0.75rem;
+}
+.company-projects-filters {
+    row-gap: 0.5rem;
+}
+.company-projects-filter-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0;
+}
+.company-projects-filter-label {
+    font-size: 0.8125rem;
+    color: #64748b;
+    white-space: nowrap;
+}
+.company-projects-filter-item .form-select {
+    min-width: 9rem;
+}
+.company-projects-table-wrap {
+    max-height: min(72vh, 820px);
+    overflow: auto;
+}
+.company-projects-table {
+    min-width: 1280px;
+    font-size: 0.8125rem;
+}
+.company-projects-table thead th {
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 0.75rem;
+    color: #475569;
+    vertical-align: middle;
+    border-bottom-width: 2px;
+}
+.company-projects-table .cp-col-star { width: 2.25rem; }
+.company-projects-table .cp-col-check { width: 2.5rem; }
+.company-projects-table .cp-col-name { min-width: 9rem; }
+.company-projects-table .cp-col-type { min-width: 6.5rem; }
+.company-projects-table .cp-col-country { min-width: 8.5rem; }
+.company-projects-table .cp-col-owner { min-width: 7rem; }
+.company-projects-table .cp-col-org { min-width: 7.5rem; }
+.company-projects-table .cp-col-team { min-width: 6.5rem; }
+.company-projects-table .cp-col-priority,
+.company-projects-table .cp-col-status { width: 4.5rem; }
+.company-projects-table .cp-col-date { width: 6.5rem; white-space: nowrap; }
+.company-projects-table .cp-col-progress { min-width: 8rem; max-width: 12rem; }
+.company-projects-table .cp-col-link { width: 5rem; }
+.company-projects-table .cp-col-actions { width: 10.5rem; }
+.company-projects-table tbody td {
+    vertical-align: middle;
+}
+.company-projects-table tr.cp-group-header td {
+    background: #eef2f7;
+    border-top: 2px solid #cbd5e1;
+    border-bottom: 1px solid #dbe3ed;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8125rem;
+    color: #334155;
+}
+.company-projects-table tr.cp-group-header td.cp-group-header--sub {
+    background: #f4f6f9;
+    border-top-width: 1px;
+    padding-left: 1.75rem;
+}
+.company-projects-table tr.cp-row-starred {
+    background-color: rgba(255, 193, 7, 0.07);
+}
+.company-projects-table .cp-cell-text {
+    line-height: 1.35;
+}
+.company-projects-table .cp-cell-meta {
+    display: block;
+    color: #64748b;
+    font-size: 0.75rem;
+}
+.company-projects-table .cp-cell-badges {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+}
+.company-projects-table .cp-cell-badges .badge {
+    font-size: 0.65rem;
+    font-weight: 500;
+}
+.company-projects-table .cp-registration-owner-input {
+    min-width: 6rem;
+    max-width: 100%;
+}
+.company-projects-table .cp-actions-cell {
+    white-space: nowrap;
+}
+.company-projects-table .cp-actions-cell .btn {
+    padding: 0.12rem 0.45rem;
+    font-size: 0.75rem;
+}
+.company-projects-table .cp-progress-cell {
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 页面1 · 项目管理列表 */
+.page1-projects-card-header {
+    padding-top: 0.85rem;
+    padding-bottom: 0.75rem;
+}
+.page1-projects-table-wrap {
+    max-height: min(68vh, 720px);
+    overflow: auto;
+}
+.page1-projects-table {
+    min-width: 1180px;
+    font-size: 0.8125rem;
+}
+.page1-projects-table thead th {
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 0.75rem;
+    color: #475569;
+    vertical-align: middle;
+    border-bottom-width: 2px;
+}
+.page1-projects-table .p1-col-check { width: 2.5rem; }
+.page1-projects-table .p1-col-name { min-width: 9rem; }
+.page1-projects-table .p1-col-country,
+.page1-projects-table .p1-col-category { min-width: 6.5rem; }
+.page1-projects-table .p1-col-org { min-width: 7.5rem; }
+.page1-projects-table .p1-col-type { min-width: 6rem; }
+.page1-projects-table .p1-col-date { width: 6.75rem; }
+.page1-projects-table .p1-col-progress { min-width: 8rem; max-width: 11rem; }
+.page1-projects-table .p1-col-priority,
+.page1-projects-table .p1-col-status { width: 4.75rem; }
+.page1-projects-table .p1-col-actions { width: 9.5rem; }
+.page1-projects-table tbody td {
+    vertical-align: middle;
+}
+.page1-projects-table .p1-cell-name .badge {
+    font-size: 0.65rem;
+    margin-left: 0.25rem;
+    vertical-align: middle;
+}
+.page1-projects-table .p1-cell-field .form-control,
+.page1-projects-table .p1-cell-field .form-select {
+    min-width: 0;
+}
+.page1-projects-table .p1-progress-input {
+    min-height: 1.85rem;
+    resize: vertical;
+    max-height: 4.5rem;
+}
+.page1-projects-table .p1-actions-cell {
+    white-space: nowrap;
+}
+.page1-projects-table .p1-actions-cell .btn {
+    padding: 0.12rem 0.45rem;
+    font-size: 0.75rem;
+}
+.page1-projects-table .p1-actions-cell .btn + .btn {
+    margin-left: 0.25rem;
 }
 

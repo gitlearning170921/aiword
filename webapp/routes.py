@@ -2873,6 +2873,48 @@ def _default_project_team_id() -> str | None:
     return str(row.id or "").strip() if row else None
 
 
+def _resolve_assigned_team_id_for_project_autocreate() -> str | None:
+    """任务录入自动补项目行时：项管用所属项目组，其它角色回退默认组。"""
+    from .authz import is_project_admin, rbac_enforced, user_team_ids
+
+    if rbac_enforced() and is_project_admin():
+        tids = user_team_ids()
+        if tids:
+            return tids[0]
+    return _default_project_team_id()
+
+
+def _realign_project_team_for_creator(project: Project | None) -> None:
+    """创建人再次录入时，若项目误绑其它项目组则改回其所属组（避免看不到自己建的项目）。"""
+    from .authz import is_project_admin, rbac_enforced, user_team_ids
+
+    if project is None or not rbac_enforced() or not is_project_admin():
+        return
+    uid = str(session.get("user_id") or "").strip()
+    if not uid:
+        return
+    creator = str(getattr(project, "created_by_user_id", "") or "").strip()
+    if creator and creator != uid:
+        return
+    tids = [str(x).strip() for x in user_team_ids() if str(x).strip()]
+    if not tids:
+        return
+    tid = str(getattr(project, "assigned_team_id", "") or "").strip()
+    if tid in tids:
+        return
+    project.assigned_team_id = tids[0]
+    if not creator:
+        project.created_by_user_id = uid
+    db.session.add(project)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    from .authz import _invalidate_project_lookup_maps
+
+    _invalidate_project_lookup_maps()
+
+
 def _ensure_project_row(project_name: str) -> Project | None:
     # 兼容旧数据：project_name 可能是 base name，也可能是展示键(label)
     from .authz import _invalidate_project_lookup_maps, _project_lookup_maps
@@ -2884,16 +2926,18 @@ def _ensure_project_row(project_name: str) -> Project | None:
     _by_id, by_label, by_name = _project_lookup_maps()
     existing = by_label.get(label) or by_name.get(label)
     if existing is not None:
+        _realign_project_team_for_creator(existing)
         return existing
 
-    default_team_id = _default_project_team_id()
+    team_id = _resolve_assigned_team_id_for_project_autocreate()
     row = Project(
         name=label,
         priority=Project.PRIORITY_MEDIUM,
         status=Project.STATUS_ACTIVE,
         registered_country=None,
         registered_category=None,
-        assigned_team_id=default_team_id,
+        assigned_team_id=team_id,
+        created_by_user_id=str(session.get("user_id") or "").strip() or None,
     )
     db.session.add(row)
     try:
@@ -3719,12 +3763,12 @@ def login_required(f):
             return _company_admin_blocked_response()
         if company_registry_enabled() and is_project_admin() and not user_team_ids():
             if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
-                return jsonify({"message": "项目管理员须先在页面1 账号管理中分配所属项目组"}), 403
+                return jsonify({"message": "项目管理员须先在页面4（超级管理员）中分配所属项目组"}), 403
             return (
                 render_template(
                     "error.html",
                     title="未分配项目组",
-                    message="项目管理员须先在页面1「账号管理」中分配所属项目组后再访问页面1/3。",
+                    message="项目管理员须先在页面4「账号管理」中分配所属项目组后再访问页面1/3。",
                     back_url=url_for("pages.login_page"),
                     back_label="重新登录",
                     hide_main_nav=True,
@@ -3803,12 +3847,12 @@ def page13_access_required(f):
                 return f(*args, **kwargs)
             if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
                 return jsonify(
-                    {"message": "项目管理员须先在页面1 账号管理中分配所属项目组"}
+                    {"message": "项目管理员须先在页面4（超级管理员）中分配所属项目组"}
                 ), 403
             return render_template(
                 "error.html",
                 title="未分配项目组",
-                message="项目管理员须先在页面1 账号管理中分配「所属项目组」后才能访问页面1/3。",
+                message="项目管理员须先在页面4（超级管理员）中分配「所属项目组」后才能访问页面1/3。",
                 hide_main_nav=True,
                 gate_page=True,
             ), 403
@@ -4049,13 +4093,12 @@ def _exam_student_assigned_teams_payload() -> list[dict[str, str]]:
 
 
 def _exam_student_scope_context_payload() -> dict:
-    """学生端：项目组只读（账号分配）；公司下拉仅展示项目组关联公司。"""
-    from .authz import is_page13_super_admin, user_team_ids
-    from .team_organizations import organization_ids_for_teams, organizations_payload_for_ids
-    from .tenant_context import collection_for_organization
+    """学生端：项目组只读；公司来自所属项目组关联公司（不含直绑公司 membership）。"""
+    from .authz import is_page13_super_admin
+    from .team_organizations import organizations_payload_for_ids
+    from .tenant_context import collection_for_organization, user_allowed_organization_ids
 
-    team_ids = user_team_ids()
-    org_ids = organization_ids_for_teams(team_ids)
+    org_ids = user_allowed_organization_ids()
     orgs = organizations_payload_for_ids(org_ids)
     assigned = _exam_student_assigned_teams_payload()
     if not orgs:
@@ -4071,7 +4114,7 @@ def _exam_student_scope_context_payload() -> dict:
             "canSwitchTeam": False,
             "canSwitchOrganization": False,
             "page13SuperAdmin": is_page13_super_admin(),
-            "message": "当前账号未分配项目组或未关联公司，请联系管理员在页面4配置",
+            "message": "当前账号未分配所属公司，请联系管理员在页面4配置",
         }
     from .exam_scope import resolve_active_organization_id
 
@@ -4099,7 +4142,7 @@ def _exam_project_admin_organization_ids() -> list[str]:
 
 
 def _exam_project_admin_scope_context_payload() -> dict:
-    """项目管理员：展示所属项目组（单组只读/多组可切换）；公司来自项目组关联。"""
+    """项目管理员：所属项目组只读；公司来自项目组关联（一人仅一组）。"""
     from .authz import is_page13_super_admin, user_team_ids
     from .team_organizations import organizations_payload_for_ids
     from .tenant_context import collection_for_organization
@@ -4145,14 +4188,14 @@ def _exam_project_admin_scope_context_payload() -> dict:
     org_id = active
     active_team = _sync_project_admin_active_exam_team(org_id)
     teams = _exam_teams_payload_for_scope(org_id)
-    can_switch_team = len(teams) > 1
+    can_switch_team = False
     coll = collection_for_organization(active) if active else "regulations"
     return {
         "organizations": orgs,
         "activeOrganizationId": active or None,
         "activeKnowledgeCollection": coll,
         "teams": teams,
-        "assignedTeams": teams if not can_switch_team else [],
+        "assignedTeams": assigned,
         "activeTeamId": active_team or None,
         "scopeAllTeams": False,
         "defaultTeamId": teams[0]["id"] if teams else None,
@@ -4192,7 +4235,7 @@ def api_scope_diagnostics():
 
 
 @bp.get("/api/exam-center/scope-context")
-@page13_access_required
+@_page13_or_login_required
 def api_exam_scope_context():
     """考试中心：当前公司与项目组作用域（超管可切换全部主体，数据按所选过滤）。"""
     from .authz import is_normal_user, is_page13_super_admin, is_project_admin
@@ -4328,7 +4371,7 @@ def api_login():
             session.clear()
             return jsonify(
                 {
-                    "message": "项目管理员须先在页面1 账号管理中分配所属项目组。",
+                    "message": "项目管理员须先在页面4（超级管理员）中分配所属项目组。",
                     "needsTeamAssignment": True,
                 }
             ), 403
@@ -8180,7 +8223,11 @@ def api_task_author_candidates():
     """任务录入编写人员下拉：项目绑定项目组成员 + 当前登录用户。"""
     from .authz import is_page13_super_admin, project_in_scope, rbac_enforced
     from .models import Project
-    from .user_access import _serialize_task_author_user, list_task_author_candidates
+    from .user_access import (
+        _resolve_project_for_author_pick,
+        _serialize_task_author_user,
+        list_task_author_candidates,
+    )
 
     project_id = (
         request.args.get("projectId") or request.args.get("project_id") or ""
@@ -8249,13 +8296,13 @@ def api_users_create():
     db.session.add(user)
     db.session.flush()
     from .user_access import (
+        ensure_role_access_requirements,
         apply_user_access_fields,
-        ensure_role_team_requirement,
         serialize_user_access,
     )
 
     try:
-        ensure_role_team_requirement(user, data)
+        ensure_role_access_requirements(user, data)
         apply_user_access_fields(user, data)
     except ValueError as e:
         db.session.rollback()
@@ -8299,13 +8346,13 @@ def api_users_update(user_id: str):
         else:
             user.can_access_company_registry = False
     from .user_access import (
+        ensure_role_access_requirements,
         apply_user_access_fields,
-        ensure_role_team_requirement,
         serialize_user_access,
     )
 
     try:
-        ensure_role_team_requirement(user, data)
+        ensure_role_access_requirements(user, data)
         apply_user_access_fields(user, data)
     except ValueError as e:
         return jsonify({"message": str(e)}), 400
@@ -8400,7 +8447,7 @@ def api_users_delete(user_id: str):
 @bp.get("/api/project-teams")
 @page13_access_required
 def api_project_teams_list():
-    """页面1 账号管理：项目组列表（不依赖公司总览功能开关）。"""
+    """页面4（超级管理员）：项目组列表（不依赖公司总览功能开关）。"""
     from .models import ProjectTeam
 
     rows = ProjectTeam.query.order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc()).all()
@@ -8639,6 +8686,9 @@ def api_upload():
         else:
             project_id = None
     _ensure_project_row(project_name)
+    from .project_teams import resolve_organization_id_for_project_upload
+
+    upload_org_id = resolve_organization_id_for_project_upload(project_id=project_id)
 
     upload_record_id = (request.form.get("uploadRecordId") or request.form.get("uploadId") or "").strip()
     existing: UploadRecord | None = None
@@ -8756,6 +8806,7 @@ def api_upload():
             existing.project_notes = project_notes
         existing.project_name = project_name
         existing.project_id = project_id
+        existing.organization_id = upload_org_id
         existing.file_name = file_name
         if (file and file.filename) or placeholders:
             existing.placeholders = placeholders
@@ -8862,6 +8913,7 @@ def api_upload():
 
     upload = UploadRecord(
         project_id=project_id,
+        organization_id=upload_org_id,
         project_name=project_name,
         project_code=project_code,
         file_name=file_name,
@@ -9289,6 +9341,8 @@ def api_uploads_import():
     updated = 0
     skipped = 0
     errors = []
+    from .authz import _project_lookup_maps
+    from .project_teams import resolve_organization_id_for_project_upload
 
     for idx, d in enumerate(rows):
         row_no = idx + 2
@@ -9317,8 +9371,14 @@ def api_uploads_import():
         notes_raw = d.get("notes") or ""
         notes_val = "\n".join(ln.strip() for ln in notes_raw.replace(";", "\n").replace("；", "\n").split("\n") if ln.strip()) or None
 
+        _ensure_project_row(project_name)
+        _, by_label, by_name = _project_lookup_maps()
+        proj = by_label.get(project_name) or by_name.get(project_name)
+        import_org_id = resolve_organization_id_for_project_upload(project=proj)
+
         try:
             if existing:
+                existing.organization_id = import_org_id
                 existing.project_code = (d.get("project_code") or "").strip() or None
                 existing.business_side = (d.get("business_side") or "").strip() or None
                 existing.product = (d.get("product") or "").strip() or None
@@ -9344,6 +9404,7 @@ def api_uploads_import():
             else:
                 upload = UploadRecord(
                     project_name=project_name,
+                    organization_id=import_org_id,
                     project_code=(d.get("project_code") or "").strip() or None,
                     file_name=file_name,
                     task_type=task_type,
@@ -9458,9 +9519,10 @@ def api_uploads_list():
         q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all(),
         proj_meta,
     )
-    from .authz import filter_upload_records_in_scope
+    from .authz import filter_upload_records_in_scope, filter_uploads_by_organization
 
     records = filter_upload_records_in_scope(records)
+    records = filter_uploads_by_organization(records)
     upload_ids = [str(r.id) for r in records if getattr(r, "id", None)]
     has_gen: set[str] = set()
     if upload_ids:
@@ -10361,7 +10423,7 @@ def _project_api_item(
 @page13_access_required
 def api_projects_list():
     """列出项目（从 upload_records 自动补齐缺失项）。"""
-    from .authz import project_in_scope, rbac_enforced
+    from .authz import filter_projects_by_organization, project_in_scope, rbac_enforced
     from .models import ProjectTeam
 
     _project_meta_map(auto_create_from_uploads=True)
@@ -10369,6 +10431,7 @@ def api_projects_list():
     rows = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
     if rbac_enforced():
         rows = [p for p in rows if project_in_scope(p)]
+    rows = filter_projects_by_organization(rows)
     try:
         from .project_registry_sync import sync_company_to_page1
 
@@ -10386,6 +10449,7 @@ def api_projects_list():
             ).all()
             if rbac_enforced():
                 rows = [p for p in rows if project_in_scope(p)]
+            rows = filter_projects_by_organization(rows)
     except Exception:
         pass
     prod_hints = _project_registered_product_name_hints([p.id for p in rows])
@@ -10415,7 +10479,7 @@ def api_projects_sync_from_company_registry():
     from .authz import is_page13_super_admin, user_team_ids
 
     if not is_page13_super_admin() and not user_team_ids():
-        return jsonify({"message": "请先在账号管理中分配所属项目组"}), 403
+        return jsonify({"message": "请先在页面4账号管理中分配所属项目组"}), 403
     try:
         synced = _sync_company_registry_projects_to_page1()
     except Exception as e:
@@ -11998,8 +12062,9 @@ def api_put_system_settings():
 @page13_access_required
 def api_get_team_dingtalk_settings():
     from .authz import is_page13_super_admin, is_project_admin, user_team_ids
-    from .project_teams import serialize_team_item
+    from .project_teams import scrub_team_dingtalk_global_echo, serialize_team_item
 
+    scrub_team_dingtalk_global_echo(commit=True)
     q = ProjectTeam.query.order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc())
     rows = q.all()
     if not is_page13_super_admin() and is_project_admin():

@@ -7,8 +7,10 @@
             <div class="card-body p-5">
                 <div class="text-center mb-4">
                     <h3 class="fw-bold text-primary">AI Word 工具</h3>
-                    <p class="text-muted">请使用账号管理中已录入的账号登录</p>
-                    <p class="small text-muted mb-0">登录后将按<strong>分级角色</strong>自动进入对应页面：公司管理员→页面0；项目管理员→页面1；普通账号→页面2。项目管理员须已分配<strong>所属项目组</strong>。</p>
+                    <p class="text-muted mb-0">请使用您的账号登录</p>
+                    {% if is_page13_super_admin %}
+                    <p class="small text-muted mb-0 mt-2">登录后将按<strong>分级角色</strong>自动进入对应页面：公司管理员→页面0；项目管理员→页面1；普通账号→页面2。项目管理员须已由超级管理员分配<strong>所属项目组</strong>。</p>
+                    {% endif %}
                 </div>
                 <form id="loginForm">
                     <div class="mb-3">
@@ -22,7 +24,7 @@
                     <button type="submit" class="btn btn-primary w-100 py-2">登录</button>
                 </form>
                 <div class="text-center mt-4">
-                    <small class="text-muted">账号与初始密码由任务下发方分配；忘记密码请联系下发人</small>
+                    <small class="text-muted">账号与初始密码由超级管理员在页面4创建分配；忘记密码请联系超级管理员</small>
                 </div>
             </div>
         </div>

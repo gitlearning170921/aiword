@@ -5,11 +5,17 @@
     <div>
         <h1>页面3 · 统计面板</h1>
         <p class="mb-1">实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
+        {% if is_page13_super_admin %}
         <p class="small text-muted mb-0">项目管理员仅统计<strong>所属项目组</strong>下绑定项目；催办按项目组 webhook 发送，未配置时使用「互联网产品部」机器人。</p>
+        {% endif %}
     </div>
-    {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
-    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='analytics') }}">进入考试训练中心</a>
-    {% endif %}
+    <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center text-end">
+        <span id="userInfo" class="badge bg-light text-dark border"></span>
+        {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='analytics') }}">进入考试训练中心</a>
+        {% endif %}
+        <button type="button" id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
+    </div>
 </div>
 
 <div class="row g-4 mb-4">
@@ -37,7 +43,9 @@
                         <button type="button" class="btn btn-sm btn-outline-primary" id="refreshScheduleBtn">刷新</button>
                     </div>
                 </div>
+                {% if is_page13_super_admin %}
                 <p class="small text-muted mb-0">若钉钉群未收到测试消息，请检查机器人是否设置了关键词且消息内容包含该关键词。定时规则与钉钉参数请联系管理员处理。</p>
+                {% endif %}
                 <div class="card mb-3">
                     <div class="card-body py-2">
                         <h6 class="mb-2">模块级联催办状态</h6>
@@ -244,7 +252,9 @@
 <div class="card mb-4" id="teamDingtalkCard">
     <div class="card-body">
         <h6 class="form-section-title mb-2">催办 · 按项目组钉钉</h6>
-        <p class="small text-muted mb-3">不同项目组可配置独立催办机器人；留空时催办将使用「系统配置 → 催办与定时通知」中的全局 Webhook 或默认项目组。</p>
+        {% if is_page13_super_admin %}
+        <p class="small text-muted mb-3">不同项目组可配置独立催办机器人；输入框<strong>留空</strong>表示使用「系统配置 → 催办与定时通知」中的全局 Webhook（不会预填体系记录机器人地址）。</p>
+        {% endif %}
         <div class="row g-2 align-items-end">
             <div class="col-md-3">
                 <label class="form-label small mb-1" for="teamDingtalkTeamId">项目组</label>
@@ -252,7 +262,8 @@
             </div>
             <div class="col-md-5">
                 <label class="form-label small mb-1" for="teamDingtalkWebhook">Webhook</label>
-                <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="https://oapi.dingtalk.com/robot/send?...">
+                <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
+                <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
             </div>
             <div class="col-md-3">
                 <label class="form-label small mb-1" for="teamDingtalkSecret">Secret（可选）</label>

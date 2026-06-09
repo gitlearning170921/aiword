@@ -1,4 +1,4 @@
-# Export built images to tar (ASCII-only)
+# Export built images to tar.gz (preferred) or tar (ASCII-only)
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version
@@ -24,15 +24,33 @@ foreach ($img in @($AiwordImage, $AicheckwordImage)) {
     }
 }
 
-$AiwordTar = Join-Path $DistDir "aiword-$Version.tar"
-$AicheckwordTar = Join-Path $DistDir "aicheckword-$Version.tar"
+$hasGzip = $null -ne (Get-Command gzip -ErrorAction SilentlyContinue)
 
-Write-Host "==> save $AiwordImage"
-docker save -o $AiwordTar $AiwordImage
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($hasGzip) {
+    $AiwordOut = Join-Path $DistDir "aiword-$Version.tar.gz"
+    $AicheckwordOut = Join-Path $DistDir "aicheckword-$Version.tar.gz"
 
-Write-Host "==> save $AicheckwordImage"
-docker save -o $AicheckwordTar $AicheckwordImage
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host "==> save gzip $AiwordImage"
+    docker save $AiwordImage | gzip -1 > $AiwordOut
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Done: $AiwordTar , $AicheckwordTar"
+    Write-Host "==> save gzip $AicheckwordImage"
+    docker save $AicheckwordImage | gzip -1 > $AicheckwordOut
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host "Done: $AiwordOut , $AicheckwordOut"
+} else {
+    $AiwordTar = Join-Path $DistDir "aiword-$Version.tar"
+    $AicheckwordTar = Join-Path $DistDir "aicheckword-$Version.tar"
+
+    Write-Host "WARN: gzip not found, exporting uncompressed .tar"
+    Write-Host "==> save $AiwordImage"
+    docker save -o $AiwordTar $AiwordImage
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host "==> save $AicheckwordImage"
+    docker save -o $AicheckwordTar $AicheckwordImage
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host "Done: $AiwordTar , $AicheckwordTar"
+}

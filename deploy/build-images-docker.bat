@@ -21,17 +21,34 @@ if errorlevel 1 (
   exit /b 1
 )
 
+set "DOCKER_BUILDKIT=1"
 set "PLATFORM=linux/amd64"
 set "PROGRESS=%DOCKER_PROGRESS%"
 if "%PROGRESS%"=="" set "PROGRESS=plain"
 
-echo ==^> build aiword:%VER% platform=%PLATFORM% progress=%PROGRESS%
-docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%"
-if errorlevel 1 exit /b 1
+set "TMPDIR=%TEMP%\aiword-docker-build-%RANDOM%"
+mkdir "%TMPDIR%" 2>nul
 
-echo ==^> build aicheckword:%VER% platform=%PLATFORM% progress=%PROGRESS%
-docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%"
-if errorlevel 1 exit /b 1
+echo ==^> parallel build aiword:%VER% + aicheckword:%VER% platform=%PLATFORM%
+
+start "build-aiword" /MIN cmd /c "set DOCKER_BUILDKIT=1&& docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%" > "%TMPDIR%\aiword.log" 2>&1 && echo OK> "%TMPDIR%\aiword.ok" || echo FAIL> "%TMPDIR%\aiword.fail""
+
+start "build-aicheckword" /MIN cmd /c "set DOCKER_BUILDKIT=1&& docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%" > "%TMPDIR%\aicheckword.log" 2>&1 && echo OK> "%TMPDIR%\aicheckword.ok" || echo FAIL> "%TMPDIR%\aicheckword.fail""
+
+:wait_builds
+if not exist "%TMPDIR%\aiword.ok" if not exist "%TMPDIR%\aiword.fail" goto wait_builds
+if not exist "%TMPDIR%\aicheckword.ok" if not exist "%TMPDIR%\aicheckword.fail" goto wait_builds
+
+set "RC=0"
+if exist "%TMPDIR%\aiword.fail" (
+  echo ERROR: aiword build failed. See %TMPDIR%\aiword.log
+  set "RC=1"
+)
+if exist "%TMPDIR%\aicheckword.fail" (
+  echo ERROR: aicheckword build failed. See %TMPDIR%\aicheckword.log
+  set "RC=1"
+)
+if not "%RC%"=="0" exit /b %RC%
 
 docker tag aiword:%VER% aiword:local
 docker tag aicheckword:%VER% aicheckword:local
@@ -39,6 +56,7 @@ docker tag aicheckword:%VER% aicheckword:local
 if not exist "%~dp0dist" mkdir "%~dp0dist"
 echo version=%VER%> "%~dp0dist\manifest-%VER%.txt"
 echo platform=%PLATFORM%>> "%~dp0dist\manifest-%VER%.txt"
+echo buildkit=1>> "%~dp0dist\manifest-%VER%.txt"
 
 echo.
 echo BUILD OK version=%VER%

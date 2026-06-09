@@ -33,6 +33,7 @@
         var p = global.location.pathname || "";
         if (p.indexOf("/login") >= 0) return false;
         if (global.__SCOPE_BAR_SUPPRESS__) return false;
+        if (!global.__PAGE13_SUPER_ADMIN__) return false;
         return true;
     }
 

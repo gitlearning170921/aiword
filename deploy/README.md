@@ -1,6 +1,16 @@
 # aiword Docker 混合部署手册
 
-在 Linux 服务器运行 **aiword + aicheckword（API）**；**aiprintword** 留在 Windows。**推荐流程：本机构建镜像 → 导出 tar → Linux 仅 load + 启动（无需源码、无需服务器 build）。**
+在 Linux 服务器运行 **aiword + aicheckword（API）**；**aiprintword** 留在 Windows。**推荐流程：本机构建镜像 → 导出 tar.gz → Linux 仅 load + 启动（无需源码、无需服务器 build）。**
+
+### 镜像瘦身说明（API 生产镜像）
+
+| 优化项 | 说明 |
+|--------|------|
+| 依赖拆分 | aiword 用 `requirements-docker.txt`（无 PyInstaller）；aicheckword 用 `requirements-api.txt`（无 Streamlit/altair） |
+| 多阶段 + BuildKit | Dockerfile 两阶段构建，`DOCKER_BUILDKIT=1` + pip 缓存，改代码重建更快 |
+| 并行 build | `build-images-docker.bat` 同时构建两个镜像 |
+| gzip 导出 | 默认 `*.tar.gz`，部署 zip 体积显著减小 |
+| Streamlit 按需 | 知识库训练 UI 用 `Dockerfile.streamlit` + compose profile `admin`，不进默认生产包 |
 
 ---
 
@@ -36,7 +46,7 @@ cd F:\wzl\learning\python\aiword\deploy
 # 自检（路径、docker、脚本语法；不构建镜像）
 .\verify-scripts.bat
 
-# 一键：构建 + 导出 tar + 打 zip 部署包
+# 一键：构建 + 导出 tar.gz + 打 zip 部署包
 .\build-all.bat 1.0.0
 ```
 
@@ -83,8 +93,8 @@ powershell -ExecutionPolicy Bypass -File .\build-images.ps1 -Version 1.0.0
 
 | 文件 | 说明 |
 |------|------|
-| `dist/aiword-1.0.0.tar` | aiword 镜像 |
-| `dist/aicheckword-1.0.0.tar` | aicheckword 镜像 |
+| `dist/aiword-1.0.0.tar.gz` | aiword 镜像（gzip；无 gzip 时回退 `.tar`） |
+| `dist/aicheckword-1.0.0.tar.gz` | aicheckword 镜像 |
 | `dist/aiword-stack-1.0.0.zip` | **上传到 Linux 的完整部署包** |
 
 > ARM 服务器（如部分云 ARM 实例）构建时：`.\build-images.ps1 -Version 1.0.0 -Platform linux/arm64`
@@ -96,10 +106,15 @@ cd deploy
 copy .env.example .env
 # 编辑 .env 填 MySQL 等
 
-docker load -i dist\aiword-1.0.0.tar
-docker load -i dist\aicheckword-1.0.0.tar
+# Linux / Git Bash：
+# gunzip -c dist/aiword-1.0.0.tar.gz | docker load
+# gunzip -c dist/aicheckword-1.0.0.tar.gz | docker load
+# 或使用 server-load-images.sh（自动识别 .tar.gz / .tar）
+
 docker compose -f docker-compose.prod.yml up -d
 ```
+
+Linux 服务器 load 见 [`server-load-images.sh`](server-load-images.sh)（自动识别 `.tar.gz` / `.tar`）。
 
 ---
 
@@ -138,7 +153,7 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 ./server-deploy.sh 1.0.0
 ```
 
-等价于：`docker load` 两个 tar → `docker compose -f docker-compose.prod.yml up -d`
+等价于：`docker load` 两个 tar.gz（或 tar）→ `docker compose -f docker-compose.prod.yml up -d`
 
 访问：`http://<服务器IP>:5000`
 
@@ -161,7 +176,7 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 ```powershell
 .\build-images.ps1 -Version 1.0.1
 .\export-images.ps1 -Version 1.0.1
-# 只需上传新的 images/*.tar 或重新 pack
+# 只需上传新的 images/*.tar.gz 或重新 pack
 ```
 
 ### Linux 服务器
@@ -215,8 +230,22 @@ AIWORD_INTEGRATION_SECRET=<与 aiword 相同>
 
 | 文件 | 用途 |
 |------|------|
-| `docker-compose.yml` | 本机开发，含 `build`，可 `--build` |
+| `docker-compose.yml` | 本机开发，含 `build`，可 `--build`；profile `admin` 可启 Streamlit |
 | `docker-compose.prod.yml` | **Linux 生产**，仅 `image`，无源码 |
+
+### Streamlit 运维 UI（可选）
+
+本机需先构建 API 镜像，再叠加 Streamlit 层：
+
+```powershell
+.\build-images-docker.bat 1.0.0
+cd ..\..\aicheckword
+docker build --build-arg AICHECKWORD_BASE_TAG=1.0.0 -t aicheckword-streamlit:1.0.0 -f Dockerfile.streamlit .
+cd ..\aiword\deploy
+docker compose --profile admin up -d aicheckword-streamlit
+```
+
+访问：`http://localhost:8501`
 
 ---
 

@@ -24,3 +24,4 @@ deploy/backup/
 deploy/.env
 *.md
 !deploy/README.md
+打包说明.md

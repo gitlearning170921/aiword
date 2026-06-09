@@ -1,12 +1,24 @@
+# syntax=docker/dockerfile:1
 # aiword Web 服务（生产：gunicorn 单 worker，配合 APScheduler）
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+WORKDIR /w
+
+COPY requirements-docker.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install -r requirements-docker.txt "gunicorn>=22.0.0"
+
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
     AIWORD_PROJECT_ROOT=/app
 
 WORKDIR /app
@@ -17,8 +29,7 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.o
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -s /bin/bash app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt "gunicorn>=22.0.0"
+COPY --from=builder /install /usr/local
 
 COPY . .
 

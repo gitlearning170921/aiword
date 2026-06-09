@@ -60,6 +60,31 @@ services:
       start_period: 90s
       retries: 3
 
+  # 可选：知识库训练 Streamlit UI（profile admin，不进默认生产 zip）
+  aicheckword-streamlit:
+    profiles: ["admin"]
+    image: ${AICHECKWORD_STREAMLIT_IMAGE:-aicheckword-streamlit:local}
+    build:
+      context: ../../aicheckword
+      dockerfile: Dockerfile.streamlit
+      args:
+        AICHECKWORD_BASE_TAG: ${IMAGE_VERSION:-local}
+    container_name: aicheckword-streamlit
+    ports:
+      - "${AICHECKWORD_STREAMLIT_PORT:-8501}:8501"
+    env_file:
+      - .env
+    volumes:
+      - aicheck_knowledge:/app/knowledge_store
+      - aicheck_uploads:/app/uploads
+      - aicheck_training:/app/training_docs
+    depends_on:
+      aicheckword:
+        condition: service_healthy
+    networks:
+      - appnet
+    restart: unless-stopped
+
   # 可选：对外 HTTPS 反代（profile nginx）
   nginx:
     profiles: ["nginx"]

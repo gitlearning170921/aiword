@@ -8,6 +8,21 @@ from . import db
 from .models import CompanyProject, Project, ProjectTeam, UploadRecord, UserTeamMembership
 
 
+def _project_name_keys_for_upload_lookup(project: Project) -> list[str]:
+    """上传记录 project_name 可能为原始名或三字段展示键，查询时需两者兼顾。"""
+    raw = (getattr(project, "name", None) or "").strip()
+    keys: list[str] = []
+    if raw:
+        keys.append(raw)
+    c = (getattr(project, "registered_country", None) or "").strip()
+    cat = (getattr(project, "registered_category", None) or "").strip()
+    if raw and (c or cat):
+        display = f"{raw}（{c or '—'} / {cat or '—'}）"
+        if display not in keys:
+            keys.append(display)
+    return keys
+
+
 def project_has_page1_upload_tasks(project_id: str) -> bool:
     """单个页面1 项目是否已有上传/任务记录。"""
     pid = (project_id or "").strip()
@@ -18,9 +33,9 @@ def project_has_page1_upload_tasks(project_id: str) -> bool:
     row = Project.query.get(pid)
     if not row:
         return False
-    name = (row.name or "").strip()
-    if name and UploadRecord.query.filter(UploadRecord.project_name == name).limit(1).first():
-        return True
+    for name in _project_name_keys_for_upload_lookup(row):
+        if UploadRecord.query.filter(UploadRecord.project_name == name).limit(1).first():
+            return True
     return False
 
 
@@ -36,7 +51,10 @@ def company_project_has_page1_upload_tasks(company_project_id: str) -> bool:
     if pids:
         if UploadRecord.query.filter(UploadRecord.project_id.in_(pids)).limit(1).first():
             return True
-    names = {(p.name or "").strip() for p in linked if (p.name or "").strip()}
+    names: set[str] = set()
+    for p in linked:
+        for key in _project_name_keys_for_upload_lookup(p):
+            names.add(key)
     if names:
         if UploadRecord.query.filter(UploadRecord.project_name.in_(list(names))).limit(1).first():
             return True
@@ -88,8 +106,7 @@ def sync_upload_records_organization_for_project(
             {"organization_id": organization_id},
             synchronize_session=False,
         )
-    name = (getattr(project, "name", None) or "").strip()
-    if name:
+    for name in _project_name_keys_for_upload_lookup(project):
         UploadRecord.query.filter(UploadRecord.project_name == name).update(
             {"organization_id": organization_id},
             synchronize_session=False,
@@ -98,6 +115,7 @@ def sync_upload_records_organization_for_project(
 
 def apply_project_organization_id(project: Project, organization_id: str | None) -> None:
     from .models import CompanyProject
+    from .reference_cascade import sync_project_organization_cascade
 
     project.organization_id = organization_id
     cp_id = (getattr(project, "company_project_id", None) or "").strip()
@@ -106,7 +124,7 @@ def apply_project_organization_id(project: Project, organization_id: str | None)
         if cp:
             cp.organization_id = organization_id
             db.session.add(cp)
-    sync_upload_records_organization_for_project(project, organization_id)
+    sync_project_organization_cascade(project, organization_id)
     db.session.add(project)
 
 
@@ -116,9 +134,45 @@ def apply_company_project_organization_id(
     cp.organization_id = organization_id
     for p in Project.query.filter(Project.company_project_id == cp.id).all():
         p.organization_id = organization_id
-        sync_upload_records_organization_for_project(p, organization_id)
+        from .reference_cascade import sync_project_organization_cascade
+
+        sync_project_organization_cascade(p, organization_id)
         db.session.add(p)
     db.session.add(cp)
+
+
+def apply_company_project_assigned_team_id(
+    cp: CompanyProject, team_id: str | None
+) -> None:
+    """公司总览项目组变更：同步关联页面1 项目。"""
+    cp.assigned_team_id = team_id
+    tid = str(team_id or "").strip() or None
+    for p in Project.query.filter(Project.company_project_id == cp.id).all():
+        p.assigned_team_id = tid
+        db.session.add(p)
+    db.session.add(cp)
+
+
+def resolve_organization_id_for_project_upload(
+    *,
+    project_id: str | None = None,
+    project: Project | None = None,
+) -> str | None:
+    """新建/更新上传记录时写入 organization_id（多租户集成与筛选依赖）。"""
+    row = project
+    if row is None and project_id:
+        row = Project.query.get(project_id)
+    if row is not None:
+        oid = str(getattr(row, "organization_id", "") or "").strip()
+        if oid:
+            return oid
+    try:
+        from .tenant_context import resolve_organization_context
+
+        oid, _ = resolve_organization_context()
+        return str(oid or "").strip() or None
+    except Exception:
+        return None
 
 
 def normalize_team_name(raw: Any) -> Optional[str]:
@@ -141,11 +195,76 @@ def team_usage(team_id: str) -> dict[str, int]:
     }
 
 
+def _normalize_dingtalk_webhook_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _system_dingtalk_webhook_urls() -> set[str]:
+    """全局催办/体系机器人 Webhook（用于识别误写入项目组的同 URL）。"""
+    import os
+
+    from .app_settings import get_setting
+
+    out: set[str] = set()
+    keys = ("DINGTALK_WEBHOOK", "CHATBOT_DINGTALK_WEBHOOK")
+    for key in keys:
+        for raw in (
+            (get_setting(key) or "").strip(),
+            (os.environ.get(key) or "").strip(),
+        ):
+            if raw:
+                out.add(_normalize_dingtalk_webhook_url(raw))
+    try:
+        from flask import current_app
+
+        app = current_app._get_current_object()
+        for key in keys:
+            cfg = (app.config.get(key) or "").strip()
+            if cfg:
+                out.add(_normalize_dingtalk_webhook_url(cfg))
+    except Exception:
+        pass
+    w = (get_setting("DINGTALK_WEBHOOK") or "").strip()
+    c = (get_setting("CHATBOT_DINGTALK_WEBHOOK") or "").strip()
+    if not c and w:
+        out.add(_normalize_dingtalk_webhook_url(w))
+    return out
+
+
+def scrub_team_dingtalk_global_echo(*, commit: bool = False) -> int:
+    """清除项目组库内与全局/体系机器人相同的 Webhook（展示与发送均走回退逻辑）。"""
+    system_urls = _system_dingtalk_webhook_urls()
+    if not system_urls:
+        return 0
+    changed = 0
+    for team in ProjectTeam.query.all():
+        raw = (getattr(team, "dingtalk_webhook", None) or "").strip()
+        if not raw:
+            continue
+        if _normalize_dingtalk_webhook_url(raw) in system_urls:
+            team.dingtalk_webhook = None
+            db.session.add(team)
+            changed += 1
+    if commit and changed:
+        db.session.commit()
+    return changed
+
+
+def team_dingtalk_webhook_for_settings(team: ProjectTeam) -> str | None:
+    """设置页仅展示项目组独立配置的 Webhook；与全局/体系机器人相同视为未配置。"""
+    webhook = (getattr(team, "dingtalk_webhook", None) or "").strip()
+    if not webhook:
+        return None
+    if _normalize_dingtalk_webhook_url(webhook) in _system_dingtalk_webhook_urls():
+        return None
+    return webhook
+
+
 def serialize_team_item(team: ProjectTeam) -> dict[str, Any]:
     from .team_organizations import organization_ids_for_team, organization_labels_for_team
 
     usage = team_usage(team.id)
-    webhook = (getattr(team, "dingtalk_webhook", None) or "").strip()
+    webhook = team_dingtalk_webhook_for_settings(team)
     secret = (getattr(team, "dingtalk_secret", None) or "").strip()
     org_ids = organization_ids_for_team(team.id)
     org_labels = organization_labels_for_team(team.id)
@@ -158,11 +277,13 @@ def serialize_team_item(team: ProjectTeam) -> dict[str, Any]:
         "sortOrder": team.sort_order,
         "isActive": bool(team.is_active),
         "dingtalkWebhook": webhook or None,
+        "dingtalkUsesGlobalFallback": not bool(webhook),
         "dingtalkSecretMasked": "******" if secret else None,
         "hasDingtalkSecret": bool(secret),
         "usageCount": usage["total"],
         "usage": usage,
-        "canDelete": usage["total"] == 0,
+        "canDelete": True,
+        "requiresCascadeConfirm": usage["total"] > 0,
     }
 
 
@@ -185,14 +306,14 @@ def update_team_name(team_id: str, new_name_raw: Any) -> tuple[ProjectTeam | Non
     return t, None
 
 
-def delete_team(team_id: str) -> tuple[bool, str | None]:
+def delete_team(team_id: str, *, cascade: bool = False) -> tuple[bool, str | None]:
     from .models import ProjectTeamOrganization
 
     t = ProjectTeam.query.get(team_id)
     if not t:
         return False, "未找到该项目组"
     usage = team_usage(team_id)
-    if usage["total"] > 0:
+    if usage["total"] > 0 and not cascade:
         parts = []
         if usage["companyProjects"]:
             parts.append(f"公司总览 {usage['companyProjects']} 项")
@@ -202,6 +323,11 @@ def delete_team(team_id: str) -> tuple[bool, str | None]:
             parts.append(f"账号绑定 {usage['userMemberships']} 项")
         detail = "、".join(parts) if parts else f"{usage['total']} 处"
         return False, f"该项目组已被引用（{detail}），无法删除"
+    if usage["total"] > 0 and cascade:
+        from .reference_cascade import cascade_delete_team
+
+        ok, err, _ = cascade_delete_team(team_id)
+        return ok, err
     ProjectTeamOrganization.query.filter_by(team_id=team_id).delete(synchronize_session=False)
     db.session.delete(t)
     return True, None

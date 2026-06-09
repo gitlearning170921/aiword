@@ -459,7 +459,13 @@ def _apply_company_fields(
         team_err = _validate_assigned_team_change(row, tid)
         if team_err:
             return team_err
-        row.assigned_team_id = tid
+        old_tid = (getattr(row, "assigned_team_id", None) or "").strip() or None
+        if old_tid != tid:
+            from .project_teams import apply_company_project_assigned_team_id
+
+            apply_company_project_assigned_team_id(row, tid)
+        else:
+            row.assigned_team_id = tid
     if "expectedCertificationDate" in data:
         row.expected_certification_date = parse_optional_date(
             data.get("expectedCertificationDate")
@@ -1525,7 +1531,11 @@ def api_teams_patch(team_id: str):
 def api_teams_delete(team_id: str):
     from .project_teams import delete_team
 
-    ok, err = delete_team(team_id)
+    cascade = request.args.get("cascade") in ("1", "true", "yes")
+    if not cascade:
+        data = request.get_json(silent=True) or {}
+        cascade = bool(data.get("cascade"))
+    ok, err = delete_team(team_id, cascade=cascade)
     if not ok:
         return jsonify({"message": err or "无法删除"}), 409 if err else 404
     db.session.commit()
@@ -1552,16 +1562,17 @@ def api_user_teams_put(user_id: str):
     raw_ids = data.get("teamIds")
     if not isinstance(raw_ids, list):
         return jsonify({"message": "teamIds 须为数组"}), 400
-    new_ids = {str(x).strip() for x in raw_ids if str(x).strip()}
-    UserTeamMembership.query.filter_by(user_id=user_id).delete()
-    for tid in new_ids:
-        if not ProjectTeam.query.get(tid):
-            continue
-        db.session.add(UserTeamMembership(user_id=user_id, team_id=tid))
+    from .user_access import normalize_user_team_ids, set_user_team_memberships
+
+    raw_list = [str(x).strip() for x in raw_ids if str(x).strip()]
+    if len(raw_list) > 1:
+        return jsonify({"message": "每个账号最多绑定一个所属项目组"}), 400
+    team_ids = normalize_user_team_ids(raw_list)
+    set_user_team_memberships(user_id, team_ids)
     db.session.commit()
     if session.get("user_id") == user_id:
-        session["team_ids"] = list(new_ids)
-    return jsonify({"message": "已更新", "teamIds": list(new_ids)})
+        session["team_ids"] = list(team_ids)
+    return jsonify({"message": "已更新", "teamIds": list(team_ids)})
 
 
 @company_bp.get("/api/company/registered-countries")
@@ -1623,10 +1634,14 @@ def api_company_registered_countries_patch(country_id: str):
 @company_bp.delete("/api/company/registered-countries/<country_id>")
 @super_admin_required
 def api_company_registered_countries_delete(country_id: str):
-    """页面4：删除字典项（已有业务引用时不允许）。"""
+    """页面4：删除字典项（超级管理员可级联清理引用）。"""
     from .registered_countries import delete_registered_country
 
-    ok, err = delete_registered_country(country_id)
+    cascade = request.args.get("cascade") in ("1", "true", "yes")
+    if not cascade:
+        data = request.get_json(silent=True) or {}
+        cascade = bool(data.get("cascade"))
+    ok, err = delete_registered_country(country_id, cascade=cascade)
     if not ok:
         return jsonify({"message": err or "无法删除"}), 409 if err else 404
     db.session.commit()

@@ -22,28 +22,9 @@ def exam_org_scoping_enabled() -> bool:
 
 
 def allowed_organization_ids() -> list[str]:
-    """当前会话在考试中心可见/可选的公司 id。"""
-    from .authz import (
-        is_normal_user,
-        is_page13_super_admin,
-        is_project_admin,
-        user_team_ids,
-    )
-    from .team_organizations import organization_ids_for_teams
+    """当前会话在考试中心可见/可选的公司 id（与 tenant_context 角色规则一致）。"""
     from .tenant_context import user_allowed_organization_ids
 
-    if is_page13_super_admin():
-        return user_allowed_organization_ids()
-    team_orgs = organization_ids_for_teams(user_team_ids())
-    if is_normal_user():
-        return team_orgs
-    if is_project_admin():
-        merged: list[str] = []
-        for oid in team_orgs + user_allowed_organization_ids():
-            s = str(oid or "").strip()
-            if s and s not in merged:
-                merged.append(s)
-        return merged
     return user_allowed_organization_ids()
 
 
@@ -177,7 +158,7 @@ def user_ids_for_team_ids(team_ids: set[str]) -> frozenset[str]:
 
 def exam_teacher_assignable_users(*, org_id: str | None = None) -> list:
     """老师端下发考试可选人员：优先按当前项目组；超管「全部组」时再按公司下项目组 ∪ 直绑公司账号。"""
-    from .models import User, UserOrganizationMembership
+    from .models import ADMIN_ROLE_COMPANY, User, UserOrganizationMembership
 
     users = User.query.order_by(User.display_name.asc(), User.username.asc()).all()
     scoped = None
@@ -204,6 +185,8 @@ def exam_teacher_assignable_users(*, org_id: str | None = None) -> list:
         str(m.user_id).strip()
         for m in UserOrganizationMembership.query.filter_by(organization_id=oid).all()
         if str(m.user_id).strip()
+        and (u := User.query.get(str(m.user_id).strip()))
+        and (getattr(u, "admin_role", None) or "").strip() == ADMIN_ROLE_COMPANY
     }
     if not allowed:
         return []

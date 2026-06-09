@@ -7,7 +7,15 @@ from typing import Any, Optional
 from flask import has_request_context, session
 
 from .app_settings import is_multi_tenant_enabled
-from .models import Organization, Project, UploadRecord, UserOrganizationMembership
+from .models import (
+    ADMIN_ROLE_COMPANY,
+    Organization,
+    Project,
+    UploadRecord,
+    User,
+    UserOrganizationMembership,
+    UserTeamMembership,
+)
 
 
 def default_organization() -> Optional[Organization]:
@@ -39,9 +47,31 @@ def _strict_org_scope() -> bool:
     return bool(is_multi_tenant_enabled() or company_registry_enabled())
 
 
+def _team_ids_for_user(user_id: str) -> list[str]:
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+    return [
+        str(m.team_id).strip()
+        for m in UserTeamMembership.query.filter_by(user_id=uid).all()
+        if str(m.team_id).strip()
+    ]
+
+
+def _admin_role_for_user_id(user_id: str) -> str:
+    uid = (user_id or "").strip()
+    if not uid:
+        return "none"
+    user = User.query.get(uid)
+    if not user:
+        return "none"
+    return (getattr(user, "admin_role", None) or "none").strip()
+
+
 def user_allowed_organization_ids(user_id: str | None = None) -> list[str]:
-    """当前请求可见的公司 id（超管=全部；普通账号=UserOrganizationMembership）。"""
-    from .authz import is_page13_super_admin
+    """可见公司 id：超管=全部；公司管理员=直绑公司；其它角色=所属项目组关联公司（知识库/考试）。"""
+    from .authz import is_page13_super_admin, user_team_ids
+    from .team_organizations import organization_ids_for_teams
 
     if is_page13_super_admin():
         return [
@@ -54,27 +84,20 @@ def user_allowed_organization_ids(user_id: str | None = None) -> list[str]:
     uid = (user_id or "").strip()
     if not uid and has_request_context():
         uid = str(session.get("user_id") or "").strip()
+    role = _admin_role_for_user_id(uid) if uid else ""
+    if not role and has_request_context():
+        role = str(session.get("admin_role") or "none").strip()
     out: list[str] = []
-    if has_request_context():
-        raw = session.get("organization_ids")
-        if isinstance(raw, list):
-            for x in raw:
-                s = str(x or "").strip()
-                if s and s not in out:
-                    out.append(s)
-    if uid:
-        for s in user_organization_ids(uid):
+    if role == ADMIN_ROLE_COMPANY:
+        target_uid = uid or (str(session.get("user_id") or "").strip() if has_request_context() else "")
+        for s in user_organization_ids(target_uid):
             if s and s not in out:
                 out.append(s)
-    if not is_page13_super_admin():
-        from .authz import is_project_admin, user_team_ids
-
-        if is_project_admin():
-            from .team_organizations import organization_ids_for_teams
-
-            for s in organization_ids_for_teams(user_team_ids()):
-                if s and s not in out:
-                    out.append(s)
+        return out
+    team_ids = _team_ids_for_user(uid) if uid else user_team_ids()
+    for s in organization_ids_for_teams(team_ids):
+        if s and s not in out:
+            out.append(s)
     return out
 
 

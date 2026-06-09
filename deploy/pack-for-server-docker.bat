@@ -13,12 +13,25 @@ set "BUNDLE=aiword-stack-%VER%"
 set "STAGE=%DIST%\%BUNDLE%"
 set "ZIP=%DIST%\%BUNDLE%.zip"
 
-if not exist "%DIST%\aiword-%VER%.tar" (
-  echo ERROR: missing %DIST%\aiword-%VER%.tar
+set "AIWORD_IMG="
+set "AICHECKWORD_IMG="
+if exist "%DIST%\aiword-%VER%.tar.gz" (
+  set "AIWORD_IMG=%DIST%\aiword-%VER%.tar.gz"
+) else if exist "%DIST%\aiword-%VER%.tar" (
+  set "AIWORD_IMG=%DIST%\aiword-%VER%.tar"
+)
+if exist "%DIST%\aicheckword-%VER%.tar.gz" (
+  set "AICHECKWORD_IMG=%DIST%\aicheckword-%VER%.tar.gz"
+) else if exist "%DIST%\aicheckword-%VER%.tar" (
+  set "AICHECKWORD_IMG=%DIST%\aicheckword-%VER%.tar"
+)
+
+if "%AIWORD_IMG%"=="" (
+  echo ERROR: missing aiword image export for version %VER%
   exit /b 1
 )
-if not exist "%DIST%\aicheckword-%VER%.tar" (
-  echo ERROR: missing %DIST%\aicheckword-%VER%.tar
+if "%AICHECKWORD_IMG%"=="" (
+  echo ERROR: missing aicheckword image export for version %VER%
   exit /b 1
 )
 
@@ -45,8 +58,8 @@ for %%F in (
 
 if exist "%~dp0nginx" xcopy /E /I /Y /Q "%~dp0nginx" "%STAGE%\nginx\" >nul
 
-copy /y "%DIST%\aiword-%VER%.tar" "%STAGE%\images\" >nul
-copy /y "%DIST%\aicheckword-%VER%.tar" "%STAGE%\images\" >nul
+copy /y "%AIWORD_IMG%" "%STAGE%\images\" >nul
+copy /y "%AICHECKWORD_IMG%" "%STAGE%\images\" >nul
 if exist "%DIST%\manifest-%VER%.txt" copy /y "%DIST%\manifest-%VER%.txt" "%STAGE%\" >nul
 echo %VER%> "%STAGE%\VERSION"
 

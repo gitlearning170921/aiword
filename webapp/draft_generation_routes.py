@@ -36,6 +36,7 @@ from ._integration_common import (
     integration_org_context_payload,
     integration_scope_from_request,
     integration_scope_list_filter,
+    integration_organization_list_filter,
     manual_upload_only_from_request,
     resolve_aicheckword_project_id_for_upload,
     resolve_org_collection_for_integration,
@@ -992,6 +993,7 @@ def api_jobs_list():
         )
     )
     q = integration_scope_list_filter(q, DraftGenerationJob, scope)
+    q = integration_organization_list_filter(q, DraftGenerationJob)
     total = q.count()
     rows = (
         q

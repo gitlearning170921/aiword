@@ -62,15 +62,7 @@ def ensure_default_team_data() -> dict[str, int | str]:
         team.is_active = True
         db.session.add(team)
 
-    # 首次迁移可把全局 webhook/secret 复制给默认组，确保无感切换。
-    from .app_settings import get_setting
-
-    global_webhook = (get_setting("DINGTALK_WEBHOOK") or "").strip()
-    global_secret = (get_setting("DINGTALK_SECRET") or "").strip()
-    if global_webhook and not (getattr(team, "dingtalk_webhook", None) or "").strip():
-        team.dingtalk_webhook = global_webhook
-    if global_secret and not (getattr(team, "dingtalk_secret", None) or "").strip():
-        team.dingtalk_secret = global_secret
+    # 不在库内写入全局 Webhook/Secret；发送时由 dingtalk_team 按项目组→全局回退，避免误展示体系机器人默认值。
     db.session.add(team)
     db.session.flush()
 
@@ -96,7 +88,11 @@ def ensure_default_team_data() -> dict[str, int | str]:
     uploads_backfilled = _backfill_upload_project_ids()
 
     users_linked = 0
+    from .user_access import user_eligible_for_team_membership
+
     for u in User.query.all():
+        if not user_eligible_for_team_membership(u):
+            continue
         exists = UserTeamMembership.query.filter_by(user_id=u.id).first()
         if exists:
             continue

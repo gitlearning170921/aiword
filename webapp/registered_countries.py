@@ -66,7 +66,8 @@ def list_registered_country_items(*, active_only: bool = False) -> list[dict[str
                 "isActive": bool(r.is_active),
                 "usageCount": usage["total"],
                 "usage": usage,
-                "canDelete": usage["total"] == 0,
+                "canDelete": True,
+                "requiresCascadeConfirm": usage["total"] > 0,
             }
         )
     return out
@@ -126,12 +127,12 @@ def update_registered_country_name(country_id: str, new_name_raw: Any) -> tuple[
     return row, None
 
 
-def delete_registered_country(country_id: str) -> tuple[bool, str | None]:
+def delete_registered_country(country_id: str, *, cascade: bool = False) -> tuple[bool, str | None]:
     row = RegisteredCountry.query.get(country_id)
     if not row:
         return False, "未找到该字典项"
     usage = registered_country_usage(row.name)
-    if usage["total"] > 0:
+    if usage["total"] > 0 and not cascade:
         parts = []
         if usage["companyProjects"]:
             parts.append(f"公司总览 {usage['companyProjects']} 项")
@@ -141,6 +142,11 @@ def delete_registered_country(country_id: str) -> tuple[bool, str | None]:
             parts.append(f"账号国家维度 {usage['userScopes']} 项")
         detail = "、".join(parts) if parts else f"{usage['total']} 处"
         return False, f"该国家已被引用（{detail}），无法删除"
+    if usage["total"] > 0 and cascade:
+        from .reference_cascade import cascade_delete_registered_country
+
+        ok, err, _ = cascade_delete_registered_country(country_id)
+        return ok, err
     db.session.delete(row)
     return True, None
 

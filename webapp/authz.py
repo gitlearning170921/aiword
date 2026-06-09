@@ -109,11 +109,10 @@ def user_team_ids() -> list[str]:
     uid = session.get("user_id")
     if not uid:
         return []
-    ids = [
-        str(m.team_id).strip()
-        for m in UserTeamMembership.query.filter_by(user_id=uid).all()
-        if str(m.team_id).strip()
-    ]
+    from .user_access import enforce_single_team_membership
+
+    tid = enforce_single_team_membership(str(uid), commit=True)
+    ids = [tid] if tid else []
     session["team_ids"] = ids
     if has_request_context():
         g._user_team_ids = ids
@@ -142,6 +141,9 @@ def registered_country_in_scope(registered_country: str | None) -> bool:
     if scopes is None:
         return True
     c = (registered_country or "").strip()
+    if not c:
+        # 字典级联删除后注册国家被清空：仍对公司管理员可见，避免项目「消失」
+        return True
     return c in scopes
 
 
@@ -450,7 +452,7 @@ def project_in_scope(
         return False
     tid = (getattr(project, "assigned_team_id", None) or "").strip()
     if not tid:
-        return True
+        return False
     tids = team_ids if team_ids is not None else set(user_team_ids())
     return tid in tids
 
@@ -464,15 +466,17 @@ def upload_in_scope(rec: UploadRecord | None) -> bool:
         return False
     proj = resolve_project_for_upload(rec)
     if proj is None:
-        return is_project_admin()
+        return False
     return project_in_scope(proj)
 
 
 def _project_visible_for_team(project: Project | None, team_ids: set[str]) -> bool:
     if project is None:
-        return True
+        return False
     tid = (getattr(project, "assigned_team_id", None) or "").strip()
-    return not tid or tid in team_ids
+    if not tid:
+        return False
+    return tid in team_ids
 
 
 def project_label_in_page3_scope(project_name: str | None) -> bool:
@@ -487,7 +491,7 @@ def project_label_in_page3_scope(project_name: str | None) -> bool:
     by_id, by_label, by_name = _project_lookup_maps()
     proj = by_label.get(label) or by_name.get(label)
     if proj is None:
-        return True
+        return False
     return project_in_scope(proj)
 
 
@@ -501,6 +505,55 @@ def exam_team_scoped_user_ids() -> frozenset[str] | None:
     if not team_id:
         return frozenset()
     return user_ids_for_team_ids({team_id})
+
+
+def allowed_organization_ids_for_filter() -> set[str] | None:
+    """任务/项目/上传列表不按公司过滤（公司仅用于知识库集成）；返回 None 表示不筛。"""
+    return None
+
+
+def upload_organization_id_effective(rec: UploadRecord) -> str:
+    oid = str(getattr(rec, "organization_id", "") or "").strip()
+    if oid:
+        return oid
+    proj = resolve_project_for_upload(rec)
+    if proj:
+        return str(getattr(proj, "organization_id", "") or "").strip()
+    return ""
+
+
+def upload_record_in_organization_scope(rec: UploadRecord, allowed: set[str] | None = None) -> bool:
+    allowed = allowed if allowed is not None else allowed_organization_ids_for_filter()
+    if allowed is None:
+        return True
+    oid = upload_organization_id_effective(rec)
+    if not oid:
+        return True
+    return oid in allowed
+
+
+def project_organization_in_scope(project: Project | None, allowed: set[str] | None = None) -> bool:
+    allowed = allowed if allowed is not None else allowed_organization_ids_for_filter()
+    if allowed is None or project is None:
+        return True
+    oid = str(getattr(project, "organization_id", "") or "").strip()
+    if not oid:
+        return True
+    return oid in allowed
+
+
+def filter_projects_by_organization(projects: list[Project]) -> list[Project]:
+    allowed = allowed_organization_ids_for_filter()
+    if allowed is None:
+        return projects
+    return [p for p in projects if project_organization_in_scope(p, allowed)]
+
+
+def filter_uploads_by_organization(records: list[UploadRecord]) -> list[UploadRecord]:
+    allowed = allowed_organization_ids_for_filter()
+    if allowed is None:
+        return records
+    return [r for r in records if upload_record_in_organization_scope(r, allowed)]
 
 
 def exam_row_organization_id_matches(row_org_id: str | None, scope_org_id: str) -> bool:
@@ -552,7 +605,6 @@ def filter_upload_records_in_scope(records: list[UploadRecord]) -> list[UploadRe
             if label:
                 proj = by_label.get(label) or by_name.get(label)
         if proj is None:
-            out.append(rec)
             continue
         if _project_visible_for_team(proj, team_ids):
             out.append(rec)
@@ -561,6 +613,7 @@ def filter_upload_records_in_scope(records: list[UploadRecord]) -> list[UploadRe
 
 def filter_upload_records_visible_to_user(records: list[UploadRecord]) -> list[UploadRecord]:
     """页面2 my-tasks 批量可见性过滤。"""
+    records = filter_uploads_by_organization(records)
     if not records:
         return []
     if is_page13_super_admin():
@@ -639,27 +692,25 @@ def _refresh_session_from_user(user: User) -> None:
     session["is_admin"] = False
     role = (getattr(user, "admin_role", None) or ADMIN_ROLE_NONE).strip()
     session["admin_role"] = role if role in ADMIN_ROLES else ADMIN_ROLE_NONE
-    session["team_ids"] = [
-        str(m.team_id).strip()
-        for m in UserTeamMembership.query.filter_by(user_id=user.id).all()
-        if str(m.team_id).strip()
-    ]
-    org_ids = [
-        str(m.organization_id).strip()
-        for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
-        if str(m.organization_id).strip()
-    ]
-    if role == ADMIN_ROLE_PROJECT:
-        from .team_organizations import organization_ids_for_teams
+    from .user_access import enforce_single_team_membership
 
-        team_ids = [
-            str(m.team_id).strip()
-            for m in UserTeamMembership.query.filter_by(user_id=user.id).all()
-            if str(m.team_id).strip()
+    primary_team = enforce_single_team_membership(user.id, commit=True)
+    session["team_ids"] = [primary_team] if primary_team else []
+    team_ids = session["team_ids"]
+    from .team_organizations import organization_ids_for_teams
+
+    if role == ADMIN_ROLE_COMPANY:
+        org_ids = [
+            str(m.organization_id).strip()
+            for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
+            if str(m.organization_id).strip()
         ]
-        for oid in organization_ids_for_teams(team_ids):
-            if oid and oid not in org_ids:
-                org_ids.append(oid)
+    else:
+        org_ids = [
+            oid
+            for oid in organization_ids_for_teams(team_ids)
+            if oid
+        ]
     session["organization_ids"] = org_ids
     active_org = str(session.get("active_organization_id") or "").strip()
     if org_ids:
@@ -674,6 +725,9 @@ def _refresh_session_from_user(user: User) -> None:
     session.pop("country_scopes_stale", None)
     session["country_scope_active"] = bool(scopes) and role == ADMIN_ROLE_COMPANY
     session["can_access_company_registry"] = role == ADMIN_ROLE_COMPANY
+    active_exam = str(session.get("active_exam_team_id") or "").strip()
+    if active_exam and active_exam not in set(session.get("team_ids") or []):
+        session.pop("active_exam_team_id", None)
 
 
 def sync_user_session(user: User) -> None:

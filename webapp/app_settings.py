@@ -288,6 +288,26 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
         "keys": PAGE2_FEATURE_FLAG_KEYS,
     },
     {
+        "id": "platform_feature_flags",
+        "title": "平台功能开关",
+        "hint": "页面0 公司总览、多公司租户隔离；填 1 开启。",
+        "defaultExpanded": False,
+        "keys": (
+            "FEATURE_COMPANY_REGISTRY",
+            "FEATURE_MULTI_TENANT",
+        ),
+    },
+    {
+        "id": "legacy_feature_flags",
+        "title": "兼容 · 旧版功能开关",
+        "hint": "未迁移环境的回退项；新部署请用上方页面1/2 分项配置，勿新增依赖。",
+        "defaultExpanded": False,
+        "keys": (
+            "FEATURE_PAGE2_AUDIT",
+            "FEATURE_EXAM_CENTER",
+        ),
+    },
+    {
         "id": "core",
         "title": "基础与安全",
         "hint": "部署、访问控制与对外地址；修改数据库连接后需重启服务。",

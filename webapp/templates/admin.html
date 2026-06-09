@@ -44,7 +44,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshCountryDict">刷新</button>
                         </div>
                         <div class="card-body">
-                            <p class="small text-muted mb-2">在此维护；页面0/1 等从此字典下拉选择。已绑定项目/账号的条目不可删除。</p>
+                            <p class="small text-muted mb-2">在此维护；页面0/1 等从此字典下拉选择。已引用条目可由超级管理员级联删除（需确认）。</p>
                             <div class="input-group input-group-sm mb-3">
                                 <input type="text" class="form-control" id="newCountryDictName" placeholder="新注册国家名称">
                                 <button type="button" class="btn btn-primary" id="btnAddCountryDict">添加</button>
@@ -62,7 +62,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshTeamDict">刷新</button>
                         </div>
                         <div class="card-body">
-                            <p class="small text-muted mb-2">在此维护；项目分配与账号所属项目组从此选择。可在编辑时关联一个或多个公司（多对多）。已绑定数据不可删除。</p>
+                            <p class="small text-muted mb-2">在此维护；项目分配与账号所属项目组从此选择。可在编辑时关联一个或多个公司（多对多）。已引用条目可由超级管理员级联删除（需确认）。</p>
                             <div class="input-group input-group-sm mb-3">
                                 <input type="text" class="form-control" id="newTeamName" placeholder="新项目组名称">
                                 <button type="button" class="btn btn-primary" id="btnAddTeam">添加</button>
@@ -161,6 +161,7 @@
                                     <th>显示名称</th>
                                     <th>手机号</th>
                                     <th>分级角色</th>
+                                    <th>所属项目组</th>
                                     <th>所属公司</th>
                                     <th>国家维度</th>
                                     <th>操作</th>
@@ -244,7 +245,7 @@
             <div class="card mb-3">
                 <div class="card-body py-2">
                     <h6 class="small fw-bold mb-2">催办 · 项目组钉钉</h6>
-                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；未配置时回退「系统配置 → 催办与定时通知」中的全局 Webhook。</p>
+                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；<strong>留空</strong>时回退全局催办 Webhook（不会预填体系记录机器人地址）。</p>
                     <div class="row g-2 align-items-end">
                         <div class="col-md-4">
                             <label class="form-label small mb-0">项目组</label>
@@ -252,7 +253,8 @@
                         </div>
                         <div class="col-md-4">
                             <label class="form-label small mb-0">Webhook</label>
-                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="https://oapi.dingtalk.com/robot/send?...">
+                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
+                            <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small mb-0">Secret（留空不改）</label>
@@ -361,17 +363,18 @@
                             <option value="company">公司管理员</option>
                         </select>
                     </div>
-                    <div class="mb-0">
+                    <div class="mb-0" id="newUserOrganizationsWrap">
                         <label class="form-label small mb-0">所属公司（可多选）</label>
                         <div id="newUserOrganizationsPicker" class="tag-multi-picker mb-2"></div>
                     </div>
-                    <div class="mb-0">
+                    <div class="mb-0" id="newUserCountriesWrap">
                         <label class="form-label small mb-0">页面0 · 注册国家维度（公司管理员）</label>
                         <div id="newUserCountriesPicker" class="tag-multi-picker"></div>
                     </div>
-                    <div class="mb-0 mt-2">
-                        <label class="form-label small mb-0">所属项目组（项目管理员）</label>
-                        <div id="newUserTeamsPicker" class="tag-multi-picker"></div>
+                    <div class="mb-0 mt-2" id="newUserTeamsWrap">
+                        <label class="form-label small mb-0">所属项目组（单选）</label>
+                        <div id="newUserTeamsPicker" class="mb-1"></div>
+                        <p class="form-text small mb-0">每人仅可绑定一个项目组；修改后将看不到原项目组的数据。</p>
                     </div>
                     <div class="mb-0 mt-2 border-top pt-2">
                         <label class="form-label small mb-0">功能权限</label>
@@ -417,17 +420,18 @@
                         <option value="company">公司管理员</option>
                     </select>
                 </div>
-                <div class="mb-2">
+                <div class="mb-2" id="editUserOrganizationsWrap">
                     <label class="form-label small">所属公司（可多选）</label>
                     <div id="editUserOrganizationsPicker" class="tag-multi-picker"></div>
                 </div>
-                <div class="mb-2">
+                <div class="mb-2" id="editUserCountriesWrap">
                     <label class="form-label small">页面0 · 注册国家维度</label>
                     <div id="editUserCountriesPicker" class="tag-multi-picker"></div>
                 </div>
-                <div class="mb-2">
-                    <label class="form-label small">所属项目组（项目管理员）</label>
-                    <div id="editUserTeamsPicker" class="tag-multi-picker"></div>
+                <div class="mb-2" id="editUserTeamsWrap">
+                    <label class="form-label small">所属项目组（单选）</label>
+                    <div id="editUserTeamsPicker" class="mb-1"></div>
+                    <p class="form-text small mb-0">每人仅可绑定一个项目组；修改后将看不到原项目组的数据。</p>
                 </div>
                 <div class="mb-2 border-top pt-2">
                     <label class="form-label small">功能权限</label>

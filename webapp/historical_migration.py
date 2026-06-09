@@ -293,9 +293,11 @@ def repair_users_without_team_membership() -> int:
     except Exception:
         pass
     linked = 0
+    from .user_access import user_eligible_for_team_membership
+
     for u in User.query.all():
         uid = str(u.id or "").strip()
-        if not uid:
+        if not uid or not user_eligible_for_team_membership(u):
             continue
         if UserTeamMembership.query.filter_by(user_id=uid).first():
             continue
@@ -369,7 +371,12 @@ def repair_exam_participants_default_team() -> int:
         if str(u.id or "").strip()
     }
     linked = 0
+    from .user_access import user_eligible_for_team_membership
+
     for uid in valid_uids:
+        u = User.query.get(uid)
+        if u is None or not user_eligible_for_team_membership(u):
+            continue
         if UserTeamMembership.query.filter_by(user_id=uid).first():
             continue
         db.session.add(UserTeamMembership(user_id=uid, team_id=team.id))

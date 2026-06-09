@@ -25,18 +25,35 @@ if (-not (Test-Path (Join-Path $AicheckwordRoot "Dockerfile"))) {
 
 Require-Docker
 
+$env:DOCKER_BUILDKIT = "1"
+
 $AiwordImage = "aiword:$Version"
 $AicheckwordImage = "aicheckword:$Version"
 
-Write-Host "==> platform: $Platform"
+Write-Host "==> platform: $Platform (parallel, BuildKit=1)"
 Write-Host "==> aiword: $AiwordImage"
 Write-Host "==> aicheckword: $AicheckwordImage"
 
-& docker build --platform $Platform -t $AiwordImage -f (Join-Path $AiwordRoot "Dockerfile") $AiwordRoot
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$aiwordArgs = @(
+    "build", "--platform", $Platform,
+    "-t", $AiwordImage,
+    "-f", (Join-Path $AiwordRoot "Dockerfile"),
+    $AiwordRoot
+)
+$aicheckArgs = @(
+    "build", "--platform", $Platform,
+    "-t", $AicheckwordImage,
+    "-f", (Join-Path $AicheckwordRoot "Dockerfile"),
+    $AicheckwordRoot
+)
 
-& docker build --platform $Platform -t $AicheckwordImage -f (Join-Path $AicheckwordRoot "Dockerfile") $AicheckwordRoot
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$pAiword = Start-Process -FilePath "docker" -ArgumentList $aiwordArgs -PassThru -NoNewWindow -Wait:$false
+$pAicheck = Start-Process -FilePath "docker" -ArgumentList $aicheckArgs -PassThru -NoNewWindow -Wait:$false
+
+Wait-Process -Id $pAiword.Id, $pAicheck.Id
+
+if ($pAiword.ExitCode -ne 0) { exit $pAiword.ExitCode }
+if ($pAicheck.ExitCode -ne 0) { exit $pAicheck.ExitCode }
 
 if (-not $SkipTagLocal) {
     docker tag $AiwordImage "aiword:local"
@@ -48,6 +65,7 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 $lines = @(
     "version=$Version",
     "platform=$Platform",
+    "buildkit=1",
     "built_at=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
     "aiword_image=$AiwordImage",
     "aicheckword_image=$AicheckwordImage"

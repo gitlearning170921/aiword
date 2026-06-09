@@ -40,6 +40,7 @@ from ._integration_common import (
     integration_requests_timeout,
     integration_scope_from_request,
     integration_scope_list_filter,
+    integration_organization_list_filter,
     login_wall,
     resolve_org_collection_for_integration,
     safe_truncate,
@@ -607,6 +608,7 @@ def api_translate_jobs_list():
     scope = integration_scope_from_request()
     q = TranslationJob.query.filter_by(user_id=uid)
     q = integration_scope_list_filter(q, TranslationJob, scope)
+    q = integration_organization_list_filter(q, TranslationJob)
     total = q.count()
     rows = (
         q

@@ -6,9 +6,13 @@
         <h1>页面1 · 模板上传与任务管理</h1>
         <p>批量录入任务信息，支持上传模板文件（含与 aicheckword 一致的 .zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
-    {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
-    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
-    {% endif %}
+    <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center text-end">
+        <span id="userInfo" class="badge bg-light text-dark border"></span>
+        {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
+        {% endif %}
+        <button type="button" id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
+    </div>
 </div>
 
 <div class="card mb-4">
@@ -32,19 +36,21 @@
     </div>
 </div>
 
-<div class="card mb-4">
-    <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="form-section-title mb-0">项目管理（优先级 / 状态）</h6>
-            <div class="d-flex gap-2 align-items-center">
+<div class="card mb-4 page1-projects-card">
+    <div class="card-header page1-projects-card-header">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span class="fw-semibold">项目管理（优先级 / 状态）</span>
+            <div class="d-flex gap-2 flex-wrap align-items-center">
                 <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="从页面0 同步分配到本账号所属项目组的公司总览项目">同步页面0项目</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
             </div>
         </div>
-        <p class="small text-muted mb-2">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在页面1/2展示，页面3统计与自动通知也不计入。</p>
-        <div id="projectsFilterRow" class="collapse mb-2">
+        {% if is_page13_super_admin %}
+        <p class="small text-muted mb-0 mt-2 pt-2 border-top border-light-subtle">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在页面1/2展示，页面3统计与自动通知也不计入。</p>
+        {% endif %}
+        <div id="projectsFilterRow" class="collapse mt-2 pt-2 border-top border-light-subtle">
             <div class="row g-2 align-items-end">
                 <div class="col-md-4">
                     <label class="form-label small mb-0">项目名称搜索</label>
@@ -58,9 +64,9 @@
                         <option value="ended">已结束</option>
                     </select>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-3{% if not is_page13_super_admin %} d-none{% endif %}">
                     <label class="form-label small mb-0">所属公司</label>
-                    <select class="form-select form-select-sm" id="filterProjectOrganization" title="多公司账号可筛选；默认展示全部绑定公司并集">
+                    <select class="form-select form-select-sm" id="filterProjectOrganization" title="超级管理员可按公司筛选（任务可见范围按项目组）">
                         <option value="__all__">全部公司（并集）</option>
                     </select>
                 </div>
@@ -69,35 +75,41 @@
                 </div>
             </div>
         </div>
+    </div>
+    <div class="card-body pt-2 pb-0">
         <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
+            {% if is_page13_super_admin %}
             <span class="small text-muted">产品类型/取证/递交/进度与页面0 公司总览双向同步；修改后点「保存」或「一键保存」。</span>
+            {% endif %}
         </div>
-        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
-            <table class="table table-sm table-striped table-hover align-middle mb-0">
+        <div class="table-responsive page1-projects-table-wrap">
+            <table class="table table-sm table-hover align-middle mb-0 page1-projects-table">
                 <thead class="table-light sticky-top">
                 <tr>
-                    <th style="width:38px"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
-                    <th>项目</th>
-                    <th style="width:120px">注册国家</th>
-                    <th style="width:120px">注册类别</th>
-                    <th style="width:140px">所属公司</th>
-                    <th style="width:100px">产品类型</th>
-                    <th style="width:108px">预计取证</th>
-                    <th style="width:108px">预计递交</th>
-                    <th style="min-width:140px">进度描述</th>
-                    <th style="width:88px">优先级</th>
-                    <th style="width:88px">状态</th>
-                    <th style="width:140px">操作</th>
+                    <th class="p1-col-check text-center"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
+                    <th class="p1-col-name">项目</th>
+                    <th class="p1-col-country">注册国家</th>
+                    <th class="p1-col-category">注册类别</th>
+                    <th class="p1-col-org">所属公司</th>
+                    <th class="p1-col-type">产品类型</th>
+                    <th class="p1-col-date">预计取证</th>
+                    <th class="p1-col-date">预计递交</th>
+                    <th class="p1-col-progress">进度描述</th>
+                    <th class="p1-col-priority">优先级</th>
+                    <th class="p1-col-status">状态</th>
+                    <th class="p1-col-actions text-end">操作</th>
                 </tr>
                 </thead>
                 <tbody id="projectsManageBody"></tbody>
             </table>
         </div>
+    </div>
+</div>
 
-        <!-- 新增项目弹窗 -->
-        <div class="modal fade" id="newProjectModal" tabindex="-1">
+<!-- 新增项目弹窗 -->
+<div class="modal fade" id="newProjectModal" tabindex="-1">
             <div class="modal-dialog modal-dialog-centered modal-lg">
                 <div class="modal-content">
                     <div class="modal-header">
@@ -115,7 +127,9 @@
                                 <select class="form-select form-select-sm" id="newProjectRegisteredCountry">
                                     <option value="">—</option>
                                 </select>
+                                {% if is_page13_super_admin %}
                                 <p class="form-text small text-muted mb-0">选项来自注册国家字典</p>
+                                {% endif %}
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small mb-0">注册类别</label>
@@ -123,10 +137,13 @@
                             </div>
                         </div>
                         <div class="mb-2">
-                            <label class="form-label small mb-0">所属公司</label>
+                            <label class="form-label small mb-0">所属公司{% if not is_page13_super_admin %} <span class="text-muted">（知识库/集成）</span>{% endif %}</label>
                             <select class="form-select form-select-sm" id="newProjectOrganizationId">
                                 <option value="">—</option>
                             </select>
+                            {% if not is_page13_super_admin %}
+                            <p class="form-text small text-muted mb-0">仅影响文档工具、考试题库等知识库集成；任务与项目列表按所属项目组可见。</p>
+                            {% endif %}
                         </div>
                         <div class="mb-2">
                             <label class="form-label small mb-0">产品类型</label>
@@ -204,7 +221,9 @@
                                 </select>
                             </div>
                         </div>
+                        {% if is_page13_super_admin %}
                         <p class="small text-muted mb-0 mt-2">点击“应用”仅修改勾选行的下拉值，最后请点“一键保存”提交。</p>
+                        {% endif %}
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
@@ -213,13 +232,14 @@
                 </div>
             </div>
         </div>
-    </div>
-</div>
 
-<div class="card mb-4">
+<div class="card mb-4 task-entry-card shadow-sm">
     <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5 class="card-title mb-0">任务录入（两级）</h5>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 task-entry-card-header">
+            <div>
+                <h5 class="card-title mb-1">任务录入</h5>
+                <p class="text-muted small mb-0">第一层填写项目信息，第二层在同一项目下批量添加文件/事项任务</p>
+            </div>
             <div>
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="downloadTemplateEmptyBtn">下载空模板</button>
                 <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="downloadTemplateSampleBtn">下载示例模板</button>
@@ -230,9 +250,9 @@
                 <span id="saveAllProgressHint" class="small text-primary ms-2 d-none" aria-live="polite"></span>
             </div>
         </div>
-        <p class="text-muted small mb-3">第一层：项目信息；第二层：该项目下的文件/事项任务。重复校验基于：项目名称 + 文件名称 + 任务类型 + 编写人。可先下载「空模板」或「示例模板」填写后导入，或导入另一工具导出的待办（CSV/Excel，表头需含：项目名称、文件名称、编写人员等）。</p>
+        <p class="text-muted small mb-3">重复校验：项目名称 + 文件名称 + 任务类型 + 编写人。可下载模板填写后导入，或从下方已保存任务快速带入项目信息。</p>
 
-        <div class="d-flex flex-wrap align-items-center gap-2 mb-3 py-2 px-2 rounded border bg-light">
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3 py-2 px-3 rounded task-entry-quick-pick">
             <span class="small text-muted text-nowrap">从已保存任务选项目：</span>
             <select class="form-select form-select-sm" id="pickSavedProjectForEntry" style="max-width:min(360px, 100%)">
                 <option value="">— 请选择已有项目 —</option>
@@ -392,19 +412,26 @@
     </div>
 </div>
 
-<p class="small text-muted mb-3">账号管理、任务类型/完成状态/审核状态等配置请联系管理员处理。</p>
+{% if is_page13_super_admin %}
+<p class="small text-muted mb-3">登录账号由超级管理员在页面4创建；任务类型/完成状态/审核状态等配置请联系超级管理员。</p>
+{% endif %}
 
 <!-- 编辑任务弹窗（页面1） -->
 <div class="modal fade" id="editRecordModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">编辑任务</h5>
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content task-record-modal">
+            <div class="modal-header border-bottom-0 pb-0">
+                <div>
+                    <h5 class="modal-title mb-1">编辑任务</h5>
+                    <p class="text-muted small mb-0">修改已保存任务的基本信息、模板与签批字段</p>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body pt-3">
                 <input type="hidden" id="editRecordId">
                 <input type="hidden" id="editRecordProjectId" value="">
+                <section class="task-record-section mb-3">
+                    <h6 class="task-record-section-title">基本信息</h6>
                 <div class="row g-2">
                     <div class="col-md-6">
                         <label class="form-label small">项目名称 *</label>
@@ -448,7 +475,7 @@
                     <div class="col-md-6">
                         <label class="form-label small">负责人（钉钉@）</label>
                         <div class="input-group input-group-sm">
-                            <input type="text" class="form-control" id="editRecordAssignee" placeholder="可选，需与账号管理中姓名一致">
+                            <input type="text" class="form-control" id="editRecordAssignee" placeholder="可选，需与页面4账号管理中姓名一致">
                             <button type="button" class="btn btn-outline-success" id="editRecordQuickUserBtn" title="快捷创建账号">+ 账号</button>
                         </div>
                         <div id="editRecordAssigneeMobileHint" class="form-text small text-muted"></div>
@@ -489,9 +516,11 @@
                         </div>
                         <div id="editNoteFilesList" class="small mt-1"></div>
                     </div>
-                    <div class="col-12 mt-2 pt-2 border-top">
-                        <p class="text-muted small fw-bold mb-2">以下为文档通用及签审批信息</p>
-                        <div class="row g-2">
+                </div>
+                </section>
+                <section class="task-record-section">
+                    <h6 class="task-record-section-title">文档通用及签审批信息</h6>
+                    <div class="row g-2">
                             <div class="col-md-6">
                                 <label class="form-label small">项目编号</label>
                                 <input type="text" class="form-control form-control-sm" id="editRecordProjectCode" placeholder="可选">
@@ -532,9 +561,8 @@
                                 <label class="form-label small">注册版本号</label>
                                 <input type="text" class="form-control form-control-sm" id="editRecordRegistrationVersion" placeholder="可选">
                             </div>
-                        </div>
                     </div>
-                </div>
+                </section>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>

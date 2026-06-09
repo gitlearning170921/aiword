@@ -72,6 +72,7 @@
     window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
     window.__FEATURE_FLAGS__ = {{ (feature_flags or {})|tojson }};
     window.__COMPANY_REGISTRY_ENABLED__ = {{ company_registry_enabled|default(false)|tojson }};
+    window.__PAGE13_SUPER_ADMIN__ = {{ is_page13_super_admin|default(false)|tojson }};
 </script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>

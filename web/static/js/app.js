@@ -848,30 +848,35 @@ function _bindProjectEntryBlock(block) {
 
 function createProjectBlock() {
     const block = document.createElement("div");
-    block.className = "project-block card border mb-3";
+    block.className = "project-block card border-0 shadow-sm mb-3";
     block.innerHTML = `
-        <div class="card-body p-3">
-            <div class="project-entry-meta-panel">
-                <h6 class="card-subtitle text-muted mb-2">第一层 · 项目信息</h6>
+        <div class="card-body p-0">
+            <div class="project-entry-block-head d-flex justify-content-between align-items-center flex-wrap gap-2 px-3 py-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="project-entry-layer-badge project-entry-layer-badge--project">第一层 · 项目</span>
+                    <span class="small text-muted">填写项目基础信息与签批通用字段</span>
+                </div>
+                <button type="button" class="btn btn-outline-danger btn-sm remove-project-btn">删除本项目块</button>
+            </div>
+            <div class="project-entry-meta-panel px-3 pb-2">
                 <div class="row g-2 mb-2">
-                    <div class="col-md-3"><label class="form-label small">项目名称 *</label><select class="form-select form-select-sm project-name" required></select></div>
+                    <div class="col-md-3"><label class="form-label small fw-semibold">项目名称 *</label><select class="form-select form-select-sm project-name" required></select></div>
                     <div class="col-md-3"><label class="form-label small">影响业务方</label><input type="text" class="form-control form-control-sm project-business-side" placeholder="影响业务方"></div>
                     <div class="col-md-3"><label class="form-label small">影响产品</label><input type="text" class="form-control form-control-sm project-product" placeholder="影响产品"></div>
                     <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
                 </div>
-                <p class="text-muted small fw-bold mb-2">以下为文档通用及签审批信息</p>
-                <div class="row g-2 mb-2">
-                    <div class="col-md-2"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
-                    <div class="col-md-2"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
+                <div class="row g-2 mb-0">
+                    <div class="col-md-3"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
+                    <div class="col-md-3"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
                     <div class="col-md-2"><label class="form-label small">注册产品名称</label><input type="text" class="form-control form-control-sm project-registered-product-name" placeholder="注册产品名称"></div>
                     <div class="col-md-2"><label class="form-label small">型号</label><input type="text" class="form-control form-control-sm project-model" placeholder="型号"></div>
                     <div class="col-md-2"><label class="form-label small">注册版本号</label><input type="text" class="form-control form-control-sm project-registration-version" placeholder="注册版本号"></div>
-                    <div class="col-md-2 d-flex align-items-end justify-content-end">
-                        <button type="button" class="btn btn-outline-danger btn-sm remove-project-btn w-100">删除本项目块</button>
-                    </div>
                 </div>
             </div>
-            <h6 class="card-subtitle text-muted mb-1">第二层 · 文件/事项任务</h6>
+            <div class="project-entry-task-panel px-3 pb-3">
+            <div class="project-entry-task-head d-flex align-items-center gap-2 mb-2">
+                <span class="project-entry-layer-badge project-entry-layer-badge--task">第二层 · 任务</span>
+            </div>
             <div class="project-entry-task-toolbar">
                 <span class="project-entry-task-row-count">已添加 0 行</span>
                 <button type="button" class="btn btn-outline-secondary btn-sm add-task-row-btn">+ 添加任务行</button>
@@ -891,7 +896,7 @@ function createProjectBlock() {
                             <th>文档链接/模板</th>
                             <th>编写人员 *</th>
                             <th>截止日期</th>
-                            <th>下发任务备注</th>
+                            <th>任务备注</th>
                             <th colspan="5" class="text-center">以下为文档通用及签审批信息</th>
                             <th style="width:50px">操作</th>
                         </tr>
@@ -908,6 +913,7 @@ function createProjectBlock() {
                     </thead>
                     <tbody class="project-task-tbody"></tbody>
                 </table>
+            </div>
             </div>
         </div>
     `;
@@ -975,7 +981,7 @@ function createTaskRowUnderProject(projectBlock) {
         <td><input type="date" class="form-control form-control-sm task-duedate"></td>
         <td>
             <div class="input-group input-group-sm">
-                <input type="text" class="form-control task-notes" placeholder="下发任务备注">
+                <input type="text" class="form-control task-notes" placeholder="任务备注">
                 <button type="button" class="btn btn-outline-secondary btn-upload-note-pdf" title="上传PDF附件">📎</button>
                 <input type="file" class="task-note-file d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
             </div>
@@ -1118,6 +1124,42 @@ function initDragSort(tbody, onReorder) {
     });
 }
 
+/** 页面1/2/3 顶部：当前账号与退出登录。 */
+function initSessionUserBar() {
+    const userInfo = document.getElementById("userInfo");
+    const logoutBtn = document.getElementById("logoutBtn");
+    if (!userInfo && !logoutBtn) return;
+
+    App.request("/api/me")
+        .then((res) => {
+            if (userInfo) {
+                if (res.page13SuperAdmin && !res.loggedIn) {
+                    userInfo.textContent = "超级管理员（页面4 访问密码）";
+                } else if (res.loggedIn) {
+                    let label = `欢迎，${res.user.displayName || res.user.username}`;
+                    if (res.page13SuperAdmin) {
+                        label += "（超级管理员 · 页面4）";
+                    } else if (res.user.adminRole === "project") {
+                        label += "（项目管理员）";
+                    }
+                    userInfo.textContent = label;
+                }
+            }
+            if (res.featureFlags && typeof res.featureFlags === "object") {
+                window.__FEATURE_FLAGS__ = { ...window.__FEATURE_FLAGS__, ...res.featureFlags };
+            }
+        })
+        .catch(() => {});
+
+    if (logoutBtn && logoutBtn.getAttribute("data-wired") !== "1") {
+        logoutBtn.setAttribute("data-wired", "1");
+        logoutBtn.addEventListener("click", async () => {
+            await App.request("/api/logout", { method: "POST" });
+            window.location.href = _appPath("/login");
+        });
+    }
+}
+
 async function initUploadPage() {
     const projectBlocksContainer = document.getElementById("projectBlocksContainer");
     const addProjectBtn = document.getElementById("addProjectBtn");
@@ -1127,6 +1169,7 @@ async function initUploadPage() {
 
     if (!projectBlocksContainer) return;
 
+    initSessionUserBar();
     await refreshEffectiveFeatureFlags();
 
     try {
@@ -1175,7 +1218,9 @@ async function initUploadPage() {
         if (!projectsManageBody) return;
         const nameKey = String(filterProjectName?.value || "").trim().toLowerCase();
         const st = String(filterProjectStatus?.value || "").trim().toLowerCase();
-        const orgFilter = String(filterProjectOrganization?.value || "__all__").trim() || "__all__";
+        const orgFilter = page13SuperAdminFlag
+            ? String(filterProjectOrganization?.value || "__all__").trim() || "__all__"
+            : "__all__";
         projectsManageBody.querySelectorAll("tr[data-project-id]").forEach((tr) => {
             const name = String(tr.dataset.projectName || "").toLowerCase();
             const status = String(tr.dataset.projectStatus || "").toLowerCase();
@@ -1209,6 +1254,13 @@ async function initUploadPage() {
 
     function fillPage1OrgFilterSelect(orgs, selectedId) {
         if (!filterProjectOrganization) return;
+        if (!page13SuperAdminFlag) {
+            filterProjectOrganization.value = "__all__";
+            try {
+                window.localStorage.setItem(PAGE1_ORG_FILTER_STORAGE_KEY, "__all__");
+            } catch (_) {}
+            return;
+        }
         let keep = selectedId != null ? String(selectedId || "").trim() : String(filterProjectOrganization.value || "__all__").trim();
         if (!selectedId) {
             try {
@@ -1269,46 +1321,31 @@ async function initUploadPage() {
                 tr.dataset.projectStatus = String(p.status || "");
                 tr.dataset.organizationId = String(p.organizationId || "");
                 tr.dataset.organizationLocked = orgLocked ? "1" : "0";
+                tr.dataset.page1HasUploadTasks = p.organizationIdLocked ? "1" : "0";
                 const linkHint = p.companyProjectId
                     ? ' <span class="badge bg-secondary" title="已关联页面0">总览</span>' : "";
                 tr.innerHTML = `
-                    <td><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
-                    <td title="${esc(p.name)}">${esc(p.name)}${linkHint}</td>
-                    <td>
-                        <select class="form-select form-select-sm project-registered-country-select">${buildRegisteredCountryOptionsHtml(p.registeredCountry || "", true)}</select>
-                    </td>
-                    <td>
-                        <input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—">
-                    </td>
-                    <td>${buildProjectOrganizationSelectHtml(p.organizationId, orgLocked)}</td>
-                    <td>
-                        <input type="text" class="form-control form-control-sm project-product-type-input" value="${esc(p.productType || "")}" placeholder="—">
-                    </td>
-                    <td>
-                        <input type="date" class="form-control form-control-sm project-cert-date-input" value="${esc(p.expectedCertificationDate || "")}">
-                    </td>
-                    <td>
-                        <input type="date" class="form-control form-control-sm project-submit-date-input" value="${esc(p.expectedSubmissionDate || "")}">
-                    </td>
-                    <td>
-                        <textarea class="form-control form-control-sm project-progress-input" rows="1" placeholder="进度…">${esc(p.progressDescription || "")}</textarea>
-                    </td>
-                    <td>
-                        <select class="form-select form-select-sm project-priority-select" data-id="${esc(p.id)}">
+                    <td class="text-center align-middle"><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
+                    <td class="p1-cell-name fw-medium" title="${esc(p.name)}"><span class="p1-cell-text">${esc(p.name)}</span>${linkHint}</td>
+                    <td class="p1-cell-field"><select class="form-select form-select-sm project-registered-country-select">${buildRegisteredCountryOptionsHtml(p.registeredCountry || "", true)}</select></td>
+                    <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—"></td>
+                    <td class="p1-cell-org">${buildProjectOrganizationSelectHtml(p.organizationId, orgLocked)}</td>
+                    <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-product-type-input" value="${esc(p.productType || "")}" placeholder="—"></td>
+                    <td class="p1-cell-field"><input type="date" class="form-control form-control-sm project-cert-date-input" value="${esc(p.expectedCertificationDate || "")}"></td>
+                    <td class="p1-cell-field"><input type="date" class="form-control form-control-sm project-submit-date-input" value="${esc(p.expectedSubmissionDate || "")}"></td>
+                    <td class="p1-cell-field"><textarea class="form-control form-control-sm project-progress-input p1-progress-input" rows="1" placeholder="进度…">${esc(p.progressDescription || "")}</textarea></td>
+                    <td class="p1-cell-field"><select class="form-select form-select-sm project-priority-select" data-id="${esc(p.id)}">
                             <option value="3" ${pr === 3 ? "selected" : ""}>高</option>
                             <option value="2" ${pr === 2 ? "selected" : ""}>中</option>
                             <option value="1" ${pr === 1 ? "selected" : ""}>低</option>
-                        </select>
-                    </td>
-                    <td>
-                        <select class="form-select form-select-sm project-status-select" data-id="${esc(p.id)}">
+                        </select></td>
+                    <td class="p1-cell-field"><select class="form-select form-select-sm project-status-select" data-id="${esc(p.id)}">
                             <option value="active" ${st === "active" ? "selected" : ""}>进行中</option>
                             <option value="ended" ${st === "ended" ? "selected" : ""}>已结束</option>
-                        </select>
-                    </td>
-                    <td class="text-nowrap">
+                        </select></td>
+                    <td class="p1-actions-cell text-end">
                         <button type="button" class="btn btn-sm btn-outline-primary btn-save-project" data-id="${esc(p.id)}">保存</button>
-                        <button type="button" class="btn btn-sm btn-outline-danger ms-1 btn-delete-project" data-id="${esc(p.id)}">删除</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger btn-delete-project" data-id="${esc(p.id)}">删除</button>
                     </td>
                 `;
                 projectsManageBody.appendChild(tr);
@@ -1345,6 +1382,8 @@ async function initUploadPage() {
                     if (orgInput && !orgInput.disabled) {
                         bodyPayload.organizationId = String(orgInput.value || "").trim() || null;
                     }
+                    const cascadeMsg = page1OrgChangeConfirmMessage(tr, bodyPayload.organizationId);
+                    if (cascadeMsg && !window.confirm(cascadeMsg)) return;
                     try {
                         await App.request(`/api/projects/${id}`, {
                             method: "PATCH",
@@ -1564,6 +1603,8 @@ async function initUploadPage() {
             payload.push(item);
         });
         if (!payload.length) { App.notify("没有可保存的项目", "warning"); return; }
+        const batchCascadeMsg = page1BatchOrgCascadeConfirmMessage(projectsManageBody);
+        if (batchCascadeMsg && !window.confirm(batchCascadeMsg)) return;
         try {
             const res = await App.request("/api/projects/batch", {
                 method: "PUT",
@@ -2073,6 +2114,40 @@ let organizationsCache = null;
 let assignableOrganizationsCache = null;
 let page13SuperAdminFlag = false;
 
+function page1OrgChangeConfirmMessage(tr, newOrgId) {
+    if (!page13SuperAdminFlag || !tr) return "";
+    if (tr.dataset.page1HasUploadTasks !== "1") return "";
+    const oldOrg = String(tr.dataset.organizationId || "").trim();
+    const nextOrg = String(newOrgId || "").trim();
+    if (oldOrg === nextOrg) return "";
+    const name = tr.dataset.projectName || "该项目";
+    return `当前操作项目「${name}」所属公司及关联任务记录、审核/翻译/初稿任务都会被更新，是否确认？`;
+}
+
+function page1BatchOrgCascadeConfirmMessage(body) {
+    if (!page13SuperAdminFlag || !body) return "";
+    let count = 0;
+    body.querySelectorAll("tr[data-project-id]").forEach((tr) => {
+        if (tr.dataset.page1HasUploadTasks !== "1") return;
+        const orgInput = tr.querySelector(".project-organization-select");
+        if (!orgInput || orgInput.disabled) return;
+        const oldOrg = String(tr.dataset.organizationId || "").trim();
+        const nextOrg = String(orgInput.value || "").trim();
+        if (oldOrg !== nextOrg) count += 1;
+    });
+    if (!count) return "";
+    if (count === 1) {
+        const tr = [...body.querySelectorAll("tr[data-project-id]")].find((row) => {
+            if (row.dataset.page1HasUploadTasks !== "1") return false;
+            const orgInput = row.querySelector(".project-organization-select");
+            if (!orgInput || orgInput.disabled) return false;
+            return String(row.dataset.organizationId || "").trim() !== String(orgInput.value || "").trim();
+        });
+        if (tr) return page1OrgChangeConfirmMessage(tr, tr.querySelector(".project-organization-select")?.value);
+    }
+    return `当前操作已选 ${count} 个项目的所属公司及关联任务记录、审核/翻译/初稿任务都会被更新，是否确认？`;
+}
+
 async function loadAssignableOrganizations(force) {
     if (!force && assignableOrganizationsCache) return assignableOrganizationsCache;
     try {
@@ -2510,26 +2585,21 @@ function initBatchUserFeaturePermissions() {
 function initEditUserMobile() {
     const saveBtn = document.getElementById("saveUserMobileBtn");
     const modalEl = document.getElementById("editUserMobileModal");
+    const roleEl = document.getElementById("editUserAdminRole");
     if (!saveBtn || !modalEl) return;
+    bindUserAccessRoleVisibility(roleEl, "edit");
     saveBtn.addEventListener("click", async () => {
         const id = document.getElementById("editUserMobileId").value;
         const mobile = document.getElementById("editUserMobileValue").value.trim();
         const displayName = (document.getElementById("editUserDisplayName")?.value || "").trim();
         const adminRole = document.getElementById("editUserAdminRole")?.value || "none";
         try {
+            const accessFields = collectUserAccessFieldsForRole(adminRole, "edit");
             const body = {
                 mobile: mobile || null,
                 displayName: displayName || null,
                 adminRole,
-                organizationIds: getTagMultiPickerValues(
-                    document.getElementById("editUserOrganizationsPicker")
-                ),
-                registeredCountries: getTagMultiPickerValues(
-                    document.getElementById("editUserCountriesPicker")
-                ),
-                teamIds: getTagMultiPickerValues(
-                    document.getElementById("editUserTeamsPicker")
-                ),
+                ...accessFields,
             };
             const fp = collectUserFeaturePermissions(
                 document.getElementById("editUserFeaturePermissions")
@@ -2694,7 +2764,7 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
     const hintEl = document.getElementById("editRecordAssigneeMobileHint");
     if (!hintEl) return;
     if (!assigneeName || !assigneeName.trim()) {
-        hintEl.textContent = "填写负责人姓名且需在账号管理中配置手机号，催办时才能@成功";
+        hintEl.textContent = "填写负责人姓名且需在页面4账号管理中配置手机号，催办时才能@成功";
         hintEl.className = "form-text small text-muted";
         return;
     }
@@ -2707,7 +2777,7 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
             hintEl.textContent = "已配置手机号：" + masked + "，催办时可@";
             hintEl.className = "form-text small text-success";
         } else {
-            hintEl.textContent = "该负责人未在账号管理中填写手机号，催办无法@成功。请先在账号管理中添加并填写手机号。";
+            hintEl.textContent = "该负责人未在页面4账号管理中填写手机号，催办无法@成功。请先联系超级管理员补全手机号。";
             hintEl.className = "form-text small text-warning";
         }
     };
@@ -3835,6 +3905,84 @@ function loadRecordsList() {
 }
 
 let usersListCache = [];
+let projectTeamsDictCache = [];
+
+function teamNameById(teamId) {
+    const id = String(teamId || "").trim();
+    if (!id) return "";
+    const row = (projectTeamsDictCache || []).find((t) => String(t.id || "").trim() === id);
+    return (row?.name || id).trim();
+}
+
+/** 账号管理：公司管理员只配公司；无/项目管理员只配项目组。 */
+function syncUserAccessFieldsByRole(role, mode) {
+    const isCompany = role === "company";
+    const prefix = mode === "edit" ? "editUser" : "newUser";
+    const orgWrap = document.getElementById(`${prefix}OrganizationsWrap`);
+    const countriesWrap = document.getElementById(`${prefix}CountriesWrap`);
+    const teamsWrap = document.getElementById(`${prefix}TeamsWrap`);
+    if (orgWrap) orgWrap.classList.toggle("d-none", !isCompany);
+    if (countriesWrap) countriesWrap.classList.toggle("d-none", !isCompany);
+    if (teamsWrap) teamsWrap.classList.toggle("d-none", isCompany);
+}
+
+function collectUserAccessFieldsForRole(role, mode) {
+    const prefix = mode === "edit" ? "editUser" : "newUser";
+    if (role === "company") {
+        return {
+            organizationIds: getTagMultiPickerValues(
+                document.getElementById(`${prefix}OrganizationsPicker`)
+            ),
+            registeredCountries: getTagMultiPickerValues(
+                document.getElementById(`${prefix}CountriesPicker`)
+            ),
+            teamIds: [],
+        };
+    }
+    return {
+        organizationIds: [],
+        registeredCountries: [],
+        teamIds: getUserTeamSinglePickerValue(document.getElementById(`${prefix}TeamsPicker`)),
+    };
+}
+
+function mountUserTeamSinglePicker(host, { value, options, emptyHint }) {
+    if (!host) return;
+    const selected = String(value || "").trim();
+    const hint = emptyHint || "— 未选择 —";
+    host.innerHTML = "";
+    host.classList.add("user-team-single-picker");
+    const sel = document.createElement("select");
+    sel.className = "form-select form-select-sm user-team-single-select";
+    const emptyOpt = document.createElement("option");
+    emptyOpt.value = "";
+    emptyOpt.textContent = hint;
+    sel.appendChild(emptyOpt);
+    (options || []).forEach((o) => {
+        const opt = document.createElement("option");
+        opt.value = String(o.value || "").trim();
+        opt.textContent = o.label || o.value || "";
+        if (opt.value === selected) opt.selected = true;
+        sel.appendChild(opt);
+    });
+    host.appendChild(sel);
+}
+
+function getUserTeamSinglePickerValue(hostOrId) {
+    const host =
+        typeof hostOrId === "string" ? document.getElementById(hostOrId) : hostOrId;
+    const sel = host?.querySelector?.(".user-team-single-select");
+    const v = (sel?.value || "").trim();
+    return v ? [v] : [];
+}
+
+function bindUserAccessRoleVisibility(selectEl, mode) {
+    if (!selectEl || selectEl.dataset.accessRoleBound === "1") return;
+    const sync = () => syncUserAccessFieldsByRole(selectEl.value || "none", mode);
+    selectEl.addEventListener("change", sync);
+    selectEl.dataset.accessRoleBound = "1";
+    sync();
+}
 let authorCandidatesCache = [];
 
 function _projectIdForAuthorPick(projectId) {
@@ -3962,7 +4110,7 @@ function renderUsersList() {
     tbody.innerHTML = "";
     if (!filtered.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="8" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
+        tr.innerHTML = `<td colspan="9" class="text-center text-muted small py-4">暂无匹配的账号</td>`;
         tbody.appendChild(tr);
         updateBatchUsersFeatureBtnState();
         return;
@@ -3973,13 +4121,25 @@ function renderUsersList() {
         const roleLabels = { none: "无", project: "项目", company: "公司" };
         const roleBadge = `<span class="badge bg-secondary">${_escUserCell(roleLabels[u.adminRole] || u.adminRole || "无")}</span>`;
         const displayName = (u.displayName || "").trim() || "-";
+        const role = u.adminRole || "none";
+        const isCompanyRole = role === "company";
+        const teamNames = (u.teamIds || [])
+            .map((tid) => teamNameById(tid))
+            .filter(Boolean);
+        const teamText = isCompanyRole
+            ? '<span class="text-muted">—</span>'
+            : teamNames.length
+              ? _escUserCell(teamNames.join("、"))
+              : '<span class="text-muted">—</span>';
         const orgNames = (u.organizationIds || [])
             .map((oid) => organizationNameById(oid))
             .filter(Boolean);
-        const orgText = orgNames.length
-            ? _escUserCell(orgNames.join("、"))
+        const orgText = isCompanyRole
+            ? orgNames.length
+                ? _escUserCell(orgNames.join("、"))
+                : '<span class="text-muted">—</span>'
             : '<span class="text-muted">—</span>';
-        const countries = (u.registeredCountries || []).length
+        const countries = isCompanyRole && (u.registeredCountries || []).length
             ? _escUserCell((u.registeredCountries || []).join("、"))
             : '<span class="text-muted">—</span>';
         tr.innerHTML = `
@@ -3988,6 +4148,7 @@ function renderUsersList() {
             <td>${_escUserCell(displayName)}</td>
             <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
             <td>${roleBadge}</td>
+            <td class="small">${teamText}</td>
             <td class="small">${orgText}</td>
             <td class="small">${countries}</td>
             <td class="text-nowrap">
@@ -4054,17 +4215,18 @@ function renderUsersList() {
                     .map((o) => ({ value: o.id, label: o.name })),
                 emptyHint: "未选择公司",
             });
-            setTagMultiPicker(document.getElementById("editUserTeamsPicker"), {
-                values: u?.teamIds || [],
+            mountUserTeamSinglePicker(document.getElementById("editUserTeamsPicker"), {
+                value: (u?.teamIds || [])[0] || "",
                 options: teams
                     .filter((t) => t.isActive !== false)
                     .map((t) => ({ value: t.id, label: t.name })),
-                emptyHint: "未选择项目组",
+                emptyHint: "— 未选择项目组 —",
             });
             renderUserFeaturePermissionFields(
                 document.getElementById("editUserFeaturePermissions"),
                 u?.featurePermissions
             );
+            bindUserAccessRoleVisibility(roleEl, "edit");
             const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
             modal.show();
         });
@@ -4075,8 +4237,13 @@ function loadUsersList() {
     const tbody = document.getElementById("usersTableBody");
     const hasAuthorPickers = !!document.querySelector(".author-picker, .task-author-picker-host");
 
-    const fetchUsers = Promise.all([loadOrganizationsDict(true), App.request("/api/users")])
-        .then(([, res]) => {
+    const fetchUsers = Promise.all([
+        loadOrganizationsDict(true),
+        loadProjectTeamsForPickers(),
+        App.request("/api/users"),
+    ])
+        .then(([, teams, res]) => {
+            projectTeamsDictCache = Array.isArray(teams) ? teams : teams?.teams || [];
             usersListCache = res.users || [];
             if (tbody) {
                 _refreshUsersOrganizationFilter();
@@ -4279,21 +4446,15 @@ async function submitCreateUserForm() {
     const passwordInput = document.getElementById("newPassword");
     const displayNameInput = document.getElementById("newDisplayName");
     const mobileInput = document.getElementById("newMobile");
+    const adminRole = document.getElementById("newUserAdminRole")?.value || "none";
+    const accessFields = collectUserAccessFieldsForRole(adminRole, "new");
     const payload = {
         username: (usernameInput?.value || "").trim(),
         password: (passwordInput?.value || "").trim(),
         displayName: displayNameInput ? (displayNameInput.value || "").trim() || null : null,
         mobile: mobileInput ? (mobileInput.value || "").trim() || null : null,
-        adminRole: document.getElementById("newUserAdminRole")?.value || "none",
-        organizationIds: getTagMultiPickerValues(
-            document.getElementById("newUserOrganizationsPicker")
-        ),
-        registeredCountries: getTagMultiPickerValues(
-            document.getElementById("newUserCountriesPicker")
-        ),
-        teamIds: getTagMultiPickerValues(
-            document.getElementById("newUserTeamsPicker")
-        ),
+        adminRole,
+        ...accessFields,
         featurePermissions: collectUserFeaturePermissions(
             document.getElementById("newUserFeaturePermissions")
         ) ?? {},
@@ -4342,17 +4503,19 @@ function initCreateUserModal() {
             emptyHint: "未选择公司",
         });
         const teams = await loadProjectTeamsForPickers();
-        setTagMultiPicker(document.getElementById("newUserTeamsPicker"), {
-            values: [],
+        mountUserTeamSinglePicker(document.getElementById("newUserTeamsPicker"), {
+            value: "",
             options: teams
                 .filter((t) => t.isActive !== false)
                 .map((t) => ({ value: t.id, label: t.name })),
-            emptyHint: "未选择项目组",
+            emptyHint: "— 未选择项目组 —",
         });
         renderUserFeaturePermissionFields(
             document.getElementById("newUserFeaturePermissions"),
             null
         );
+        const roleEl = document.getElementById("newUserAdminRole");
+        bindUserAccessRoleVisibility(roleEl, "new");
         bootstrap.Modal.getOrCreateInstance(modalEl).show();
         setTimeout(() => document.getElementById("newUsername")?.focus(), 200);
     });
@@ -4368,6 +4531,7 @@ function initCreateUserModal() {
 
     form?.addEventListener("submit", onSubmit);
     submitBtn?.addEventListener("click", onSubmit);
+    bindUserAccessRoleVisibility(document.getElementById("newUserAdminRole"), "new");
 }
 
 function initQuickUserForm() {
@@ -4741,14 +4905,13 @@ function initPage2ObserverFilters(filterOptions) {
 async function initGeneratePage() {
     const myTasksBody = document.getElementById("myTasksBody");
     const noTasksAlert = document.getElementById("noTasksAlert");
-    const userInfo = document.getElementById("userInfo");
-    const logoutBtn = document.getElementById("logoutBtn");
     const placeholderModal = document.getElementById("placeholderModal");
     const showHistoryEl = document.getElementById("showHistoryProjects");
 
     if (!myTasksBody) return;
 
     syncPage2TableHeader();
+    initSessionUserBar();
 
     // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
     if (showHistoryEl) showHistoryEl.checked = false;
@@ -4756,30 +4919,6 @@ async function initGeneratePage() {
     await loadCompletionStatuses();
     await loadTaskTypes();
     await refreshEffectiveFeatureFlags();
-
-    App.request("/api/me").then(async (res) => {
-        if (userInfo) {
-            if (res.page13SuperAdmin && !res.loggedIn) {
-                userInfo.textContent = "超级管理员（页面4 访问密码）";
-            } else if (res.loggedIn) {
-                let label = `欢迎，${res.user.displayName || res.user.username}`;
-                if (res.page13SuperAdmin) {
-                    label += "（超级管理员 · 页面4）";
-                } else if (res.user.adminRole === "project") {
-                    label += "（项目管理员）";
-                }
-                userInfo.textContent = label;
-            }
-        }
-        if (res.featureFlags && typeof res.featureFlags === "object") {
-            window.__FEATURE_FLAGS__ = res.featureFlags;
-        }
-    });
-
-    logoutBtn?.addEventListener("click", async () => {
-        await App.request("/api/logout", { method: "POST" });
-        window.location.href = _appPath("/login");
-    });
 
     const loadMyTasks = async () => {
         try {
@@ -5464,6 +5603,26 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
         ],
     },
     {
+        id: "platform_feature_flags",
+        title: "平台功能开关",
+        hint: "页面0 公司总览、多公司租户隔离；填 1 开启。",
+        defaultExpanded: false,
+        keys: [
+            "FEATURE_COMPANY_REGISTRY",
+            "FEATURE_MULTI_TENANT",
+        ],
+    },
+    {
+        id: "legacy_feature_flags",
+        title: "兼容 · 旧版功能开关",
+        hint: "未迁移环境的回退项；新部署请用上方页面1/2 分项，勿新增依赖。",
+        defaultExpanded: false,
+        keys: [
+            "FEATURE_PAGE2_AUDIT",
+            "FEATURE_EXAM_CENTER",
+        ],
+    },
+    {
         id: "core",
         title: "基础与安全",
         hint: "部署、访问控制与对外地址；修改数据库连接后需重启服务。",
@@ -5747,11 +5906,14 @@ ${sectionToolsHtml}
 }
 
 function initDashboardPage() {
+    initSessionUserBar();
     let teamDingtalkRows = [];
     const teamSelect = document.getElementById("teamDingtalkTeamId");
     const teamWebhookInput = document.getElementById("teamDingtalkWebhook");
     const teamSecretInput = document.getElementById("teamDingtalkSecret");
     const saveTeamBtn = document.getElementById("saveTeamDingtalkBtn");
+
+    const teamWebhookHint = document.getElementById("teamDingtalkWebhookHint");
 
     const renderTeamDingtalkForm = () => {
         if (!teamSelect) return;
@@ -5764,6 +5926,7 @@ function initDashboardPage() {
             teamSelect.appendChild(op);
             if (teamWebhookInput) teamWebhookInput.value = "";
             if (teamSecretInput) teamSecretInput.value = "";
+            if (teamWebhookHint) teamWebhookHint.textContent = "";
             if (saveTeamBtn) saveTeamBtn.disabled = true;
             return;
         }
@@ -5777,6 +5940,11 @@ function initDashboardPage() {
         const cur = teamDingtalkRows.find((t) => t.id === teamSelect.value) || null;
         if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
         if (teamSecretInput) teamSecretInput.value = "";
+        if (teamWebhookHint) {
+            teamWebhookHint.textContent = cur?.dingtalkWebhook
+                ? "已配置本项目组独立 Webhook"
+                : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
+        }
         if (saveTeamBtn) saveTeamBtn.disabled = false;
     };
 
@@ -5797,6 +5965,11 @@ function initDashboardPage() {
         const cur = teamDingtalkRows.find((t) => t.id === teamSelect.value) || null;
         if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
         if (teamSecretInput) teamSecretInput.value = "";
+        if (teamWebhookHint) {
+            teamWebhookHint.textContent = cur?.dingtalkWebhook
+                ? "已配置本项目组独立 Webhook"
+                : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
+        }
     });
     saveTeamBtn?.addEventListener("click", async () => {
         const tid = (teamSelect?.value || "").trim();

@@ -747,7 +747,7 @@
         ctx = ctx || {};
         window.__examScopeContext = ctx;
         if (ctx.__http_status && ctx.__http_status >= 400) {
-            fillExamOrganizationSelect([], null, ctx.message || "公司列表加载失败");
+            fillExamOrganizationSelect([], null, "公司列表加载失败");
             fillExamTeamSelect(ctx);
             return ctx;
         }
@@ -780,8 +780,8 @@
                 readonlyEl.classList.remove("d-none");
                 readonlyEl.textContent = assigned.map(function (t) { return t.name || t.id; }).join("、");
                 readonlyEl.title = ctx.isProjectAdmin
-                    ? "当前账号所属项目组（由管理员在页面4分配）"
-                    : "项目组由管理员在账号管理中分配，不可自行切换";
+                    ? "当前账号所属项目组（由超级管理员在页面4分配，每人仅一组）"
+                    : "项目组由超级管理员在页面4指定，每人仅一组，不可自行切换";
             }
             return;
         }

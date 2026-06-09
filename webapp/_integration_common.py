@@ -759,6 +759,29 @@ def integration_scope_list_filter(q: Any, model: Any, scope: str) -> Any:
     return q.filter(or_(col.is_(None), col == "", col == INTEGRATION_SCOPE_WORKFLOW))
 
 
+def integration_organization_list_filter(q: Any, model: Any) -> Any:
+    """多租户：仅页面0 文档工具 job 列表按当前公司过滤；工作流任务 job 按项目组，不按公司筛。"""
+    from sqlalchemy import or_
+
+    scope = normalize_integration_scope(integration_scope_from_request())
+    if scope != INTEGRATION_SCOPE_PAGE0:
+        return q
+    if not is_multi_tenant_enabled():
+        return q
+    col = getattr(model, "organization_id", None)
+    if col is None:
+        return q
+    try:
+        from .tenant_context import resolve_organization_context
+
+        oid = str(resolve_organization_context()[0] or "").strip()
+    except Exception:
+        oid = ""
+    if not oid:
+        return q
+    return q.filter(or_(col.is_(None), col == "", col == oid))
+
+
 def latest_audit_report_id_for_scope(
     user_id: str,
     scope: str = INTEGRATION_SCOPE_PAGE0,
