@@ -149,9 +149,9 @@ def _valid_organization_ids(raw_org_ids: list[Any]) -> list[str]:
 
 
 def ensure_role_access_requirements(user: User, data: dict) -> None:
-    """公司管理员须有所属公司；项目管理员须有所属项目组（页面0 体系开启时）。"""
+    """公司管理员须有所属公司；普通账号/项目管理员须有所属项目组（页面0 体系开启时）。"""
     from .authz import company_registry_enabled
-    from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLE_PROJECT
+    from .models import ADMIN_ROLE_COMPANY, ADMIN_ROLE_NONE, ADMIN_ROLE_PROJECT
 
     if not company_registry_enabled():
         return
@@ -167,24 +167,20 @@ def ensure_role_access_requirements(user: User, data: dict) -> None:
         if not existing:
             raise ValueError("公司管理员必须至少选择一个所属公司")
         return
-    if role != ADMIN_ROLE_PROJECT:
-        if "teamIds" in data:
-            raw = data.get("teamIds")
-            team_ids = raw if isinstance(raw, list) else []
-            if len([str(x).strip() for x in team_ids if str(x).strip()]) > MAX_USER_TEAM_MEMBERSHIPS:
-                raise ValueError("每个账号最多绑定一个所属项目组")
+    if role not in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
         return
+    role_label = "项目管理员" if role == ADMIN_ROLE_PROJECT else "普通账号"
     if "teamIds" in data:
         raw = data.get("teamIds")
         team_ids = raw if isinstance(raw, list) else []
         if len(team_ids) > MAX_USER_TEAM_MEMBERSHIPS:
             raise ValueError("每个账号最多绑定一个所属项目组")
         if not normalize_user_team_ids(team_ids):
-            raise ValueError("项目管理员必须选择一个有效的所属项目组")
+            raise ValueError(f"{role_label}必须选择一个有效的所属项目组")
         return
     existing = UserTeamMembership.query.filter_by(user_id=user.id).first()
     if not existing:
-        raise ValueError("项目管理员必须至少选择一个所属项目组")
+        raise ValueError(f"{role_label}必须至少选择一个所属项目组")
 
 
 def ensure_role_team_requirement(user: User, data: dict) -> None:

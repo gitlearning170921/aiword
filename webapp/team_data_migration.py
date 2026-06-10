@@ -49,15 +49,15 @@ def _backfill_upload_project_ids() -> int:
     return changed
 
 
-def ensure_default_team_data() -> dict[str, int | str]:
-    """幂等迁移：补默认组并回填项目/任务/用户归组。"""
+def ensure_default_team_row(*, bind_default_org: bool = True) -> tuple[ProjectTeam, bool]:
+    """确保默认项目组存在（不回填项目/用户归属）。返回 (team, created)。"""
     team = ProjectTeam.query.filter(ProjectTeam.name == DEFAULT_TEAM_NAME).first()
-    created = 0
+    created = False
     if not team:
         team = ProjectTeam(name=DEFAULT_TEAM_NAME, sort_order=0, is_active=True)
         db.session.add(team)
         db.session.flush()
-        created = 1
+        created = True
     if not bool(getattr(team, "is_active", True)):
         team.is_active = True
         db.session.add(team)
@@ -66,18 +66,31 @@ def ensure_default_team_data() -> dict[str, int | str]:
     db.session.add(team)
     db.session.flush()
 
-    default_team_id = team.id
+    if bind_default_org:
+        try:
+            from .tenant_context import default_organization
+            from .team_organizations import set_team_organization_ids
 
-    try:
-        from .tenant_context import default_organization
-        from .team_organizations import set_team_organization_ids
+            dorg = default_organization()
+            dorg_id = str(getattr(dorg, "id", "") or "").strip()
+            if dorg_id:
+                set_team_organization_ids(str(team.id), [dorg_id])
+        except Exception:
+            pass
 
-        dorg = default_organization()
-        dorg_id = str(getattr(dorg, "id", "") or "").strip()
-        if dorg_id:
-            set_team_organization_ids(str(team.id), [dorg_id])
-    except Exception:
-        pass
+    return team, created
+
+
+def backfill_historical_team_gaps(team: ProjectTeam) -> dict[str, int]:
+    """仅历史迁移：空 assigned_team_id / 无项目组 membership 补齐默认组。"""
+    default_team_id = str(team.id or "").strip()
+    if not default_team_id:
+        return {
+            "companyProjectsUpdated": 0,
+            "projectsUpdated": 0,
+            "uploadsBackfilled": 0,
+            "usersLinked": 0,
+        }
 
     company_projects_updated = CompanyProject.query.filter(
         CompanyProject.assigned_team_id.is_(None)
@@ -101,10 +114,19 @@ def ensure_default_team_data() -> dict[str, int | str]:
 
     db.session.commit()
     return {
-        "defaultTeamId": default_team_id,
-        "defaultTeamCreated": created,
         "companyProjectsUpdated": int(company_projects_updated or 0),
         "projectsUpdated": int(projects_updated or 0),
         "uploadsBackfilled": int(uploads_backfilled or 0),
         "usersLinked": users_linked,
+    }
+
+
+def ensure_default_team_data() -> dict[str, int | str]:
+    """一次性历史迁移：补默认组并回填空项目组/空归属。"""
+    team, created = ensure_default_team_row()
+    stats = backfill_historical_team_gaps(team)
+    return {
+        "defaultTeamId": str(team.id or "").strip(),
+        "defaultTeamCreated": int(created),
+        **stats,
     }

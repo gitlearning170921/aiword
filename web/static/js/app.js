@@ -396,8 +396,11 @@ function createCompletionStatusSelect(currentValue, uploadId) {
     return select;
 }
 
-function getDueDateStyle(dueDateStr) {
+function getDueDateStyle(dueDateStr, isCompleted) {
     if (!dueDateStr) return { class: "", text: "-" };
+    if (isCompleted) {
+        return { class: "", text: dueDateStr, title: "已完成" };
+    }
     
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -414,6 +417,16 @@ function getDueDateStyle(dueDateStr) {
         return { class: "bg-warning-subtle text-warning-emphasis", text: dueDateStr, title: `还剩 ${diffDays} 天` };
     }
     return { class: "", text: dueDateStr, title: `还剩 ${diffDays} 天` };
+}
+
+function isUploadTaskCompleted(record) {
+    if (!record) return false;
+    return !!(
+        record.completionStatus ||
+        record.isCompleted ||
+        record.taskStatus === "completed" ||
+        record.quickCompleted
+    );
 }
 
 function normalizeDocLink(value) {
@@ -983,7 +996,7 @@ function createTaskRowUnderProject(projectBlock) {
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-notes" placeholder="任务备注">
                 <button type="button" class="btn btn-outline-secondary btn-upload-note-pdf" title="上传PDF附件">📎</button>
-                <input type="file" class="task-note-file d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+                <input type="file" class="task-note-file d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.zip,.tar,.gz,.tgz,.rar">
             </div>
             <div class="task-note-files-list small mt-1"></div>
         </td>
@@ -1293,14 +1306,20 @@ async function initUploadPage() {
         try {
             await loadAssignableOrganizations();
             fillPage1OrgFilterSelect(assignableOrganizationsCache || []);
+            let page1Teams = [];
+            if (page13SuperAdminFlag) {
+                page1Teams = await loadProjectTeamsForPickers();
+                projectTeamsDictCache = Array.isArray(page1Teams) ? page1Teams : page1Teams?.teams || [];
+            }
             const rows = await App.request("/api/projects");
             projectsMetaCache = rows || [];
             projectsManageBody.innerHTML = "";
+            const tableColspan = page13SuperAdminFlag ? 13 : 12;
             if (!rows || !rows.length) {
                 const emptyHtml =
                     window.ScopeBar && ScopeBar.emptyTableRow
-                        ? ScopeBar.emptyTableRow(12, "page1_projects")
-                        : '<tr><td colspan="12" class="text-muted small">暂无页面1 项目</td></tr>';
+                        ? ScopeBar.emptyTableRow(tableColspan, "page1_projects")
+                        : `<tr><td colspan="${tableColspan}" class="text-muted small">暂无页面1 项目</td></tr>`;
                 projectsManageBody.innerHTML = emptyHtml;
                 updateBatchProjectsBtnState();
                 return;
@@ -1316,20 +1335,26 @@ async function initUploadPage() {
                 const pr = Number.isFinite(Number(p.priority)) ? Number(p.priority) : 2;
                 const st = (p.status || "active");
                 const orgLocked = !!p.organizationIdLocked && !page13SuperAdminFlag;
+                const teamLocked = !!p.assignedTeamIdLocked && !page13SuperAdminFlag;
                 tr.dataset.projectId = esc(p.id);
                 tr.dataset.projectName = String(p.name || "");
                 tr.dataset.projectStatus = String(p.status || "");
                 tr.dataset.organizationId = String(p.organizationId || "");
+                tr.dataset.assignedTeamId = String(p.assignedTeamId || "");
                 tr.dataset.organizationLocked = orgLocked ? "1" : "0";
                 tr.dataset.page1HasUploadTasks = p.organizationIdLocked ? "1" : "0";
                 const linkHint = p.companyProjectId
                     ? ' <span class="badge bg-secondary" title="已关联页面0">总览</span>' : "";
+                const teamCell = page13SuperAdminFlag
+                    ? `<td class="p1-cell-team">${buildProjectTeamSelectHtml(p.assignedTeamId, teamLocked, page1Teams)}</td>`
+                    : "";
                 tr.innerHTML = `
                     <td class="text-center align-middle"><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
                     <td class="p1-cell-name fw-medium" title="${esc(p.name)}"><span class="p1-cell-text">${esc(p.name)}</span>${linkHint}</td>
                     <td class="p1-cell-field"><select class="form-select form-select-sm project-registered-country-select">${buildRegisteredCountryOptionsHtml(p.registeredCountry || "", true)}</select></td>
                     <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—"></td>
                     <td class="p1-cell-org">${buildProjectOrganizationSelectHtml(p.organizationId, orgLocked)}</td>
+                    ${teamCell}
                     <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-product-type-input" value="${esc(p.productType || "")}" placeholder="—"></td>
                     <td class="p1-cell-field"><input type="date" class="form-control form-control-sm project-cert-date-input" value="${esc(p.expectedCertificationDate || "")}"></td>
                     <td class="p1-cell-field"><input type="date" class="form-control form-control-sm project-submit-date-input" value="${esc(p.expectedSubmissionDate || "")}"></td>
@@ -1369,6 +1394,7 @@ async function initUploadPage() {
                     const subInput = tr ? tr.querySelector(".project-submit-date-input") : null;
                     const progInput = tr ? tr.querySelector(".project-progress-input") : null;
                     const orgInput = tr ? tr.querySelector(".project-organization-select") : null;
+                    const teamInput = tr ? tr.querySelector(".project-team-select") : null;
                     const bodyPayload = {
                         priority: prEl ? Number(prEl.value) : 2,
                         status: stEl ? stEl.value : "active",
@@ -1382,7 +1408,10 @@ async function initUploadPage() {
                     if (orgInput && !orgInput.disabled) {
                         bodyPayload.organizationId = String(orgInput.value || "").trim() || null;
                     }
-                    const cascadeMsg = page1OrgChangeConfirmMessage(tr, bodyPayload.organizationId);
+                    if (teamInput && !teamInput.disabled) {
+                        bodyPayload.assignedTeamId = String(teamInput.value || "").trim() || null;
+                    }
+                    const cascadeMsg = page1ProjectSaveConfirmMessage(tr, bodyPayload);
                     if (cascadeMsg && !window.confirm(cascadeMsg)) return;
                     try {
                         await App.request(`/api/projects/${id}`, {
@@ -1599,6 +1628,10 @@ async function initUploadPage() {
             };
             if (orgInput && !orgInput.disabled) {
                 item.organizationId = String(orgInput.value || "").trim() || null;
+            }
+            const teamInput = tr.querySelector(".project-team-select");
+            if (teamInput && !teamInput.disabled) {
+                item.assignedTeamId = String(teamInput.value || "").trim() || null;
             }
             payload.push(item);
         });
@@ -2124,6 +2157,45 @@ function page1OrgChangeConfirmMessage(tr, newOrgId) {
     return `当前操作项目「${name}」所属公司及关联任务记录、审核/翻译/初稿任务都会被更新，是否确认？`;
 }
 
+function page1TeamChangeConfirmMessage(tr, newTeamId) {
+    if (!page13SuperAdminFlag || !tr) return "";
+    if (tr.dataset.page1HasUploadTasks !== "1") return "";
+    const oldTeam = String(tr.dataset.assignedTeamId || "").trim();
+    const nextTeam = String(newTeamId || "").trim();
+    if (oldTeam === nextTeam) return "";
+    const name = tr.dataset.projectName || "该项目";
+    return `当前操作项目「${name}」所属项目组及关联页面0 公司总览（若已关联）都会被更新，是否确认？`;
+}
+
+function page1ProjectSaveConfirmMessage(tr, bodyPayload) {
+    const orgMsg = page1OrgChangeConfirmMessage(tr, bodyPayload?.organizationId);
+    const teamMsg = page1TeamChangeConfirmMessage(tr, bodyPayload?.assignedTeamId);
+    if (orgMsg && teamMsg) {
+        return `${orgMsg}\n\n${teamMsg}`;
+    }
+    return orgMsg || teamMsg || "";
+}
+
+function buildProjectTeamSelectHtml(teamId, locked, teams) {
+    const esc = (s) =>
+        String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    const selected = String(teamId || "").trim();
+    const opts = (teams || [])
+        .filter((t) => t.isActive !== false)
+        .map((t) => {
+            const id = String(t.id || "").trim();
+            const name = String(t.name || id).trim();
+            return `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(name)}</option>`;
+        })
+        .join("");
+    const disabled = locked ? " disabled" : "";
+    return `<select class="form-select form-select-sm project-team-select"${disabled} title="超级管理员可修改所属项目组"><option value="">— 未分配 —</option>${opts}</select>`;
+}
+
 function page1BatchOrgCascadeConfirmMessage(body) {
     if (!page13SuperAdminFlag || !body) return "";
     let count = 0;
@@ -2135,6 +2207,33 @@ function page1BatchOrgCascadeConfirmMessage(body) {
         const nextOrg = String(orgInput.value || "").trim();
         if (oldOrg !== nextOrg) count += 1;
     });
+    let teamCount = 0;
+    body.querySelectorAll("tr[data-project-id]").forEach((tr) => {
+        if (tr.dataset.page1HasUploadTasks !== "1") return;
+        const teamInput = tr.querySelector(".project-team-select");
+        if (!teamInput || teamInput.disabled) return;
+        const oldTeam = String(tr.dataset.assignedTeamId || "").trim();
+        const nextTeam = String(teamInput.value || "").trim();
+        if (oldTeam !== nextTeam) teamCount += 1;
+    });
+    if (!count && !teamCount) return "";
+    if (count && teamCount) {
+        return `当前操作将更新 ${Math.max(count, teamCount)} 个项目的所属公司/所属项目组及关联数据，是否确认？`;
+    }
+    if (teamCount && !count) {
+        if (teamCount === 1) {
+            const tr = [...body.querySelectorAll("tr[data-project-id]")].find((row) => {
+                if (row.dataset.page1HasUploadTasks !== "1") return false;
+                const teamInput = row.querySelector(".project-team-select");
+                if (!teamInput || teamInput.disabled) return false;
+                return String(row.dataset.assignedTeamId || "").trim() !== String(teamInput.value || "").trim();
+            });
+            if (tr) {
+                return page1TeamChangeConfirmMessage(tr, tr.querySelector(".project-team-select")?.value);
+            }
+        }
+        return `当前操作已选 ${teamCount} 个项目的所属项目组及关联页面0 数据将被更新，是否确认？`;
+    }
     if (!count) return "";
     if (count === 1) {
         const tr = [...body.querySelectorAll("tr[data-project-id]")].find((row) => {
@@ -3614,7 +3713,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
         } else {
             sourceHtml = "-";
         }
-        const dueDateStyle = getDueDateStyle(r.dueDate);
+        const dueDateStyle = getDueDateStyle(r.dueDate, isUploadTaskCompleted(r));
         const dueDateHtml = dueDateStyle.class 
             ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>`
             : dueDateStyle.text;
@@ -3977,10 +4076,12 @@ function getUserTeamSinglePickerValue(hostOrId) {
 }
 
 function bindUserAccessRoleVisibility(selectEl, mode) {
-    if (!selectEl || selectEl.dataset.accessRoleBound === "1") return;
+    if (!selectEl) return;
     const sync = () => syncUserAccessFieldsByRole(selectEl.value || "none", mode);
-    selectEl.addEventListener("change", sync);
-    selectEl.dataset.accessRoleBound = "1";
+    if (selectEl.dataset.accessRoleBound !== "1") {
+        selectEl.addEventListener("change", sync);
+        selectEl.dataset.accessRoleBound = "1";
+    }
     sync();
 }
 let authorCandidatesCache = [];
@@ -4786,16 +4887,21 @@ let lastRenderedMyTasks = [];
 let myTasksSortKey = "projectPriority";
 let myTasksSortDir = "desc";
 let myTasksCollapsedGroups = new Set();
+let page2ObserverMode = false;
 let page2ReadOnly = false;
 let page2ViewMode = "normal";
+
+function page2RowCanMutate(r) {
+    return !!(r && r.canMutate);
+}
 
 function syncPage2TableHeader() {
     const headRow = document.getElementById("myTasksHeadRow");
     if (!headRow) return;
     const seqTh = headRow.querySelector('th[data-col="seq"]');
     if (!seqTh) return;
-    const showTeam = page2ReadOnly && page2ViewMode === "super_admin_readonly";
-    const showPerson = page2ReadOnly;
+    const showTeam = page2ObserverMode && page2ViewMode === "super_admin_readonly";
+    const showPerson = page2ObserverMode;
 
     let thTeam = document.getElementById("thPage2ObserverTeam");
     let thPerson = document.getElementById("thPage2ObserverPerson");
@@ -4834,8 +4940,8 @@ function syncPage2TableHeader() {
 
 function page2TableColSpan() {
     let span = 25;
-    if (page2ReadOnly && page2ViewMode === "super_admin_readonly") span += 1;
-    if (page2ReadOnly) span += 1;
+    if (page2ObserverMode && page2ViewMode === "super_admin_readonly") span += 1;
+    if (page2ObserverMode) span += 1;
     return span;
 }
 
@@ -4846,22 +4952,24 @@ function applyPage2ObserverChrome() {
     const hint = document.querySelector(".page2-completion-hint");
     const desc = document.querySelector(".card-body > p.text-muted.small");
     document.querySelectorAll(".page2-observer-group").forEach((el) => {
-        el.classList.toggle("d-none", !page2ReadOnly);
+        el.classList.toggle("d-none", !page2ObserverMode);
     });
-    if (banner) banner.classList.toggle("d-none", !page2ReadOnly);
-    if (filterRow) filterRow.classList.toggle("d-none", !page2ReadOnly);
+    if (banner) banner.classList.toggle("d-none", !page2ObserverMode);
+    if (filterRow) filterRow.classList.toggle("d-none", !page2ObserverMode);
     if (teamWrap) {
         teamWrap.classList.toggle("d-none", page2ViewMode !== "super_admin_readonly");
     }
     if (hint) {
-        hint.textContent = page2ReadOnly ? "完成状态（只读）" : "请及时更新完成状态";
+        hint.textContent = page2ReadOnly ? "完成状态（只读）" : (page2ObserverMode ? "分配给自己的任务可编辑，其余只读" : "请及时更新完成状态");
     }
-    if (desc && page2ReadOnly) {
-        desc.textContent = "以下为观察范围内全部人员任务，仅可查看与筛选，不可修改或操作。";
+    if (desc && page2ObserverMode) {
+        desc.textContent = page2ViewMode === "project_admin_readonly"
+            ? "以下为所属项目组内全部人员任务；分配给自己的可修改，其余仅可查看与筛选。"
+            : "以下为观察范围内全部人员任务，仅可查看与筛选，不可修改或操作。";
     }
     syncPage2TableHeader();
     const filterCollapse = document.getElementById("tasksFilterRow");
-    if (filterCollapse && page2ReadOnly) {
+    if (filterCollapse && page2ObserverMode) {
         filterCollapse.classList.add("show");
     }
 }
@@ -4932,6 +5040,7 @@ async function initGeneratePage() {
             const qs = params.toString();
             const url = qs ? `/api/my-tasks?${qs}` : "/api/my-tasks";
             const res = await App.request(url);
+            page2ObserverMode = !!(res.observerMode ?? (res.viewMode && res.viewMode !== "normal"));
             page2ReadOnly = !!res.readOnly;
             page2ViewMode = res.viewMode || "normal";
             initPage2ObserverFilters(res.filterOptions || { teams: [], users: [] });
@@ -5183,12 +5292,13 @@ function renderMyTasksTable(records) {
     lastRenderedMyTasks = records || [];
     const groupBy = (document.querySelector('input[name="myTasksGroupBy"]:checked') || {}).value || "none";
     const colSpan = page2TableColSpan();
-    const showTeamCol = page2ReadOnly && page2ViewMode === "super_admin_readonly";
-    const showPersonCol = page2ReadOnly;
+    const showTeamCol = page2ObserverMode && page2ViewMode === "super_admin_readonly";
+    const showPersonCol = page2ObserverMode;
     
     const addOneRow = (r, idx, groupKey, groupIndex, collapsed) => {
         const tr = document.createElement("tr");
         tr.dataset.id = r.id;
+        const rowMutable = page2RowCanMutate(r);
         if (groupKey !== undefined) {
             tr.classList.add("group-data-row");
             tr.dataset.groupKey = groupKey;
@@ -5209,7 +5319,7 @@ function renderMyTasksTable(records) {
             : `<input type="text" class="form-control form-control-sm task-link-input" placeholder="填入链接" data-id="${r.id}" value="">`;
         const projectNotesDisplay = (r.projectNotes != null && r.projectNotes !== "") ? r.projectNotes : "-";
         const notesDisplay = (r.notes != null && r.notes !== "") ? r.notes : "-";
-        const dueDateStyle = getDueDateStyle(r.dueDate);
+        const dueDateStyle = getDueDateStyle(r.dueDate, isUploadTaskCompleted(r));
         const dueDateHtml = dueDateStyle.class
             ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>`
             : (r.dueDate || "-");
@@ -5221,18 +5331,18 @@ function renderMyTasksTable(records) {
         const isMatterRow = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
         const execNotesPlaceholder = isMatterRow ? "请填写事项完成情况" : "执行备注";
         const execNotesVal = (r.executionNotes != null && r.executionNotes !== "") ? String(r.executionNotes) : "";
-        const execNotesCell = page2ReadOnly
-            ? `<span title="${_escTitle(execNotesVal)}">${execNotesVal || "-"}</span>`
-            : `<input type="text" class="form-control form-control-sm execution-notes-input" placeholder="${execNotesPlaceholder}" data-id="${r.id}" value="${execNotesVal.replace(/"/g, "&quot;")}">`;
-        const linkCellFinal = page2ReadOnly
-            ? (r.hasLinks && firstLink ? `<a href="${firstLink}" target="_blank" class="text-primary small">打开</a>` : "-")
-            : linkCellHtml;
-        const seqCellHtml = page2ReadOnly
-            ? `<td class="seq-cell">${idx + 1}</td>`
-            : `<td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>`;
-        const opCellHtml = page2ReadOnly
-            ? '<span class="small text-muted">只读</span>'
-            : _buildPage2ActionButtonsHtml(r);
+        const execNotesCell = rowMutable
+            ? `<input type="text" class="form-control form-control-sm execution-notes-input" placeholder="${execNotesPlaceholder}" data-id="${r.id}" value="${execNotesVal.replace(/"/g, "&quot;")}">`
+            : `<span title="${_escTitle(execNotesVal)}">${execNotesVal || "-"}</span>`;
+        const linkCellFinal = rowMutable
+            ? linkCellHtml
+            : (r.hasLinks && firstLink ? `<a href="${firstLink}" target="_blank" class="text-primary small">打开</a>` : "-");
+        const seqCellHtml = rowMutable
+            ? `<td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${idx + 1}</td>`
+            : `<td class="seq-cell">${idx + 1}</td>`;
+        const opCellHtml = rowMutable
+            ? _buildPage2ActionButtonsHtml(r)
+            : '<span class="small text-muted">只读</span>';
         const teamCol = showTeamCol
             ? `<td data-col="observerTeam" title="${_escTitle(r.teamName)}">${(r.teamName || "-")}</td>`
             : "";
@@ -5269,7 +5379,7 @@ function renderMyTasksTable(records) {
             <td class="col-op">${opCellHtml}</td>
         `;
         const statusCell = tr.querySelector(".completion-status-cell");
-        if (page2ReadOnly) {
+        if (!rowMutable) {
             statusCell.textContent = r.completionStatus || "未完成";
         } else {
         const statusSelect = createCompletionStatusSelect(r.completionStatus, r.id);
@@ -5481,7 +5591,7 @@ function renderMyTasksTable(records) {
         });
     }
     
-    if (!page2ReadOnly) {
+    if (records.some((r) => page2RowCanMutate(r))) {
         initDragSort(myTasksBody, async (orders) => {
             try {
                 await App.request("/api/uploads/reorder", {
@@ -5575,10 +5685,28 @@ function _escHtmlSysCfg(s) {
 /** 后端未返回 sections 时的前端分区（与 app_settings.SYSTEM_CONFIG_SECTIONS 一致） */
 const CLIENT_SYSTEM_CONFIG_SECTIONS = [
     {
-        id: "page1_feature_flags",
-        title: "页面1 功能开关",
-        hint: "页面0/1/3 文档工具与考试中心、任务列表签字/打印/单审；填 1 开启。账号权限见「账号管理」· 页面1 分组。",
+        id: "page_tools_feature_flags",
+        title: "页面0/1/2 功能入口",
+        hint:
+            "各填一行英文逗号分隔 slug 开启入口；保存后自动同步下方单项开关。" +
+            "页面0：draft_gen, audit, audit_modify, translate。" +
+            "页面1：draft_gen, audit, audit_modify, translate, sign, print, exam_center。" +
+            "页面2：upload_replace, draft_gen, audit_modify, translate, exam_center。" +
+            "账号权限见「账号管理」· 页面1/2 分组。",
         defaultExpanded: true,
+        keys: [
+            "FEATURE_TOOLS_PAGE0",
+            "FEATURE_TOOLS_PAGE1",
+            "FEATURE_TOOLS_PAGE2",
+            "FEATURE_COMPANY_REGISTRY",
+            "FEATURE_MULTI_TENANT",
+        ],
+    },
+    {
+        id: "legacy_feature_flags",
+        title: "兼容 · 单项功能开关",
+        hint: "由上方 CSV 保存时自动同步；一般无需手改。",
+        defaultExpanded: false,
         keys: [
             "FEATURE_PAGE1_DRAFT_GEN",
             "FEATURE_PAGE1_AUDIT",
@@ -5587,37 +5715,11 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
             "FEATURE_PAGE1_EXAM_CENTER",
             "FEATURE_PAGE1_SIGN",
             "FEATURE_PAGE1_PRINT",
-        ],
-    },
-    {
-        id: "page2_feature_flags",
-        title: "页面2 功能开关",
-        hint: "页面2 任务行按钮与考试中心入口；填 1 开启。账号权限见「账号管理」· 页面2 分组。",
-        defaultExpanded: true,
-        keys: [
             "FEATURE_PAGE2_UPLOAD_REPLACE",
             "FEATURE_PAGE2_DRAFT_GEN",
             "FEATURE_PAGE2_AUDIT_MODIFY",
             "FEATURE_PAGE2_TRANSLATE",
             "FEATURE_PAGE2_EXAM_CENTER",
-        ],
-    },
-    {
-        id: "platform_feature_flags",
-        title: "平台功能开关",
-        hint: "页面0 公司总览、多公司租户隔离；填 1 开启。",
-        defaultExpanded: false,
-        keys: [
-            "FEATURE_COMPANY_REGISTRY",
-            "FEATURE_MULTI_TENANT",
-        ],
-    },
-    {
-        id: "legacy_feature_flags",
-        title: "兼容 · 旧版功能开关",
-        hint: "未迁移环境的回退项；新部署请用上方页面1/2 分项，勿新增依赖。",
-        defaultExpanded: false,
-        keys: [
             "FEATURE_PAGE2_AUDIT",
             "FEATURE_EXAM_CENTER",
         ],
@@ -5845,7 +5947,13 @@ function _renderSystemSettingFieldHtml(k, settings) {
     } else if (k.sensitive && !raw) {
         ph = "未配置";
     }
-    return `<div class="col-md-6"><label class="form-label small mb-0">${_escHtmlSysCfg(k.label)}</label><input type="${typ}" class="form-control form-control-sm sys-cfg-input" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${_escHtmlSysCfg(ph)}" autocomplete="off"></div>`;
+    const isToolsCsv = k.key.startsWith("FEATURE_TOOLS_PAGE");
+    const colClass = isToolsCsv ? "col-12" : "col-md-6";
+    const inputClass = isToolsCsv
+        ? "form-control form-control-sm sys-cfg-input font-monospace"
+        : "form-control form-control-sm sys-cfg-input";
+    const slugPh = isToolsCsv ? "英文逗号分隔 slug，如 draft_gen, audit" : ph;
+    return `<div class="${colClass}"><label class="form-label small mb-0">${_escHtmlSysCfg(k.label)}</label><input type="${typ}" class="${inputClass}" data-key="${k.key}" data-sensitive="${k.sensitive ? "1" : "0"}" value="${showVal}" placeholder="${_escHtmlSysCfg(slugPh)}" autocomplete="off"></div>`;
 }
 
 /** 按后端 sections 分区渲染；无 sections 时回退为平铺列表 */
@@ -5903,6 +6011,30 @@ ${sectionToolsHtml}
     return `<div class="row g-2">${(keys || [])
         .map((k) => _renderSystemSettingFieldHtml(k, settings))
         .join("")}</div>`;
+}
+
+function bindTestAutoNotifyButtons() {
+    if (!document.getElementById("testAutoNotifyThu")) return;
+    const testAutoNotify = async (type) => {
+        try {
+            const result = await App.request("/api/notify/test-auto", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(type ? { type } : {}),
+            });
+            const ok = result && result.success === true;
+            App.notify(result?.message || (ok ? "测试发送成功" : "发送失败"), ok ? "success" : "danger");
+        } catch (e) {
+            const data = e.data || {};
+            App.notify(data.message || e.message || "测试失败", "danger");
+        }
+    };
+    document.getElementById("testAutoNotifyThu")?.addEventListener("click", () => testAutoNotify("thursday"));
+    document.getElementById("testAutoNotifyOverdue")?.addEventListener("click", () => testAutoNotify("overdue"));
+    document.getElementById("testAutoNotifyProject")?.addEventListener("click", () => testAutoNotify("project_stats"));
+    document.getElementById("testAutoNotifyModuleCascade")?.addEventListener("click", async () => {
+        await testAutoNotify("module_cascade");
+    });
 }
 
 function initDashboardPage() {
@@ -5979,16 +6111,31 @@ function initDashboardPage() {
         }
         try {
             _setButtonBusy(saveTeamBtn, true, "保存中…");
-            await App.request(`/api/system-settings/team-dingtalk/${encodeURIComponent(tid)}`, {
+            const payload = {
+                dingtalkWebhook: (teamWebhookInput?.value || "").trim(),
+            };
+            const secret = (teamSecretInput?.value || "").trim();
+            if (secret) payload.dingtalkSecret = secret;
+            const res = await App.request(`/api/system-settings/team-dingtalk/${encodeURIComponent(tid)}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    dingtalkWebhook: (teamWebhookInput?.value || "").trim(),
-                    dingtalkSecret: (teamSecretInput?.value || "").trim(),
-                }),
+                body: JSON.stringify(payload),
             });
-            App.notify("项目组钉钉配置已保存", "success");
-            await loadTeamDingtalkSettings();
+            const savedTeam = res?.team;
+            if (savedTeam) {
+                const idx = teamDingtalkRows.findIndex((t) => t.id === savedTeam.id);
+                if (idx >= 0) teamDingtalkRows[idx] = savedTeam;
+            }
+            if (teamWebhookInput) {
+                teamWebhookInput.value = savedTeam?.dingtalkWebhook || "";
+            }
+            if (teamSecretInput) teamSecretInput.value = "";
+            if (teamWebhookHint) {
+                teamWebhookHint.textContent = savedTeam?.dingtalkWebhook
+                    ? "已配置本项目组独立 Webhook"
+                    : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
+            }
+            App.notify(res?.message || "项目组钉钉配置已保存", res?.webhookEchoesGlobal ? "info" : "success");
         } catch (e) {
             App.notify((e && e.message) || "保存失败", "danger");
         } finally {
@@ -6216,23 +6363,6 @@ function initDashboardPage() {
         }
     });
 
-    const testAutoNotify = async (type) => {
-        try {
-            const result = await App.request("/api/notify/test-auto", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(type ? { type } : {}),
-            });
-            const ok = result && result.success === true;
-            App.notify(result?.message || (ok ? "测试发送成功" : "发送失败"), ok ? "success" : "danger");
-        } catch (e) {
-            const data = e.data || {};
-            App.notify(data.message || e.message || "测试失败", "danger");
-        }
-    };
-    document.getElementById("testAutoNotifyThu")?.addEventListener("click", () => testAutoNotify("thursday"));
-    document.getElementById("testAutoNotifyOverdue")?.addEventListener("click", () => testAutoNotify("overdue"));
-    document.getElementById("testAutoNotifyProject")?.addEventListener("click", () => testAutoNotify("project_stats"));
     const loadModuleCascadeStatus = async () => {
         const container = document.getElementById("moduleCascadeStatusContainer");
         if (!container) return;
@@ -6270,10 +6400,6 @@ function initDashboardPage() {
             container.innerHTML = '<div class="small text-danger">加载失败</div>';
         }
     };
-    document.getElementById("testAutoNotifyModuleCascade")?.addEventListener("click", async () => {
-        await testAutoNotify("module_cascade");
-        loadModuleCascadeStatus();
-    });
 
     if (!overallRate) {
         if (scheduleWeeklyEl) loadSchedule();
@@ -6426,7 +6552,7 @@ function initDashboardPage() {
                 if (collapsed) tr.classList.add("d-none");
             }
             const statusHtml = row.completionStatus ? `<span class="badge bg-success">${row.completionStatus}</span>` : '<span class="badge bg-secondary">未完成</span>';
-            const dueDateStyle = getDueDateStyle(row.dueDate);
+            const dueDateStyle = getDueDateStyle(row.dueDate, !!row.isCompleted);
             const dueDateHtml = dueDateStyle.class ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>` : (dueDateStyle.text || "-");
             const projectCode = (row.projectCode != null && row.projectCode !== "") ? row.projectCode : "-";
             const fileVersion = (row.fileVersion != null && row.fileVersion !== "") ? row.fileVersion : "-";
@@ -6629,7 +6755,6 @@ function initDashboardPage() {
         radio.addEventListener("change", () => { window.reRenderDetailTable(); });
     });
     initDashboardFilters(loadSummary);
-    initNotifyTemplateModal();
     
     loadSchedule();
     loadSummary();
@@ -6858,7 +6983,7 @@ function renderFilteredDetailTable(rows) {
         const statusHtml = row.completionStatus 
             ? `<span class="badge bg-success">${row.completionStatus}</span>`
             : '<span class="badge bg-secondary">未完成</span>';
-        const dueDateStyle = getDueDateStyle(row.dueDate);
+        const dueDateStyle = getDueDateStyle(row.dueDate, !!row.isCompleted);
         const dueDateHtml = dueDateStyle.class 
             ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>`
             : (dueDateStyle.text || "-");
@@ -7335,6 +7460,8 @@ function initAdminPage() {
     initBatchUserFeaturePermissions();
     loadUsersList();
     initDashboardPage();
+    bindTestAutoNotifyButtons();
+    initNotifyTemplateModal();
     refreshAdminChatbotCallbackUrlPanel().catch(() => {});
     document.getElementById("tab-system-btn")?.addEventListener("click", () => {
         refreshAdminChatbotCallbackUrlPanel().catch(() => {});

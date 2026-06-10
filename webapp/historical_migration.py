@@ -122,20 +122,9 @@ def _is_test_project_team_name(name: str | None) -> bool:
 def ensure_default_team_linked_to_default_org() -> None:
     """幂等：默认项目组「互联网产品部」绑定默认公司（含 M2M junction）。"""
     from . import db
-    from .models import ProjectTeam
-    from .team_data_migration import DEFAULT_TEAM_NAME, ensure_default_team_data
-    from .team_organizations import set_team_organization_ids
-    from .tenant_context import default_organization
+    from .team_data_migration import ensure_default_team_row
 
-    ensure_default_team_data()
-    team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True).first()
-    if not team:
-        return
-    dorg = default_organization()
-    dorg_id = str(getattr(dorg, "id", "") or "").strip()
-    if not dorg_id:
-        return
-    set_team_organization_ids(str(team.id), [dorg_id])
+    ensure_default_team_row()
     db.session.commit()
 
 
@@ -149,14 +138,12 @@ def cleanup_test_project_teams() -> dict[str, int]:
         ProjectTeamOrganization,
         UserTeamMembership,
     )
-    from .team_data_migration import DEFAULT_TEAM_NAME, ensure_default_team_data
+    from .team_data_migration import DEFAULT_TEAM_NAME, ensure_default_team_row
 
-    ensure_default_team_data()
-    default_team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True).first()
-    if not default_team:
+    team, _ = ensure_default_team_row()
+    default_id = str(team.id or "").strip()
+    if not default_id:
         return {"teamsRemoved": 0, "membershipsMoved": 0, "projectsReassigned": 0}
-
-    default_id = str(default_team.id or "").strip()
     teams_removed = 0
     memberships_moved = 0
     projects_reassigned = 0
@@ -201,9 +188,8 @@ def cleanup_test_project_teams() -> dict[str, int]:
 
 
 def repair_exam_activity_organization_to_default() -> int:
-    """考试活动/作答/下发任务：空或无效 organization_id 回填默认公司；单公司部署下统一归入默认公司。"""
+    """考试活动/作答/下发任务：仅空或无效 organization_id 回填默认公司。"""
     from . import db
-    from .app_settings import is_multi_tenant_enabled
     from .models import ExamCenterActivity, ExamCenterAssignment, ExamAttempt, Organization
     from .tenant_context import default_organization
 
@@ -214,14 +200,11 @@ def repair_exam_activity_organization_to_default() -> int:
     if not default_oid:
         return 0
     valid_oids = {str(o.id or "").strip() for o in Organization.query.all() if str(o.id or "").strip()}
-    single_org_mode = (not is_multi_tenant_enabled()) or len(valid_oids) <= 1
     changed = 0
 
     def _needs_fix(raw: str | None) -> bool:
         oid = str(raw or "").strip()
-        if not oid or oid not in valid_oids:
-            return True
-        return bool(single_org_mode and oid != default_oid)
+        return not oid or oid not in valid_oids
 
     for row in ExamCenterActivity.query.all():
         if _needs_fix(getattr(row, "organization_id", None)):
@@ -241,7 +224,9 @@ def repair_exam_activity_organization_to_default() -> int:
 
 
 def repair_exam_null_organization_ids() -> None:
-    """启动时幂等补齐考试表空 organization_id → 默认公司（南京鱼跃软件技术有限公司）。"""
+    """历史迁移：考试表空 organization_id → 默认公司。"""
+    if is_exam_org_backfill_done():
+        return
     from . import db
     from .tenant_context import default_organization
 
@@ -269,29 +254,14 @@ def repair_exam_null_organization_ids() -> None:
 
 
 def repair_users_without_team_membership() -> int:
-    """启动时幂等：无任何项目组绑定的账号补默认项目组（互联网产品部）。"""
-    from . import db
-    from .models import ProjectTeam, User, UserTeamMembership
-    from .team_data_migration import DEFAULT_TEAM_NAME
-
-    team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME).first()
-    if not team:
-        from .team_data_migration import ensure_default_team_data
-
-        ensure_default_team_data()
-        team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME).first()
-    if not team:
+    """历史迁移：无任何项目组绑定的账号补默认项目组（互联网产品部）。"""
+    if is_historical_migration_done():
         return 0
-    try:
-        from .tenant_context import default_organization
+    from . import db
+    from .models import User, UserTeamMembership
+    from .team_data_migration import ensure_default_team_row
 
-        dorg = default_organization()
-        dorg_id = str(getattr(dorg, "id", "") or "").strip()
-        if dorg_id and not str(getattr(team, "organization_id", "") or "").strip():
-            team.organization_id = dorg_id
-            db.session.add(team)
-    except Exception:
-        pass
+    team, _ = ensure_default_team_row()
     linked = 0
     from .user_access import user_eligible_for_team_membership
 
@@ -341,22 +311,15 @@ def cleanup_redundant_default_team_memberships() -> int:
 
 
 def repair_exam_participants_default_team() -> int:
-    """有考试活动但无任何项目组的账号，补默认项目组「互联网产品部」（幂等；不覆盖已有归属）。"""
-    from . import db
-    from .models import ExamCenterActivity, ProjectTeam, User, UserTeamMembership
-    from .team_data_migration import DEFAULT_TEAM_NAME, ensure_default_team_data
-    from .team_organizations import set_team_organization_ids
-    from .tenant_context import default_organization
-
-    ensure_default_team_data()
-    team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True).first()
-    if not team:
+    """历史迁移：有考试活动但无任何项目组的账号，补默认项目组（不覆盖已有归属）。"""
+    if is_historical_migration_done():
         return 0
-    dorg = default_organization()
-    dorg_id = str(getattr(dorg, "id", "") or "").strip()
-    if dorg_id:
-        set_team_organization_ids(str(team.id), [dorg_id])
-        db.session.flush()
+    from . import db
+    from .models import ExamCenterActivity, User, UserTeamMembership
+    from .team_data_migration import ensure_default_team_row
+
+    team, _ = ensure_default_team_row()
+    db.session.flush()
     raw_uids = {
         str(r[0]).strip()
         for r in db.session.query(ExamCenterActivity.user_id).distinct().all()
@@ -390,13 +353,14 @@ def repair_exam_participants_default_team() -> int:
 
 
 def repair_project_admins_without_team() -> int:
-    """项目管理员无项目组时补默认组「互联网产品部」（幂等）。"""
+    """历史迁移：项目管理员无项目组时补默认组（不覆盖新建时已配置的归属）。"""
+    if is_historical_migration_done():
+        return 0
     from . import db
-    from .models import ADMIN_ROLE_PROJECT, ProjectTeam, User, UserTeamMembership
-    from .team_data_migration import DEFAULT_TEAM_NAME, ensure_default_team_data
+    from .models import ADMIN_ROLE_PROJECT, User, UserTeamMembership
+    from .team_data_migration import ensure_default_team_row
 
-    ensure_default_team_data()
-    team = ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True).first()
+    team, _ = ensure_default_team_row()
     if not team:
         return 0
     linked = 0
@@ -463,14 +427,16 @@ def repair_exam_activity_user_identity() -> int:
 
 
 def repair_exam_scope_defaults() -> None:
-    """查询前可安全重复执行：默认公司/项目组绑定，不删除测试项目组。"""
-    repair_exam_null_organization_ids()
-    repair_exam_activity_organization_to_default()
+    """查询前可安全重复执行：身份规范化与默认组存在性，不再回填新项目/新账号归属。"""
     ensure_default_team_linked_to_default_org()
     cleanup_redundant_default_team_memberships()
-    repair_exam_participants_default_team()
-    repair_project_admins_without_team()
-    repair_users_without_team_membership()
+    if not is_exam_org_backfill_done():
+        repair_exam_null_organization_ids()
+    if not is_historical_migration_done():
+        repair_exam_activity_organization_to_default()
+        repair_exam_participants_default_team()
+        repair_project_admins_without_team()
+        repair_users_without_team_membership()
     repair_exam_activity_user_identity()
     try:
         from .routes import _backfill_exam_center_activities_from_attempts

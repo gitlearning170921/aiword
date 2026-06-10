@@ -81,7 +81,7 @@
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
             {% if is_page13_super_admin %}
-            <span class="small text-muted">产品类型/取证/递交/进度与页面0 公司总览双向同步；修改后点「保存」或「一键保存」。</span>
+            <span class="small text-muted">产品类型/取证/递交/进度与页面0 公司总览双向同步；超级管理员可修改所属公司/所属项目组（含已下发任务项目）。</span>
             {% endif %}
         </div>
         <div class="table-responsive page1-projects-table-wrap">
@@ -93,6 +93,9 @@
                     <th class="p1-col-country">注册国家</th>
                     <th class="p1-col-category">注册类别</th>
                     <th class="p1-col-org">所属公司</th>
+                    {% if is_page13_super_admin %}
+                    <th class="p1-col-team">所属项目组</th>
+                    {% endif %}
                     <th class="p1-col-type">产品类型</th>
                     <th class="p1-col-date">预计取证</th>
                     <th class="p1-col-date">预计递交</th>
@@ -512,7 +515,7 @@
                         <div class="d-flex align-items-start gap-1">
                             <textarea class="form-control form-control-sm" id="editRecordNotes" rows="2" placeholder="第二层下发任务备注，多个链接每行一个"></textarea>
                             <button type="button" class="btn btn-outline-secondary btn-sm" id="editNoteUploadPdfBtn" title="上传附件" style="white-space:nowrap">📎上传</button>
-                            <input type="file" id="editNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+                            <input type="file" id="editNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.zip,.tar,.gz,.tgz,.rar">
                         </div>
                         <div id="editNoteFilesList" class="small mt-1"></div>
                     </div>
@@ -642,7 +645,7 @@
                         <div class="d-flex align-items-start gap-1">
                             <textarea class="form-control form-control-sm" id="batchEditNotes" rows="2" placeholder="留空不修改，多个链接每行一个"></textarea>
                             <button type="button" class="btn btn-outline-secondary btn-sm" id="batchEditNoteUploadPdfBtn" title="上传附件" style="white-space:nowrap">📎上传</button>
-                            <input type="file" id="batchEditNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg">
+                            <input type="file" id="batchEditNoteFileInput" class="d-none" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.zip,.tar,.gz,.tgz,.rar">
                         </div>
                         <div id="batchEditNoteFilesList" class="small mt-1"></div>
                     </div>

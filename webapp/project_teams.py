@@ -128,6 +128,38 @@ def apply_project_organization_id(project: Project, organization_id: str | None)
     db.session.add(project)
 
 
+def validate_project_assigned_team_change(
+    project: Project, new_team_id: str | None
+) -> str | None:
+    """页面1 已有任务后，仅超级管理员可改所属项目组。"""
+    from .authz import is_page13_super_admin
+
+    if is_page13_super_admin():
+        return None
+    old = (getattr(project, "assigned_team_id", None) or "").strip() or None
+    new = (new_team_id or "").strip() or None
+    if old == new:
+        return None
+    if project_has_page1_upload_tasks(project.id):
+        return ASSIGNED_TEAM_LOCKED_MSG
+    return None
+
+
+def apply_project_assigned_team_id(project: Project, team_id: str | None) -> None:
+    """页面1 项目组变更：同步关联公司总览（若已关联）。"""
+    tid = str(team_id or "").strip() or None
+    project.assigned_team_id = tid
+    cp_id = (getattr(project, "company_project_id", None) or "").strip()
+    if cp_id:
+        from .models import CompanyProject
+
+        cp = CompanyProject.query.get(cp_id)
+        if cp:
+            cp.assigned_team_id = tid
+            db.session.add(cp)
+    db.session.add(project)
+
+
 def apply_company_project_organization_id(
     cp: CompanyProject, organization_id: str | None
 ) -> None:
@@ -231,6 +263,16 @@ def _system_dingtalk_webhook_urls() -> set[str]:
     return out
 
 
+def normalize_team_dingtalk_webhook_for_storage(raw: str | None) -> str | None:
+    """入库：空值或与本系统全局/体系机器人相同则存 None（发送时走回退）。"""
+    url = (raw or "").strip() or None
+    if not url:
+        return None
+    if _normalize_dingtalk_webhook_url(url) in _system_dingtalk_webhook_urls():
+        return None
+    return url
+
+
 def scrub_team_dingtalk_global_echo(*, commit: bool = False) -> int:
     """清除项目组库内与全局/体系机器人相同的 Webhook（展示与发送均走回退逻辑）。"""
     system_urls = _system_dingtalk_webhook_urls()
@@ -251,13 +293,35 @@ def scrub_team_dingtalk_global_echo(*, commit: bool = False) -> int:
 
 
 def team_dingtalk_webhook_for_settings(team: ProjectTeam) -> str | None:
-    """设置页仅展示项目组独立配置的 Webhook；与全局/体系机器人相同视为未配置。"""
+    """设置页展示项目组独立 Webhook（与全局相同视为未单独配置）。"""
     webhook = (getattr(team, "dingtalk_webhook", None) or "").strip()
     if not webhook:
         return None
     if _normalize_dingtalk_webhook_url(webhook) in _system_dingtalk_webhook_urls():
         return None
     return webhook
+
+
+def apply_team_dingtalk_settings(team: ProjectTeam, data: dict) -> dict[str, bool]:
+    """写入项目组钉钉配置；返回 {webhookEchoesGlobal, secretUpdated}。"""
+    flags = {"webhookEchoesGlobal": False, "secretUpdated": False}
+    if "dingtalkWebhook" in data:
+        requested = (data.get("dingtalkWebhook") or "").strip()
+        stored = normalize_team_dingtalk_webhook_for_storage(data.get("dingtalkWebhook"))
+        team.dingtalk_webhook = stored
+        flags["webhookEchoesGlobal"] = bool(requested and not stored)
+    if "dingtalkSecret" in data:
+        raw_secret = data.get("dingtalkSecret")
+        if raw_secret is None:
+            pass
+        else:
+            stripped = (raw_secret or "").strip()
+            if stripped:
+                team.dingtalk_secret = stripped
+                flags["secretUpdated"] = True
+            # 空串表示「保持不变」，不覆盖原 secret
+    db.session.add(team)
+    return flags
 
 
 def serialize_team_item(team: ProjectTeam) -> dict[str, Any]:

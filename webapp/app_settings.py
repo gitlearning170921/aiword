@@ -147,65 +147,81 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "定时任务实例标识（多套部署共库时填不同值则各发一条钉钉；单套部署留空）",
         False,
     ),
-    # 功能开关：1=开启入口；0/空=隐藏。页面1（上传/任务管理）与页面2（我的任务）分开配置。
+    # 页面0/1/2 功能入口：英文逗号分隔 slug（见 SYSTEM_CONFIG_SECTIONS「页面0/1/2 功能入口」分区说明）
+    (
+        "FEATURE_TOOLS_PAGE0",
+        "页面0 功能入口（英文逗号分隔 slug：draft_gen, audit, audit_modify, translate）",
+        False,
+    ),
+    (
+        "FEATURE_TOOLS_PAGE1",
+        "页面1 功能入口（slug：draft_gen, audit, audit_modify, translate, sign, print, exam_center）",
+        False,
+    ),
+    (
+        "FEATURE_TOOLS_PAGE2",
+        "页面2 功能入口（slug：upload_replace, draft_gen, audit_modify, translate, exam_center）",
+        False,
+    ),
+    # 下列单项开关由上方 CSV 保存时自动同步；也可在「兼容 · 单项功能开关」中手改。
     (
         "FEATURE_PAGE1_DRAFT_GEN",
-        "页面1功能开关 · 初稿生成（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 初稿生成（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_AUDIT",
-        "页面1功能开关 · 文档审核（页面0/1 文档工具、任务列表单审；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 文档审核（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_AUDIT_MODIFY",
-        "页面1功能开关 · 审核后修改（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 审核后修改（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_TRANSLATE",
-        "页面1功能开关 · 文档翻译（页面0/1 文档工具；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 文档翻译（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_EXAM_CENTER",
-        "页面1功能开关 · 考试训练中心入口（页面1/3 顶部；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 考试训练中心（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_SIGN",
-        "页面1功能开关 · 去签字 / 批量去签字（跳转 aiprintword；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 去签字（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE1_PRINT",
-        "页面1功能开关 · 去打印 / 批量去打印（跳转 aiprintword；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面1 · 去打印（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE2_UPLOAD_REPLACE",
-        "页面2功能开关 · 上传/替换（1=显示按钮；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面2 · 上传/替换（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE2_DRAFT_GEN",
-        "页面2功能开关 · 初稿生成（任务行按钮；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面2 · 初稿生成（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE2_AUDIT_MODIFY",
-        "页面2功能开关 · 审核后修改（1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面2 · 审核后修改（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE2_TRANSLATE",
-        "页面2功能开关 · 翻译（1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面2 · 翻译（1=显示；空或0=隐藏）",
         False,
     ),
     (
         "FEATURE_PAGE2_EXAM_CENTER",
-        "页面2功能开关 · 考试训练中心入口（页面2 顶部；1=显示；空或0=隐藏。默认隐藏）",
+        "【自动同步】页面2 · 考试训练中心（1=显示；空或0=隐藏）",
         False,
     ),
     # 旧版单一开关（仍可读，用于兼容未迁移的配置；新部署请用上方页面1/2 分项）
@@ -272,37 +288,43 @@ PAGE2_FEATURE_FLAG_KEYS: tuple[str, ...] = (
 
 # 页面4 · 系统与钉钉「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
 # defaultExpanded=True 的分区默认展开，其余折叠（details 无 open 属性）。
+def _page_tools_section_hint() -> str:
+    from .feature_tools_config import SLUG_LABELS, feature_tools_slug_hint
+
+    def _line(page: str, title: str) -> str:
+        slugs = feature_tools_slug_hint(page)
+        parts = [f"{s}={SLUG_LABELS.get(s, s)}" for s in slugs.split(", ") if s]
+        return f"{title}：{', '.join(parts)}"
+
+    return (
+        "页面0/1/2 各填一行英文逗号分隔的 slug 即可开启对应入口；保存后自动同步下方单项开关。"
+        f"{_line('0', '页面0')}。"
+        f"{_line('1', '页面1')}。"
+        f"{_line('2', '页面2')}。"
+        "账号级权限仍见「账号管理」· 页面1/2 分组。"
+    )
+
+
 SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
     {
-        "id": "page1_feature_flags",
-        "title": "页面1 功能开关",
-        "hint": "页面0/1/3 文档工具与考试中心、任务列表签字/打印/单审；填 1 开启。账号级权限见页面4「账号管理」· 页面1 分组。",
+        "id": "page_tools_feature_flags",
+        "title": "页面0/1/2 功能入口",
+        "hint": _page_tools_section_hint(),
         "defaultExpanded": True,
-        "keys": PAGE1_FEATURE_FLAG_KEYS,
-    },
-    {
-        "id": "page2_feature_flags",
-        "title": "页面2 功能开关",
-        "hint": "页面2 任务行按钮（上传/替换、初稿、审核后修改、翻译）与考试中心入口；填 1 开启。账号级权限见「账号管理」· 页面2 分组。",
-        "defaultExpanded": True,
-        "keys": PAGE2_FEATURE_FLAG_KEYS,
-    },
-    {
-        "id": "platform_feature_flags",
-        "title": "平台功能开关",
-        "hint": "页面0 公司总览、多公司租户隔离；填 1 开启。",
-        "defaultExpanded": False,
         "keys": (
+            "FEATURE_TOOLS_PAGE0",
+            "FEATURE_TOOLS_PAGE1",
+            "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
         ),
     },
     {
         "id": "legacy_feature_flags",
-        "title": "兼容 · 旧版功能开关",
-        "hint": "未迁移环境的回退项；新部署请用上方页面1/2 分项配置，勿新增依赖。",
+        "title": "兼容 · 单项功能开关",
+        "hint": "由上方 CSV 保存时自动同步；一般无需手改。未迁移环境可继续填 1 开启；旧版共用开关见最末两项。",
         "defaultExpanded": False,
-        "keys": (
+        "keys": PAGE1_FEATURE_FLAG_KEYS + PAGE2_FEATURE_FLAG_KEYS + (
             "FEATURE_PAGE2_AUDIT",
             "FEATURE_EXAM_CENTER",
         ),
@@ -531,6 +553,11 @@ def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]
     for key in FEATURE_FLAG_KEYS:
         out[key] = _parse_flag(get_setting(key, default="", app=app))
     _apply_legacy_global_feature_flags(out, app)
+    from .feature_tools_config import PAGE0_DERIVED_FLAG_KEYS, apply_feature_tools_csv_to_flags
+
+    apply_feature_tools_csv_to_flags(out, app)
+    for key in PAGE0_DERIVED_FLAG_KEYS:
+        out.setdefault(key, False)
     return out
 
 
@@ -546,8 +573,11 @@ def is_feature_admin_viewer() -> bool:
 
 def effective_feature_flags_for_request(app: Optional["Flask"] = None) -> dict[str, bool]:
     """当前请求生效的功能开关：全局配置 ∧ 账号覆盖；仅超级管理员（页面4 访问密码）全开。"""
+    from .feature_tools_config import PAGE0_DERIVED_FLAG_KEYS
+
+    all_keys = (*FEATURE_FLAG_KEYS, *PAGE0_DERIVED_FLAG_KEYS)
     if is_feature_admin_viewer():
-        return {k: True for k in FEATURE_FLAG_KEYS}
+        return {k: True for k in all_keys}
     global_flags = feature_flags_for_template(app)
     try:
         from flask import session
@@ -629,17 +659,26 @@ def register_exam_center_feature_gate(app: "Flask") -> None:
         rel = path[len(root) :] if root and path.startswith(root) else path
         if rel.startswith("/draft-gen"):
             return feature_gate_response_any(
-                "FEATURE_PAGE1_DRAFT_GEN", "FEATURE_PAGE2_DRAFT_GEN"
+                "FEATURE_PAGE0_DRAFT_GEN",
+                "FEATURE_PAGE1_DRAFT_GEN",
+                "FEATURE_PAGE2_DRAFT_GEN",
             )
         if rel.startswith("/audit-modify"):
             return feature_gate_response_any(
-                "FEATURE_PAGE1_AUDIT_MODIFY", "FEATURE_PAGE2_AUDIT_MODIFY"
+                "FEATURE_PAGE0_AUDIT_MODIFY",
+                "FEATURE_PAGE1_AUDIT_MODIFY",
+                "FEATURE_PAGE2_AUDIT_MODIFY",
             )
         if rel.startswith("/audit"):
-            return feature_gate_response_any("FEATURE_PAGE1_AUDIT")
+            return feature_gate_response_any(
+                "FEATURE_PAGE0_AUDIT",
+                "FEATURE_PAGE1_AUDIT",
+            )
         if rel.startswith("/translate"):
             return feature_gate_response_any(
-                "FEATURE_PAGE1_TRANSLATE", "FEATURE_PAGE2_TRANSLATE"
+                "FEATURE_PAGE0_TRANSLATE",
+                "FEATURE_PAGE1_TRANSLATE",
+                "FEATURE_PAGE2_TRANSLATE",
             )
         if rel.startswith("/go/sign") or rel.startswith("/api/go/batch-sign"):
             return feature_gate_response("FEATURE_PAGE1_SIGN")
@@ -1192,10 +1231,25 @@ def save_system_settings(
     非敏感项传空字符串时不覆盖库内已有值（避免表单未带出默认值时误清空）。
     """
     from . import db
+    from .feature_tools_config import (
+        FEATURE_TOOLS_CSV_KEYS,
+        legacy_flags_synced_from_tools_csv,
+        sync_legacy_flags_from_tools_csv_updates,
+    )
     from .models import AppConfig
 
-    written = []
+    written: list[str] = []
+    csv_sync_written: set[str] = set()
+    if any(k in updates for k in FEATURE_TOOLS_CSV_KEYS):
+        csv_sync_written = set(sync_legacy_flags_from_tools_csv_updates(updates))
+        written.extend(k for k in csv_sync_written if k not in written)
+
+    legacy_synced = legacy_flags_synced_from_tools_csv()
     for key, raw in updates.items():
+        if key in csv_sync_written:
+            continue
+        if key in legacy_synced and csv_sync_written:
+            continue
         if key not in {k for k, _, _ in SYSTEM_CONFIG_KEYS}:
             continue
         val = (raw or "").strip()
@@ -1219,8 +1273,8 @@ def save_system_settings(
             _upsert_config(key, val)
             written.append(key)
             continue
-        # 功能开关：允许清空以关闭功能（默认即关闭），不能因「非敏感空串不覆盖」而锁住
-        if key in FEATURE_FLAG_KEYS:
+        # 功能开关 / 功能入口 CSV：允许清空以关闭功能（默认即关闭）
+        if key in FEATURE_FLAG_KEYS or key in FEATURE_TOOLS_CSV_KEYS:
             _upsert_config(key, val)
             written.append(key)
             continue
@@ -1467,6 +1521,9 @@ def system_settings_for_api_get(app: "Flask", project_root: Path) -> dict[str, A
         if key in ("UPLOAD_FOLDER", "OUTPUT_FOLDER") and not v:
             v = (str(app.config.get(key) or "")).strip()
         out[key] = v
+    from .feature_tools_config import ensure_feature_tools_csv_in_settings
+
+    ensure_feature_tools_csv_in_settings(out)
     return out
 
 

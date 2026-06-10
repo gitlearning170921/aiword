@@ -21,16 +21,16 @@
     <div class="card-body">
         <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从页面1/2 任务带入。</p>
         <div class="d-flex flex-wrap gap-2">
-            {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
+            {% if feature_flags.FEATURE_PAGE0_DRAFT_GEN %}
             <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_AUDIT %}
+            {% if feature_flags.FEATURE_PAGE0_AUDIT %}
             <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_AUDIT_MODIFY %}
+            {% if feature_flags.FEATURE_PAGE0_AUDIT_MODIFY %}
             <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
+            {% if feature_flags.FEATURE_PAGE0_TRANSLATE %}
             <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
             {% endif %}
         </div>

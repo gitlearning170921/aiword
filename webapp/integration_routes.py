@@ -161,8 +161,6 @@ def update_audit():
 
     if audit_status:
         record.audit_status = audit_status
-        if audit_status == "审核不通过待修改":
-            record.audit_reject_count = (getattr(record, "audit_reject_count", 0) or 0) + 1
 
     review_summary = (data.get("reviewSummary") or "").strip()
     if review_summary:

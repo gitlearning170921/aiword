@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .doc_service import extract_placeholders, extract_placeholders_from_bytes
 
@@ -28,7 +29,52 @@ def is_task_template_archive(path: Path) -> bool:
     n = p.name.lower()
     if n.endswith(".tar.gz") or n.endswith(".tgz"):
         return True
-    return p.suffix.lower() in (".zip", ".tar", ".gz", ".rar")
+    if n.endswith(".zip") or p.suffix.lower() == ".zip":
+        return True
+    return p.suffix.lower() in (".tar", ".gz", ".rar")
+
+
+def _is_legacy_doc(raw: bytes) -> bool:
+    return len(raw) >= 8 and raw[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _is_ooxml_docx(raw: bytes) -> bool:
+    if not raw.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            return any(
+                n == "[Content_Types].xml" or n.endswith("/[Content_Types].xml")
+                for n in zf.namelist()
+            )
+    except zipfile.BadZipFile:
+        return False
+
+
+def _detect_archive_kind(path: Path, raw: Optional[bytes] = None) -> Optional[str]:
+    """按文件名与文件头判断压缩包类型；单个 .docx（OOXML）返回 None。"""
+    data = raw if raw is not None else path.read_bytes()
+    if _is_ooxml_docx(data):
+        return None
+    name = path.name.lower()
+    if name.endswith((".tar.gz", ".tgz")) or path.suffix.lower() in (".tar", ".gz"):
+        if len(data) >= 2 and data[:2] == b"\x1f\x8b":
+            return "tar"
+        if len(data) >= 262 and data[257:262] in (b"ustar", b"ustar\x00"):
+            return "tar"
+    if name.endswith(".zip") or path.suffix.lower() == ".zip":
+        return "zip"
+    if path.suffix.lower() == ".rar":
+        return "rar"
+    if data.startswith(b"PK"):
+        try:
+            zipfile.ZipFile(io.BytesIO(data))
+            return "zip"
+        except zipfile.BadZipFile:
+            pass
+    if len(data) >= 2 and data[:2] == b"\x1f\x8b":
+        return "tar"
+    return None
 
 
 def _open_zip_with_encoding(archive_path: Path) -> zipfile.ZipFile:
@@ -72,12 +118,13 @@ def _collect_docx_from_dir(root: Path) -> List[Path]:
     return out
 
 
-def _extract_archive_to_temp(archive_path: Path, temp_dir: Path) -> List[Path]:
+def _extract_archive_to_temp(archive_path: Path, temp_dir: Path, *, kind: Optional[str] = None) -> List[Path]:
     """解压到 ``temp_dir``，返回其中所有 .docx 路径（不含子包）。"""
     ap = Path(archive_path)
+    archive_kind = kind or _detect_archive_kind(ap)
     doc_files: List[Path] = []
 
-    if ap.suffix.lower() == ".zip":
+    if archive_kind == "zip":
         zf = _open_zip_with_encoding(ap)
         try:
             for name in zf.namelist():
@@ -97,7 +144,7 @@ def _extract_archive_to_temp(archive_path: Path, temp_dir: Path) -> List[Path]:
             zf.close()
         return doc_files
 
-    if ap.name.lower().endswith((".tar.gz", ".tgz")) or ap.suffix.lower() in (".tar", ".gz"):
+    if archive_kind == "tar":
         with tarfile.open(ap, "r:*") as tf:
             for member in tf.getmembers():
                 if not member.isfile():
@@ -114,7 +161,7 @@ def _extract_archive_to_temp(archive_path: Path, temp_dir: Path) -> List[Path]:
                         doc_files.append(extracted)
         return doc_files
 
-    if ap.suffix.lower() == ".rar":
+    if archive_kind == "rar":
         try:
             import rarfile
         except ImportError as e:
@@ -163,11 +210,19 @@ def resolve_task_template_from_saved_path(saved_path: Path, *, file_name_hint: s
     if not p.is_file():
         raise FileNotFoundError(str(p))
 
-    if is_task_template_archive(p):
+    raw = p.read_bytes()
+    if _is_legacy_doc(raw):
+        raise ValueError(
+            "不支持旧版 Word（.doc）作为模板，请在 Word 中另存为 .docx，"
+            "或打包为 .zip / .tar.gz 压缩包（内含 .docx）后上传。"
+        )
+
+    archive_kind = _detect_archive_kind(p, raw)
+    if archive_kind:
         tmp = tempfile.mkdtemp(prefix="aiword_task_tpl_")
         try:
             tdir = Path(tmp)
-            docx_list = _extract_archive_to_temp(p, tdir)
+            docx_list = _extract_archive_to_temp(p, tdir, kind=archive_kind)
             if not docx_list:
                 docx_list = _collect_docx_from_dir(tdir)
             chosen = _pick_docx(docx_list, file_name_hint)
@@ -177,6 +232,16 @@ def resolve_task_template_from_saved_path(saved_path: Path, *, file_name_hint: s
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    placeholders = extract_placeholders(str(p))
-    blob = p.read_bytes()
-    return blob, placeholders
+    if _is_ooxml_docx(raw):
+        return raw, extract_placeholders_from_bytes(raw)
+
+    try:
+        placeholders = extract_placeholders(str(p))
+        return raw, placeholders
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "not a zip file" in msg or "badzipfile" in msg:
+            raise ValueError(
+                "无法识别模板文件：请上传 .docx，或与 aicheckword 一致的 .zip / .tar / .tar.gz 压缩包（内含 .docx）。"
+            ) from exc
+        raise

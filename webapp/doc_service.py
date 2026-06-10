@@ -66,7 +66,14 @@ def _replace_placeholders_in_table(table, mapping: Dict[str, str]):
 
 def extract_placeholders_from_bytes(content: bytes) -> List[str]:
     """从内存中的 .docx 字节解析占位符（与磁盘模板逻辑一致）。"""
-    doc = Document(io.BytesIO(content))
+    import zipfile
+
+    try:
+        doc = Document(io.BytesIO(content))
+    except zipfile.BadZipFile as exc:
+        raise ValueError(
+            "文件不是有效的 .docx（OOXML）模板；旧版 .doc 请先另存为 .docx 后再上传。"
+        ) from exc
     placeholders: List[str] = []
     seen = set()
     pattern = re.compile(r"\{\{\s*([^{}\n\r]+?)\s*\}\}")

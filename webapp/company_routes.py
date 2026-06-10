@@ -315,6 +315,7 @@ def _sync_unlinked_page1_one_to_one(scope_org_ids: list[str] | None = None) -> i
             registered_country=getattr(p, "registered_country", None),
             registered_category=getattr(p, "registered_category", None),
             product_type=getattr(p, "product_type", None),
+            assigned_team_id=getattr(p, "assigned_team_id", None),
             expected_certification_date=getattr(p, "expected_certification_date", None),
             expected_submission_date=getattr(p, "expected_submission_date", None),
             progress_description=getattr(p, "progress_description", None),
@@ -1458,6 +1459,8 @@ def api_teams_list():
 @company_bp.post("/api/teams")
 @super_admin_required
 def api_teams_create():
+    from .project_teams import normalize_team_dingtalk_webhook_for_storage
+
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -1468,7 +1471,9 @@ def api_teams_create():
         name=name,
         sort_order=int(data.get("sortOrder") or 0),
         is_active=bool(data.get("isActive", True)),
-        dingtalk_webhook=(data.get("dingtalkWebhook") or "").strip() or None,
+        dingtalk_webhook=normalize_team_dingtalk_webhook_for_storage(
+            data.get("dingtalkWebhook")
+        ),
         dingtalk_secret=(data.get("dingtalkSecret") or "").strip() or None,
     )
     db.session.add(t)
@@ -1507,10 +1512,15 @@ def api_teams_patch(team_id: str):
     if "isActive" in data:
         t.is_active = bool(data.get("isActive"))
     if "dingtalkWebhook" in data:
-        t.dingtalk_webhook = (data.get("dingtalkWebhook") or "").strip() or None
+        from .project_teams import normalize_team_dingtalk_webhook_for_storage
+
+        t.dingtalk_webhook = normalize_team_dingtalk_webhook_for_storage(
+            data.get("dingtalkWebhook")
+        )
     if "dingtalkSecret" in data:
-        # 明确传空串表示清空，未传则保持原值。
-        t.dingtalk_secret = (data.get("dingtalkSecret") or "").strip() or None
+        stripped = (data.get("dingtalkSecret") or "").strip()
+        if stripped:
+            t.dingtalk_secret = stripped
     if "organizationIds" in data or "organizationId" in data:
         from .team_organizations import set_team_organization_ids
 

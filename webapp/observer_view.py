@@ -26,17 +26,32 @@ def exam_student_view_mode() -> str:
 
 
 def page2_mutation_allowed() -> bool:
+    """全局写权限：仅普通账号；项管/超管走记录级 upload_record_mutable_by_current_user。"""
     return page2_view_mode() == "normal"
 
 
+def page2_observer_mode() -> bool:
+    return page2_view_mode() != "normal"
+
+
 def exam_student_mutation_allowed() -> bool:
-    return exam_student_view_mode() == "normal"
+    """考试学生端写操作：普通账号与项管（按 assignment 受众校验）；超管只读。"""
+    mode = exam_student_view_mode()
+    return mode in ("normal", "project_admin_readonly")
 
 
-def observer_mutation_blocked_response():
+def observer_mutation_blocked_response(*, record_level: bool = False):
     from flask import jsonify
 
+    if record_level:
+        return jsonify({"message": "无权修改该任务"}), 403
     return jsonify({"message": "当前为只读查看模式，不可操作"}), 403
+
+
+def upload_record_mutable_by_current_user(rec: UploadRecord) -> bool:
+    from .authz import upload_record_mutable_by_current_user as _mutable
+
+    return _mutable(rec)
 
 
 def _build_user_team_maps() -> tuple[dict[str, list[str]], dict[str, User], dict[str, str]]:

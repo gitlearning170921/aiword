@@ -3399,15 +3399,16 @@
         var tbodyHist = document.getElementById("studentHistoryBody");
         var studentHistoryCache = [];
         var studentReadOnly = false;
+        var studentObserverMode = false;
         var studentViewMode = "normal";
         var HISTORY_PAGE = 80;
 
         function studentHistoryShowTeam() {
-            return studentReadOnly && studentViewMode === "super_admin_readonly";
+            return studentObserverMode && studentViewMode === "super_admin_readonly";
         }
 
         function studentHistoryShowPerson() {
-            return !!studentReadOnly;
+            return !!studentObserverMode;
         }
 
         function studentHistoryColSpan() {
@@ -3465,7 +3466,7 @@
 
         function applyStudentObserverChrome() {
             var banner = document.getElementById("studentObserverBanner");
-            if (banner) banner.classList.toggle("d-none", !studentReadOnly);
+            if (banner) banner.classList.toggle("d-none", !studentObserverMode);
             document.querySelectorAll(".student-write-only").forEach(function (el) {
                 el.classList.toggle("d-none", !!studentReadOnly);
             });
@@ -3475,16 +3476,16 @@
             if (teamSel) {
                 var ctx = window.__examScopeContext || {};
                 var showInnerTeam =
-                    studentReadOnly &&
+                    studentObserverMode &&
                     studentViewMode === "super_admin_readonly" &&
                     !!ctx.scopeAllTeams;
                 teamSel.classList.toggle("d-none", !showInnerTeam);
             }
             if (userSel) {
-                userSel.classList.toggle("d-none", !studentReadOnly);
+                userSel.classList.toggle("d-none", !studentObserverMode);
             }
             if (groupSel) {
-                groupSel.classList.toggle("d-none", !studentReadOnly);
+                groupSel.classList.toggle("d-none", !studentObserverMode);
             }
             syncStudentHistoryTableHeader();
         }
@@ -5065,7 +5066,7 @@
             var selG = document.getElementById("studentHistoryGroupBy");
             var modeF = selM && selM.value ? String(selM.value).trim().toLowerCase() : "";
             var resF = selR && selR.value ? String(selR.value).trim().toLowerCase() : "";
-            var groupBy = studentReadOnly && selG && selG.value ? String(selG.value).trim() : "none";
+            var groupBy = studentObserverMode && selG && selG.value ? String(selG.value).trim() : "none";
             var list = studentHistoryCache.filter(function (r) {
                 if (!r) return false;
                 if (modeF && String(r.mode || "").trim().toLowerCase() !== modeF) return false;
@@ -5176,6 +5177,11 @@
                         " 条记录（已加载 " +
                         (Number.isFinite(l) && l >= 0 ? l : loaded) +
                         " 条）。可按项目组/人员筛选与分组。";
+                } else if (studentObserverMode) {
+                    elHistMeta.textContent =
+                        "观察模式：共 " +
+                        (Number.isFinite(t) && t >= 0 ? t : loaded) +
+                        " 条记录；分配给自己的考试可正常参加，其余仅可查看。";
                 } else if (Number.isFinite(t) && t >= 0 && Number.isFinite(l) && l >= 0) {
                     elHistMeta.textContent =
                         "共 " +
@@ -5221,6 +5227,10 @@
                     return;
                 }
                 var recs = data && data.data && data.data.records ? data.data.records : [];
+                studentObserverMode = !!(
+                    (data && data.data && data.data.observerMode) ||
+                    (data && data.data && data.data.viewMode && data.data.viewMode !== "normal")
+                );
                 studentReadOnly = !!(data && data.data && data.data.readOnly);
                 studentViewMode = (data && data.data && data.data.viewMode) || "normal";
                 initStudentObserverFilters((data && data.data && data.data.filterOptions) || { teams: [], users: [] });

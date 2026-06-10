@@ -8,10 +8,11 @@
                 <div class="text-center mb-4">
                     <h3 class="fw-bold text-primary">AI Word 工具</h3>
                     <p class="text-muted mb-0">请使用您的账号登录</p>
-                    {% if is_page13_super_admin %}
-                    <p class="small text-muted mb-0 mt-2">登录后将按<strong>分级角色</strong>自动进入对应页面：公司管理员→页面0；项目管理员→页面1；普通账号→页面2。项目管理员须已由超级管理员分配<strong>所属项目组</strong>。</p>
-                    {% endif %}
+                    <p class="small text-muted mb-0 mt-2">登录后将按<strong>分级角色</strong>进入对应页面：公司管理员须已分配<strong>所属公司</strong>；普通账号与项目管理员须已分配<strong>所属项目组</strong>（均由超级管理员在页面4配置）。</p>
                 </div>
+                {% if login_error %}
+                <div class="alert alert-warning py-2 small" role="alert">{{ login_error }}</div>
+                {% endif %}
                 <form id="loginForm">
                     <div class="mb-3">
                         <label class="form-label">用户名</label>

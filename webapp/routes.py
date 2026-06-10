@@ -2735,7 +2735,9 @@ def _bank_row_matches_set_id(it: dict[str, Any], set_sid: str) -> bool:
 # ---------- 辅助函数 ----------
 
 def _save_file(file_storage, target_dir: Path) -> tuple[str, str]:
-    filename = secure_filename(file_storage.filename)
+    from .upload_filename import preserved_secure_filename
+
+    filename = preserved_secure_filename(file_storage.filename or "")
     generated_name = f"{now_local().strftime('%Y%m%d%H%M%S%f')}_{filename}"
     file_path = target_dir / generated_name
     file_storage.save(file_path)
@@ -2855,40 +2857,24 @@ def _backfill_project_ids() -> None:
     db.session.commit()
 
 
-def _default_project_team_id() -> str | None:
-    from .team_data_migration import DEFAULT_TEAM_NAME
-
-    row = (
-        ProjectTeam.query.filter_by(name=DEFAULT_TEAM_NAME, is_active=True)
-        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
-        .first()
-    )
-    if row:
-        return str(row.id or "").strip() or None
-    row = (
-        ProjectTeam.query.filter_by(is_active=True)
-        .order_by(ProjectTeam.sort_order.asc(), ProjectTeam.created_at.asc())
-        .first()
-    )
-    return str(row.id or "").strip() if row else None
-
-
 def _resolve_assigned_team_id_for_project_autocreate() -> str | None:
-    """任务录入自动补项目行时：项管用所属项目组，其它角色回退默认组。"""
-    from .authz import is_project_admin, rbac_enforced, user_team_ids
+    """任务录入自动补项目行时：仅使用当前账号已绑定的项目组，不回退默认组。"""
+    from .authz import rbac_enforced, user_team_ids
 
-    if rbac_enforced() and is_project_admin():
-        tids = user_team_ids()
-        if tids:
-            return tids[0]
-    return _default_project_team_id()
+    if not rbac_enforced():
+        return None
+    tids = [str(x).strip() for x in user_team_ids() if str(x).strip()]
+    return tids[0] if tids else None
 
 
 def _realign_project_team_for_creator(project: Project | None) -> None:
-    """创建人再次录入时，若项目误绑其它项目组则改回其所属组（避免看不到自己建的项目）。"""
-    from .authz import is_project_admin, rbac_enforced, user_team_ids
+    """创建人再次录入时，仅当项目尚未绑定项目组时补写其所属组（不覆盖已有归属）。"""
+    from .authz import rbac_enforced, user_team_ids
 
-    if project is None or not rbac_enforced() or not is_project_admin():
+    if project is None or not rbac_enforced():
+        return
+    tid = str(getattr(project, "assigned_team_id", "") or "").strip()
+    if tid:
         return
     uid = str(session.get("user_id") or "").strip()
     if not uid:
@@ -2898,9 +2884,6 @@ def _realign_project_team_for_creator(project: Project | None) -> None:
         return
     tids = [str(x).strip() for x in user_team_ids() if str(x).strip()]
     if not tids:
-        return
-    tid = str(getattr(project, "assigned_team_id", "") or "").strip()
-    if tid in tids:
         return
     project.assigned_team_id = tids[0]
     if not creator:
@@ -3021,6 +3004,33 @@ def _is_valid_doc_link(value: str) -> bool:
         if not (lower.startswith("http://") or lower.startswith("https://")):
             return False
     return True
+
+
+AUDIT_REJECT_PENDING_STATUS = "审核不通过待修改"
+
+
+def _maybe_bump_audit_reject_count(
+    upload: UploadRecord,
+    *,
+    previous_completion_status: Optional[str],
+    previous_audit_status: Optional[str],
+    target_audit_status: Optional[str] = None,
+    target_completion_status: Optional[str] = None,
+) -> None:
+    """仅在「原已完成」且新设为审核不通过待修改时 +1；重复保存或其它编辑不计数。"""
+    prev_completed = (previous_completion_status or "").strip()
+    if not prev_completed:
+        return
+    if target_audit_status is not None:
+        new_audit = (target_audit_status or "").strip()
+        old_audit = (previous_audit_status or "").strip()
+        if new_audit == AUDIT_REJECT_PENDING_STATUS and old_audit != AUDIT_REJECT_PENDING_STATUS:
+            upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
+        return
+    if target_completion_status is not None:
+        new_cs = (target_completion_status or "").strip()
+        if new_cs == AUDIT_REJECT_PENDING_STATUS and prev_completed != AUDIT_REJECT_PENDING_STATUS:
+            upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
 
 
 def _prepare_summary(upload: UploadRecord) -> GenerationSummary:
@@ -3747,11 +3757,8 @@ def login_required(f):
         from .authz import (
             _company_admin_blocked_response,
             block_until_super_admin_or_user_id,
-            company_registry_enabled,
             is_company_admin,
             is_page13_super_admin,
-            is_project_admin,
-            user_team_ids,
         )
 
         if is_page13_super_admin():
@@ -3761,21 +3768,6 @@ def login_required(f):
             return blocked
         if is_company_admin():
             return _company_admin_blocked_response()
-        if company_registry_enabled() and is_project_admin() and not user_team_ids():
-            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
-                return jsonify({"message": "项目管理员须先在页面4（超级管理员）中分配所属项目组"}), 403
-            return (
-                render_template(
-                    "error.html",
-                    title="未分配项目组",
-                    message="项目管理员须先在页面4「账号管理」中分配所属项目组后再访问页面1/3。",
-                    back_url=url_for("pages.login_page"),
-                    back_label="重新登录",
-                    hide_main_nav=True,
-                    gate_page=True,
-                ),
-                403,
-            )
         return f(*args, **kwargs)
     return decorated_function
 
@@ -3796,6 +3788,9 @@ def _page13_or_login_required(f):
         if session.get("user_id"):
             if is_company_admin():
                 return _company_admin_blocked_response()
+            blocked = block_until_super_admin_or_user_id()
+            if blocked is not None:
+                return blocked
             return f(*args, **kwargs)
         blocked = block_until_super_admin_or_user_id()
         if blocked is not None:
@@ -3835,7 +3830,6 @@ def page13_access_required(f):
             is_company_admin,
             is_page13_super_admin,
             is_project_admin,
-            user_team_ids,
         )
 
         if is_page13_super_admin():
@@ -3843,19 +3837,10 @@ def page13_access_required(f):
         if session.get("user_id") and is_company_admin():
             return _company_admin_blocked_response()
         if session.get("user_id") and is_project_admin():
-            if user_team_ids():
-                return f(*args, **kwargs)
-            if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
-                return jsonify(
-                    {"message": "项目管理员须先在页面4（超级管理员）中分配所属项目组"}
-                ), 403
-            return render_template(
-                "error.html",
-                title="未分配项目组",
-                message="项目管理员须先在页面4（超级管理员）中分配「所属项目组」后才能访问页面1/3。",
-                hide_main_nav=True,
-                gate_page=True,
-            ), 403
+            blocked = block_until_super_admin_or_user_id()
+            if blocked is not None:
+                return blocked
+            return f(*args, **kwargs)
         blocked = block_until_super_admin_or_user_id()
         if blocked is not None:
             return blocked
@@ -3892,8 +3877,11 @@ def index():
     # - 页面4 访问密码（超级管理员）：进入页面1/3 或考试中心老师/统计端
     # - user_id（学生端/页面2）：进入页面2
     if session.get("user_id"):
-        from .authz import role_home_url
+        from .authz import role_home_url, user_access_binding_block_response
 
+        blocked = user_access_binding_block_response()
+        if blocked is not None:
+            return blocked
         return redirect(role_home_url())
     if session.get("page13_authenticated"):
         from .authz import role_home_url
@@ -3948,9 +3936,23 @@ def api_go_aiprintword_batch_print():
 def login_page():
     if request.args:
         return redirect(url_for("pages.login_page"))
-    if session.get("page13_authenticated") or session.get("user_id"):
+    if session.get("page13_authenticated"):
         from .authz import role_home_url
 
+        return redirect(role_home_url())
+    if session.get("user_id"):
+        from .authz import role_home_url, validate_user_access_binding
+        from .models import User
+
+        user = User.query.get(session.get("user_id"))
+        ok, message, _ = validate_user_access_binding(user)
+        if not ok:
+            session.clear()
+            return render_template(
+                "login.html",
+                page13_password_configured=_page13_password_configured(),
+                login_error=message,
+            )
         return redirect(role_home_url())
     return render_template(
         "login.html",
@@ -4037,8 +4039,12 @@ def exam_center_page():
             if blocked is not None:
                 return blocked
     elif role == "student":
-        if not session.get("user_id") and not is_page13_super_admin():
-            return redirect(url_for("pages.login_page"))
+        if not is_page13_super_admin():
+            from .authz import block_until_super_admin_or_user_id
+
+            blocked = block_until_super_admin_or_user_id()
+            if blocked is not None:
+                return blocked
     else:
         from .authz import block_until_super_admin_or_user_id
 
@@ -4360,21 +4366,15 @@ def api_login():
     user = User.query.filter_by(username=username).first()
     if not user or not user.check_password(password):
         return jsonify({"message": "用户名或密码错误，请核对账号与密码后重试"}), 401
-    from .authz import company_registry_enabled, role_home_url, sync_user_session
-    from .models import ADMIN_ROLE_PROJECT
+    from .authz import company_registry_enabled, role_home_url, sync_user_session, validate_user_access_binding
 
     sync_user_session(user)
     role = session.get("admin_role") or "none"
 
-    if company_registry_enabled() and role == ADMIN_ROLE_PROJECT:
-        if not list(session.get("team_ids") or []):
-            session.clear()
-            return jsonify(
-                {
-                    "message": "项目管理员须先在页面4（超级管理员）中分配所属项目组。",
-                    "needsTeamAssignment": True,
-                }
-            ), 403
+    ok, message, extra = validate_user_access_binding(user)
+    if not ok:
+        session.clear()
+        return jsonify({"message": message, **extra}), 403
 
     home = role_home_url()
     return jsonify({
@@ -4430,14 +4430,20 @@ def api_me():
         is_project_admin,
         role_home_url,
         user_country_scopes,
+        validate_user_access_binding,
     )
-
+    from .models import User
     from .observer_view import exam_student_view_mode, page2_view_mode
 
     scopes = user_country_scopes()
+    user = User.query.get(session.get("user_id"))
+    binding_ok, binding_message, binding_flags = validate_user_access_binding(user)
     return jsonify({
         "loggedIn": True,
         "homeUrl": role_home_url(),
+        "accessBindingOk": binding_ok,
+        "accessBindingMessage": binding_message or None,
+        **binding_flags,
         "page13SuperAdmin": is_page13_super_admin(),
         "page2ViewMode": page2_view_mode(),
         "examStudentViewMode": exam_student_view_mode(),
@@ -6967,7 +6973,8 @@ def api_exam_student_history():
                 "total": int(total),
                 "has_more": has_more,
                 "viewMode": view_mode,
-                "readOnly": view_mode != "normal",
+                "observerMode": view_mode != "normal",
+                "readOnly": view_mode == "super_admin_readonly",
                 "filterOptions": filter_opts,
             },
             "trace_id": uuid.uuid4().hex,
@@ -8846,10 +8853,17 @@ def api_upload():
         if _sent("registrationVersion"):
             existing.registration_version = registration_version
         if _sent("auditStatus"):
+            prev_completion = existing.completion_status
+            prev_audit = existing.audit_status
             ast = (request.form.get("auditStatus") or "").strip() or None
+            _maybe_bump_audit_reject_count(
+                existing,
+                previous_completion_status=prev_completion,
+                previous_audit_status=prev_audit,
+                target_audit_status=ast,
+            )
             existing.audit_status = ast or None
-            if ast == "审核不通过待修改":
-                existing.audit_reject_count = (getattr(existing, "audit_reject_count", 0) or 0) + 1
+            if ast == AUDIT_REJECT_PENDING_STATUS:
                 existing.completion_status = None
                 existing.task_status = "pending"
                 existing.quick_completed = False
@@ -9293,13 +9307,20 @@ def api_upload_note_file():
     if not file or not file.filename:
         return jsonify({"message": "请选择文件"}), 400
     fn_lower = (file.filename or "").lower()
-    allowed = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg")
-    if not any(fn_lower.endswith(ext) for ext in allowed):
+    allowed = (
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+        ".png", ".jpg", ".jpeg",
+        ".zip", ".tar", ".gz", ".tgz", ".rar",
+    )
+    from .upload_filename import normalized_upload_extension, preserved_secure_filename
+
+    ext = normalized_upload_extension(file.filename or "")
+    if ext not in allowed and not any(fn_lower.endswith(s) for s in allowed):
         return jsonify({"message": f"仅支持以下格式：{', '.join(allowed)}"}), 400
     raw = file.read()
     if len(raw) > current_app.config.get("MAX_CONTENT_LENGTH", 25 * 1024 * 1024):
         return jsonify({"message": "文件过大"}), 400
-    stored_name = f"{now_local().strftime('%Y%m%d%H%M%S%f')}_{secure_filename(file.filename)}"
+    stored_name = f"{now_local().strftime('%Y%m%d%H%M%S%f')}_{preserved_secure_filename(file.filename or '')}"
     db.session.add(
         NoteAttachmentFile(
             stored_name=stored_name,
@@ -9711,15 +9732,28 @@ def api_upload_update(upload_id: str):
     if "auditStatus" in data:
         raw_ast = data.get("auditStatus")
         audit_status = (str(raw_ast).strip() if raw_ast is not None else "") or None
+        _maybe_bump_audit_reject_count(
+            upload,
+            previous_completion_status=upload.completion_status,
+            previous_audit_status=upload.audit_status,
+            target_audit_status=audit_status,
+        )
         upload.audit_status = audit_status
-        if audit_status == "审核不通过待修改":
-            upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
+        if audit_status == AUDIT_REJECT_PENDING_STATUS:
             upload.completion_status = None
             upload.task_status = "pending"
             upload.quick_completed = False
     if "completionStatus" in data:
         raw_cs = data.get("completionStatus")
         completion_status = (str(raw_cs).strip() if raw_cs is not None else "") or None
+        prev_completion = upload.completion_status
+        if completion_status:
+            _maybe_bump_audit_reject_count(
+                upload,
+                previous_completion_status=prev_completion,
+                previous_audit_status=upload.audit_status,
+                target_completion_status=completion_status,
+            )
         upload.completion_status = completion_status
         if upload.completion_status:
             upload.task_status = "completed"
@@ -9777,9 +9811,11 @@ def api_my_tasks():
     """页面2：普通账号仅本人任务；超管/项管只读观察全部可见范围，支持项目组/人员筛选。"""
     from .observer_view import (
         build_observer_filter_options,
+        page2_observer_mode,
         page2_query_upload_rows,
         page2_view_mode,
         prepare_page2_observer_rows,
+        upload_record_mutable_by_current_user,
     )
 
     include_history = str(request.args.get("includeHistory") or "").strip() in ("1", "true", "True", "yes", "on")
@@ -9859,13 +9895,15 @@ def api_my_tasks():
                 "teamName": meta.get("teamName") or None,
                 "assigneeUserId": meta.get("assigneeUserId") or None,
                 "assigneeLabel": meta.get("assigneeLabel") or None,
+                "canMutate": upload_record_mutable_by_current_user(r),
             }
         )
 
     return jsonify(
         {
             "viewMode": view_mode,
-            "readOnly": view_mode != "normal",
+            "observerMode": page2_observer_mode(),
+            "readOnly": view_mode == "super_admin_readonly",
             "filterOptions": filter_opts,
             "records": out_records,
         }
@@ -9876,19 +9914,19 @@ def api_my_tasks():
 @login_required
 def api_update_execution_notes(upload_id: str):
     """更新执行任务备注（仅页面2可编辑）。"""
-    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
 
-    if not page2_mutation_allowed():
-        return observer_mutation_blocked_response()
+    upload = UploadRecord.query.get(upload_id)
+    if not upload:
+        return jsonify({"message": "未找到该记录"}), 404
+    if not upload_record_mutable_by_current_user(upload):
+        return observer_mutation_blocked_response(record_level=True)
     from .notify_content import (
         MATTER_COMPLETE_NOTES_INVALID_MSG,
         is_matter_task_upload,
         is_meaningful_matter_execution_notes,
     )
 
-    upload = UploadRecord.query.get(upload_id)
-    if not upload:
-        return jsonify({"message": "未找到该记录"}), 404
     data = request.get_json(force=True) or {}
     val = data.get("executionNotes")
     s = (val if isinstance(val, str) else "").strip() or None
@@ -9956,15 +9994,13 @@ def api_download_upload_template_file(upload_id: str):
 @login_required
 def api_upload_replace_template_file(upload_id: str):
     """页面2：上传模板文件覆盖该任务已有文件或链接，写入 FTP（每条任务仅保留一个文件）。"""
-    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
 
-    if not page2_mutation_allowed():
-        return observer_mutation_blocked_response()
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
-    if not _upload_record_visible_to_page2_user(upload):
-        return jsonify({"message": "无权修改该任务"}), 403
+    if not upload_record_mutable_by_current_user(upload):
+        return observer_mutation_blocked_response(record_level=True)
 
     file = request.files.get("file")
     if not file or not file.filename:
@@ -10038,10 +10074,13 @@ def api_upload_replace_template_file(upload_id: str):
 @login_required
 def api_update_completion_status(upload_id: str):
     """更新任务的完成状态（页面2使用）。可仅更新文档链接；文件型标记完成需文档；事项型需执行任务备注。"""
-    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
 
-    if not page2_mutation_allowed():
-        return observer_mutation_blocked_response()
+    upload = UploadRecord.query.get(upload_id)
+    if not upload:
+        return jsonify({"message": "未找到该记录"}), 404
+    if not upload_record_mutable_by_current_user(upload):
+        return observer_mutation_blocked_response(record_level=True)
     from .notify_content import (
         MATTER_COMPLETE_NOTES_INVALID_MSG,
         MATTER_COMPLETE_NOTES_MSG,
@@ -10049,10 +10088,6 @@ def api_update_completion_status(upload_id: str):
         is_meaningful_matter_execution_notes,
     )
 
-    upload = UploadRecord.query.get(upload_id)
-    if not upload:
-        return jsonify({"message": "未找到该记录"}), 404
-    
     data = request.get_json(force=True) or {}
     completion_status = data.get("completionStatus")
     template_links = (data.get("templateLinks") or "").strip() or None
@@ -10066,6 +10101,7 @@ def api_update_completion_status(upload_id: str):
         upload.execution_notes = (str(data.get("executionNotes") or "").strip()) or None
     
     if completion_status is not None:
+        prev_completion = upload.completion_status
         if completion_status:
             if is_matter_task_upload(upload):
                 if not is_meaningful_matter_execution_notes(upload.execution_notes):
@@ -10077,6 +10113,12 @@ def api_update_completion_status(upload_id: str):
                     return jsonify({"message": msg}), 400
             elif not upload.has_template():
                 return jsonify({"message": "请先填写文档链接后再标记完成状态"}), 400
+            _maybe_bump_audit_reject_count(
+                upload,
+                previous_completion_status=prev_completion,
+                previous_audit_status=upload.audit_status,
+                target_completion_status=completion_status,
+            )
             upload.completion_status = completion_status
             upload.task_status = "completed"
         else:
@@ -10101,10 +10143,8 @@ def api_update_completion_status(upload_id: str):
 @bp.post("/api/generate")
 @login_required
 def api_generate():
-    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
 
-    if not page2_mutation_allowed():
-        return observer_mutation_blocked_response()
     data = request.get_json(force=True) or {}
     upload_id = data.get("uploadId")
     triggered_by = data.get("triggeredBy") or session.get("username", "web")
@@ -10119,6 +10159,8 @@ def api_generate():
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到对应的模板记录"}), 404
+    if not upload_record_mutable_by_current_user(upload):
+        return observer_mutation_blocked_response(record_level=True)
 
     template_bytes = None
     template_path = None
@@ -10398,6 +10440,7 @@ def _project_api_item(
         "productType": getattr(p, "product_type", None),
         "assignedTeamId": tid or None,
         "assignedTeamName": teams.get(tid) if tid else None,
+        "assignedTeamIdLocked": org_locked,
         "expectedCertificationDate": (
             p.expected_certification_date.strftime("%Y-%m-%d")
             if getattr(p, "expected_certification_date", None)
@@ -10594,6 +10637,13 @@ def api_projects_create_or_update():
     row.priority = priority
     row.status = status
     row.registration_scope = scope
+    tid = (data.get("assignedTeamId") or "").strip() or None
+    if tid:
+        row.assigned_team_id = tid
+    elif rbac_enforced() and not row.assigned_team_id:
+        tids = user_team_ids()
+        if tids:
+            row.assigned_team_id = tids[0]
     cp_link = (data.get("companyProjectId") or "").strip()
     if bool(data.get("includeInCompanyRegistry")):
         if cp_link:
@@ -10606,6 +10656,7 @@ def api_projects_create_or_update():
                 priority=priority,
                 status=status,
                 organization_id=getattr(row, "organization_id", None),
+                assigned_team_id=getattr(row, "assigned_team_id", None),
                 created_by_user_id=session.get("user_id"),
             )
             from .project_registry_sync import apply_payload_to_company, payload_from_api_data
@@ -10616,13 +10667,6 @@ def api_projects_create_or_update():
             db.session.add(cp)
             db.session.flush()
             row.company_project_id = cp.id
-    tid = (data.get("assignedTeamId") or "").strip() or None
-    if tid:
-        row.assigned_team_id = tid
-    elif rbac_enforced() and current_admin_role() == ADMIN_ROLE_PROJECT:
-        tids = user_team_ids()
-        if tids:
-            row.assigned_team_id = tids[0]
     db.session.add(row)
     db.session.flush()
     _apply_page1_registry_fields_and_sync(row, data)
@@ -10708,6 +10752,22 @@ def api_projects_patch(project_id: str):
 
     if rbac_enforced() and not project_in_scope(row):
         return jsonify({"message": "无权修改该项目"}), 403
+
+    if "assignedTeamId" in data:
+        from .project_teams import (
+            apply_project_assigned_team_id,
+            validate_project_assigned_team_change,
+        )
+
+        tid = (data.get("assignedTeamId") or "").strip() or None
+        team_err = validate_project_assigned_team_change(row, tid)
+        if team_err:
+            return jsonify({"message": team_err}), 403
+        old_tid = str(getattr(row, "assigned_team_id", "") or "").strip() or None
+        if old_tid != (tid or None):
+            apply_project_assigned_team_id(row, tid)
+        else:
+            row.assigned_team_id = tid
 
     if "organizationId" in data or "organization_id" in data:
         from .company_routes import _resolve_assignable_organization_id
@@ -10876,6 +10936,22 @@ def api_projects_batch_update():
         if "registeredCategory" in it:
             row.registered_category = (it.get("registeredCategory") or "").strip() or None
 
+        if "assignedTeamId" in it:
+            from .project_teams import (
+                apply_project_assigned_team_id,
+                validate_project_assigned_team_change,
+            )
+
+            tid = (it.get("assignedTeamId") or "").strip() or None
+            team_err = validate_project_assigned_team_change(row, tid)
+            if team_err:
+                return jsonify({"message": team_err}), 403
+            old_tid = str(getattr(row, "assigned_team_id", "") or "").strip() or None
+            if old_tid != (tid or None):
+                apply_project_assigned_team_id(row, tid)
+            else:
+                row.assigned_team_id = tid
+
         if "organizationId" in it or "organization_id" in it:
             from .authz import is_page13_super_admin
             from .company_routes import _resolve_assignable_organization_id
@@ -11001,7 +11077,7 @@ def api_projects_bindings_count(project_id: str):
 # ---------- 通知文案配置 API ----------
 
 @bp.get("/api/configs/notify-templates")
-@page13_access_required
+@super_admin_required
 def api_get_notify_templates():
     templates = NotifyTemplateConfig.query.order_by(NotifyTemplateConfig.template_key).all()
     return jsonify([
@@ -11017,7 +11093,7 @@ def api_get_notify_templates():
 
 
 @bp.put("/api/configs/notify-templates/<template_id>")
-@page13_access_required
+@super_admin_required
 def api_update_notify_template(template_id: str):
     template = NotifyTemplateConfig.query.get(template_id)
     if not template:
@@ -11046,10 +11122,8 @@ def api_update_notify_template(template_id: str):
 @login_required
 def api_reorder_uploads():
     """更新任务排序"""
-    from .observer_view import observer_mutation_blocked_response, page2_mutation_allowed
+    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
 
-    if not page2_mutation_allowed():
-        return observer_mutation_blocked_response()
     data = request.get_json(force=True) or {}
     orders = data.get("orders", [])
     
@@ -11061,9 +11135,12 @@ def api_reorder_uploads():
         sort_order = item.get("sortOrder", 0)
         if upload_id:
             upload = UploadRecord.query.get(upload_id)
-            if upload:
-                upload.sort_order = sort_order
-                db.session.add(upload)
+            if not upload:
+                continue
+            if not upload_record_mutable_by_current_user(upload):
+                return observer_mutation_blocked_response(record_level=True)
+            upload.sort_order = sort_order
+            db.session.add(upload)
     
     db.session.commit()
     return jsonify({"message": "排序更新成功"})
@@ -12062,9 +12139,8 @@ def api_put_system_settings():
 @page13_access_required
 def api_get_team_dingtalk_settings():
     from .authz import is_page13_super_admin, is_project_admin, user_team_ids
-    from .project_teams import scrub_team_dingtalk_global_echo, serialize_team_item
+    from .project_teams import serialize_team_item
 
-    scrub_team_dingtalk_global_echo(commit=True)
     q = ProjectTeam.query.order_by(ProjectTeam.sort_order.asc(), ProjectTeam.name.asc())
     rows = q.all()
     if not is_page13_super_admin() and is_project_admin():
@@ -12078,7 +12154,6 @@ def api_get_team_dingtalk_settings():
 @page13_access_required
 def api_put_team_dingtalk_settings(team_id: str):
     from .authz import is_page13_super_admin, is_project_admin, user_team_ids
-    from .project_teams import serialize_team_item
 
     t = ProjectTeam.query.get((team_id or "").strip())
     if not t:
@@ -12087,13 +12162,21 @@ def api_put_team_dingtalk_settings(team_id: str):
         if t.id not in set(user_team_ids()):
             return jsonify({"message": "仅可配置所属项目组的钉钉 webhook"}), 403
     data = request.get_json(force=True) or {}
-    if "dingtalkWebhook" in data:
-        t.dingtalk_webhook = (data.get("dingtalkWebhook") or "").strip() or None
-    if "dingtalkSecret" in data:
-        t.dingtalk_secret = (data.get("dingtalkSecret") or "").strip() or None
-    db.session.add(t)
+    from .project_teams import apply_team_dingtalk_settings, serialize_team_item
+
+    flags = apply_team_dingtalk_settings(t, data)
     db.session.commit()
-    return jsonify({"success": True, "message": "已保存", "team": serialize_team_item(t)})
+    msg = "已保存"
+    if flags.get("webhookEchoesGlobal"):
+        msg = "已保存：该 Webhook 与全局催办/体系机器人相同，将自动使用全局配置（无需重复填写）"
+    return jsonify(
+        {
+            "success": True,
+            "message": msg,
+            "webhookEchoesGlobal": bool(flags.get("webhookEchoesGlobal")),
+            "team": serialize_team_item(t),
+        }
+    )
 
 
 @bp.get("/api/notify/module-cascade-status")
@@ -12165,7 +12248,11 @@ def api_notify_module_cascade_manual():
 @bp.post("/api/notify/test-auto")
 @page13_access_required
 def api_notify_test_auto():
-    """测试自动催办：按类型执行与定时任务完全相同的逻辑，仅时间提前到点击时。"""
+    """测试自动催办：按类型执行与定时任务完全相同的逻辑，仅时间提前到点击时（仅超级管理员）。"""
+    from .authz import is_page13_super_admin
+
+    if not is_page13_super_admin():
+        return jsonify({"success": False, "message": "仅超级管理员可测试自动催办"}), 403
     payload = request.get_json(silent=True) or {}
     test_type = (payload.get("type") or "").strip().lower()
 

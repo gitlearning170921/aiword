@@ -34,18 +34,8 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <h6 class="form-section-title mb-0">下一次自动通知时间</h6>
-                    <div>
-                        <span class="me-1">测试自动催办：</span>
-                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
-                        <button type="button" class="btn btn-sm btn-outline-primary" id="refreshScheduleBtn">刷新</button>
-                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="refreshScheduleBtn">刷新</button>
                 </div>
-                {% if is_page13_super_admin %}
-                <p class="small text-muted mb-0">若钉钉群未收到测试消息，请检查机器人是否设置了关键词且消息内容包含该关键词。定时规则与钉钉参数请联系管理员处理。</p>
-                {% endif %}
                 <div class="card mb-3">
                     <div class="card-body py-2">
                         <h6 class="mb-2">模块级联催办状态</h6>
@@ -274,31 +264,5 @@
             </div>
         </div>
     </div>
-</div>
-
-<div class="modal fade" id="notifyTemplateModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">通知文案配置</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="notifyTemplateList">
-                    <!-- 动态生成 -->
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" id="saveNotifyTemplatesBtn">保存</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1050;">
-    <button type="button" class="btn btn-secondary" data-bs-toggle="modal" data-bs-target="#notifyTemplateModal">
-        通知文案配置
-    </button>
 </div>
 {% endblock %}

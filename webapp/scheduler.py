@@ -156,6 +156,51 @@ def _get_webhook_secret(team_id: str | None = None):
     return webhook, secret
 
 
+def _scheduler_team_in_scope(team_id: str | None, scope_team_ids: frozenset[str] | None) -> bool:
+    """scope_team_ids 为 None 表示全部项目组（定时任务）；否则仅匹配所属组。"""
+    if scope_team_ids is None:
+        return True
+    tid = (team_id or "").strip()
+    if not tid:
+        return False
+    return tid in scope_team_ids
+
+
+def _scheduler_upload_team_id(rec) -> str | None:
+    from .dingtalk_team import resolve_team_id_by_upload
+
+    return resolve_team_id_by_upload(rec)
+
+
+def _scheduler_group_uploads_by_team(uploads) -> dict[str | None, list]:
+    out: dict[str | None, list] = defaultdict(list)
+    for u in uploads:
+        out[_scheduler_upload_team_id(u)].append(u)
+    return dict(out)
+
+
+def _filter_uploads_by_scheduler_team_scope(uploads, proj_meta: dict, scope_team_ids: frozenset[str] | None):
+    if scope_team_ids is None:
+        return uploads
+    out = []
+    for u in uploads:
+        if _scheduler_team_in_scope(_scheduler_upload_team_id(u), scope_team_ids):
+            out.append(u)
+    return out
+
+
+def _project_name_in_scheduler_team_scope(
+    project_name: str | None,
+    proj_meta: dict,
+    scope_team_ids: frozenset[str] | None,
+) -> bool:
+    if scope_team_ids is None:
+        return True
+    from .dingtalk_team import resolve_team_id_by_project_name
+
+    return _scheduler_team_in_scope(resolve_team_id_by_project_name(project_name), scope_team_ids)
+
+
 def _project_meta_for_scheduler() -> tuple[dict[str, dict], set[str]]:
     """读取项目优先级/状态，用于排序与过滤已结束项目。"""
     from .models import Project, UploadRecord
@@ -466,13 +511,16 @@ def _release_send_lock_after_job(lock_file: str, keep_lock: bool) -> None:
         pass
 
 
-def _run_thursday_reminder(skip_dedupe: bool = False):
+def _run_thursday_reminder(
+    skip_dedupe: bool = False,
+    scope_team_ids: frozenset[str] | None = None,
+):
     """每周四 16:00 提醒：统计全部事项（不限于本周），按项目分组展示未完成列表，项目与影响业务方/产品合并为一条显示，并依次 @ 待办人员。"""
     app = _app
     if not app:
-        return
+        return {"no_tasks": True, "teams_sent": 0}
     if not _try_acquire_send_lock("thursday_reminder", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
-        return
+        return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(其他进程已发送)"}
     lock_file = os.path.join(
         app.instance_path, "scheduler_locks", f"{_send_lock_file_basename('thursday_reminder')}.lock"
     )
@@ -481,7 +529,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
     try:
         if not _try_acquire_mysql_cron_serialize_lock("thursday_reminder"):
             _release_send_lock_after_job(lock_file, False)
-            return
+            return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(其他实例已发送)"}
         mysql_lock_ok = True
         with app.app_context():
             from . import dingtalk_service
@@ -491,8 +539,8 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
             q_all = UploadRecord.query.filter(UploadRecord.assignee_name.isnot(None))
             if ended:
                 q_all = q_all.filter(~UploadRecord.project_name.in_(list(ended)))
-            total_count = q_all.count()
-            completed_count = q_all.filter(UploadRecord.task_status == "completed").count()
+            all_tasks = q_all.all()
+            team_all_tasks = _scheduler_group_uploads_by_team(all_tasks)
 
             q_pending = UploadRecord.query.filter(
                 UploadRecord.task_status == "pending",
@@ -502,9 +550,15 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 q_pending = q_pending.filter(~UploadRecord.project_name.in_(list(ended)))
             pending_tasks = q_pending.order_by(UploadRecord.due_date).all()
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
+            if scope_team_ids is not None:
+                all_tasks = _filter_uploads_by_scheduler_team_scope(all_tasks, proj_meta, scope_team_ids)
+                pending_tasks = _filter_uploads_by_scheduler_team_scope(
+                    pending_tasks, proj_meta, scope_team_ids
+                )
+                team_all_tasks = _scheduler_group_uploads_by_team(all_tasks)
 
-            if total_count == 0:
-                return
+            if not all_tasks:
+                return {"no_tasks": True, "teams_sent": 0}
 
             from .app_settings import get_setting_for_scheduler
             base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
@@ -526,30 +580,36 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 dedupe_key = _cron_send_dedupe_slot_key("thursday_reminder")
                 if not _try_claim_cron_send_dedupe(dedupe_key):
                     logger.info("自动催办(周四提醒)：本分钟槽位已被占用，跳过重复发送")
-                    return
+                    return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(本分钟已由其他实例发送)"}
             send_ok = False
+            teams_sent = 0
+            team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks)
             try:
-                team_to_projects: dict[str | None, list[str]] = {}
-                for pn in by_project.keys():
-                    team_id = (proj_meta.get(pn) or {}).get("team_id")
-                    team_to_projects.setdefault(team_id, []).append(pn)
+                team_to_projects: dict[str | None, set[str]] = {}
+                for u in pending_tasks:
+                    pn = u.project_name or ""
+                    if not pn:
+                        continue
+                    team_to_projects.setdefault(_scheduler_upload_team_id(u), set()).add(pn)
                 if not team_to_projects:
-                    team_to_projects = {None: []}
+                    team_to_projects = {None: set()}
                 for team_id, team_projects in team_to_projects.items():
+                    if not _scheduler_team_in_scope(team_id, scope_team_ids):
+                        continue
                     webhook, secret = _get_webhook_secret(team_id)
                     if not webhook:
                         logger.warning("自动催办(周四提醒)：team_id=%s 未配置 webhook，已跳过", team_id)
                         continue
-                    team_pending = []
-                    for pn in team_projects:
-                        team_pending.extend(by_project.get(pn) or [])
-                    if not team_projects:
-                        team_pending = []
-                    team_total = total_count if not team_projects else len(team_pending) + completed_count
+                    team_pending = team_pending_by_id.get(team_id, [])
+                    team_project_list = sorted(team_projects)
+                    team_records = team_all_tasks.get(team_id, [])
+                    team_total = len(team_records)
+                    team_completed = sum(1 for u in team_records if u.task_status == "completed")
+                    team_pending_count = len(team_pending)
                     lines = [
                         "【每周任务完成提醒】",
                         "",
-                        f"全部事项共 {team_total} 项：已完成 {completed_count} 项，未完成 {len(team_pending)} 项。",
+                        f"全部事项共 {team_total} 项：已完成 {team_completed} 项，未完成 {team_pending_count} 项。",
                         "",
                     ]
                     if not team_pending:
@@ -559,7 +619,7 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                             m = proj_meta.get(pn) or {}
                             return (-int(m.get("priority") or 2), pn or "")
 
-                        for project_name in sorted(team_projects, key=_proj_sort_key):
+                        for project_name in sorted(team_project_list, key=_proj_sort_key):
                             uploads = by_project.get(project_name) or []
                             groups = {}
                             for u in uploads:
@@ -604,6 +664,8 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                         secret=secret,
                     )
                     send_ok = bool(result and result.get("success")) or send_ok
+                    if result and result.get("success"):
+                        teams_sent += 1
             finally:
                 if dedupe_key and not send_ok:
                     _release_cron_send_dedupe_claim(dedupe_key)
@@ -611,13 +673,18 @@ def _run_thursday_reminder(skip_dedupe: bool = False):
                 actually_sent = True
             else:
                 logger.warning("自动催办(周四提醒)：钉钉发送失败，请检查 Webhook/Secret 及网络")
+            return {"no_tasks": False, "teams_sent": teams_sent, "last_error": None if send_ok else "钉钉未返回成功"}
     finally:
         _release_send_lock_after_job(lock_file, actually_sent)
         if mysql_lock_ok:
             _release_mysql_cron_serialize_lock("thursday_reminder")
+    return {"no_tasks": False, "teams_sent": 0}
 
 
-def _run_overdue_reminder(skip_dedupe: bool = False):
+def _run_overdue_reminder(
+    skip_dedupe: bool = False,
+    scope_team_ids: frozenset[str] | None = None,
+):
     """每日 15:00 检查：截止日期为明天的任务，按负责人合并为一条消息发送。返回发送结果供测试接口展示。"""
     app = _app
     if not app:
@@ -649,6 +716,8 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
                 q = q.filter(~UploadRecord.project_name.in_(list(ended)))
             tasks = q.order_by(UploadRecord.assignee_name, UploadRecord.due_date).all()
             tasks = _dedupe_upload_records_for_notify(tasks)
+            if scope_team_ids is not None:
+                tasks = _filter_uploads_by_scheduler_team_scope(tasks, proj_meta, scope_team_ids)
 
             if not tasks:
                 return {"no_tasks": True, "sent": 0, "failed": 0, "last_error": None}
@@ -670,13 +739,12 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
             by_team_assignee: dict[tuple[str | None, str], list] = {}
-            from .dingtalk_team import resolve_team_id_by_upload
 
             for t in tasks:
                 name = (t.assignee_name or t.author or "").strip()
                 if not name:
                     continue
-                team_id = resolve_team_id_by_upload(t)
+                team_id = _scheduler_upload_team_id(t)
                 key = (team_id, name)
                 by_team_assignee.setdefault(key, []).append(t)
 
@@ -685,6 +753,8 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
             last_error = None
             try:
                 for (team_id, assignee_name), person_tasks in by_team_assignee.items():
+                    if not _scheduler_team_in_scope(team_id, scope_team_ids):
+                        continue
                     if not person_tasks:
                         continue
                     webhook, secret = _get_webhook_secret(team_id)
@@ -747,13 +817,16 @@ def _run_overdue_reminder(skip_dedupe: bool = False):
             _release_mysql_cron_serialize_lock("overdue_reminder")
 
 
-def _run_project_stats(skip_dedupe: bool = False):
+def _run_project_stats(
+    skip_dedupe: bool = False,
+    scope_team_ids: frozenset[str] | None = None,
+):
     """每两天 9:30：按项目统计每个人未完成任务项（不显示未完成列表），并依次 @ 待办人员。"""
     app = _app
     if not app:
-        return
+        return {"no_tasks": True, "teams_sent": 0}
     if not _try_acquire_send_lock("project_stats", cooldown_seconds=_DEFAULT_CRON_SEND_COOLDOWN):
-        return
+        return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(其他进程已发送)"}
     lock_file = os.path.join(
         app.instance_path, "scheduler_locks", f"{_send_lock_file_basename('project_stats')}.lock"
     )
@@ -762,7 +835,7 @@ def _run_project_stats(skip_dedupe: bool = False):
     try:
         if not _try_acquire_mysql_cron_serialize_lock("project_stats"):
             _release_send_lock_after_job(lock_file, False)
-            return
+            return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(其他实例已发送)"}
         mysql_lock_ok = True
         with app.app_context():
             from . import dingtalk_service
@@ -779,6 +852,10 @@ def _run_project_stats(skip_dedupe: bool = False):
                 q_pending = q_pending.filter(~UploadRecord.project_name.in_(list(ended)))
             pending_tasks = q_pending.order_by(UploadRecord.due_date).all()
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
+            if scope_team_ids is not None:
+                pending_tasks = _filter_uploads_by_scheduler_team_scope(
+                    pending_tasks, proj_meta, scope_team_ids
+                )
 
             by_project = {}
             for u in pending_tasks:
@@ -787,28 +864,36 @@ def _run_project_stats(skip_dedupe: bool = False):
                     by_project[p] = []
                 by_project[p].append(u)
 
+            if scope_team_ids is not None and not by_project:
+                return {"no_tasks": True, "teams_sent": 0}
+
             dedupe_key = None
             if not skip_dedupe:
                 dedupe_key = _cron_send_dedupe_slot_key("project_stats")
                 if not _try_claim_cron_send_dedupe(dedupe_key):
                     logger.info("自动催办(项目统计)：本分钟槽位已被占用，跳过重复发送")
-                    return
+                    return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(本分钟已由其他实例发送)"}
             send_ok = False
+            teams_sent = 0
             try:
-                team_to_projects: dict[str | None, list[str]] = {}
-                for pn in by_project.keys():
-                    team_id = (proj_meta.get(pn) or {}).get("team_id")
-                    team_to_projects.setdefault(team_id, []).append(pn)
+                team_to_projects: dict[str | None, set[str]] = {}
+                for u in pending_tasks:
+                    pn = u.project_name or ""
+                    if not pn:
+                        continue
+                    team_to_projects.setdefault(_scheduler_upload_team_id(u), set()).add(pn)
                 if not team_to_projects:
-                    team_to_projects = {None: []}
+                    team_to_projects = {None: set()}
+                team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks)
                 for team_id, team_projects in team_to_projects.items():
+                    if not _scheduler_team_in_scope(team_id, scope_team_ids):
+                        continue
                     webhook, secret = _get_webhook_secret(team_id)
                     if not webhook:
                         logger.warning("自动催办(项目统计)：team_id=%s 未配置 webhook，已跳过", team_id)
                         continue
-                    team_pending = []
-                    for pn in team_projects:
-                        team_pending.extend(by_project.get(pn) or [])
+                    team_pending = team_pending_by_id.get(team_id, [])
+                    team_project_list = sorted(team_projects)
                     if not team_pending:
                         lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
                         at_names = None
@@ -817,14 +902,14 @@ def _run_project_stats(skip_dedupe: bool = False):
                         lines = [
                             "【每两天项目完成情况统计】",
                             "",
-                            f"整体未完成任务数：{len(team_pending)} 项，涉及 {len(team_projects)} 个项目。",
+                            f"本项目组未完成任务数：{len(team_pending)} 项，涉及 {len(team_project_list)} 个项目。",
                             "",
                         ]
                         def _proj_sort_key(pn: str):
                             m = proj_meta.get(pn) or {}
                             return (-int(m.get("priority") or 2), pn or "")
 
-                        for project_name in sorted(team_projects, key=_proj_sort_key):
+                        for project_name in sorted(team_project_list, key=_proj_sort_key):
                             uploads = by_project.get(project_name) or []
                             by_person = {}
                             for u in uploads:
@@ -865,6 +950,8 @@ def _run_project_stats(skip_dedupe: bool = False):
                         secret=secret,
                     )
                     send_ok = bool(result and result.get("success")) or send_ok
+                    if result and result.get("success"):
+                        teams_sent += 1
             finally:
                 if dedupe_key and not send_ok:
                     _release_cron_send_dedupe_claim(dedupe_key)
@@ -872,10 +959,12 @@ def _run_project_stats(skip_dedupe: bool = False):
                 actually_sent = True
             else:
                 logger.warning("自动催办(项目统计)：钉钉发送失败，请检查 Webhook/Secret 及网络")
+            return {"no_tasks": False, "teams_sent": teams_sent, "last_error": None if send_ok else "钉钉未返回成功"}
     finally:
         _release_send_lock_after_job(lock_file, actually_sent)
         if mysql_lock_ok:
             _release_mysql_cron_serialize_lock("project_stats")
+    return {"no_tasks": False, "teams_sent": 0}
 
 
 def _send_module_cascade_for_project(project_name: str, trigger_module: str, target_module: str, trigger_label: str):

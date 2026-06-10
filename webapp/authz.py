@@ -202,9 +202,10 @@ def path_allowed_for_current_user(path: str) -> bool:
     role = current_admin_role()
     if role == ADMIN_ROLE_COMPANY:
         return p == "/company" or p.startswith("/company/")
-    if role == ADMIN_ROLE_PROJECT:
+    if role in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
         if company_registry_enabled() and not user_team_ids():
             return False
+    if role == ADMIN_ROLE_PROJECT:
         return (
             p in ("/upload", "/dashboard", "/exam-center")
             or p.startswith("/upload/")
@@ -239,7 +240,11 @@ def nav_show_page2() -> bool:
     """页面2：超级管理员、普通账号、项目管理员；公司管理员仅页面0。"""
     if is_page13_super_admin():
         return True
-    return bool(session.get("user_id")) and not is_company_admin()
+    if not session.get("user_id") or is_company_admin():
+        return False
+    if company_registry_enabled() and current_admin_role() in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
+        return bool(user_team_ids())
+    return True
 
 
 def nav_show_page4() -> bool:
@@ -284,11 +289,14 @@ def super_admin_password_gate_response(
 
 def block_until_super_admin_or_user_id(*, for_api: bool | None = None):
     """已验证访问密码或已登录 → None；否则密码门 / 登录 / API 401。"""
+    is_api = for_api if for_api is not None else _is_api_request()
     if is_page13_super_admin():
         return None
     if session.get("user_id"):
+        blocked = user_access_binding_block_response(for_api=is_api)
+        if blocked is not None:
+            return blocked
         return None
-    is_api = for_api if for_api is not None else _is_api_request()
     if page13_password_configured():
         if is_api:
             return (
@@ -366,6 +374,72 @@ def _company_admin_blocked_response():
     return redirect(url_for("company.company_registry_page"))
 
 
+def validate_user_access_binding(user: User | None) -> tuple[bool, str, dict[str, bool]]:
+    """校验账号是否已配置角色要求的所属公司/项目组（仅公司体系开启时生效）。"""
+    extra: dict[str, bool] = {}
+    if user is None:
+        return True, "", extra
+    if not company_registry_enabled():
+        return True, "", extra
+    role = (getattr(user, "admin_role", None) or ADMIN_ROLE_NONE).strip()
+    if role not in ADMIN_ROLES:
+        role = ADMIN_ROLE_NONE
+    if role == ADMIN_ROLE_COMPANY:
+        org_ids = [
+            str(m.organization_id).strip()
+            for m in UserOrganizationMembership.query.filter_by(user_id=user.id).all()
+            if str(m.organization_id).strip()
+        ]
+        if org_ids:
+            return True, "", extra
+        extra["needsOrganizationAssignment"] = True
+        return (
+            False,
+            "公司管理员须先在页面4（超级管理员）中分配所属公司，请联系超级管理员后再登录。",
+            extra,
+        )
+    if role in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
+        from .user_access import enforce_single_team_membership
+
+        tid = enforce_single_team_membership(str(user.id), commit=False)
+        if tid:
+            return True, "", extra
+        extra["needsTeamAssignment"] = True
+        role_label = "项目管理员" if role == ADMIN_ROLE_PROJECT else "普通账号"
+        return (
+            False,
+            f"{role_label}须先在页面4（超级管理员）中分配所属项目组，请联系超级管理员后再登录。",
+            extra,
+        )
+    return True, "", extra
+
+
+def user_access_binding_block_response(*, for_api: bool | None = None):
+    """已登录但缺少所属公司/项目组 → 403 或错误页；满足要求 → None。"""
+    if is_page13_super_admin() or not session.get("user_id"):
+        return None
+    user = User.query.get(session.get("user_id"))
+    ok, message, extra = validate_user_access_binding(user)
+    if ok:
+        return None
+    is_api = for_api if for_api is not None else _is_api_request()
+    if is_api:
+        return jsonify({"message": message, **extra}), 403
+    title = "未分配所属公司" if extra.get("needsOrganizationAssignment") else "未分配项目组"
+    return (
+        render_template(
+            "error.html",
+            title=title,
+            message=message,
+            back_url=url_for("pages.login_page"),
+            back_label="返回登录",
+            hide_main_nav=True,
+            gate_page=True,
+        ),
+        403,
+    )
+
+
 def company_registry_write_allowed() -> bool:
     if is_page13_super_admin():
         return True
@@ -440,6 +514,8 @@ def project_in_scope(
     if project is None:
         return False
     if not rbac_enforced():
+        return True
+    if is_page13_super_admin():
         return True
     if is_company_admin():
         scopes = user_country_scopes()
@@ -684,6 +760,25 @@ def upload_record_visible_to_user(rec: Any) -> bool:
     return False
 
 
+def upload_record_mutable_by_current_user(rec: Any) -> bool:
+    """页面2 写操作：普通账号/项管仅本人任务；超管只读观察不可改。"""
+    if rec is None:
+        return False
+    if is_page13_super_admin():
+        return False
+    if not _record_assigned_to_current_user(rec):
+        return False
+    if is_normal_user():
+        if rbac_enforced() and user_team_ids():
+            return upload_in_scope(rec)
+        return True
+    if is_project_admin() and rbac_enforced():
+        if not user_team_ids():
+            return False
+        return upload_in_scope(rec)
+    return False
+
+
 def _refresh_session_from_user(user: User) -> None:
     """从数据库刷新 session 中的角色/归属，不写入数据库。"""
     session["user_id"] = user.id
@@ -757,6 +852,9 @@ def company_registry_api_required(fn: Callable):
             return fn(*args, **kwargs)
         if not session.get("user_id"):
             return jsonify({"message": "请先登录", "needsLogin": True}), 401
+        blocked = user_access_binding_block_response()
+        if blocked is not None:
+            return blocked
         if not is_company_admin():
             return jsonify(
                 {
@@ -778,6 +876,9 @@ def company_admin_write_required(fn: Callable):
             return fn(*args, **kwargs)
         if not session.get("user_id"):
             return jsonify({"message": "请先登录", "needsLogin": True}), 401
+        blocked = user_access_binding_block_response()
+        if blocked is not None:
+            return blocked
         if not company_registry_write_allowed():
             return jsonify({"message": "需要公司管理员权限"}), 403
         return fn(*args, **kwargs)
@@ -819,6 +920,9 @@ def company_registry_page_required(fn: Callable):
                 ),
                 403,
             )
+        blocked = user_access_binding_block_response()
+        if blocked is not None:
+            return blocked
         return fn(*args, **kwargs)
 
     return wrapper
