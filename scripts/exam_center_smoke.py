@@ -477,7 +477,8 @@ def run_exam_team_scope_regression(app, c) -> None:
         r_hist = c.get("/api/exam-center/student/history?limit=20")
         assert r_hist.status_code == 200, r_hist.get_json()
         hist_j = r_hist.get_json() or {}
-        assert hist_j.get("data", {}).get("readOnly") is True, hist_j
+        assert hist_j.get("data", {}).get("readOnly") is False, hist_j
+        assert hist_j.get("data", {}).get("observerMode") is True, hist_j
         users_opts = (hist_j.get("data") or {}).get("filterOptions", {}).get("users") or []
         labels = {
             str(u.get("label") or u.get("name") or "")

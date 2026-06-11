@@ -52,6 +52,64 @@
       .replace(/"/g, "&quot;");
   }
 
+  function statusBadgeZh(st) {
+    var m = { modified: "已修改", partial: "部分修改", not_addressed: "未修改" };
+    return m[String(st || "")] || String(st || "");
+  }
+
+  function renderAuditCoverage(covByTarget) {
+    var wrap = $("amod_coverage_wrap");
+    var sumEl = $("amod_coverage_summary");
+    var listEl = $("amod_coverage_list");
+    if (!wrap || !listEl) return;
+    if (!covByTarget || typeof covByTarget !== "object") {
+      wrap.classList.add("d-none");
+      return;
+    }
+    var keys = Object.keys(covByTarget);
+    if (!keys.length) {
+      wrap.classList.add("d-none");
+      return;
+    }
+    wrap.classList.remove("d-none");
+    var html = "";
+    var totalAll = 0, modAll = 0, missAll = 0;
+    keys.forEach(function (fn) {
+      var cov = covByTarget[fn] || {};
+      var sm = cov.summary || {};
+      totalAll += sm.total_immediate_points || 0;
+      modAll += sm.modified || 0;
+      missAll += (sm.not_addressed || 0) + (sm.partial || 0);
+      html += '<div class="mb-3"><div class="fw-semibold">' + esc(fn) + "</div>";
+      html += '<div class="text-muted mb-1">共 ' + (sm.total_immediate_points || 0) +
+        " 点 · 已改 " + (sm.modified || 0) + " · 部分 " + (sm.partial || 0) +
+        " · 未改 " + (sm.not_addressed || 0) + "（ZIP 内 *.audit_modify.log.md 含改前/改后详情）</div>";
+      (cov.points || []).forEach(function (pt, idx) {
+        var st = pt.status || "not_addressed";
+        var badgeCls = st === "modified" ? "success" : st === "partial" ? "warning" : "secondary";
+        html += '<div class="border-top pt-2 mt-2"><span class="badge bg-' + badgeCls + ' me-1">' +
+          esc(statusBadgeZh(st)) + '</span><code>' + esc(pt.audit_point_ref || "") + "</code>";
+        if (pt.location) html += '<div class="text-muted">位置：' + esc(pt.location) + "</div>";
+        if (pt.description) html += "<div>问题：" + esc(String(pt.description).slice(0, 240)) + "</div>";
+        (pt.changes || []).slice(0, 2).forEach(function (ch) {
+          html += '<div class="mt-1"><span class="text-muted">' + esc(ch.type || "change") + "</span>";
+          if (ch.before) html += '<pre class="small mb-0 bg-white border p-1">' + esc(String(ch.before).slice(0, 400)) + "</pre>";
+          if (ch.after) html += '<pre class="small mb-0 bg-white border p-1">' + esc(String(ch.after).slice(0, 400)) + "</pre>";
+          html += "</div>";
+        });
+        if (st !== "modified" && pt.not_addressed_reason) {
+          html += '<div class="text-danger small mt-1">原因：' + esc(pt.not_addressed_reason) + "</div>";
+        }
+        html += "</div>";
+      });
+      html += "</div>";
+    });
+    if (sumEl) {
+      sumEl.textContent = "汇总：共 " + totalAll + " 个立即修改点 · 已落实 " + modAll + " · 未完全落实 " + missAll;
+    }
+    listEl.innerHTML = html || "（无覆盖数据）";
+  }
+
   function historyDownloadUrl(it) {
     if (!it || !it.id) return "";
     return root + "/audit-modify/api/jobs/" + encodeURIComponent(it.id) + "/download";
@@ -123,7 +181,7 @@
     var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
       ? window.IntegrationPrefill.integrationScopeQuery()
       : "scope=workflow";
-    AsyncJob.api(
+    return AsyncJob.api(
       root + "/audit-modify/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
@@ -307,6 +365,10 @@
                 prog.update(1, "修改完成，可下载 ZIP");
                 showMsg("修改完成", false);
                 if (dlBtn) dlBtn.disabled = false;
+                var res = finalJson && finalJson.result;
+                if (res && res.audit_point_coverage_by_target) {
+                  renderAuditCoverage(res.audit_point_coverage_by_target);
+                }
               } else {
                 prog.setHeadline("修改失败");
                 prog.setTerminal(false);
@@ -340,7 +402,7 @@
   }
 
   function init() {
-    if (!window.IntegrationPrefill) return;
+    if (!window.IntegrationPrefill || !$("amod_report_id")) return Promise.resolve();
     var IP = window.IntegrationPrefill;
     var q = parseQuery();
     var pf = IP.parsePrefillFromLocation();
@@ -428,8 +490,8 @@
         if (rid || uid) fetchPostAuditDefaults();
       },
     };
-    loadPage0LatestReportIfNeeded().then(function () {
-      IP.loadBootstrap(amodBootstrapOpts);
+    var bootstrapPromise = loadPage0LatestReportIfNeeded().then(function () {
+      return IP.loadBootstrap(amodBootstrapOpts);
     });
 
     IP.wireProjectSelect("amod", function () { return window.__integrationBootstrap_amod; }, function () {
@@ -484,9 +546,18 @@
     if (q.upload_id || q.report_id) {
       setTimeout(preview, 200);
     }
-    loadHistory();
+    return Promise.all([bootstrapPromise, loadHistory()]);
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
+  function runInit() {
+    return init();
+  }
+
+  if (typeof registerPageInit === "function") {
+    registerPageInit(runInit);
+  } else if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", runInit);
+  } else {
+    runInit();
+  }
 })();

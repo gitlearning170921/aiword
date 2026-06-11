@@ -302,7 +302,14 @@ def _chatbot_normalize_provider(requested: Optional[str]) -> tuple[str, Optional
 
 
 def _chatbot_client_headers(provider: str) -> dict[str, str]:
-    """页面2 个人 LLM 凭据透传；始终带上 X-Client-Llm-Provider 以免上游误用全局 deepseek。"""
+    """页面2 个人 LLM 凭据透传；personalKeysOnly 时禁止回落系统 Key。"""
+    from .draft_generation_routes import (
+        _client_llm_headers,
+        _draft_personal_key_headers,
+        _draft_personal_keys_enforced,
+        _normalize_requested_provider,
+    )
+
     prov = (provider or "").strip().lower()
     headers: dict[str, str] = {}
     if prov:
@@ -311,11 +318,14 @@ def _chatbot_client_headers(provider: str) -> dict[str, str]:
     if not uid:
         return headers
     try:
-        from .draft_generation_routes import _client_llm_headers, _normalize_requested_provider
-
         norm = _normalize_requested_provider(prov) or prov
         if norm in ("deepseek", "tongyi", "cursor"):
-            headers.update(_client_llm_headers(str(uid), provider=norm) or {})
+            enforced = _draft_personal_keys_enforced()
+            if enforced:
+                headers.update(_draft_personal_key_headers() or {})
+            personal = _client_llm_headers(str(uid), provider=norm) or {}
+            if enforced or personal.get("X-Client-Llm-Api-Key"):
+                headers.update(personal)
             headers["X-Client-Llm-Provider"] = norm
     except Exception:
         pass
@@ -8250,6 +8260,15 @@ def api_task_author_candidates():
     return jsonify({"users": [_serialize_task_author_user(u) for u in users]})
 
 
+@bp.get("/api/users/feature-permission-schema")
+@page13_access_required
+def api_users_feature_permission_schema():
+    """账号新建/编辑与批量功能权限共用的字段分组（勿在 app.js 重复维护）。"""
+    from .user_feature_permissions import feature_permission_schema_for_client
+
+    return jsonify({"ok": True, **feature_permission_schema_for_client()})
+
+
 @bp.get("/api/users")
 @page13_access_required
 def api_users_list():
@@ -8994,11 +9013,20 @@ def api_upload():
 
 
 def _send_task_notification(upload: UploadRecord, due_date_str: str):
-    """如果设置了负责人，发送钉钉通知"""
+    """如果设置了负责人，发送钉钉通知（按任务所属项目组选择 Webhook）。"""
     if not upload.assignee_name:
         return
-    webhook = _dingtalk_webhook_str() or None
-    secret = _dingtalk_secret_opt()
+    from .dingtalk_team import resolve_dingtalk_credentials, resolve_team_id_by_upload
+
+    team_id = resolve_team_id_by_upload(upload)
+    webhook, secret, source = resolve_dingtalk_credentials(team_id)
+    if not webhook:
+        current_app.logger.warning(
+            "新建任务钉钉通知跳过：未配置 Webhook team_id=%s upload=%s",
+            team_id,
+            upload.id,
+        )
+        return
     template_source = (
         "已上传文件"
         if _upload_record_has_task_file(upload)
@@ -9016,59 +9044,18 @@ def _send_task_notification(upload: UploadRecord, due_date_str: str):
         upload.dingtalk_notified_at = now_local()
         db.session.add(upload)
         db.session.commit()
+        current_app.logger.info(
+            "新建任务钉钉通知已发送 team_id=%s source=%s assignee=%s",
+            team_id,
+            source,
+            upload.assignee_name,
+        )
 
 
-# 待办导入：表头与任务字段映射（支持另一工具导出 CSV/Excel）
-_IMPORT_HEADER_MAP = {
-    "项目名称": "project_name",
-    "项目编号": "project_code",
-    "影响业务方": "business_side",
-    "产品": "product",
-    "影响产品": "product",
-    "国家": "country",
-    "项目备注": "project_notes",
-    "注册产品名称": "registered_product_name",
-    "型号": "model",
-    "注册版本号": "registration_version",
-    "文件名称": "fileName",
-    "任务类型": "task_type",
-    "类型": "task_type",
-    "任务类别": "task_type",
-    "task_type": "task_type",
-    "文档链接": "template_links",
-    "文件版本号": "file_version",
-    "编写人员": "author",
-    "负责人": "assignee_name",
-    "截止日期": "due_date",
-    "下发任务备注": "notes",
-    "文档体现日期": "document_display_date",
-    "审核人员": "reviewer",
-    "批准人员": "approver",
-    "所属模块": "belonging_module",
-    "体现编写人员": "displayed_author",
-    "projectName": "project_name",
-    "projectCode": "project_code",
-    "businessSide": "business_side",
-    "product": "product",
-    "country": "country",
-    "projectNotes": "project_notes",
-    "fileName": "fileName",
-    "taskType": "task_type",
-    "templateLinks": "template_links",
-    "fileVersion": "file_version",
-    "author": "author",
-    "assigneeName": "assignee_name",
-    "dueDate": "due_date",
-    "notes": "notes",
-    "documentDisplayDate": "document_display_date",
-    "reviewer": "reviewer",
-    "approver": "approver",
-    "belongingModule": "belonging_module",
-    "displayedAuthor": "displayed_author",
-    "registeredProductName": "registered_product_name",
-    "model": "model",
-    "registrationVersion": "registration_version",
-}
+def _import_header_map():
+    from .task_entry_schema import import_header_map
+
+    return import_header_map()
 
 
 def _decode_import_csv_bytes(raw_bytes: bytes) -> str:
@@ -9118,7 +9105,7 @@ def _parse_import_csv(raw: str) -> tuple[list[dict], str]:
         for j, h in enumerate(headers):
             if j < len(row):
                 val = (row[j] or "").strip()
-                key = _IMPORT_HEADER_MAP.get(h) or _IMPORT_HEADER_MAP.get(h.strip())
+                key = _import_header_map().get(h) or _import_header_map().get(h.strip())
                 if key:
                     d[key] = val
         out.append(d)
@@ -9153,99 +9140,33 @@ def _parse_import_excel(raw: bytes, filename: str) -> tuple[list[dict], str]:
             if j < len(row):
                 val = row[j]
                 val = (str(val).strip() if val is not None else "") or ""
-                key = _IMPORT_HEADER_MAP.get(h) or _IMPORT_HEADER_MAP.get(h.strip())
+                key = _import_header_map().get(h) or _import_header_map().get(h.strip())
                 if key:
                     d[key] = val
         out.append(d)
     return out, ""
 
 
-def _parse_import_date(s: str) -> Optional[date]:
-    if not s or not (s or "").strip():
-        return None
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-# 导入模板表头（与任务录入/列表一致：先项目与文档通用信息，再文件任务与签审批信息）
-_IMPORT_TEMPLATE_HEADERS = [
-    "项目名称", "项目编号", "影响业务方", "影响产品", "国家", "项目备注", "注册产品名称", "型号", "注册版本号",
-    "文件名称", "任务类型", "所属模块", "文档链接", "文件版本号", "文档体现日期", "审核人员", "批准人员", "体现编写人员",
-    "编写人员", "负责人", "截止日期", "下发任务备注",
-]
-
-
-def _format_date_for_import(obj) -> str:
-    """安全格式化为 YYYY-MM-DD，避免非 date/datetime 导致异常。"""
-    if obj is None:
-        return ""
-    if hasattr(obj, "strftime"):
-        try:
-            return obj.strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            return ""
-    return str(obj)[:10] if obj else ""
-
-
-def _record_to_import_row(r: UploadRecord) -> list:
-    """与 _IMPORT_TEMPLATE_HEADERS 列顺序一致"""
-    return [
-        (r.project_name or ""),
-        (r.project_code or ""),
-        (r.business_side or ""),
-        (r.product or ""),
-        (r.country or ""),
-        (r.project_notes or ""),
-        str(getattr(r, "registered_product_name", None) or ""),
-        str(getattr(r, "model", None) or ""),
-        str(getattr(r, "registration_version", None) or ""),
-        (r.file_name or ""),
-        (r.task_type or ""),
-        str(getattr(r, "belonging_module", None) or ""),
-        (r.template_links or "").replace("\n", " ").strip(),
-        str(getattr(r, "file_version", None) or ""),
-        _format_date_for_import(getattr(r, "document_display_date", None)),
-        str(getattr(r, "reviewer", None) or ""),
-        str(getattr(r, "approver", None) or ""),
-        str(getattr(r, "displayed_author", None) or ""),
-        (r.author or ""),
-        (r.assignee_name or r.author or ""),
-        _format_date_for_import(r.due_date),
-        (r.notes or ""),
-    ]
-
-
 def _build_import_template_csv(include_sample: bool, project_name: Optional[str] = None) -> str:
-    """生成导入用 CSV。include_sample=True 时填充数据行；project_name 指定时填充该项目下所有任务，否则一行示例或占位。"""
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(_IMPORT_TEMPLATE_HEADERS)
+    from .task_entry_schema import build_import_template_csv
+
+    records_for_project = None
+    fallback_sample = None
     if include_sample:
         if project_name and (project_name or "").strip():
-            records = (
+            records_for_project = (
                 UploadRecord.query.filter(UploadRecord.project_name == project_name.strip())
                 .order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc())
                 .all()
             )
-            for r in records:
-                writer.writerow(_record_to_import_row(r))
         else:
-            sample = UploadRecord.query.order_by(UploadRecord.created_at.desc()).first()
-            if sample:
-                writer.writerow(_record_to_import_row(sample))
-            else:
-                writer.writerow([
-                    "示例项目", "PRJ001", "示例业务方", "示例产品", "中国", "项目备注示例", "注册产品示例", "型号示例", "V1.0",
-                    "示例文件", "初稿待编写", "开发", "https://example.com/doc.docx", "V1.0",
-                    datetime.now().strftime("%Y-%m-%d"), "审核人", "批准人", "体现编写人",
-                    "张三", "张三", datetime.now().strftime("%Y-%m-%d"), "下发任务备注示例",
-                ])
-    return buf.getvalue()
+            fallback_sample = UploadRecord.query.order_by(UploadRecord.created_at.desc()).first()
+    return build_import_template_csv(
+        include_sample,
+        project_name,
+        records_for_project=records_for_project,
+        fallback_sample_record=fallback_sample,
+    )
 
 
 @bp.get("/api/uploads/project-names")
@@ -9274,6 +9195,15 @@ def api_uploads_project_names():
 
     arr = sorted(set(arr), key=_k)
     return jsonify({"projectNames": arr})
+
+
+@bp.get("/api/task-entry/import-schema")
+@page13_access_required
+def api_task_entry_import_schema():
+    """任务录入 / 下载模板 / 导入待办 共用字段定义（表头顺序与 key）。"""
+    from .task_entry_schema import import_schema_for_client
+
+    return jsonify({"ok": True, **import_schema_for_client()})
 
 
 @bp.get("/api/uploads/import-template")
@@ -9364,6 +9294,7 @@ def api_uploads_import():
     errors = []
     from .authz import _project_lookup_maps
     from .project_teams import resolve_organization_id_for_project_upload
+    from .task_entry_schema import parse_import_date, validate_import_row_task_category
 
     for idx, d in enumerate(rows):
         row_no = idx + 2
@@ -9375,12 +9306,18 @@ def api_uploads_import():
             errors.append({"row": row_no, "message": "缺少项目名称、文件名称或编写人员，已跳过"})
             continue
 
+        cat_err = validate_import_row_task_category(d)
+        if cat_err:
+            skipped += 1
+            errors.append({"row": row_no, "message": cat_err})
+            continue
+
         task_type = (d.get("task_type") or "").strip() or None
         template_links = (d.get("template_links") or "").strip() or None
         if template_links:
             template_links = _normalize_template_links(template_links) or None
-        due_date = _parse_import_date(d.get("due_date") or "")
-        document_display_date = _parse_import_date(d.get("document_display_date") or "")
+        due_date = parse_import_date(d.get("due_date") or "")
+        document_display_date = parse_import_date(d.get("document_display_date") or "")
 
         existing = UploadRecord.query.filter_by(
             project_name=project_name,

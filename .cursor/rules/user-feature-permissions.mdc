@@ -1,0 +1,38 @@
+---
+description: 账号功能权限（新建/编辑/批量）字段联动；改权限项须同步 user_feature_permissions.py
+globs:
+  - webapp/user_feature_permissions.py
+  - webapp/routes.py
+  - web/static/js/app.js
+  - web/templates/admin.html
+  - webapp/templates/admin.html
+---
+
+# 账号功能权限 ↔ 批量功能权限 联动
+
+页面4「账号管理」中 **新建账号**、**编辑账号**、**批量功能权限** 共用服务端 schema：
+
+- 定义源：`webapp/user_feature_permissions.py`
+  - `USER_PAGE0/1/2_FEATURE_KEYS`
+  - `USER_FEATURE_PERM_GROUP_DEFS`
+  - `USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS`
+  - `USER_FEATURE_LABELS`
+- API：`GET /api/users/feature-permission-schema`
+- 前端：`ensureUserFeaturePermSchema()` + `_renderUserFeaturePermSelects(..., mode)`（`user` / `batch`）
+
+## 增删改功能权限项时必做
+
+1. 在 `user_feature_permissions.py` 增加/调整 key、分组、角色可见分组、中文标签。
+2. 确认 `USER_MANAGED_FEATURE_KEYS` 与 `parse_batch_feature_permission_patch` 自动覆盖新 key（已遍历该 tuple）。
+3. 前端 **禁止** 在 `renderBatchUserFeaturePermissionFields` 单独维护字段列表；批量与单账号须走同一 `_renderUserFeaturePermSelects`。
+4. 若新 key 需全局开关，同步 `app_settings.py` / `feature_tools_config.py` 的 slug 映射。
+
+## 角色可见性
+
+- 新建/编辑：按 `USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS` 过滤分组。
+- 批量功能权限：展示 **全部分组**（管理员可跨角色批量 patch；未选字段保持各账号原值）。
+
+## 自检
+
+- `GET /api/users/feature-permission-schema` 的 `groups` 与账号管理三处 UI 字段一致。
+- 批量弹窗比单账号多「不修改」选项，其余 key/label 相同。

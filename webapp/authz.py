@@ -345,7 +345,7 @@ def page4_access_required(fn: Callable):
             return fn(*args, **kwargs)
         return super_admin_password_gate_response(
             gate_title="页面4 · 超级管理员",
-            gate_description="请输入访问密码以进入系统管理台（字典、账号、配置、系统与钉钉）。",
+            gate_description="请输入访问密码以进入系统管理台（字典、账号、系统与钉钉）。",
         )
 
     return wrapper
@@ -395,7 +395,7 @@ def validate_user_access_binding(user: User | None) -> tuple[bool, str, dict[str
         extra["needsOrganizationAssignment"] = True
         return (
             False,
-            "公司管理员须先在页面4（超级管理员）中分配所属公司，请联系超级管理员后再登录。",
+            "您的账号尚未分配所属公司，请联系管理员后再登录。",
             extra,
         )
     if role in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
@@ -405,10 +405,9 @@ def validate_user_access_binding(user: User | None) -> tuple[bool, str, dict[str
         if tid:
             return True, "", extra
         extra["needsTeamAssignment"] = True
-        role_label = "项目管理员" if role == ADMIN_ROLE_PROJECT else "普通账号"
         return (
             False,
-            f"{role_label}须先在页面4（超级管理员）中分配所属项目组，请联系超级管理员后再登录。",
+            "您的账号尚未分配所属项目组，请联系管理员后再登录。",
             extra,
         )
     return True, "", extra

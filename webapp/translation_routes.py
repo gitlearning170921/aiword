@@ -42,7 +42,9 @@ from ._integration_common import (
     integration_scope_list_filter,
     integration_organization_list_filter,
     login_wall,
+    personal_llm_key_wall,
     resolve_org_collection_for_integration,
+    sync_active_organization_if_requested,
     safe_truncate,
     upload_record_visible_to_user,
     upstream_headers,
@@ -94,6 +96,7 @@ def api_translate_meta():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    sync_active_organization_if_requested(explicit_org, org_id)
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=min(30, _translation_timeout()),
@@ -332,6 +335,11 @@ def api_translate_create_job():
     if err_msg:
         return jsonify({"message": err_msg}), 400
 
+    provider = str(payload_obj.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
+
     display_map: dict[str, str] = {}
     upload_id_map: dict[str, str] = {}
     files_to_upload: list[tuple[str, tuple[str, bytes, str]]] = []
@@ -384,7 +392,7 @@ def api_translate_create_job():
 
     url = f"{base}/api/integration/translation/jobs"
     hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
-    hdrs.update(client_llm_headers_for_session())
+    hdrs.update(client_llm_headers_for_session(provider=provider))
     try:
         r = requests.post(
             url,
@@ -744,6 +752,11 @@ def api_translate_correct_create_job():
                 }
             ), 400
 
+    provider = str(payload_obj.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
+
     display_map: dict[str, str] = {}
     upload_id_map: dict[str, str] = {}
     files_to_upload: list[tuple[str, tuple[str, bytes, str]]] = []
@@ -797,7 +810,7 @@ def api_translate_correct_create_job():
 
     url = f"{base}/api/integration/translation/correct/jobs"
     hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
-    hdrs.update(client_llm_headers_for_session())
+    hdrs.update(client_llm_headers_for_session(provider=provider))
     try:
         r = requests.post(
             url,

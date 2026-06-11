@@ -51,7 +51,9 @@ from ._integration_common import (
     latest_audit_report_id_for_scope,
     login_wall,
     manual_upload_only_from_request,
+    personal_llm_key_wall,
     resolve_org_collection_for_integration,
+    sync_active_organization_if_requested,
     resolve_aicheckword_project_id_for_upload,
     safe_truncate,
     upload_record_visible_to_user,
@@ -335,6 +337,7 @@ def api_audit_modify_integration_bootstrap():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    sync_active_organization_if_requested(explicit_org, org_id)
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=30,
@@ -388,16 +391,28 @@ def api_audit_modify_create_job():
     except Exception as e:  # noqa: BLE001
         return jsonify({"message": f"payload 解析失败：{e}"}), 400
 
+    upload_id = (
+        (request.form.get("upload_id") or "").strip()
+        or str(payload_obj.get("upload_id") or payload_obj.get("uploadId") or "").strip()
+    )
+    base_upload_id = (
+        (request.form.get("base_upload_id") or "").strip()
+        or str(
+            payload_obj.get("base_upload_id") or payload_obj.get("baseUploadId") or ""
+        ).strip()
+    )
+
     explicit_org = str(
         payload_obj.get("organizationId") or payload_obj.get("organization_id") or ""
     ).strip()
     try:
+        upload_ids_for_org = [
+            x for x in [upload_id, base_upload_id] if str(x or "").strip()
+        ]
         org_id, resolved_collection = resolve_org_collection_for_integration(
             preferred_collection=str(payload_obj.get("collection") or "regulations"),
             explicit_organization_id=explicit_org or None,
-            upload_ids=[
-                x for x in [upload_id, base_upload_id] if str(x or "").strip()
-            ],
+            upload_ids=upload_ids_for_org or None,
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
@@ -431,8 +446,6 @@ def api_audit_modify_create_job():
             raw_report = parsed
 
     # Base 文件来源：multipart base_files / 同时支持 base_upload_id 拉任务
-    base_upload_id = (request.form.get("base_upload_id") or "").strip()
-    upload_id = (request.form.get("upload_id") or "").strip()
     if report_id is None and raw_report is None and upload_id:
         rec_for_report = UploadRecord.query.get(upload_id)
         if not rec_for_report:
@@ -489,14 +502,25 @@ def api_audit_modify_create_job():
         disp = _template_display_filename(rec) or rec.file_name or "base.docx"
         base_uploads.append((disp, blob))
     else:
-        for f in base_files_form:
-            data = f.read()
-            if not data:
-                continue
-            base_uploads.append(((f.filename or "base.docx").strip() or "base.docx", data))
+        from .archive_expand import flatten_upload_file_storage
+
+        for disp_name, blob in flatten_upload_file_storage(base_files_form):
+            base_uploads.append((disp_name, blob))
 
     if not base_uploads:
-        return jsonify({"message": "请提供 base_upload_id 或上传 1 个 Base 文件"}), 400
+        return jsonify({"message": "请提供 base_upload_id 或上传 Base 文件（支持 .zip/.tar 压缩包）"}), 400
+    if len(base_uploads) > 1:
+        names_preview = "、".join(n for n, _ in base_uploads[:6])
+        if len(base_uploads) > 6:
+            names_preview += f" 等 {len(base_uploads)} 个"
+        return jsonify(
+            {
+                "message": (
+                    f"审核后修改稳态模式仅支持 1 个 Base 文件，当前解压/选择后共 {len(base_uploads)} 个"
+                    f"（{names_preview}）。请只上传单个 Word/Excel 或仅含一个文档的压缩包。"
+                )
+            }
+        ), 400
     upload_name = base_uploads[0][0]
     tpl_manual = ""
     tpl0 = payload_obj.get("template_file_names")
@@ -554,6 +578,11 @@ def api_audit_modify_create_job():
     if stable_err:
         return jsonify({"message": stable_err}), 400
 
+    provider = str(payload_obj.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
+
     template_key = str(target_names[0])
     base_files_by_target = payload_obj.get("base_files_by_target")
     if not isinstance(base_files_by_target, dict):
@@ -609,7 +638,7 @@ def api_audit_modify_create_job():
     # 提交上游 draft jobs
     url = f"{base}/api/integration/draft/jobs"
     hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
-    hdrs.update(client_llm_headers_for_session())
+    hdrs.update(client_llm_headers_for_session(provider=provider))
     files_to_upload: list[tuple[str, tuple[str, bytes, str]]] = [
         ("base_files", (upload_name, base_uploads[0][1], "application/octet-stream"))
     ]

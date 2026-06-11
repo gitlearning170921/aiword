@@ -27,6 +27,20 @@ def _allowed_suffix(name: str) -> bool:
     return Path(name or "").suffix.lower() in _TRAIN_SUFFIXES
 
 
+def flatten_upload_file_storage(files) -> list[tuple[str, bytes]]:
+    """Flask FileStorage 列表 → 扁平 (文件名, bytes)；zip/tar 自动解压一层。"""
+    raw: list[tuple[str, bytes]] = []
+    for f in files or []:
+        name = str(getattr(f, "filename", None) or "upload.bin").strip() or "upload.bin"
+        try:
+            data = f.read()
+        except Exception:
+            continue
+        if data:
+            raw.append((name, data))
+    return expand_upload_blobs(raw)
+
+
 def expand_upload_blobs(
     items: Iterable[tuple[str, bytes]],
 ) -> list[tuple[str, bytes]]:

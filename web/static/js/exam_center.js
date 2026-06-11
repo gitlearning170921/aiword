@@ -512,7 +512,7 @@
             });
             if (typeof onRoleChange === "function") {
                 try {
-                    onRoleChange(role);
+                    return onRoleChange(role);
                 } catch (e) {}
             }
             try {
@@ -527,7 +527,7 @@
                 activate(targetRole);
             });
         });
-        activate(role);
+        return activate(role);
     }
 
     function bindOutput() {
@@ -3466,7 +3466,7 @@
 
         function applyStudentObserverChrome() {
             var banner = document.getElementById("studentObserverBanner");
-            if (banner) banner.classList.toggle("d-none", !studentObserverMode);
+            if (banner) banner.classList.toggle("d-none", !studentReadOnly);
             document.querySelectorAll(".student-write-only").forEach(function (el) {
                 el.classList.toggle("d-none", !!studentReadOnly);
             });
@@ -6403,7 +6403,7 @@
         window.__examLoadModeCompare = loadModeCompare;
     }
 
-    document.addEventListener("DOMContentLoaded", function () {
+    async function initExamCenterPage() {
         var ctx = window.__EXAM_CENTER_CONTEXT__;
         if (!ctx || !document.getElementById("examApiResult")) return;
 
@@ -6442,59 +6442,52 @@
         }
 
         refreshExamCenterUserDisplay();
-        loadExamOrganizationContext();
-        bindRoleSwitch(ctx, function (role) {
+        await loadExamOrganizationContext();
+        function roleInitialLoads(role) {
+            var tasks = [];
             if (role === "teacher") {
-                if (typeof window.__examLoadTeacherIngestJobs === "function") {
-                    window.__examLoadTeacherIngestJobs();
-                }
-                if (typeof window.__examLoadTeacherReviewJobs === "function") {
-                    window.__examLoadTeacherReviewJobs();
-                }
-                if (typeof window.__examLoadTeacherSets === "function") {
-                    window.__examLoadTeacherSets();
-                }
-                if (typeof window.__examLoadTeacherBankQuestions === "function") {
-                    window.__examLoadTeacherBankQuestions();
-                }
-                if (typeof window.__examLoadTeacherIssuedAssignments === "function") {
-                    window.__examLoadTeacherIssuedAssignments();
-                }
-                if (typeof window.__examLoadTeacherRequirementStatus === "function") {
-                    window.__examLoadTeacherRequirementStatus();
-                }
+                [
+                    "__examLoadTeacherIngestJobs",
+                    "__examLoadTeacherReviewJobs",
+                    "__examLoadTeacherSets",
+                    "__examLoadTeacherBankQuestions",
+                    "__examLoadTeacherIssuedAssignments",
+                    "__examLoadTeacherRequirementStatus",
+                ].forEach(function (key) {
+                    if (typeof window[key] === "function") tasks.push(window[key]());
+                });
             }
             if (role === "analytics") {
-                if (typeof window.__examLoadStatsOptions === "function") {
-                    window.__examLoadStatsOptions();
-                }
-                if (typeof window.__examLoadStatsRecentActivity === "function") {
-                    window.__examLoadStatsRecentActivity();
-                }
-                if (typeof window.__examLoadStatsOverview === "function") {
-                    window.__examLoadStatsOverview();
-                }
-                if (typeof window.__examLoadStudentBoardTable === "function") {
-                    window.__examLoadStudentBoardTable();
-                }
-                if (typeof window.__examLoadStudentModeTable === "function") {
-                    window.__examLoadStudentModeTable();
-                }
-                if (typeof window.__examLoadModeCompare === "function") {
-                    window.__examLoadModeCompare();
-                }
-                if (typeof window.__examLoadExamAssignmentDeadlineStats === "function") {
-                    window.__examLoadExamAssignmentDeadlineStats();
-                }
+                [
+                    "__examLoadStatsOptions",
+                    "__examLoadStatsRecentActivity",
+                    "__examLoadStatsOverview",
+                    "__examLoadStudentBoardTable",
+                    "__examLoadStudentModeTable",
+                    "__examLoadModeCompare",
+                    "__examLoadExamAssignmentDeadlineStats",
+                ].forEach(function (key) {
+                    if (typeof window[key] === "function") tasks.push(window[key]());
+                });
             }
             if (role === "student") {
-                if (typeof window.__examLoadStudentAssignments === "function") {
-                    window.__examLoadStudentAssignments();
-                }
-                if (typeof window.__examLoadStudentHistory === "function") {
-                    window.__examLoadStudentHistory();
-                }
+                [
+                    "__examLoadStudentAssignments",
+                    "__examLoadStudentHistory",
+                ].forEach(function (key) {
+                    if (typeof window[key] === "function") tasks.push(window[key]());
+                });
             }
+            return tasks.length ? Promise.allSettled(tasks) : Promise.resolve();
+        }
+        await bindRoleSwitch(ctx, function (role) {
+            return roleInitialLoads(role);
         });
-    });
+    }
+
+    if (typeof registerPageInit === "function") {
+        registerPageInit(initExamCenterPage);
+    } else {
+        document.addEventListener("DOMContentLoaded", initExamCenterPage);
+    }
 })();

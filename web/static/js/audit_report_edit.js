@@ -10,6 +10,8 @@
 
   var _points = [];
 
+  var _orgCollection = "";
+
 
 
   var ACTION_OPTIONS = ["立即修改", "延期修改", "无需修改"];
@@ -38,9 +40,87 @@
 
     box.textContent = msg || "";
 
-    box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
+    box.className = "alert " + (isErr ? "alert-danger" : (msg ? "alert-success" : "alert-info"));
 
     box.classList.remove("d-none");
+
+    try { box.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+
+  }
+
+
+
+  function showCorrFeedback(msg, isErr) {
+
+    var el = $("are_corr_feedback");
+
+    if (!el) return;
+
+    el.textContent = msg || "";
+
+    el.className = "small " + (isErr ? "text-danger" : "text-success");
+
+  }
+
+
+
+  function bindClick(id, fn) {
+
+    var el = $(id);
+
+    if (!el || typeof fn !== "function") return;
+
+    el.addEventListener("click", function (ev) {
+
+      if (ev && ev.preventDefault) ev.preventDefault();
+
+      fn(ev);
+
+    });
+
+  }
+
+
+
+  function parseResponseJson(r) {
+
+    return r.text().then(function (text) {
+
+      var j = null;
+
+      try { j = text ? JSON.parse(text) : null; } catch (_) {}
+
+      if (!j) j = { message: (text || "").slice(0, 300) || ("HTTP " + r.status) };
+
+      return { ok: r.ok, status: r.status, json: j };
+
+    });
+
+  }
+
+
+
+  function loadOrgContext() {
+
+    return fetch(root + "/audit/api/org-context", { credentials: "same-origin" })
+
+      .then(function (r) { return parseResponseJson(r); })
+
+      .then(function (x) {
+
+        var j = x.json || {};
+
+        if (!x.ok || !j.ok) return;
+
+        _orgCollection = String(j.activeKnowledgeCollection || j.collection || "").trim();
+
+        var el = $("are_kb_collection");
+
+        if (el) el.textContent = _orgCollection || "—";
+
+      })
+
+      .catch(function () {});
 
   }
 
@@ -178,6 +258,304 @@
 
     $("are_modify_docs").value = Array.isArray(md) ? md.join("\n") : (md != null ? String(md) : "");
 
+    if (p.correction_kind === "false_positive" || p.false_positive_reason) {
+
+      if ($("are_corr_fp")) $("are_corr_fp").checked = true;
+
+    } else if (p.deprecated) {
+
+      if ($("are_corr_dep")) $("are_corr_dep").checked = true;
+
+    } else if ($("are_corr_revision")) {
+
+      $("are_corr_revision").checked = true;
+
+    }
+
+    syncCorrectionPanels(p);
+
+  }
+
+
+
+  function currentCorrectionKind() {
+
+    var r = document.querySelector('input[name="are_corr_kind"]:checked');
+
+    return (r && r.value) || "revision";
+
+  }
+
+
+
+  function syncCorrectionPanels(p) {
+
+    var kind = currentCorrectionKind();
+
+    var fpPanel = $("are_corr_fp_panel");
+
+    var depPanel = $("are_corr_dep_panel");
+
+    var revHint = $("are_corr_revision_hint");
+
+    if (fpPanel) fpPanel.classList.toggle("d-none", kind !== "false_positive");
+
+    if (depPanel) depPanel.classList.toggle("d-none", kind !== "deprecated");
+
+    if (revHint) revHint.classList.toggle("d-none", kind !== "revision");
+
+    if (kind === "false_positive" && $("are_fp_reason")) {
+
+      if (!(($("are_fp_reason").value || "").trim()) && p && p.false_positive_reason) {
+
+        $("are_fp_reason").value = String(p.false_positive_reason);
+
+      }
+
+    }
+
+    if (kind === "deprecated" && $("are_dep_note") && p && p.deprecation_note) {
+
+      $("are_dep_note").value = String(p.deprecation_note);
+
+    }
+
+    var repFields = $("are_replace_fields");
+
+    if (repFields) {
+
+      repFields.classList.toggle("d-none", !(kind === "deprecated" && $("are_add_replace") && $("are_add_replace").checked));
+
+    }
+
+  }
+
+
+
+  function buildCorrectionBody() {
+
+    var kind = currentCorrectionKind();
+
+    var body = {
+
+      correction_kind: kind,
+
+      feed_to_kb: !($("are_feed_kb") && !$("are_feed_kb").checked),
+
+    };
+
+    if (kind === "false_positive") {
+
+      body.false_positive_reason = ($("are_fp_reason") && $("are_fp_reason").value || "").trim();
+
+      if (!body.false_positive_reason) {
+
+        return { error: "请填写误报原因" };
+
+      }
+
+      return body;
+
+    }
+
+    if (kind === "deprecated") {
+
+      body.deprecation_note = ($("are_dep_note") && $("are_dep_note").value || "").trim();
+
+      if ($("are_add_replace") && $("are_add_replace").checked) {
+
+        var desc = ($("are_rep_desc") && $("are_rep_desc").value || "").trim();
+
+        if (!desc) return { error: "新增审核点请填写问题描述" };
+
+        body.replacement_point = {
+
+          category: ($("are_rep_category") && $("are_rep_category").value || "一致性").trim() || "一致性",
+
+          location: ($("are_rep_location") && $("are_rep_location").value || "").trim(),
+
+          description: desc,
+
+          suggestion: ($("are_rep_suggestion") && $("are_rep_suggestion").value || "").trim(),
+
+          severity: "low",
+
+          action: "立即修改",
+
+          modify_docs: [],
+
+        };
+
+      }
+
+      return body;
+
+    }
+
+    body.description = $("are_desc").value || "";
+
+    body.regulation_ref = ($("are_regulation_ref") && $("are_regulation_ref").value) || "";
+
+    body.suggestion = $("are_suggestion").value || "";
+
+    body.action = $("are_action").value || "";
+
+    body.modify_docs = ($("are_modify_docs").value || "").split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+
+    return body;
+
+  }
+
+
+
+  function saveCorrection() {
+
+    showCorrFeedback("", false);
+
+    var rid = currentReportId();
+
+    if (!rid || isNaN(rid) || rid <= 0) {
+
+      showMsg("请输入有效报告 ID", true);
+
+      showCorrFeedback("请先填写报告 ID", true);
+
+      return;
+
+    }
+
+    if (!_points || !_points.length) {
+
+      showMsg("请先加载报告", true);
+
+      showCorrFeedback("请先点击「加载报告」", true);
+
+      return;
+
+    }
+
+    var sel = $("are_point_sel");
+
+    var idx = parseInt((sel && sel.value) || "", 10);
+
+    if (isNaN(idx) || idx < 0) {
+
+      showMsg("请选择审核点", true);
+
+      showCorrFeedback("请选择审核点", true);
+
+      return;
+
+    }
+
+    var body = buildCorrectionBody();
+
+    if (body.error) {
+
+      showMsg(body.error, true);
+
+      showCorrFeedback(body.error, true);
+
+      return;
+
+    }
+
+    if (_orgCollection) body.collection = _orgCollection;
+
+    var uid = ($("are_upload_id") && $("are_upload_id").value || "").trim();
+
+    if (uid) body.upload_id = uid;
+
+    body.save_correction = true;
+
+    var url = root + "/audit/api/reports/" + encodeURIComponent(String(rid)) + "/points/" + encodeURIComponent(String(idx))
+
+      + "?sub_report_index=" + encodeURIComponent(String(currentSubIdx()));
+
+    var btn = $("are_btn_correct");
+
+    var btnHtml = btn ? btn.innerHTML : "";
+
+    if (btn) {
+
+      btn.disabled = true;
+
+      btn.setAttribute("aria-busy", "true");
+
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>保存中…';
+
+    }
+
+    showCorrFeedback("正在保存纠正…", false);
+
+    fetch(url, {
+
+      method: "PATCH",
+
+      credentials: "same-origin",
+
+      headers: { "Content-Type": "application/json" },
+
+      body: JSON.stringify(body),
+
+    })
+
+      .then(parseResponseJson)
+
+      .then(function (x) {
+
+        if (!x.ok || !x.json || !x.json.ok) {
+
+          var em = (x.json && (x.json.message || x.json.detail)) || ("HTTP " + (x.status || ""));
+
+          showMsg(em, true);
+
+          showCorrFeedback(em, true);
+
+          return;
+
+        }
+
+        var coll = (x.json.collection || (x.json.data && x.json.data.collection) || _orgCollection || "").trim();
+
+        var fed = body.feed_to_kb
+
+          ? ("，已写入公司知识库" + (coll ? ("（" + coll + "）") : ""))
+
+          : "";
+
+        showMsg("纠正已保存" + fed, false);
+
+        showCorrFeedback("纠正已保存" + fed, false);
+
+        return loadReport();
+
+      })
+
+      .catch(function (e) {
+
+        var em = String((e && e.message) || e || "纠正保存失败");
+
+        showMsg(em, true);
+
+        showCorrFeedback(em, true);
+
+      })
+
+      .finally(function () {
+
+        if (btn) {
+
+          btn.innerHTML = btnHtml;
+
+          btn.disabled = false;
+
+          btn.removeAttribute("aria-busy");
+
+        }
+
+      });
+
   }
 
 
@@ -246,13 +624,13 @@
 
       showMsg("请输入有效报告 ID", true);
 
-      return;
+      return Promise.resolve();
 
     }
 
     var subIdx = currentSubIdx();
 
-    fetch(root + "/audit/api/reports/" + encodeURIComponent(String(rid)), { credentials: "same-origin" })
+    return fetch(root + "/audit/api/reports/" + encodeURIComponent(String(rid)), { credentials: "same-origin" })
 
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, json: j }; }); })
 
@@ -428,39 +806,147 @@
 
     var q = parseQuery();
 
-    if (q.report_id) $("are_report_id").value = String(q.report_id);
+    if (q.report_id && $("are_report_id")) $("are_report_id").value = String(q.report_id);
 
-    if (q.upload_id) $("are_upload_id").value = String(q.upload_id);
+    if (q.upload_id && $("are_upload_id")) $("are_upload_id").value = String(q.upload_id);
 
-    if (q.sub_report_index) $("are_sub_idx").value = String(q.sub_report_index);
+    if (q.sub_report_index && $("are_sub_idx")) $("are_sub_idx").value = String(q.sub_report_index);
+
+    var pendingPointIdx = q.point_index != null ? parseInt(String(q.point_index), 10) : NaN;
+
+    var pendingCorrKind = (q.corr_kind || "").trim().toLowerCase();
 
 
 
-    $("are_btn_load").addEventListener("click", loadReport);
+    bindClick("are_btn_load", loadReport);
 
-    $("are_btn_save").addEventListener("click", saveCurrentPoint);
+    bindClick("are_btn_save", saveCurrentPoint);
 
-    $("are_btn_todo").addEventListener("click", gotoTodo);
+    bindClick("are_btn_todo", gotoTodo);
 
-    $("are_point_sel").addEventListener("change", function () {
+    bindClick("are_btn_correct", saveCorrection);
 
-      var idx = parseInt(($("are_point_sel").value || ""), 10);
 
-      if (!isNaN(idx)) renderPointForm(idx);
+
+    document.querySelectorAll('input[name="are_corr_kind"]').forEach(function (el) {
+
+      el.addEventListener("change", function () {
+
+        var idx = parseInt(($("are_point_sel") && $("are_point_sel").value) || "", 10);
+
+        syncCorrectionPanels(!isNaN(idx) ? (_points[idx] || {}) : {});
+
+      });
 
     });
 
-    if (($("are_report_id").value || "").trim()) loadReport();
 
-    else updateImmediateHint();
+
+    if ($("are_add_replace")) {
+
+      $("are_add_replace").addEventListener("change", function () {
+
+        var idx = parseInt(($("are_point_sel") && $("are_point_sel").value) || "", 10);
+
+        syncCorrectionPanels(!isNaN(idx) ? (_points[idx] || {}) : {});
+
+      });
+
+    }
+
+
+
+    if ($("are_point_sel")) {
+
+      $("are_point_sel").addEventListener("change", function () {
+
+        var idx = parseInt(($("are_point_sel").value || ""), 10);
+
+        if (!isNaN(idx)) renderPointForm(idx);
+
+      });
+
+    }
+
+
+
+    function afterReportLoaded() {
+
+      if (!isNaN(pendingPointIdx) && pendingPointIdx >= 0 && $("are_point_sel")) {
+
+        $("are_point_sel").value = String(pendingPointIdx);
+
+        renderPointForm(pendingPointIdx);
+
+        if (pendingCorrKind === "false_positive" && $("are_corr_fp")) {
+
+          $("are_corr_fp").checked = true;
+
+          syncCorrectionPanels(_points[pendingPointIdx] || {});
+
+        } else if (pendingCorrKind === "deprecated" && $("are_corr_dep")) {
+
+          $("are_corr_dep").checked = true;
+
+          syncCorrectionPanels(_points[pendingPointIdx] || {});
+
+        }
+
+      }
+
+      if (window.location.hash === "#are_correction_panel") {
+
+        var panel = $("are_correction_panel");
+
+        if (panel && panel.scrollIntoView) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+
+      }
+
+    }
+
+
+
+    var boot = loadOrgContext();
+
+    if (($("are_report_id").value || "").trim()) {
+
+      return boot.then(function () { return loadReport(); }).then(afterReportLoaded);
+
+    }
+
+    updateImmediateHint();
+
+    return boot;
 
   }
 
 
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  function runInit() {
 
-  else init();
+    if (!$("are_report_id")) return;
+
+    try {
+
+      return init();
+
+    } catch (e) {
+
+      showMsg("页面初始化失败：" + String((e && e.message) || e), true);
+
+    }
+
+  }
+
+
+
+  if (typeof registerPageInit === "function") {
+
+    registerPageInit(runInit);
+
+  } else if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runInit);
+
+  else runInit();
 
 })();
 

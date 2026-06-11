@@ -10,6 +10,82 @@
   var root = window.__SCRIPT_ROOT__ || "";
   var _historyPage = 1;
   var _historyTotalPages = 1;
+  var _audFilesAccum = [];
+  var AUD_UPLOAD_ACCEPT = ".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz";
+
+  function audIsArchiveName(name) {
+    var l = String(name || "").toLowerCase();
+    return l.endsWith(".zip") || l.endsWith(".tar") || l.endsWith(".tgz")
+      || l.endsWith(".tar.gz") || l.endsWith(".gz");
+  }
+
+  function audMergeFiles(accum, fileList) {
+    var i;
+    for (i = 0; i < (fileList || []).length; i += 1) {
+      var f = fileList[i];
+      if (!f) continue;
+      var dup = false;
+      var j;
+      for (j = 0; j < accum.length; j += 1) {
+        if (accum[j].name === f.name && accum[j].size === f.size) { dup = true; break; }
+      }
+      if (!dup) accum.push(f);
+    }
+  }
+
+  function audRenderFileList() {
+    var ul = $("aud_files_list");
+    var cap = $("aud_files_count");
+    if (!ul) return;
+    ul.innerHTML = "";
+    var idx;
+    for (idx = 0; idx < _audFilesAccum.length; idx += 1) {
+      (function (i) {
+        var f = _audFilesAccum[i];
+        var li = document.createElement("li");
+        li.className = "list-group-item d-flex justify-content-between align-items-center py-1 px-2";
+        var span = document.createElement("span");
+        span.className = "text-break me-2";
+        span.textContent = f.name + " (" + (f.size < 1024 ? f.size + " B" : Math.ceil(f.size / 1024) + " KB") + ")";
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-sm btn-link text-danger text-nowrap p-0";
+        btn.textContent = "移除";
+        btn.addEventListener("click", function () {
+          _audFilesAccum.splice(i, 1);
+          audRenderFileList();
+        });
+        li.appendChild(span);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      })(idx);
+    }
+    if (cap) {
+      cap.textContent = _audFilesAccum.length
+        ? ("已选 " + _audFilesAccum.length + " 个文件（压缩包提交后自动解压）")
+        : "尚未选择文件";
+    }
+  }
+
+  function wireAuditFilePicker() {
+    var picker = $("aud_files_picker");
+    if (!picker || picker.getAttribute("data-aud-wired") === "1") return;
+    picker.setAttribute("data-aud-wired", "1");
+    picker.setAttribute("accept", AUD_UPLOAD_ACCEPT);
+    picker.addEventListener("change", function () {
+      if (picker.files && picker.files.length) audMergeFiles(_audFilesAccum, picker.files);
+      picker.value = "";
+      audRenderFileList();
+    });
+    var pickBtn = $("aud_btn_pick_files");
+    if (pickBtn) pickBtn.addEventListener("click", function () { picker.click(); });
+    var clearBtn = $("aud_btn_clear_files");
+    if (clearBtn) clearBtn.addEventListener("click", function () {
+      _audFilesAccum.length = 0;
+      audRenderFileList();
+    });
+    audRenderFileList();
+  }
 
   function parseQuery() {
     var out = {};
@@ -159,7 +235,7 @@
     var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
       ? window.IntegrationPrefill.integrationScopeQuery()
       : "scope=workflow";
-    AsyncJob.api(
+    return AsyncJob.api(
       root + "/audit/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
@@ -173,6 +249,18 @@
   var SEV_ICON = { high: "🔴", medium: "🟡", low: "🔵", info: "ℹ️" };
   var SEV_ZH = { high: "高", medium: "中", low: "低", info: "提示" };
   var _lastViewJobId = "";
+
+  function defaultActionForSeverity(sev) {
+    var s = String(sev || "info").toLowerCase();
+    var map = { high: "立即修改", medium: "立即修改", low: "延期修改", info: "无需修改" };
+    return map[s] || "无需修改";
+  }
+
+  function effectiveAction(p) {
+    var a = (p && p.action != null) ? String(p.action).trim() : "";
+    if (a) return a;
+    return defaultActionForSeverity(p && p.severity);
+  }
 
   function renderReportsSummary(summary) {
     var box = $("aud_reports_box");
@@ -240,27 +328,38 @@
     }];
   }
 
-  function renderAuditPointCard(p, index) {
+  function renderAuditPointCard(p, index, ctx) {
     var sev = String((p && p.severity) || "info").toLowerCase();
     var icon = SEV_ICON[sev] || "ℹ️";
     var dep = p && p.deprecated;
     var fp = p && (p.correction_kind === "false_positive" || p.false_positive_reason);
     var prefix = dep ? "〔弃〕 " : (fp ? "〔误〕 " : "");
-    var action = (p && p.action) ? String(p.action) : "";
+    var action = effectiveAction(p);
     var md = Array.isArray(p && p.modify_docs) ? p.modify_docs.filter(Boolean).join("；") : "";
     var parts = [
       '<div class="border-start border-3 ps-2 mb-3' + (dep ? " opacity-75" : "") + '">',
       '<div class="fw-semibold">' + prefix + icon + ' 审核点 ' + index + '：' + esc((p && p.category) || "未分类") + '</div>',
       '<div class="small text-muted">严重程度：' + esc(SEV_ZH[sev] || sev) + ' · 位置：' + esc((p && p.location) || "未知") + '</div>',
+      '<div class="small d-flex flex-wrap align-items-center gap-1 mt-1">处理状态：<span class="badge bg-light text-dark border">' + esc(action) + '</span>',
     ];
-    if (action) {
-      parts.push('<div class="small">处理状态：<span class="badge bg-light text-dark border">' + esc(action) + '</span></div>');
+    if (ctx && ctx.reportId != null) {
+      var pi = (index > 0 ? index - 1 : 0);
+      var corrHref = root + "/audit/report-edit?report_id=" + encodeURIComponent(String(ctx.reportId))
+        + "&sub_report_index=" + encodeURIComponent(String(ctx.subIdx || 0))
+        + "&point_index=" + encodeURIComponent(String(pi))
+        + "&corr_kind=false_positive"
+        + "#are_correction_panel";
+      parts.push('<a class="btn btn-sm btn-outline-warning" target="_blank" rel="noopener" href="' + corrHref + '">纠正</a>');
     }
+    parts.push('</div>');
     parts.push('<div class="small mt-1"><strong>问题描述：</strong>' + esc((p && p.description) || "") + '</div>');
     parts.push('<div class="small"><strong>法规依据：</strong>' + esc((p && p.regulation_ref) || "") + '</div>');
     parts.push('<div class="small"><strong>修改建议：</strong>' + esc((p && p.suggestion) || "") + '</div>');
     if (md) {
       parts.push('<div class="small"><strong>需修改文档：</strong>' + esc(md) + '</div>');
+    }
+    if (fp && p.false_positive_reason) {
+      parts.push('<div class="small text-muted"><strong>误报原因：</strong>' + esc(p.false_positive_reason) + '</div>');
     }
     parts.push("</div>");
     return parts.join("");
@@ -311,7 +410,10 @@
           html.push('<p class="text-muted small">（无审核点）</p>');
         } else {
           points.forEach(function (p, i) {
-            html.push(renderAuditPointCard(p, i + 1));
+            html.push(renderAuditPointCard(p, i + 1, {
+              reportId: sec.reportId,
+              subIdx: sec.subIdx,
+            }));
           });
         }
         var rid = sec.reportId != null ? String(sec.reportId) : "";
@@ -580,15 +682,6 @@
       }
     }
     var payload = buildPayload();
-    var sourceType = currentSourceType();
-    if (sourceType === "text") {
-      submitTextReview(payload);
-      return;
-    }
-    if (sourceType === "kdocs") {
-      submitKdocsReview(payload);
-      return;
-    }
     var prog = AsyncJob.progressUI({
       wrapId: "aud_progress_wrap",
       barId: "aud_progress_bar",
@@ -600,9 +693,9 @@
     if (dlBtn) dlBtn.disabled = true;
 
     var uploadIdsTxt = ($("aud_upload_ids") && $("aud_upload_ids").value || "").trim();
-    var pickedFiles = ($("aud_files_picker") && $("aud_files_picker").files || []);
+    var pickedFiles = _audFilesAccum.slice();
     var hasTask = !!uploadIdsTxt;
-    var hasManual = pickedFiles && pickedFiles.length > 0;
+    var hasManual = pickedFiles.length > 0;
     if (hasTask && hasManual) {
       showMsg("来源唯一性：upload_ids 与手动上传不可同时使用", true);
       return;
@@ -615,8 +708,17 @@
       var fileCount = hasTask
         ? uploadIdsTxt.split(/[\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean).length
         : pickedFiles.length;
-      if (fileCount < 2) {
-        showMsg(payload.mode + " 模式至少需要 2 个文件", true);
+      var hasArchive = false;
+      if (!hasTask) {
+        for (var ai = 0; ai < pickedFiles.length; ai += 1) {
+          if (audIsArchiveName(pickedFiles[ai].name)) { hasArchive = true; break; }
+        }
+      }
+      if (fileCount < 2 && !hasArchive) {
+        showMsg(
+          payload.mode + " 模式至少需要 2 个文件（或 1 个含多份文档的压缩包）",
+          true
+        );
         return;
       }
     } else if (hasManual && pickedFiles.length > 50) {
@@ -707,7 +809,7 @@
   }
 
   function init() {
-    if (!window.IntegrationPrefill) return;
+    if (!window.IntegrationPrefill || !$("aud_mode")) return Promise.resolve();
     var IP = window.IntegrationPrefill;
     var q = parseQuery();
     var pf = IP.parsePrefillFromLocation();
@@ -735,18 +837,12 @@
       withCases: false,
       onError: function (m) { showMsg(m, true); },
     };
-    IP.loadBootstrap(bootstrapOpts);
+    var bootstrapPromise = IP.loadBootstrap(bootstrapOpts);
     IP.wireProjectSelect("aud", function () { return window.__integrationBootstrap_aud; }, function () {
       return IP.getPagePrefill("aud") || IP.parsePrefillFromLocation();
     });
 
-    var picker = $("aud_files_picker");
-    if (picker) {
-      picker.addEventListener("change", function () {
-        var n = (picker.files || []).length;
-        $("aud_files_count").textContent = n ? "已选 " + n + " 个文件" : "未选择";
-      });
-    }
+    wireAuditFilePicker();
 
     var subBtn = $("aud_btn_submit");
     if (subBtn) subBtn.addEventListener("click", submitJob);
@@ -766,10 +862,6 @@
         loadPromptDefaults();
       });
     }
-    document.querySelectorAll('input[name="aud_source_type"]').forEach(function (el) {
-      el.addEventListener("change", syncSourcePanels);
-    });
-    syncSourcePanels();
     var promptPanel = $("aud_prompts_panel");
     if (promptPanel) {
       promptPanel.addEventListener("show.bs.collapse", loadPromptDefaults);
@@ -800,12 +892,18 @@
       loadHistory();
     });
 
-    loadHistory();
+    return Promise.all([bootstrapPromise, loadHistory()]);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+  function runInit() {
+    return init();
+  }
+
+  if (typeof registerPageInit === "function") {
+    registerPageInit(runInit);
+  } else if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", runInit);
   } else {
-    init();
+    runInit();
   }
 })();

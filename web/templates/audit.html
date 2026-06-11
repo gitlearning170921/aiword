@@ -11,31 +11,17 @@
       {% else %}
       可从「页面1 任务」勾选携带 <code>upload_ids</code> 触发，也可手动上传文件。
       {% endif %}
+      手动上传支持<strong>多文件</strong>与 <code>.zip / .tar / .tar.gz（.tgz）</code> 压缩包（服务端自动解压，与 aicheckword 一致）。
       个人 LLM 凭据沿用「初稿生成」页保存的 Key（如未配置则使用 aicheckword 系统默认）。
       审核逻辑与 aicheckword 第三步一致（含自动匹配过往案例、章节完整性、按项目过滤审核点等）。
+      误报可在报告编辑页<strong>纠正并入库</strong>，供后续审核参考。
     </p>
     <div id="aud_msg" class="alert d-none" role="alert"></div>
 
     <div class="card mb-3">
       <div class="card-header">来源</div>
       <div class="card-body">
-        <div class="mb-2">
-          <label class="form-label small">来源类型</label>
-          <div class="d-flex flex-wrap gap-3">
-            <div class="form-check">
-              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_files" value="files" checked>
-              <label class="form-check-label" for="aud_source_files">文件 / 任务</label>
-            </div>
-            <div class="form-check">
-              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_text" value="text">
-              <label class="form-check-label" for="aud_source_text">粘贴文本</label>
-            </div>
-            <div class="form-check">
-              <input class="form-check-input" type="radio" name="aud_source_type" id="aud_source_kdocs" value="kdocs">
-              <label class="form-check-label" for="aud_source_kdocs">金山文档链接</label>
-            </div>
-          </div>
-        </div>
+        <p class="small text-muted mb-2">当前仅支持<strong>文件 / 任务</strong>作为审核来源。</p>
         <div id="aud_source_files_panel">
         <div class="row g-2">
           {% if not manual_upload_only %}
@@ -48,21 +34,17 @@
           {% endif %}
           <div class="col-md-{% if manual_upload_only %}12{% else %}6{% endif %}">
             <label class="form-label">{% if manual_upload_only %}手动上传文件{% else %}或手动上传文件{% endif %}</label>
-            <input type="file" id="aud_files_picker" class="form-control" multiple accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md"/>
-            <div class="form-text" id="aud_files_count">未选择</div>
+            <p class="text-muted small mb-1">可多次点「选择文件」追加；对话框内可用 Ctrl/Shift 多选。压缩包会在提交后自动解压。</p>
+            <div class="d-flex flex-wrap gap-2 mb-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="aud_btn_pick_files">选择文件…</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="aud_btn_clear_files">清空列表</button>
+            </div>
+            <input type="file" id="aud_files_picker" class="d-none" multiple
+              accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz"/>
+            <ul class="list-group list-group-flush border rounded small" id="aud_files_list" style="max-height: 10rem; overflow-y: auto;"></ul>
+            <div class="form-text" id="aud_files_count">尚未选择文件</div>
           </div>
         </div>
-        </div>
-        <div id="aud_source_text_panel" class="d-none">
-          <label class="form-label">待审文本</label>
-          <textarea id="aud_review_text" class="form-control font-monospace" rows="8" placeholder="粘贴待审核正文…"></textarea>
-          <input type="text" id="aud_review_text_filename" class="form-control form-control-sm mt-2" placeholder="虚拟文件名（如 待审文档.docx）" value="待审文档.docx">
-        </div>
-        <div id="aud_source_kdocs_panel" class="d-none">
-          <label class="form-label">金山文档链接</label>
-          <input type="url" id="aud_kdocs_url" class="form-control mb-2" placeholder="https://… 查看链接">
-          <input type="url" id="aud_kdocs_download_url" class="form-control mb-2" placeholder="下载链接（可选，有则用于提取正文/批注）">
-          <input type="text" id="aud_kdocs_filename" class="form-control form-control-sm" placeholder="文件名" value="文档.docx">
         </div>
       </div>
     </div>

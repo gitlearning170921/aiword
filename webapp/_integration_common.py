@@ -4,7 +4,7 @@
 抽出 ``audit_routes`` / ``audit_modify_routes`` / ``translation_routes`` 的同构片段：
 - 取 aicheckword API base URL（与初稿统一）
 - 取上游 Bearer / Integration-Secret 头
-- 从已登录 session 透传"客户 LLM"头（仅在用户在初稿页保存过个人 Key 时才会有值）
+- 从已登录 session 透传个人 LLM 头（与初稿页 ``UserLlmCredential`` 共用；``personalKeysOnly`` 开启时提交前须 ``personal_llm_key_wall``）
 - 标准登录拦截
 - 上游读/连接超时
 - "稳态模式"提示文案常量
@@ -20,10 +20,11 @@ from typing import Any, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import requests
-from flask import current_app, jsonify, request, session
+from flask import current_app, has_request_context, jsonify, request, session
 
 from .app_settings import get_setting, is_multi_tenant_enabled
 from .tenant_context import (
+    collection_for_organization,
     integration_org_context_payload,
     integration_organizations_payload,
     resolve_organization_context,
@@ -299,6 +300,16 @@ def fetch_draft_page_bootstrap(
     return data, None, body
 
 
+def sync_active_organization_if_requested(
+    explicit_organization_id: Optional[str], resolved_org_id: str
+) -> None:
+    """集成页显式切换公司时，将会话 active_organization_id 与解析结果对齐。"""
+    explicit = str(explicit_organization_id or "").strip()
+    resolved = str(resolved_org_id or "").strip()
+    if explicit and resolved == explicit and has_request_context():
+        session["active_organization_id"] = resolved
+
+
 def build_integration_bootstrap_payload(
     collection: str,
     *,
@@ -318,14 +329,18 @@ def build_integration_bootstrap_payload(
         return {"ok": False, "message": err}
     assert data is not None
     org_ctx = integration_org_context_payload()
+    oid = str(organization_id or "").strip() or str(org_ctx.get("activeOrganizationId") or "").strip()
+    active_coll = collection_for_organization(oid) if oid else (
+        data.get("collection") or collection or "regulations"
+    )
     return {
         "ok": True,
         "metaError": None,
         "collection": (data.get("collection") or collection or "regulations"),
         "collections": integration_collection_rows(),
         "organizations": org_ctx.get("organizations") or [],
-        "activeOrganizationId": org_ctx.get("activeOrganizationId"),
-        "activeKnowledgeCollection": org_ctx.get("activeKnowledgeCollection"),
+        "activeOrganizationId": oid or None,
+        "activeKnowledgeCollection": active_coll,
         "projects": data.get("projects") or [],
         "cases": data.get("cases") or [],
         "documentLanguages": data.get("documentLanguages") or [],
@@ -339,29 +354,71 @@ def build_integration_bootstrap_payload(
     }
 
 
-def client_llm_headers_for_session() -> dict[str, str]:
-    """从已登录用户的 UserLlmCredential 取个人 LLM 头（与 draft 模块同源逻辑）。
+def client_llm_headers_for_session(provider: Optional[str] = None) -> dict[str, str]:
+    """从 session 组装发往 aicheckword 的 LLM 头。
 
-    复用 draft_generation_routes 中已有实现，避免新增加密/解密重复路径。
-    若用户未配置个人 Key，返回空 dict（上游回退系统设置）。
+    - ``personalKeysOnly=true``：须个人 Key，并发送 ``X-Client-Llm-Personal-Keys-Only``。
+    - ``personalKeysOnly=false``：无个人 Key 时不带头（上游用系统 Key）；若已保存个人 Key 则透传作优先覆盖（不回退禁止）。
     """
     uid = session.get("user_id")
     if not uid:
         return {}
     try:
-        from .draft_generation_routes import _client_llm_headers, _draft_personal_key_headers
+        from .draft_generation_routes import (
+            _client_llm_headers,
+            _draft_personal_key_headers,
+            _draft_personal_keys_enforced,
+            _normalize_requested_provider,
+        )
     except Exception:
         return {}
+    prov = _normalize_requested_provider(provider) if provider else None
     headers: dict[str, str] = {}
+    enforced = _draft_personal_keys_enforced()
+    personal: dict[str, str] = {}
     try:
-        headers.update(_client_llm_headers(str(uid)) or {})
+        personal = _client_llm_headers(str(uid), provider=prov) or {}
     except Exception:
-        headers = {}
-    try:
-        headers.update(_draft_personal_key_headers() or {})
-    except Exception:
-        pass
+        personal = {}
+    if personal.get("X-Client-Llm-Api-Key"):
+        if enforced:
+            headers.update(_draft_personal_key_headers() or {})
+        headers.update(personal)
     return headers
+
+
+def personal_llm_key_ready_for_session(provider: Optional[str] = None) -> tuple[bool, str]:
+    """当前 session 是否满足 LLM Key 要求（personalKeysOnly 关闭时始终通过）。"""
+    from .draft_generation_routes import _draft_personal_keys_enforced, _personal_key_ready
+
+    if not _draft_personal_keys_enforced():
+        return True, ""
+    uid = session.get("user_id")
+    if not uid:
+        return False, "请先登录后再提交（须使用个人 LLM API Key）"
+    return _personal_key_ready(str(uid), provider=provider)
+
+
+def personal_llm_key_wall(provider: Optional[str] = None):
+    """personalKeysOnly 开启且未配置/未能发出个人 Key 时返回 (jsonify(...), 400)；否则 None。"""
+    from .draft_generation_routes import _draft_personal_keys_enforced
+
+    if not _draft_personal_keys_enforced():
+        return None
+    ok, msg = personal_llm_key_ready_for_session(provider=provider)
+    if not ok:
+        return jsonify({"message": msg}), 400
+    hdrs = client_llm_headers_for_session(provider=provider)
+    if not hdrs.get("X-Client-Llm-Api-Key"):
+        return jsonify(
+            {
+                "message": (
+                    "个人 LLM Key 未能随请求发出（可能解密失败或与所选提供方不一致）。"
+                    "请在「初稿生成」页点「测试 Key」或重新保存。"
+                )
+            }
+        ), 400
+    return None
 
 
 def upload_record_visible_to_user(rec: Any) -> bool:

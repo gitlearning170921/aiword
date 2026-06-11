@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""账号级功能权限（页面1 / 页面2 分项，与系统配置全局开关叠加）。"""
+"""账号级功能权限（页面0 / 页面1 / 页面2 分项，与系统配置全局开关叠加）。"""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,15 @@ from typing import Any, Optional
 
 from .models import User
 
-# 页面1：文档工具、任务列表签字/打印/单审、考试中心
+# 页面0：公司总览 · 文档工具（手动上传）
+USER_PAGE0_FEATURE_KEYS: tuple[str, ...] = (
+    "FEATURE_PAGE0_DRAFT_GEN",
+    "FEATURE_PAGE0_AUDIT",
+    "FEATURE_PAGE0_AUDIT_MODIFY",
+    "FEATURE_PAGE0_TRANSLATE",
+)
+
+# 页面1：文档工具、任务列表签字/打印/单审、考试中心（含页面3 顶栏入口）
 USER_PAGE1_FEATURE_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE1_DRAFT_GEN",
     "FEATURE_PAGE1_AUDIT",
@@ -28,15 +36,45 @@ USER_PAGE2_FEATURE_KEYS: tuple[str, ...] = (
 )
 
 USER_MANAGED_FEATURE_KEYS: tuple[str, ...] = (
-    USER_PAGE1_FEATURE_KEYS + USER_PAGE2_FEATURE_KEYS
+    USER_PAGE0_FEATURE_KEYS + USER_PAGE1_FEATURE_KEYS + USER_PAGE2_FEATURE_KEYS
 )
 
+# 账号管理 · 功能权限 UI 分组（新建/编辑/批量共用；前端通过 API 拉取，勿在 app.js 重复维护）
+USER_FEATURE_PERM_GROUP_DEFS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "page0",
+        "title": "页面0 · 文档工具",
+        "keys": USER_PAGE0_FEATURE_KEYS,
+    },
+    {
+        "id": "page1",
+        "title": "页面1（含页面3）",
+        "keys": USER_PAGE1_FEATURE_KEYS,
+    },
+    {
+        "id": "page2",
+        "title": "页面2",
+        "keys": USER_PAGE2_FEATURE_KEYS,
+    },
+)
+
+# 分级角色在账号管理中可见的分组（批量功能权限展示全部分组）
+USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS: dict[str, tuple[str, ...]] = {
+    "company": ("page0",),
+    "project": ("page1", "page2"),
+    "none": ("page2",),
+}
+
 USER_FEATURE_LABELS: dict[str, str] = {
+    "FEATURE_PAGE0_DRAFT_GEN": "页面0 · 初稿生成",
+    "FEATURE_PAGE0_AUDIT": "页面0 · 文档审核",
+    "FEATURE_PAGE0_AUDIT_MODIFY": "页面0 · 审核后修改",
+    "FEATURE_PAGE0_TRANSLATE": "页面0 · 文档翻译",
     "FEATURE_PAGE1_DRAFT_GEN": "页面1 · 初稿生成",
     "FEATURE_PAGE1_AUDIT": "页面1 · 文档审核",
     "FEATURE_PAGE1_AUDIT_MODIFY": "页面1 · 审核后修改",
     "FEATURE_PAGE1_TRANSLATE": "页面1 · 文档翻译",
-    "FEATURE_PAGE1_EXAM_CENTER": "页面1 · 考试训练中心",
+    "FEATURE_PAGE1_EXAM_CENTER": "页面1/3 · 考试训练中心",
     "FEATURE_PAGE1_SIGN": "页面1 · 去签字",
     "FEATURE_PAGE1_PRINT": "页面1 · 去打印",
     "FEATURE_PAGE2_UPLOAD_REPLACE": "页面2 · 上传/替换",
@@ -58,6 +96,35 @@ _USER_LEGACY_PERM_MIRROR: dict[str, tuple[str, ...]] = {
 
 def user_managed_feature_keys() -> tuple[str, ...]:
     return USER_MANAGED_FEATURE_KEYS
+
+
+def feature_permission_schema_for_client() -> dict[str, Any]:
+    """新建/编辑账号与「批量功能权限」共用字段定义。"""
+    groups = [
+        {
+            "id": g["id"],
+            "title": g["title"],
+            "defs": [
+                {"key": k, "label": _feature_perm_short_label(k)}
+                for k in g["keys"]
+            ],
+        }
+        for g in USER_FEATURE_PERM_GROUP_DEFS
+    ]
+    return {
+        "groups": groups,
+        "roleVisibleGroupIds": {
+            role: list(ids) for role, ids in USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS.items()
+        },
+    }
+
+
+def _feature_perm_short_label(key: str) -> str:
+    """账号管理下拉用短标签（去掉「页面N ·」前缀）。"""
+    full = USER_FEATURE_LABELS.get(key, key)
+    if " · " in full:
+        return full.split(" · ", 1)[1]
+    return full
 
 
 def _coerce_feature_permissions_raw(raw: Any) -> Any:
@@ -152,12 +219,24 @@ def merge_user_feature_flags(
     return out
 
 
+def _feature_permission_page_label(key: str) -> str:
+    if key in USER_PAGE0_FEATURE_KEYS:
+        return "0"
+    if key in USER_PAGE1_FEATURE_KEYS:
+        return "1"
+    return "2"
+
+
 def serialize_user_feature_permissions(user: User) -> dict[str, Any]:
     perms = read_user_feature_permissions(user)
     return {
         "featurePermissions": perms,
         "featurePermissionMeta": [
-            {"key": k, "label": USER_FEATURE_LABELS.get(k, k), "page": "1" if k in USER_PAGE1_FEATURE_KEYS else "2"}
+            {
+                "key": k,
+                "label": USER_FEATURE_LABELS.get(k, k),
+                "page": _feature_permission_page_label(k),
+            }
             for k in USER_MANAGED_FEATURE_KEYS
         ],
     }

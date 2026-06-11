@@ -248,8 +248,8 @@
     }
 
     function init() {
-        if (!shouldShowBar()) return;
-        refresh(false);
+        if (!shouldShowBar()) return Promise.resolve();
+        return refresh(false);
     }
 
     global.ScopeBar = {
@@ -263,7 +263,9 @@
         pageKeyFromPath: pageKeyFromPath,
     };
 
-    if (document.readyState === "loading") {
+    if (typeof registerPageInit === "function") {
+        registerPageInit(init);
+    } else if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", init);
     } else {
         init();

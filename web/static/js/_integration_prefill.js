@@ -676,7 +676,8 @@
       global["__integrationOrgs_" + prefix] = b.organizations || [];
 
       if ($(organizationSelectId(prefix))) {
-        fillOrganizationSelect(prefix, b.organizations, b.activeOrganizationId || orgId);
+        var pickOrg = orgId || b.activeOrganizationId;
+        fillOrganizationSelect(prefix, b.organizations, pickOrg);
         wireOrganizationSelect(prefix, {
           root: opts.root || "",
           orgContextRoot: opts.orgContextRoot,
@@ -688,7 +689,7 @@
         });
         coll = syncCollectionFromOrganization(
           prefix,
-          readOrganizationId(prefix) || b.activeOrganizationId,
+          readOrganizationId(prefix) || pickOrg,
           b.organizations
         );
       } else if (collEl && collEl.tagName === "SELECT") {

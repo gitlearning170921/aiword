@@ -794,6 +794,31 @@ class TranslationJob(db.Model):
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 
 
+class UserFeedback(db.Model):
+    """用户问题反馈：页面0–3 浮动入口提交，超管在页面4 处理。"""
+
+    __tablename__ = "user_feedback"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    submitter_username: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    submitter_display_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    feature_module: Mapped[str] = mapped_column(db.String(64), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(db.Text, nullable=False)
+    priority: Mapped[str] = mapped_column(db.String(16), nullable=False, default="normal", index=True)
+    status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="pending", index=True)
+    screenshot_ftp_path: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    screenshot_original_name: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    screenshot_upload_error: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    resolution: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    resolved_by_label: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class ExamCenterActivityDetail(db.Model):
     """练习/考试提交后明细快照，供老师端/统计端查看成绩与薄弱项。"""
     __tablename__ = "exam_center_activity_details"

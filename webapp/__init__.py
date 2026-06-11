@@ -1543,6 +1543,15 @@ def create_app() -> Flask:
                 "nav_show_page4": False,
             }
 
+    @app.context_processor
+    def _inject_feedback_fab():
+        try:
+            from .feedback_routes import feedback_fab_enabled
+
+            return {"feedback_fab_enabled": feedback_fab_enabled()}
+        except Exception:
+            return {"feedback_fab_enabled": False}
+
     @app.after_request
     def _no_store_for_app_js_css(response):
         from flask import request
@@ -1629,6 +1638,10 @@ def create_app() -> Flask:
 
         app.register_blueprint(company_bp)
         register_admin_blueprint(app)
+
+        from .feedback_routes import register_feedback_blueprint
+
+        register_feedback_blueprint(app)
 
         from .app_settings import register_exam_center_feature_gate
 

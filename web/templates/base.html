@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=static_version) }}">
     {% block head_extra %}{% endblock %}
 </head>
-<body class="app-body {% if request.endpoint == 'pages.generate_page' %}generate-view{% endif %}">
+<body class="app-body {% if not gate_page %}app-page-booting{% endif %} {% if request.endpoint == 'pages.generate_page' %}generate-view{% endif %}">
 {% set _suppress_top_nav = request.endpoint == 'pages.generate_page' and not (nav_show_page123_staff|default(false)) %}
 {% if not hide_main_nav and request.endpoint != 'pages.login_page' and not _suppress_top_nav %}
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4 shadow-lg">
@@ -54,6 +54,13 @@
 </nav>
 {% endif %}
 
+<div id="appPageLoading" class="app-page-loading" aria-live="polite" aria-busy="true" role="status">
+    <div class="app-page-loading-inner">
+        <div class="app-page-loading-spinner" aria-hidden="true"></div>
+        <div class="app-page-loading-text">页面加载中…</div>
+    </div>
+</div>
+
 <div id="globalScopeBarMount" class="container-fluid px-4 mb-2 d-none" aria-live="polite"></div>
 
 <main class="container-fluid px-4">
@@ -67,6 +74,65 @@
     {% block content %}{% endblock %}
 </main>
 
+{% if feedback_fab_enabled|default(false) %}
+<button type="button" class="feedback-fab" id="feedbackFabBtn" title="问题反馈（按住拖动）" aria-label="问题反馈，按住可拖动位置">
+    <span aria-hidden="true">反馈</span>
+</button>
+<div class="modal fade" id="feedbackModal" tabindex="-1" aria-labelledby="feedbackModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="feedbackModalLabel">问题反馈</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs mb-3" id="feedbackModalTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="feedback-tab-submit-btn" data-bs-toggle="tab" data-bs-target="#feedback-tab-submit" type="button" role="tab">提交反馈</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="feedback-tab-mine-btn" data-bs-toggle="tab" data-bs-target="#feedback-tab-mine" type="button" role="tab">我的反馈</button>
+                    </li>
+                </ul>
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="feedback-tab-submit" role="tabpanel">
+                        <form id="feedbackSubmitForm">
+                            <div class="mb-3">
+                                <label class="form-label" for="feedbackFeatureModule">功能模块 <span class="text-danger">*</span></label>
+                                <select class="form-select" id="feedbackFeatureModule" name="feature_module" required></select>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="feedbackPriority">优先级 <span class="text-danger">*</span></label>
+                                <select class="form-select" id="feedbackPriority" name="priority" required></select>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="feedbackDescription">问题描述 <span class="text-danger">*</span></label>
+                                <textarea class="form-control" id="feedbackDescription" name="description" rows="5" maxlength="8000" required placeholder="请描述遇到的问题、复现步骤或期望行为"></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="feedbackScreenshot">问题截图（可选）</label>
+                                <input type="file" class="form-control" id="feedbackScreenshot" name="screenshot" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp">
+                                <div class="form-text">支持 PNG/JPEG/GIF/WebP，最大 5MB；截图将上传至 FTP 服务器。</div>
+                                <div id="feedbackScreenshotPreview" class="mt-2 d-none">
+                                    <img src="" alt="截图预览" class="img-fluid rounded border" style="max-height:180px">
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-end gap-2">
+                                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                                <button type="submit" class="btn btn-primary" id="feedbackSubmitBtn">提交</button>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="tab-pane fade" id="feedback-tab-mine" role="tabpanel">
+                        <div id="feedbackMineList" class="small text-muted">加载中…</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <script src="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.bundle.min.js', v=static_version) }}"></script>
 <script>
     window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
@@ -77,6 +143,9 @@
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
 <script src="{{ url_for('static', filename='js/scope_bar.js', v=static_version) }}"></script>
+{% endif %}
+{% if feedback_fab_enabled|default(false) or request.endpoint == 'admin.admin_page' %}
+<script src="{{ url_for('static', filename='js/feedback.js', v=static_version) }}"></script>
 {% endif %}
 {% block body_extra %}{% endblock %}
 </body>

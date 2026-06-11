@@ -66,7 +66,7 @@
   var trBootstrapOpts = null;
 
   function loadMeta() {
-    if (!window.IntegrationPrefill) return;
+    if (!window.IntegrationPrefill) return Promise.resolve();
     var IP = window.IntegrationPrefill;
     var pf = IP.parsePrefillFromLocation();
     trBootstrapOpts = {
@@ -84,10 +84,7 @@
       },
       onError: function (m) { showMsg(m, true); },
     };
-    IP.loadBootstrap(trBootstrapOpts);
-    IP.wireProjectSelect("tr", function () { return window.__integrationBootstrap_tr; }, function () {
-      return IP.getPagePrefill("tr") || IP.parsePrefillFromLocation();
-    });
+    return IP.loadBootstrap(trBootstrapOpts);
   }
 
   function historyDownloadUrl(it) {
@@ -166,7 +163,7 @@
     var scopeQ = (window.IntegrationPrefill && window.IntegrationPrefill.integrationScopeQuery)
       ? window.IntegrationPrefill.integrationScopeQuery()
       : "scope=workflow";
-    AsyncJob.api(
+    return AsyncJob.api(
       root + "/translate/api/jobs?page=" + encodeURIComponent(String(_historyPage || 1)) + "&page_size=10&" + scopeQ,
       { method: "GET" }
     ).then(function (x) {
@@ -507,6 +504,7 @@
   }
 
   function init() {
+    if (!$("tr_target_lang")) return Promise.resolve();
     var q = parseQuery();
     if (q.upload_ids && $("tr_upload_ids")) {
       var lst = String(q.upload_ids).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
@@ -575,10 +573,23 @@
       loadHistory();
     });
 
-    loadMeta();
-    loadHistory();
+    if (window.IntegrationPrefill) {
+      window.IntegrationPrefill.wireProjectSelect("tr", function () { return window.__integrationBootstrap_tr; }, function () {
+        return window.IntegrationPrefill.getPagePrefill("tr") || window.IntegrationPrefill.parsePrefillFromLocation();
+      });
+    }
+    return Promise.all([loadMeta(), loadHistory()]);
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
+  function runInit() {
+    return init();
+  }
+
+  if (typeof registerPageInit === "function") {
+    registerPageInit(runInit);
+  } else if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", runInit);
+  } else {
+    runInit();
+  }
 })();

@@ -52,10 +52,12 @@
           <div class="col-12">
             <label class="form-label">审核/对话模型（可选）</label>
             <input id="dg_llm_model" class="form-control" placeholder="留空则用 aicheckword 默认；通义示例 qwen-plus" autocomplete="off"/>
-            <div class="form-text">以上两项与 API Key 均按<strong>当前所选提供方</strong>分别保存；切换提供方时会自动切换为该方已保存内容（当前方未提交的编辑会先暂存在本页再切换）。</div>
+            <div class="form-text">以上两项与 API Key 均按<strong>当前所选提供方</strong>分别保存（便于本地记录）；<strong>提交初稿/审核/翻译时仅上传 API Key</strong>，Base URL 与模型以 aicheckword 系统/侧栏配置为准（与侧栏直连行为一致）。</div>
           </div>
           <div class="col-12">
-            <button type="button" class="btn btn-primary" id="dg_btn_save_llm">保存 LLM 设置</button>
+            <button type="button" class="btn btn-primary" id="dg_btn_save_llm">保存个人 LLM 设置</button>
+            <button type="button" class="btn btn-outline-secondary ms-2" id="dg_btn_test_llm">测试 Key</button>
+            <div class="form-text">API Key 加密保存在 aiword 数据库，<strong>仅当前登录账号</strong>可用；初稿/审核/翻译/审核后修改共用。若 aicheckword 未开启「须个人 Key」，未保存时将使用 aicheckword 系统 Key。保存前可先点「测试 Key」验证。</div>
           </div>
         </div>
       </div>

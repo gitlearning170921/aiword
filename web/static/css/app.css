@@ -710,6 +710,123 @@ tr.cp-row-starred > td {
     padding: 0 14px 14px;
 }
 
+/* 页面4 · 系统与钉钉：左右各占一半，面板内滚动 */
+.admin-system-split {
+    align-items: stretch;
+}
+.admin-system-panel {
+    min-height: min(72vh, 780px);
+    border-radius: 12px;
+}
+.admin-system-panel-body {
+    overflow-y: auto;
+    max-height: calc(min(72vh, 780px) - 52px);
+}
+.admin-system-panel.d-flex.flex-column .admin-system-panel-body {
+    max-height: calc(min(72vh, 780px) - 96px);
+}
+.admin-dingtalk-section {
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: #fafbfc;
+}
+.admin-dingtalk-section:last-child {
+    margin-bottom: 0;
+}
+.admin-dingtalk-section-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #0f172a;
+    list-style: none;
+}
+.admin-dingtalk-section-summary::-webkit-details-marker {
+    display: none;
+}
+.admin-dingtalk-section-summary::before {
+    content: "▸";
+    margin-right: 6px;
+    color: #64748b;
+    transition: transform 0.15s ease;
+}
+.admin-dingtalk-section[open] > .admin-dingtalk-section-summary::before {
+    transform: rotate(90deg);
+}
+.admin-dingtalk-section-tag {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #64748b;
+    background: rgba(100, 116, 139, 0.12);
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+.admin-dingtalk-section-body {
+    padding: 0 12px 12px;
+    border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+.sys-cfg-form--inline .sys-cfg-form-intro {
+    display: none;
+}
+
+/* 全页首屏 loading */
+.app-page-loading {
+    position: fixed;
+    inset: 0;
+    z-index: 2100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(248, 250, 252, 0.72);
+    backdrop-filter: blur(2px);
+}
+.app-page-booting .app-page-loading,
+.app-page-loading.show {
+    display: flex;
+}
+body.app-page-loading-active {
+    overflow: hidden;
+}
+.app-page-loading-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 28px;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+}
+.app-page-loading-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgba(13, 110, 253, 0.18);
+    border-top-color: #0d6efd;
+    border-radius: 50%;
+    animation: app-page-loading-spin 0.75s linear infinite;
+}
+.app-page-loading-text {
+    font-size: 0.9rem;
+    color: #475569;
+}
+@keyframes app-page-loading-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (max-width: 991.98px) {
+    .admin-system-panel,
+    .admin-system-panel-body {
+        min-height: auto;
+        max-height: none;
+    }
+}
+
 /* 页面1 · 任务录入：项目信息固定、任务表区域可滚动且表头固定 */
 .task-entry-card {
     border: 1px solid rgba(15, 23, 42, 0.08);
@@ -1094,5 +1211,40 @@ tr.cp-row-starred > td {
 }
 .page1-projects-table .p1-actions-cell .btn + .btn {
     margin-left: 0.25rem;
+}
+
+/* 问题反馈浮动按钮 */
+.feedback-fab {
+    position: fixed;
+    right: 24px;
+    bottom: 28px;
+    z-index: 1080;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: none;
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    color: #fff;
+    font-size: 0.875rem;
+    font-weight: 700;
+    box-shadow: 0 12px 28px rgba(37, 99, 235, 0.45);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.feedback-fab.feedback-fab-dragging {
+    cursor: grabbing;
+    transition: none;
+    box-shadow: 0 16px 32px rgba(37, 99, 235, 0.55);
+}
+.feedback-fab:hover:not(.feedback-fab-dragging) {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 32px rgba(37, 99, 235, 0.5);
+    color: #fff;
+}
+.feedback-fab:focus-visible {
+    outline: 3px solid rgba(37, 99, 235, 0.35);
+    outline-offset: 2px;
 }
 

@@ -27,17 +27,21 @@ def upstream_form_post(
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
     organization_id: str | None = None,
     read_seconds: int = 600,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     base = integration_api_base()
     if not base:
         return upstream_unconfigured_response()
     url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+    headers = upstream_headers(for_multipart=bool(files), organization_id=organization_id)
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         resp = requests.post(
             url,
             data=data or {},
             files=files or [],
-            headers=upstream_headers(for_multipart=bool(files), organization_id=organization_id),
+            headers=headers,
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
@@ -59,16 +63,20 @@ def upstream_json_post(
     body: dict[str, Any],
     organization_id: str | None = None,
     read_seconds: int = 120,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     base = integration_api_base()
     if not base:
         return upstream_unconfigured_response()
     url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+    headers = upstream_headers(for_multipart=False, organization_id=organization_id)
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         resp = requests.post(
             url,
             json=body,
-            headers=upstream_headers(for_multipart=False, organization_id=organization_id),
+            headers=headers,
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:

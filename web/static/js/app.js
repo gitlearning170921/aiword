@@ -123,9 +123,78 @@ const App = {
         document.body.appendChild(alert);
         setTimeout(() => alert.remove(), 3000);
     },
+    _pageInitHandlers: [],
+    /** 注册页面首屏初始化（DOM 就绪后统一执行并显示 loading） */
+    onPageInit(fn) {
+        if (typeof fn === "function") {
+            this._pageInitHandlers.push(fn);
+        }
+    },
+    pageLoading: {
+        _depth: 0,
+        _el: null,
+        _textEl: null,
+        _ensure() {
+            if (!this._el) {
+                this._el = document.getElementById("appPageLoading");
+                this._textEl = this._el && this._el.querySelector(".app-page-loading-text");
+            }
+            return this._el;
+        },
+        show(message) {
+            this._depth += 1;
+            const node = this._ensure();
+            if (node) {
+                if (message && this._textEl) this._textEl.textContent = message;
+                node.classList.add("show");
+                document.body.classList.add("app-page-loading-active");
+            }
+        },
+        hide() {
+            this._depth = Math.max(0, this._depth - 1);
+            if (this._depth > 0) return;
+            const node = this._ensure();
+            if (node) node.classList.remove("show");
+            document.body.classList.remove("app-page-loading-active", "app-page-booting");
+        },
+        async run(fn, message) {
+            this.show(message);
+            try {
+                return await fn();
+            } finally {
+                this.hide();
+            }
+        },
+    },
 };
 // 供独立页面脚本（如 company_registry.js）通过 window.App 调用
 window.App = App;
+
+function registerPageInit(fn) {
+    if (typeof App.onPageInit === "function") {
+        App.onPageInit(fn);
+        return;
+    }
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => Promise.resolve().then(fn));
+    } else {
+        Promise.resolve().then(fn);
+    }
+}
+window.registerPageInit = registerPageInit;
+
+async function flushPageInitHandlers() {
+    if (document.body.classList.contains("app-page-booting")) {
+        App.pageLoading.show("页面加载中…");
+    }
+    try {
+        await new Promise((r) => requestAnimationFrame(r));
+        const handlers = App._pageInitHandlers.slice();
+        await Promise.allSettled(handlers.map((fn) => Promise.resolve().then(fn)));
+    } finally {
+        App.pageLoading.hide();
+    }
+}
 
 /** 子路径部署（SCRIPT_NAME）下拼接站内路径，与 App.request 前缀规则一致。 */
 function _appPath(path) {
@@ -1196,7 +1265,7 @@ async function initUploadPage() {
     refreshNewProjectCountrySelect();
 
     // 尽早拉取列表，避免 await loadTaskTypes() 阻塞或失败时「已保存任务列表」一直空白
-    loadRecordsList();
+    await loadRecordsList();
 
     // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
     if (showHistoryEl) showHistoryEl.checked = false;
@@ -1760,46 +1829,44 @@ async function initUploadPage() {
         });
     }
 
-    const _CSV_HEADERS = [
-        "项目名称","项目编号","影响业务方","影响产品","国家","项目备注","注册产品名称","型号","注册版本号",
-        "文件名称","任务类型","文档链接","文件版本号","编写人员","负责人",
-        "截止日期","下发任务备注","文档体现日期","审核人员","批准人员","所属模块","体现编写人员",
-    ];
-    function _csvEscape(v) {
-        var s = (v == null ? "" : String(v));
-        if (s.indexOf(",") !== -1 || s.indexOf('"') !== -1 || s.indexOf("\n") !== -1) {
-            return '"' + s.replace(/"/g, '""') + '"';
+    async function _downloadImportTemplate({ includeSample, projectName }) {
+        const params = new URLSearchParams();
+        params.set("type", includeSample ? "with_sample" : "empty");
+        if (projectName) params.set("project_name", projectName);
+        const url = `/api/uploads/import-template?${params.toString()}`;
+        const resp = await fetch(url, { credentials: "same-origin" });
+        if (!resp.ok) {
+            let msg = `下载失败（HTTP ${resp.status}）`;
+            try {
+                const data = await resp.json();
+                if (data && data.message) msg = data.message;
+            } catch (_e) { /* ignore */ }
+            throw new Error(msg);
         }
-        return s;
-    }
-    function _recordToCsvRow(r) {
-        return [
-            r.projectName, r.projectCode, r.businessSide, r.product, r.country, r.projectNotes,
-            r.registeredProductName, r.model, r.registrationVersion,
-            r.fileName, r.taskType, r.templateLinks, r.fileVersion, r.author, r.assigneeName || r.author,
-            r.dueDate, r.notes, r.documentDisplayDate, r.reviewer, r.approver, r.belongingModule, r.displayedAuthor,
-        ].map(_csvEscape).join(",");
-    }
-    function _downloadCsvString(csvContent, filename) {
-        var BOM = "\uFEFF";
-        var blob = new Blob([BOM + csvContent], { type: "text/csv;charset=utf-8;" });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement("a");
-        a.href = url;
+        const blob = await resp.blob();
+        const cd = resp.headers.get("Content-Disposition") || "";
+        const m = /filename="([^"]+)"/i.exec(cd);
+        const filename = m ? m[1] : (includeSample ? "待办导入模板_含示例.csv" : "待办导入模板_空.csv");
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
         a.download = filename;
         a.style.display = "none";
         document.body.appendChild(a);
         a.click();
         setTimeout(function () {
             if (a.parentNode) document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(objectUrl);
         }, 300);
     }
 
-    document.getElementById("downloadTemplateEmptyBtn")?.addEventListener("click", function () {
-        var csv = _CSV_HEADERS.map(_csvEscape).join(",") + "\n";
-        _downloadCsvString(csv, "待办导入模板_空.csv");
-        App.notify("已下载空模板", "success");
+    document.getElementById("downloadTemplateEmptyBtn")?.addEventListener("click", async function () {
+        try {
+            await _downloadImportTemplate({ includeSample: false });
+            App.notify("已下载空模板", "success");
+        } catch (e) {
+            App.notify(e.message || "下载失败", "danger");
+        }
     });
 
     const sampleModal = document.getElementById("importTemplateSampleModal");
@@ -1825,22 +1892,16 @@ async function initUploadPage() {
         var modal = sampleModal ? new bootstrap.Modal(sampleModal) : null;
         modal?.show();
     });
-    sampleConfirmBtn?.addEventListener("click", function () {
+    sampleConfirmBtn?.addEventListener("click", async function () {
         var projectName = (sampleSelect?.value || "").trim();
-        var rows = [_CSV_HEADERS.map(_csvEscape).join(",")];
-        var records = allRecordsCache || [];
-        if (projectName) {
-            records = records.filter(function (r) { return (r.projectName || "").trim() === projectName; });
+        try {
+            await _downloadImportTemplate({ includeSample: true, projectName: projectName || undefined });
+            var modal = sampleModal ? bootstrap.Modal.getInstance(sampleModal) : null;
+            modal?.hide();
+            App.notify("已下载示例模板", "success");
+        } catch (e) {
+            App.notify(e.message || "下载失败", "danger");
         }
-        if (records.length > 0) {
-            records.forEach(function (r) { rows.push(_recordToCsvRow(r)); });
-        }
-        rows.push("");
-        var filename = projectName ? ("待办导入模板_" + projectName.substring(0, 20) + ".csv") : "待办导入模板_含示例.csv";
-        _downloadCsvString(rows.join("\n"), filename);
-        var modal = sampleModal ? bootstrap.Modal.getInstance(sampleModal) : null;
-        modal?.hide();
-        App.notify("已下载示例模板", "success");
     });
 
     const importTasksBtn = document.getElementById("importTasksBtn");
@@ -2500,9 +2561,20 @@ async function loadProjectTeamsForPickers() {
     }
 }
 
-const USER_FEATURE_PERM_GROUPS = [
+const USER_FEATURE_PERM_GROUPS_FALLBACK = [
     {
-        title: "页面1",
+        id: "page0",
+        title: "页面0 · 文档工具",
+        defs: [
+            { key: "FEATURE_PAGE0_DRAFT_GEN", label: "初稿生成" },
+            { key: "FEATURE_PAGE0_AUDIT", label: "文档审核" },
+            { key: "FEATURE_PAGE0_AUDIT_MODIFY", label: "审核后修改" },
+            { key: "FEATURE_PAGE0_TRANSLATE", label: "文档翻译" },
+        ],
+    },
+    {
+        id: "page1",
+        title: "页面1（含页面3）",
         defs: [
             { key: "FEATURE_PAGE1_DRAFT_GEN", label: "初稿生成" },
             { key: "FEATURE_PAGE1_AUDIT", label: "文档审核" },
@@ -2514,6 +2586,7 @@ const USER_FEATURE_PERM_GROUPS = [
         ],
     },
     {
+        id: "page2",
         title: "页面2",
         defs: [
             { key: "FEATURE_PAGE2_UPLOAD_REPLACE", label: "上传/替换" },
@@ -2525,22 +2598,69 @@ const USER_FEATURE_PERM_GROUPS = [
     },
 ];
 
-/** @deprecated 兼容旧引用；请用 USER_FEATURE_PERM_GROUPS */
-const USER_FEATURE_PERM_DEFS = USER_FEATURE_PERM_GROUPS.flatMap((g) => g.defs);
+/** @deprecated 兼容旧引用；运行时以 ensureUserFeaturePermSchema() 为准 */
+const USER_FEATURE_PERM_GROUPS = USER_FEATURE_PERM_GROUPS_FALLBACK;
 
-function _renderUserFeaturePermSelects(container, permissions, selectClass) {
+let _userFeaturePermSchema = null;
+
+async function ensureUserFeaturePermSchema() {
+    if (_userFeaturePermSchema) return _userFeaturePermSchema;
+    try {
+        const res = await App.request("/api/users/feature-permission-schema");
+        _userFeaturePermSchema = {
+            groups: Array.isArray(res.groups) && res.groups.length ? res.groups : USER_FEATURE_PERM_GROUPS_FALLBACK,
+            roleVisibleGroupIds: res.roleVisibleGroupIds && typeof res.roleVisibleGroupIds === "object"
+                ? res.roleVisibleGroupIds
+                : { company: ["page0"], project: ["page1", "page2"], none: ["page2"] },
+        };
+    } catch (_e) {
+        _userFeaturePermSchema = {
+            groups: USER_FEATURE_PERM_GROUPS_FALLBACK,
+            roleVisibleGroupIds: { company: ["page0"], project: ["page1", "page2"], none: ["page2"] },
+        };
+    }
+    return _userFeaturePermSchema;
+}
+
+function _userFeaturePermGroupsAll() {
+    return (_userFeaturePermSchema && _userFeaturePermSchema.groups) || USER_FEATURE_PERM_GROUPS_FALLBACK;
+}
+
+/** 按分级角色决定账号管理里展示哪些功能权限分组。 */
+function userFeaturePermGroupsForRole(role) {
+    const r = (role || "none").trim();
+    const schema = _userFeaturePermSchema;
+    const map = schema?.roleVisibleGroupIds || {
+        company: ["page0"],
+        project: ["page1", "page2"],
+        none: ["page2"],
+    };
+    const ids = map[r] || map.none || ["page2"];
+    return _userFeaturePermGroupsAll().filter((g) => ids.includes(g.id));
+}
+
+/** @deprecated 兼容旧引用 */
+const USER_FEATURE_PERM_DEFS = USER_FEATURE_PERM_GROUPS_FALLBACK.flatMap((g) => g.defs);
+
+function _renderUserFeaturePermSelects(container, permissions, selectClass, groups, mode) {
     if (!container) return;
     const perms = permissions && typeof permissions === "object" ? permissions : {};
     const cls = selectClass || "user-feature-perm";
-    container.innerHTML = USER_FEATURE_PERM_GROUPS.map((group) => {
+    const activeGroups = groups && groups.length ? groups : _userFeaturePermGroupsAll();
+    const isBatch = mode === "batch";
+    container.innerHTML = activeGroups.map((group) => {
         const fields = group.defs.map(({ key, label }) => {
-            let sel = "inherit";
-            if (Object.prototype.hasOwnProperty.call(perms, key)) {
+            let sel = isBatch ? "skip" : "inherit";
+            if (!isBatch && Object.prototype.hasOwnProperty.call(perms, key)) {
                 sel = perms[key] ? "allow" : "deny";
             }
+            const skipOpt = isBatch
+                ? `<option value="skip"${sel === "skip" ? " selected" : ""}>不修改</option>`
+                : "";
             return (
                 `<div class="col-md-6"><label class="form-label small mb-0">${label}</label>` +
                 `<select class="form-select form-select-sm ${cls}" data-key="${key}">` +
+                skipOpt +
                 `<option value="inherit"${sel === "inherit" ? " selected" : ""}>跟随系统</option>` +
                 `<option value="allow"${sel === "allow" ? " selected" : ""}>允许</option>` +
                 `<option value="deny"${sel === "deny" ? " selected" : ""}>禁止</option>` +
@@ -2554,8 +2674,25 @@ function _renderUserFeaturePermSelects(container, permissions, selectClass) {
     }).join("");
 }
 
-function renderUserFeaturePermissionFields(container, permissions) {
-    _renderUserFeaturePermSelects(container, permissions, "user-feature-perm");
+function renderUserFeaturePermissionFields(container, permissions, role) {
+    _renderUserFeaturePermSelects(
+        container,
+        permissions,
+        "user-feature-perm",
+        userFeaturePermGroupsForRole(role),
+        "user"
+    );
+}
+
+function syncUserFeaturePermFieldsByRole(role, mode) {
+    const prefix = mode === "edit" ? "editUser" : "newUser";
+    const wrap = document.getElementById(`${prefix}FeaturePermsWrap`);
+    const container = document.getElementById(`${prefix}FeaturePermissions`);
+    const groups = userFeaturePermGroupsForRole(role);
+    if (wrap) wrap.classList.toggle("d-none", groups.length === 0);
+    if (!container) return;
+    const perms = collectUserFeaturePermissions(container);
+    renderUserFeaturePermissionFields(container, perms, role);
 }
 
 function collectUserFeaturePermissions(container) {
@@ -2578,21 +2715,13 @@ function collectUserFeaturePermissions(container) {
 
 function renderBatchUserFeaturePermissionFields(container) {
     if (!container) return;
-    container.innerHTML = USER_FEATURE_PERM_GROUPS.map((group) => {
-        const fields = group.defs.map(({ key, label }) => (
-            `<div class="col-md-6"><label class="form-label small mb-0">${label}</label>` +
-            `<select class="form-select form-select-sm user-feature-perm-batch" data-key="${key}">` +
-            `<option value="skip" selected>不修改</option>` +
-            `<option value="inherit">跟随系统</option>` +
-            `<option value="allow">允许</option>` +
-            `<option value="deny">禁止</option>` +
-            `</select></div>`
-        )).join("");
-        return (
-            `<div class="col-12"><div class="small fw-semibold text-muted mb-1">${group.title}</div></div>` +
-            fields
-        );
-    }).join("");
+    _renderUserFeaturePermSelects(
+        container,
+        {},
+        "user-feature-perm-batch",
+        _userFeaturePermGroupsAll(),
+        "batch"
+    );
 }
 
 function collectBatchUserFeaturePermissionPatches(container) {
@@ -3990,11 +4119,11 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
 
 function loadRecordsList() {
     const tbody = document.getElementById("recordsTableBody");
-    if (!tbody) return;
+    if (!tbody) return Promise.resolve();
 
     const showHistory = !!document.getElementById("showHistoryProjectsPage1")?.checked;
     const url = showHistory ? "/api/uploads?includeHistory=1" : "/api/uploads";
-    App.request(url)
+    return App.request(url)
         .then((res) => {
             allRecordsCache = res.records || [];
             renderRecordsTable(allRecordsCache);
@@ -4077,7 +4206,11 @@ function getUserTeamSinglePickerValue(hostOrId) {
 
 function bindUserAccessRoleVisibility(selectEl, mode) {
     if (!selectEl) return;
-    const sync = () => syncUserAccessFieldsByRole(selectEl.value || "none", mode);
+    const sync = () => {
+        const role = selectEl.value || "none";
+        syncUserAccessFieldsByRole(role, mode);
+        syncUserFeaturePermFieldsByRole(role, mode);
+    };
     if (selectEl.dataset.accessRoleBound !== "1") {
         selectEl.addEventListener("change", sync);
         selectEl.dataset.accessRoleBound = "1";
@@ -4325,7 +4458,8 @@ function renderUsersList() {
             });
             renderUserFeaturePermissionFields(
                 document.getElementById("editUserFeaturePermissions"),
-                u?.featurePermissions
+                u?.featurePermissions,
+                u?.adminRole || btn.dataset.adminRole || "none"
             );
             bindUserAccessRoleVisibility(roleEl, "edit");
             const modal = new bootstrap.Modal(document.getElementById("editUserMobileModal"));
@@ -4338,7 +4472,7 @@ function loadUsersList() {
     const tbody = document.getElementById("usersTableBody");
     const hasAuthorPickers = !!document.querySelector(".author-picker, .task-author-picker-host");
 
-    const fetchUsers = Promise.all([
+    return Promise.all([
         loadOrganizationsDict(true),
         loadProjectTeamsForPickers(),
         App.request("/api/users"),
@@ -4355,9 +4489,6 @@ function loadUsersList() {
             }
         })
         .catch((e) => App.notify(e.message || "加载用户失败", "danger"));
-
-    if (!tbody) return fetchUsers;
-    return fetchUsers;
 }
 
 function initUsersListFilter() {
@@ -4613,7 +4744,8 @@ function initCreateUserModal() {
         });
         renderUserFeaturePermissionFields(
             document.getElementById("newUserFeaturePermissions"),
-            null
+            null,
+            document.getElementById("newUserAdminRole")?.value || "none"
         );
         const roleEl = document.getElementById("newUserAdminRole");
         bindUserAccessRoleVisibility(roleEl, "new");
@@ -5065,7 +5197,7 @@ async function initGeneratePage() {
     
     initMyTasksFilter();
     initMyTasksTableSort();
-    loadMyTasks();
+    await loadMyTasks();
 
     showHistoryEl?.addEventListener("change", () => {
         loadMyTasks();
@@ -5688,11 +5820,11 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
         id: "page_tools_feature_flags",
         title: "页面0/1/2 功能入口",
         hint:
-            "各填一行英文逗号分隔 slug 开启入口；保存后自动同步下方单项开关。" +
+            "各填一行英文逗号分隔 slug 开启入口；保存后自动写入运行时功能开关。" +
             "页面0：draft_gen, audit, audit_modify, translate。" +
-            "页面1：draft_gen, audit, audit_modify, translate, sign, print, exam_center。" +
+            "页面1（含页面3 考试中心）：draft_gen, audit, audit_modify, translate, sign, print, exam_center。" +
             "页面2：upload_replace, draft_gen, audit_modify, translate, exam_center。" +
-            "账号权限见「账号管理」· 页面1/2 分组。",
+            "账号权限见「账号管理」· 按分级角色展示页面0/1/2 分组。",
         defaultExpanded: true,
         keys: [
             "FEATURE_TOOLS_PAGE0",
@@ -5700,28 +5832,6 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
             "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
-        ],
-    },
-    {
-        id: "legacy_feature_flags",
-        title: "兼容 · 单项功能开关",
-        hint: "由上方 CSV 保存时自动同步；一般无需手改。",
-        defaultExpanded: false,
-        keys: [
-            "FEATURE_PAGE1_DRAFT_GEN",
-            "FEATURE_PAGE1_AUDIT",
-            "FEATURE_PAGE1_AUDIT_MODIFY",
-            "FEATURE_PAGE1_TRANSLATE",
-            "FEATURE_PAGE1_EXAM_CENTER",
-            "FEATURE_PAGE1_SIGN",
-            "FEATURE_PAGE1_PRINT",
-            "FEATURE_PAGE2_UPLOAD_REPLACE",
-            "FEATURE_PAGE2_DRAFT_GEN",
-            "FEATURE_PAGE2_AUDIT_MODIFY",
-            "FEATURE_PAGE2_TRANSLATE",
-            "FEATURE_PAGE2_EXAM_CENTER",
-            "FEATURE_PAGE2_AUDIT",
-            "FEATURE_EXAM_CENTER",
         ],
     },
     {
@@ -5929,7 +6039,8 @@ async function refreshAdminChatbotCallbackUrlPanel() {
 }
 
 /** 单条系统配置输入框 HTML */
-function _renderSystemSettingFieldHtml(k, settings) {
+function _renderSystemSettingFieldHtml(k, settings, opts) {
+    const inline = !!(opts && opts.inline);
     const raw = settings[k.key] != null ? String(settings[k.key]) : "";
     const showVal = _escHtmlSysCfg(raw);
     const isDb = k.key === "DATABASE_URL";
@@ -5948,7 +6059,7 @@ function _renderSystemSettingFieldHtml(k, settings) {
         ph = "未配置";
     }
     const isToolsCsv = k.key.startsWith("FEATURE_TOOLS_PAGE");
-    const colClass = isToolsCsv ? "col-12" : "col-md-6";
+    const colClass = isToolsCsv || inline ? "col-12" : "col-md-6";
     const inputClass = isToolsCsv
         ? "form-control form-control-sm sys-cfg-input font-monospace"
         : "form-control form-control-sm sys-cfg-input";
@@ -5957,7 +6068,8 @@ function _renderSystemSettingFieldHtml(k, settings) {
 }
 
 /** 按后端 sections 分区渲染；无 sections 时回退为平铺列表 */
-function _renderSystemSettingsFormHtml(keys, settings, sections) {
+function _renderSystemSettingsFormHtml(keys, settings, sections, opts) {
+    const inline = !!(opts && opts.inline);
     const keyMap = Object.fromEntries((keys || []).map((k) => [k.key, k]));
     const esc = _escHtmlSysCfg;
     const secs =
@@ -5992,7 +6104,7 @@ function _renderSystemSettingsFormHtml(keys, settings, sections) {
                     ? `<p class="sys-cfg-section-hint small text-muted mb-2">${esc(sec.hint)}</p>`
                     : "";
                 const fieldsHtml = fields
-                    .map((k) => _renderSystemSettingFieldHtml(k, settings))
+                    .map((k) => _renderSystemSettingFieldHtml(k, settings, opts))
                     .join("");
                 return `<details class="sys-cfg-section"${openAttr} data-section-id="${esc(sec.id || "")}">
 <summary class="sys-cfg-section-summary">
@@ -6009,7 +6121,7 @@ ${sectionToolsHtml}
         );
     }
     return `<div class="row g-2">${(keys || [])
-        .map((k) => _renderSystemSettingFieldHtml(k, settings))
+        .map((k) => _renderSystemSettingFieldHtml(k, settings, opts))
         .join("")}</div>`;
 }
 
@@ -6038,6 +6150,10 @@ function bindTestAutoNotifyButtons() {
 }
 
 function initDashboardPage() {
+    return _initDashboardPageInner();
+}
+
+async function _initDashboardPageInner() {
     initSessionUserBar();
     let teamDingtalkRows = [];
     const teamSelect = document.getElementById("teamDingtalkTeamId");
@@ -6156,7 +6272,9 @@ function initDashboardPage() {
                     '<div class="alert alert-warning mb-0 small">未获取到配置项列表，请刷新页面。</div>';
                 return;
             }
-            container.innerHTML = _renderSystemSettingsFormHtml(keys, settings, sections);
+            container.innerHTML = _renderSystemSettingsFormHtml(keys, settings, sections, {
+                inline: container.classList.contains("sys-cfg-form--inline"),
+            });
             _bindChatbotCallbackUrlLiveUpdate(container, settings);
         } catch (e) {
             console.error(e);
@@ -6171,70 +6289,28 @@ function initDashboardPage() {
         }
     };
 
-    // 系统配置弹窗：默认不展开，点击按钮后再拉取并渲染
-    const systemModal = document.getElementById("systemSettingsModal");
-    const openSystemSettingsBtn = document.getElementById("openSystemSettingsBtn");
-    const closeSystemSettingsBtn = document.getElementById("closeSystemSettingsBtn");
+    // 系统配置：内嵌于「系统与钉钉」标签页右栏，切换至该标签时加载
     let systemSettingsLoaded = false;
 
-    const showSystemModal = () => {
-        if (!systemModal) return;
-        systemModal.classList.add("show");
-        systemModal.setAttribute("aria-hidden", "false");
-        // 兼容：同时设置内联样式，确保弹窗一定可见
-        systemModal.style.display = "block";
-        systemModal.style.position = "fixed";
-        systemModal.style.left = "0";
-        systemModal.style.top = "0";
-        systemModal.style.right = "0";
-        systemModal.style.bottom = "0";
-        systemModal.style.zIndex = "2000";
-        document.body.style.overflow = "hidden";
-    };
-
-    const hideSystemModal = () => {
-        if (!systemModal) return;
-        systemModal.classList.remove("show");
-        systemModal.setAttribute("aria-hidden", "true");
-        systemModal.style.display = "none";
-        systemModal.style.position = "";
-        systemModal.style.zIndex = "";
-        document.body.style.overflow = "";
-    };
-
-    if (openSystemSettingsBtn) {
-        openSystemSettingsBtn.addEventListener("click", async () => {
-            showSystemModal();
-            if (!systemSettingsLoaded) {
-                const container = document.getElementById("systemSettingsForm");
-                if (container) {
-                    container.innerHTML =
-                        '<div class="alert alert-info mb-0 small">加载中…</div>';
-                }
-                try {
-                    await loadSystemSettings();
-                    systemSettingsLoaded = true;
-                } catch (_) {
-                    // ignore；loadSystemSettings 内部已做提示
-                }
-            }
-        });
-        if (systemModal) {
-            closeSystemSettingsBtn?.addEventListener("click", hideSystemModal);
-            systemModal.addEventListener("click", (e) => {
-                if (e.target && e.target.getAttribute && e.target.getAttribute("data-close") === "1") {
-                    hideSystemModal();
-                }
-            });
-            window.addEventListener("keydown", (e) => {
-                if (e.key === "Escape") hideSystemModal();
-            });
-        }
-    } else {
-        // 兼容：若页面尚未包含“打开按钮”，则回退到原先“默认加载”
-        loadSystemSettings();
+    const ensureSystemSettingsLoaded = async () => {
+        const container = document.getElementById("systemSettingsForm");
+        if (!container || systemSettingsLoaded) return;
+        container.innerHTML = '<div class="alert alert-info mb-0 small">加载中…</div>';
+        await loadSystemSettings();
         systemSettingsLoaded = true;
+    };
+
+    const loadAdminSystemTabData = () => {
+        ensureSystemSettingsLoaded().catch(() => {});
+        loadTeamDingtalkSettings();
+        refreshAdminChatbotCallbackUrlPanel().catch(() => {});
+    };
+
+    document.getElementById("tab-system-btn")?.addEventListener("shown.bs.tab", loadAdminSystemTabData);
+    if (document.getElementById("tab-system")?.classList.contains("active")) {
+        loadAdminSystemTabData();
     }
+
     loadTeamDingtalkSettings();
 
     document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
@@ -6402,7 +6478,7 @@ function initDashboardPage() {
     };
 
     if (!overallRate) {
-        if (scheduleWeeklyEl) loadSchedule();
+        if (scheduleWeeklyEl) await loadSchedule();
         return;
     }
 
@@ -6755,9 +6831,8 @@ function initDashboardPage() {
         radio.addEventListener("change", () => { window.reRenderDetailTable(); });
     });
     initDashboardFilters(loadSummary);
-    
-    loadSchedule();
-    loadSummary();
+
+    await Promise.all([loadSchedule(), loadSummary()]);
     window.loadSummary = loadSummary;
     
     document.getElementById("refreshScheduleBtn")?.addEventListener("click", loadSchedule);
@@ -7451,35 +7526,55 @@ function initOrganizationsAdmin() {
 }
 
 function initAdminPage() {
-    if (!document.getElementById("adminPageRoot")) return;
-    initOrganizationsAdmin();
-    initCreateUserModal();
-    initUsersListFilter();
-    initConfigManagement();
-    initEditUserMobile();
-    initBatchUserFeaturePermissions();
-    loadUsersList();
-    initDashboardPage();
-    bindTestAutoNotifyButtons();
-    initNotifyTemplateModal();
-    refreshAdminChatbotCallbackUrlPanel().catch(() => {});
-    document.getElementById("tab-system-btn")?.addEventListener("click", () => {
-        refreshAdminChatbotCallbackUrlPanel().catch(() => {});
-    });
+    /* 已并入 DOMContentLoaded → App.onPageInit；保留空壳避免旧引用报错 */
 }
 
-document.addEventListener("DOMContentLoaded", async () => {
-    await loadCompletionStatuses().catch((e) => {
-        console.warn("loadCompletionStatuses:", e);
+document.addEventListener("DOMContentLoaded", () => {
+    App.onPageInit(async () => {
+        await loadCompletionStatuses().catch((e) => {
+            console.warn("loadCompletionStatuses:", e);
+        });
     });
-    Promise.resolve(initUploadPage()).catch((e) => {
-        console.error("initUploadPage:", e);
-        if (document.getElementById("recordsTableBody")) loadRecordsList();
+    App.onPageInit(async () => {
+        try {
+            await initUploadPage();
+        } catch (e) {
+            console.error("initUploadPage:", e);
+            if (document.getElementById("recordsTableBody")) await loadRecordsList();
+        }
     });
-    initLoginPage();
-    initGeneratePage();
-    initDashboardPage();
-    initAdminPage();
+    App.onPageInit(() => {
+        initLoginPage();
+    });
+    App.onPageInit(async () => {
+        await initGeneratePage();
+    });
+    App.onPageInit(async () => {
+        if (!document.getElementById("detailTable") && !document.getElementById("adminPageRoot")) return;
+        await _initDashboardPageInner();
+    });
+    App.onPageInit(async () => {
+        if (!document.getElementById("adminPageRoot")) return;
+        initOrganizationsAdmin();
+        initCreateUserModal();
+        initUsersListFilter();
+        initConfigManagement();
+        initEditUserMobile();
+        initBatchUserFeaturePermissions();
+        ensureUserFeaturePermSchema().then(() => {
+            renderBatchUserFeaturePermissionFields(document.getElementById("batchUserFeaturePermissions"));
+            const roleEl = document.getElementById("newUserAdminRole");
+            renderUserFeaturePermissionFields(
+                document.getElementById("newUserFeaturePermissions"),
+                null,
+                roleEl?.value || "none"
+            );
+        }).catch(() => {});
+        await loadUsersList();
+        bindTestAutoNotifyButtons();
+        initNotifyTemplateModal();
+    });
+    setTimeout(flushPageInitHandlers, 0);
 
     initColumnToggle("colToggleBtn1", "colToggleMenu1", "recordsTable");
     initColumnToggle("colToggleBtn3", "colToggleMenu3", "detailTable");

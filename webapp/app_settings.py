@@ -155,84 +155,12 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ),
     (
         "FEATURE_TOOLS_PAGE1",
-        "页面1 功能入口（slug：draft_gen, audit, audit_modify, translate, sign, print, exam_center）",
+        "页面1 功能入口（含页面3 考试中心；slug：draft_gen, audit, audit_modify, translate, sign, print, exam_center）",
         False,
     ),
     (
         "FEATURE_TOOLS_PAGE2",
         "页面2 功能入口（slug：upload_replace, draft_gen, audit_modify, translate, exam_center）",
-        False,
-    ),
-    # 下列单项开关由上方 CSV 保存时自动同步；也可在「兼容 · 单项功能开关」中手改。
-    (
-        "FEATURE_PAGE1_DRAFT_GEN",
-        "【自动同步】页面1 · 初稿生成（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_AUDIT",
-        "【自动同步】页面1 · 文档审核（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_AUDIT_MODIFY",
-        "【自动同步】页面1 · 审核后修改（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_TRANSLATE",
-        "【自动同步】页面1 · 文档翻译（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_EXAM_CENTER",
-        "【自动同步】页面1 · 考试训练中心（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_SIGN",
-        "【自动同步】页面1 · 去签字（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE1_PRINT",
-        "【自动同步】页面1 · 去打印（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE2_UPLOAD_REPLACE",
-        "【自动同步】页面2 · 上传/替换（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE2_DRAFT_GEN",
-        "【自动同步】页面2 · 初稿生成（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE2_AUDIT_MODIFY",
-        "【自动同步】页面2 · 审核后修改（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE2_TRANSLATE",
-        "【自动同步】页面2 · 翻译（1=显示；空或0=隐藏）",
-        False,
-    ),
-    (
-        "FEATURE_PAGE2_EXAM_CENTER",
-        "【自动同步】页面2 · 考试训练中心（1=显示；空或0=隐藏）",
-        False,
-    ),
-    # 旧版单一开关（仍可读，用于兼容未迁移的配置；新部署请用上方页面1/2 分项）
-    (
-        "FEATURE_PAGE2_AUDIT",
-        "【已废弃·兼容】原共用审核开关（未单独配置页面1审核时回退读取；勿新增）",
-        False,
-    ),
-    (
-        "FEATURE_EXAM_CENTER",
-        "【已废弃·兼容】原共用考试中心开关（未单独配置页面1/2 考试时回退读取；勿新增）",
         False,
     ),
     (
@@ -286,7 +214,7 @@ PAGE2_FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE2_EXAM_CENTER",
 )
 
-# 页面4 · 系统与钉钉「系统配置」弹窗分区：顺序即展示顺序；keys 须覆盖 SYSTEM_CONFIG_KEYS 全集且无重复。
+# 页面4 · 系统配置分区：顺序即展示顺序；keys 须与 SYSTEM_CONFIG_KEYS 全集一致且无重复。
 # defaultExpanded=True 的分区默认展开，其余折叠（details 无 open 属性）。
 def _page_tools_section_hint() -> str:
     from .feature_tools_config import SLUG_LABELS, feature_tools_slug_hint
@@ -297,11 +225,11 @@ def _page_tools_section_hint() -> str:
         return f"{title}：{', '.join(parts)}"
 
     return (
-        "页面0/1/2 各填一行英文逗号分隔的 slug 即可开启对应入口；保存后自动同步下方单项开关。"
+        "页面0/1/2 各填一行英文逗号分隔的 slug 即可开启对应入口；保存后自动写入运行时功能开关。"
         f"{_line('0', '页面0')}。"
-        f"{_line('1', '页面1')}。"
+        f"{_line('1', '页面1（含页面3 顶栏考试中心）')}。"
         f"{_line('2', '页面2')}。"
-        "账号级权限仍见「账号管理」· 页面1/2 分组。"
+        "账号级权限仍见「账号管理」· 按分级角色展示页面0/1/2 分组。"
     )
 
 
@@ -317,16 +245,6 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
-        ),
-    },
-    {
-        "id": "legacy_feature_flags",
-        "title": "兼容 · 单项功能开关",
-        "hint": "由上方 CSV 保存时自动同步；一般无需手改。未迁移环境可继续填 1 开启；旧版共用开关见最末两项。",
-        "defaultExpanded": False,
-        "keys": PAGE1_FEATURE_FLAG_KEYS + PAGE2_FEATURE_FLAG_KEYS + (
-            "FEATURE_PAGE2_AUDIT",
-            "FEATURE_EXAM_CENTER",
         ),
     },
     {

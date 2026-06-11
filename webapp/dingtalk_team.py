@@ -5,8 +5,88 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Iterable
 
-from .authz import project_display_label
 from .models import Project, ProjectTeam, UploadRecord
+
+
+def _team_id_from_project(project: Project | None) -> str | None:
+    if project is None:
+        return None
+    tid = (getattr(project, "assigned_team_id", None) or "").strip()
+    return tid or None
+
+
+def _project_for_label(project_name: str | None) -> Project | None:
+    """与 authz.resolve_project_for_upload 一致：按展示名 / 基础名匹配项目。"""
+    label = (project_name or "").strip()
+    if not label:
+        return None
+    from .authz import _project_lookup_maps
+
+    _by_id, by_label, by_name = _project_lookup_maps()
+    return by_label.get(label) or by_name.get(label)
+
+
+def resolve_team_id_by_project_name(project_name: str | None) -> str | None:
+    return _team_id_from_project(_project_for_label(project_name))
+
+
+def resolve_team_id_by_upload(rec: UploadRecord | None) -> str | None:
+    if rec is None:
+        return None
+    from .authz import resolve_project_for_upload
+
+    return _team_id_from_project(resolve_project_for_upload(rec))
+
+
+def resolve_team_id_by_upload_with_meta(
+    rec: UploadRecord | None,
+    proj_meta: dict | None = None,
+) -> str | None:
+    """定时任务侧：upload → 项目 → 项目组；再回退 proj_meta[project_name].team_id。"""
+    tid = resolve_team_id_by_upload(rec)
+    if tid:
+        return tid
+    if not proj_meta or rec is None:
+        return None
+    pn = (getattr(rec, "project_name", None) or "").strip()
+    if not pn:
+        return None
+    m = proj_meta.get(pn) or {}
+    fallback = (m.get("team_id") or "").strip()
+    return fallback or None
+
+
+def group_uploads_by_team(
+    uploads: Iterable[UploadRecord],
+    *,
+    proj_meta: dict | None = None,
+) -> dict[str | None, list[UploadRecord]]:
+    out: dict[str | None, list[UploadRecord]] = defaultdict(list)
+    for rec in uploads:
+        if proj_meta is not None:
+            tid = resolve_team_id_by_upload_with_meta(rec, proj_meta)
+        else:
+            tid = resolve_team_id_by_upload(rec)
+        out[tid].append(rec)
+    return dict(out)
+
+
+def group_project_names_by_team(
+    uploads: Iterable[UploadRecord],
+    *,
+    proj_meta: dict | None = None,
+) -> dict[str | None, set[str]]:
+    out: dict[str | None, set[str]] = defaultdict(set)
+    for rec in uploads:
+        pn = (getattr(rec, "project_name", None) or "").strip()
+        if not pn:
+            continue
+        if proj_meta is not None:
+            tid = resolve_team_id_by_upload_with_meta(rec, proj_meta)
+        else:
+            tid = resolve_team_id_by_upload(rec)
+        out[tid].add(pn)
+    return dict(out)
 
 
 def _default_team_dingtalk_credentials(*, for_scheduler: bool = False) -> tuple[str, str | None]:
@@ -67,38 +147,3 @@ def resolve_dingtalk_credentials(
         return webhook, secret, "default_team"
     webhook, secret = _global_dingtalk_credentials(for_scheduler=for_scheduler)
     return webhook, secret, "global"
-
-
-def resolve_team_id_by_project_name(project_name: str | None) -> str | None:
-    label = (project_name or "").strip()
-    if not label:
-        return None
-    for p in Project.query.all():
-        if project_display_label(
-            getattr(p, "name", None),
-            getattr(p, "registered_country", None),
-            getattr(p, "registered_category", None),
-        ) == label:
-            tid = (getattr(p, "assigned_team_id", None) or "").strip()
-            return tid or None
-    return None
-
-
-def resolve_team_id_by_upload(rec: UploadRecord | None) -> str | None:
-    if rec is None:
-        return None
-    pid = (getattr(rec, "project_id", None) or "").strip()
-    if pid:
-        p = Project.query.get(pid)
-        if p:
-            tid = (getattr(p, "assigned_team_id", None) or "").strip()
-            if tid:
-                return tid
-    return resolve_team_id_by_project_name(getattr(rec, "project_name", None))
-
-
-def group_uploads_by_team(uploads: Iterable[UploadRecord]) -> dict[str | None, list[UploadRecord]]:
-    out: dict[str | None, list[UploadRecord]] = defaultdict(list)
-    for rec in uploads:
-        out[resolve_team_id_by_upload(rec)].append(rec)
-    return dict(out)

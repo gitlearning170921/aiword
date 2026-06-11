@@ -1715,12 +1715,14 @@
         document.querySelector('[data-bs-target="#trainTabKnowledge"]')?.addEventListener("shown.bs.tab", refreshKnowledgeStatus);
     }
 
-    function initDictMaintenanceOnly() {
+    async function initDictMaintenanceOnly() {
         bindDictMaintenanceEvents();
-        loadAdminOrganizationsForDict().then(() => loadRegisteredCountriesDict()).then(() => loadTeams());
+        await loadAdminOrganizationsForDict();
+        await loadRegisteredCountriesDict();
+        await loadTeams();
     }
 
-    function boot() {
+    async function boot() {
         if (body) {
             wireCompanyLogoutButton();
             initCompanySessionBar();
@@ -1730,19 +1732,22 @@
             initGroupBySelect();
             bindEvents();
             bindDictMaintenanceEvents();
-            loadRegisteredCountriesDict().then(() => {
-                loadOrganizationsContext();
-                loadTeams();
-                loadProjects(true);
-            });
+            await loadRegisteredCountriesDict();
+            await Promise.all([
+                loadOrganizationsContext(),
+                loadTeams(),
+                loadProjects(true),
+            ]);
             return;
         }
         if (document.getElementById("countryDictList")) {
-            initDictMaintenanceOnly();
+            await initDictMaintenanceOnly();
         }
     }
 
-    if (document.readyState === "loading") {
+    if (typeof registerPageInit === "function") {
+        registerPageInit(boot);
+    } else if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", boot);
     } else {
         boot();

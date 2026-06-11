@@ -3,7 +3,8 @@
 
 初稿 LLM（页面2个人配置）：默认 deepseek / cursor / tongyi；**允许列表与是否须个人 Key**
 由 aicheckword ``GET /api/integration/draft/interop-config`` 下发并与本页合并。
-``X-Client-Llm-Personal-Keys-Only`` 仅在上游 ``personalKeysOnly`` 为 true 时发送。
+``X-Client-Llm-Personal-Keys-Only`` 仅在上游 ``interop-config.personalKeysOnly`` 为 true 时发送；
+为 false 时 aiword 可不配个人 Key，由 aicheckword 系统 Key 承担（用户已保存个人 Key 时仍可透传作优先覆盖）。
 说明见 aicheckword ``docs/integration-draft-provider-status.md``。
 """
 
@@ -20,6 +21,7 @@ import requests
 from flask import (
     Blueprint,
     current_app,
+    has_request_context,
     jsonify,
     render_template,
     request,
@@ -40,9 +42,17 @@ from ._integration_common import (
     manual_upload_only_from_request,
     resolve_aicheckword_project_id_for_upload,
     resolve_org_collection_for_integration,
+    sync_active_organization_if_requested,
     upstream_get_json,
 )
-from .llm_credential_crypto import decrypt_api_key, encrypt_api_key
+from .llm_credential_crypto import (
+    coerce_encrypted_blob,
+    decrypt_api_key,
+    encrypt_api_key,
+    normalize_api_key_plain,
+    normalize_llm_base_url,
+    verify_api_key_roundtrip,
+)
 from .models import DraftGenerationJob, UploadRecord, UserLlmCredential, now_local
 
 # 上游 HTTP「读超时」配置上限（秒）：提交大 multipart、下载 ZIP 等单请求可等待的最长时间。
@@ -120,10 +130,10 @@ def _encrypted_key_blob_for_provider(row: UserLlmCredential, provider: str) -> O
     attr = _DRAFT_LLM_PROVIDER_KEY_ATTR[p]
     blob = getattr(row, attr, None)
     if blob:
-        return blob
+        return coerce_encrypted_blob(blob)
     legacy = row.api_key_encrypted
     if legacy and (row.provider or "").strip().lower() == p:
-        return legacy
+        return coerce_encrypted_blob(legacy)
     return None
 
 
@@ -477,6 +487,11 @@ def _upstream_personal_keys_only() -> bool:
     return True
 
 
+def _draft_personal_keys_enforced() -> bool:
+    """是否须个人 Key：与 aicheckword ``draft_interop_personal_keys_only`` / interop-config 同步。"""
+    return _upstream_personal_keys_only()
+
+
 def _upstream_admin_notes() -> str:
     _refresh_upstream_interop_if_stale()
     if not _interop_data:
@@ -490,19 +505,19 @@ def _builtin_provider_rows() -> list[dict[str, Any]]:
             "id": "deepseek",
             "label": "DeepSeek",
             "requiresApiKey": True,
-            "hint": "须个人 API Key；可选 API Base URL、模型名，留空则用上游默认。",
+            "hint": "个人 API Key（上游要求 personalKeysOnly 时必填）；可选 Base URL / 模型，留空则用上游默认。",
         },
         {
             "id": "cursor",
             "label": "Cursor",
             "requiresApiKey": True,
-            "hint": "须个人 Cursor API Key；可选 Cursor API Base、模型名；仓库/ref 用上游 cursor_*。",
+            "hint": "个人 Cursor API Key（上游要求 personalKeysOnly 时必填）；可选 Base / 模型；仓库/ref 用上游 cursor_*。",
         },
         {
             "id": "tongyi",
             "label": "通义千问（DashScope）",
             "requiresApiKey": True,
-            "hint": "须个人 DashScope API Key；可选模型名，留空则用上游默认。",
+            "hint": "个人 DashScope Key（上游要求 personalKeysOnly 时必填）；可选模型名，留空则用上游默认。",
         },
     ]
 
@@ -571,8 +586,8 @@ def _interop_sync_warnings() -> list[str]:
 
 
 def _draft_personal_key_headers() -> dict[str, str]:
-    """上游 personalKeysOnly 为 true 时声明个人 Key 模式。"""
-    if not _upstream_personal_keys_only():
+    """声明个人 Key 模式，禁止上游回落系统管理员 Key。"""
+    if not _draft_personal_keys_enforced():
         return {}
     return {"X-Client-Llm-Personal-Keys-Only": "1"}
 
@@ -601,7 +616,11 @@ def _load_user_credential(user_id: str) -> Optional[UserLlmCredential]:
 
 
 def _client_llm_headers(user_id: str, provider: Optional[str] = None) -> dict[str, str]:
-    """发往 aicheckword 的个人 LLM 头：Key 必填（个人）；Base URL / 模型可选，空则上游用系统默认。"""
+    """发往 aicheckword 的个人 LLM 头：仅透传 Provider + Api-Key。
+
+    Base URL / 模型 intentionally 不发送，与 aicheckword 侧栏/系统配置保持一致；
+    避免 aiword 库内历史误填的 Base/模型导致「同 Key 在 aicheckword 直连可用、经 aiword 却 401」。
+    """
     row = _load_user_credential(user_id)
     if not row:
         return {}
@@ -612,45 +631,27 @@ def _client_llm_headers(user_id: str, provider: Optional[str] = None) -> dict[st
     key_plain = _decrypt_key_for_provider(row, prov, sk)
     if not key_plain.strip():
         return {}
-    bu = _base_url_for_provider(row, prov)
-    mo = _model_for_provider(row, prov)
-
-    def _with_optional(h: dict[str, str]) -> dict[str, str]:
-        if bu:
-            h["X-Client-Llm-Base-Url"] = bu
-        if mo:
-            h["X-Client-Llm-Model"] = mo
-        return h
-
-    if prov == "cursor":
-        return _with_optional(
-            {
-                "X-Client-Llm-Provider": "cursor",
-                "X-Client-Llm-Api-Key": key_plain.strip(),
-            }
-        )
-    if prov == "tongyi":
-        return _with_optional(
-            {
-                "X-Client-Llm-Provider": "tongyi",
-                "X-Client-Llm-Api-Key": key_plain.strip(),
-            }
-        )
-    return _with_optional(
-        {
-            "X-Client-Llm-Provider": "deepseek",
-            "X-Client-Llm-Api-Key": key_plain.strip(),
-        }
-    )
+    return {
+        "X-Client-Llm-Provider": prov,
+        "X-Client-Llm-Api-Key": key_plain.strip(),
+    }
 
 
 def _personal_key_ready(user_id: str, provider: Optional[str] = None) -> tuple[bool, str]:
-    """初稿提交前：上游要求个人 Key 时须已配置并解密出非空 API Key。"""
-    if not _upstream_personal_keys_only():
+    """初稿提交前：须已配置当前登录账号的个人 API Key。"""
+    if not _draft_personal_keys_enforced():
         return True, ""
     p, err = _resolve_submit_provider(user_id, provider)
     if not p:
         return False, err
+    sk = str(current_app.config.get("SECRET_KEY") or "")
+    row = _load_user_credential(user_id)
+    if not row or not _has_usable_stored_key_for_provider(row, p, sk=sk):
+        labels = {"deepseek": "DeepSeek", "cursor": "Cursor", "tongyi": "通义千问"}
+        return False, (
+            f"请先在「个人 LLM 设置」（初稿/审核/翻译/审核后修改共用）中为 "
+            f"{labels.get(p, p)} 保存本账号 API Key（不可使用他人或系统管理员 Key）"
+        )
     return True, ""
 
 
@@ -675,7 +676,7 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
     _refresh_upstream_interop_if_stale()
     eff = _effective_allowed_provider_ids_ordered()
     notes = _upstream_admin_notes()
-    pko = _upstream_personal_keys_only()
+    pko = _draft_personal_keys_enforced()
     warns = _interop_sync_warnings()
     allowed_rows = _merged_allowed_providers_for_client()
     row = _load_user_credential(uid)
@@ -689,6 +690,15 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
     sk = str(current_app.config.get("SECRET_KEY") or "")
     has_by = {pid: _has_usable_stored_key_for_provider(row, pid, sk=sk) for pid in AIWORD_DRAFT_LLM_PROVIDERS}
     has_key = bool(has_by.get(provider_out))
+    has_blob_by: dict[str, bool] = {}
+    decrypt_ok_by: dict[str, bool] = {}
+    stored_len_by: dict[str, int] = {}
+    for pid in AIWORD_DRAFT_LLM_PROVIDERS:
+        blob = _encrypted_key_blob_for_provider(row, pid) if row else None
+        has_blob_by[pid] = bool(blob)
+        plain = decrypt_api_key(sk, blob) if blob else ""
+        decrypt_ok_by[pid] = bool(plain.strip())
+        stored_len_by[pid] = len(plain.strip())
     base_by = {pid: _base_url_for_provider(row, pid) for pid in AIWORD_DRAFT_LLM_PROVIDERS}
     model_by = {pid: _model_for_provider(row, pid) for pid in AIWORD_DRAFT_LLM_PROVIDERS}
     return {
@@ -696,6 +706,9 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
         "provider": provider_out,
         "hasApiKey": has_key,
         "hasApiKeyByProvider": has_by,
+        "hasEncryptedBlobByProvider": has_blob_by,
+        "keyDecryptOkByProvider": decrypt_ok_by,
+        "storedKeyLengthByProvider": stored_len_by,
         "apiBaseUrl": base_by.get(provider_out, ""),
         "llmModel": model_by.get(provider_out, ""),
         "apiBaseUrlByProvider": base_by,
@@ -710,14 +723,117 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
 
 @draft_gen_bp.get("/api/llm-settings")
 def api_llm_settings_get():
-    err = _login_wall()
-    if err:
-        return err
-    uid = _session_user_id()
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
     row = _load_user_credential(uid)
     if not row:
         return jsonify(_llm_settings_payload_for_user(uid, configured=False))
     return jsonify(_llm_settings_payload_for_user(uid, configured=True))
+
+
+def _llm_key_test_response(uid: str, data: dict[str, Any]):
+    """测试个人 LLM Key；优先经 aicheckword（与初稿任务同路径），始终返回 JSON。"""
+    try:
+        provider = (data.get("provider") or "deepseek").strip().lower()
+        if provider not in AIWORD_DRAFT_LLM_PROVIDERS:
+            return jsonify({"ok": False, "message": f"不支持的 provider: {provider}"}), 400
+        form_key = normalize_api_key_plain(data.get("apiKey") or data.get("api_key") or "")
+        key_source = "form" if form_key else "stored"
+        trial_key = form_key
+        sk = str(current_app.config.get("SECRET_KEY") or "")
+        row = _load_user_credential(uid)
+        if not trial_key:
+            if row:
+                blob = _encrypted_key_blob_for_provider(row, provider)
+                if blob and not decrypt_api_key(sk, blob).strip():
+                    return jsonify(
+                        {
+                            "ok": False,
+                            "message": (
+                                "已保存的 Key 无法解密（密文存在但读出来为空）。"
+                                "常见原因：系统配置中的 SECRET_KEY 曾变更。"
+                                "请重新在输入框粘贴 Key 并点「保存」，再测试。"
+                            ),
+                            "keySource": key_source,
+                            "keyDecryptFailed": True,
+                        }
+                    ), 400
+                trial_key = _decrypt_key_for_provider(row, provider, sk)
+        if not trial_key.strip():
+            return jsonify(
+                {"ok": False, "message": "请先填写 API Key 或保存后再测试", "keySource": key_source}
+            ), 400
+        upstream_base = _draft_api_base()
+        if upstream_base:
+            ok, msg, diag = _test_llm_key_via_upstream(provider=provider, api_key=trial_key)
+            src_label = "输入框明文" if key_source == "form" else "库内解密"
+            resp_base = {
+                "keySource": key_source,
+                "testPath": "upstream",
+            }
+            if diag:
+                resp_base["diagnostics"] = diag
+            if ok:
+                return jsonify(
+                    {
+                        **resp_base,
+                        "ok": True,
+                        "message": f"{msg}（Key 来源：{src_label}；经 aicheckword 验证）",
+                    }
+                )
+            if not ok:
+                hint = ""
+                if diag.get("systemKeyWorks") is True:
+                    hint = (
+                        "【结论】aicheckword 侧栏系统 Key 可用，但你保存的个人 Key 无效或不是同一把；"
+                        "请从 DeepSeek 控制台重新复制 Key 粘贴保存，或把 aicheckword 侧栏里可用的 Key 原样复制过来。"
+                    )
+                elif diag.get("systemKeyWorks") is False:
+                    hint = (
+                        "【结论】个人 Key 与 aicheckword 系统 Key 均不可用；"
+                        "请先在 aicheckword 侧栏保存可用的 DeepSeek Key（Base URL: https://api.deepseek.com/v1）。"
+                    )
+                elif diag.get("receivedKeyPrefixOk") is False:
+                    hint = "【结论】Key 格式异常（DeepSeek 通常以 sk- 开头），请重新复制。"
+                msg_out = f"{msg} {hint}".strip() if hint else msg
+                return jsonify(
+                    {
+                        **resp_base,
+                        "ok": False,
+                        "message": f"{msg_out}（Key 来源：{src_label}）",
+                    }
+                ), 400
+        base_url = normalize_llm_base_url(
+            provider, (data.get("apiBaseUrl") or data.get("api_base_url") or "").strip()
+        )
+        model = (data.get("llmModel") or data.get("llm_model") or "").strip()
+        ok, msg = _test_llm_key_for_provider(
+            provider=provider,
+            api_key=trial_key,
+            base_url=base_url,
+            model=model,
+        )
+        src_label = "输入框明文" if key_source == "form" else "库内解密"
+        if not ok:
+            return jsonify(
+                {
+                    "ok": False,
+                    "message": f"{msg}（Key 来源：{src_label}；aiword 直连，未配置上游）",
+                    "keySource": key_source,
+                    "testPath": "direct",
+                }
+            ), 400
+        return jsonify(
+            {
+                "ok": True,
+                "message": f"{msg}（Key 来源：{src_label}）",
+                "keySource": key_source,
+                "testPath": "direct",
+            }
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"测试 Key 时服务器异常：{exc}"}), 500
 
 
 @draft_gen_bp.post("/api/llm-settings")
@@ -728,11 +844,15 @@ def api_llm_settings_post():
     blocked, uid = _account_user_id_wall()
     if blocked:
         return blocked
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = request.get_json(force=True) or {}
+    if data.get("testOnly") or data.get("test_only"):
+        return _llm_key_test_response(uid, data)
     _refresh_upstream_interop_if_stale(force=True)
-    data = request.get_json(force=True) or {}
     provider = (data.get("provider") or "deepseek").strip().lower()
-    api_key = (data.get("apiKey") or data.get("api_key") or "").strip()
-    api_base = (data.get("apiBaseUrl") or data.get("api_base_url") or "").strip()
+    api_key = normalize_api_key_plain(data.get("apiKey") or data.get("api_key") or "")
+    api_base = normalize_llm_base_url(provider, (data.get("apiBaseUrl") or data.get("api_base_url") or "").strip())
     llm_model = (data.get("llmModel") or data.get("llm_model") or "").strip()
 
     if provider not in AIWORD_DRAFT_LLM_PROVIDERS:
@@ -761,6 +881,8 @@ def api_llm_settings_post():
     if not row:
         row = UserLlmCredential(user_id=uid, provider=provider)
         db.session.add(row)
+    elif str(getattr(row, "user_id", "") or "").strip() != uid:
+        return jsonify({"message": "无权修改该账号的 LLM 设置"}), 403
     row.provider = provider
     base_attr = _DRAFT_LLM_BASE_ATTR[provider]
     model_attr = _DRAFT_LLM_MODEL_ATTR[provider]
@@ -775,12 +897,173 @@ def api_llm_settings_post():
     labels = {"deepseek": "DeepSeek", "cursor": "Cursor", "tongyi": "通义千问（DashScope）"}
     key_attr = _DRAFT_LLM_PROVIDER_KEY_ATTR[provider]
     if api_key:
+        if not verify_api_key_roundtrip(sk, api_key):
+            return jsonify(
+                {
+                    "message": (
+                        "Key 加密自检失败（保存后无法正确读回）。"
+                        "请重试；若仍失败，请检查系统配置 SECRET_KEY 是否稳定、勿随意修改。"
+                    )
+                }
+            ), 500
         setattr(row, key_attr, encrypt_api_key(sk, api_key))
         row.api_key_encrypted = None
-    elif not _encrypted_key_blob_for_provider(row, provider) and _upstream_personal_keys_only():
-        return jsonify({"message": f"{labels[provider]} 须填写并保存个人 API Key（不使用 aicheckword 系统管理员 Key）"}), 400
+    elif not _encrypted_key_blob_for_provider(row, provider) and _draft_personal_keys_enforced():
+        return jsonify({"message": f"{labels[provider]} 须填写并保存个人 API Key（仅本账号可用，不使用 aicheckword 系统管理员 Key）"}), 400
     db.session.commit()
     return jsonify({"ok": True, "message": "已保存"})
+
+
+def _format_upstream_llm_test_detail(detail: Any) -> tuple[str, dict[str, Any]]:
+    """解析 aicheckword llm-key-test 失败 detail，提取可读消息与诊断字段。"""
+    meta: dict[str, Any] = {}
+    if isinstance(detail, str):
+        return detail, meta
+    if not isinstance(detail, dict):
+        return str(detail), meta
+    msg = str(detail.get("message") or detail.get("detail") or detail)
+    for k in (
+        "systemKeyWorks",
+        "receivedKeyLength",
+        "receivedKeyPrefixOk",
+        "baseUrlUsed",
+        "modelUsed",
+    ):
+        if k in detail:
+            meta[k] = detail[k]
+    return msg, meta
+
+
+def _test_llm_key_via_upstream(*, provider: str, api_key: str) -> tuple[bool, str, dict[str, Any]]:
+    """经 aicheckword 探测 Key，与初稿 job 使用相同 Header 与个人 Key 策略。"""
+    meta: dict[str, Any] = {}
+    base = (_draft_api_base() or "").strip().rstrip("/")
+    if not base:
+        return False, "未配置 AICHECKWORD_DRAFT_API_BASE", meta
+    p = (provider or "deepseek").strip().lower()
+    key = normalize_api_key_plain(api_key)
+    if not key:
+        return False, "API Key 为空", meta
+    org_id, _ = resolve_org_collection_for_integration()
+    headers = {
+        **_upstream_headers(for_multipart=False, organization_id=org_id),
+        "X-Client-Llm-Provider": p,
+        "X-Client-Llm-Api-Key": key,
+    }
+    if _draft_personal_keys_enforced():
+        headers["X-Client-Llm-Personal-Keys-Only"] = "true"
+    url = f"{base}/api/integration/draft/llm-key-test"
+    payload = {"provider": p, "apiKey": key}
+    try:
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=_draft_requests_timeout(read_seconds=min(90, _draft_timeout())),
+        )
+    except requests.RequestException as exc:
+        return False, f"无法连接 aicheckword 测试接口：{exc}", meta
+    if r.status_code == 401:
+        return False, "aicheckword 集成鉴权失败（HTTP 401），请检查 QUIZ_API_SECRET / Bearer 配置", meta
+    try:
+        body = r.json()
+    except ValueError:
+        snippet = (r.text or "")[:240]
+        return False, f"aicheckword 返回非 JSON（HTTP {r.status_code}）：{snippet}", meta
+    if r.status_code >= 500:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        msg, meta = _format_upstream_llm_test_detail(detail)
+        if not msg:
+            msg = (body.get("message") if isinstance(body, dict) else None) or (r.text or "")[:240]
+        return False, msg or f"aicheckword 内部错误 HTTP {r.status_code}", meta
+    if r.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        msg, meta = _format_upstream_llm_test_detail(detail)
+        if not msg:
+            msg = (body.get("message") if isinstance(body, dict) else None) or (r.text or "")[:240]
+        return False, msg or f"HTTP {r.status_code}", meta
+    if isinstance(body, dict) and body.get("ok") is False:
+        return False, str(body.get("message") or "Key 验证失败"), meta
+    if isinstance(body, dict) and body.get("message"):
+        return True, str(body["message"]), meta
+    return True, "Key 验证通过", meta
+
+
+def _test_llm_key_for_provider(
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str = "",
+    model: str = "",
+) -> tuple[bool, str]:
+    """直连提供方最小请求，验证 Key（不写日志明文）。"""
+    p = (provider or "").strip().lower()
+    key = normalize_api_key_plain(api_key)
+    if not key:
+        return False, "API Key 为空"
+    if p == "deepseek":
+        bu = normalize_llm_base_url(p, base_url) or "https://api.deepseek.com/v1"
+        mo = (model or "deepseek-chat").strip()
+        url = f"{bu.rstrip('/')}/chat/completions"
+        try:
+            r = requests.post(
+                url,
+                json={
+                    "model": mo,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 8,
+                },
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                timeout=45,
+            )
+        except requests.RequestException as exc:
+            return False, f"网络请求失败：{exc}"
+        if r.status_code == 401:
+            return False, (
+                "DeepSeek 拒绝该 Key（HTTP 401）。请核对：Key 是否完整、勿带 Bearer 前缀、"
+                "Base URL 留空或形如 https://api.deepseek.com/v1"
+            )
+        if r.status_code >= 400:
+            return False, f"DeepSeek HTTP {r.status_code}：{(r.text or '')[:240]}"
+        return True, "DeepSeek Key 验证通过"
+    if p == "tongyi":
+        mo = (model or "qwen-plus").strip()
+        try:
+            r = requests.post(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                json={
+                    "model": mo,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 8,
+                },
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                timeout=45,
+            )
+        except requests.RequestException as exc:
+            return False, f"网络请求失败：{exc}"
+        if r.status_code == 401:
+            return False, "通义 DashScope 拒绝该 Key（HTTP 401）"
+        if r.status_code >= 400:
+            return False, f"通义 HTTP {r.status_code}：{(r.text or '')[:240]}"
+        return True, "通义 Key 验证通过"
+    if p == "cursor":
+        return False, "Cursor 暂不支持一键测试，请保存后在实际任务中验证（须配 GitHub 仓库）"
+    return False, f"暂不支持测试 provider={p!r}"
+
+
+@draft_gen_bp.post("/api/llm-settings/test")
+def api_llm_settings_test():
+    """兼容旧前端路径；推荐 POST /api/llm-settings 且 body.testOnly=true。"""
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = request.get_json(force=True) or {}
+    return _llm_key_test_response(uid, data)
 
 
 def _fetch_upstream_meta(
@@ -833,6 +1116,7 @@ def api_draft_bootstrap():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    sync_active_organization_if_requested(explicit_org, org_id)
     bc_raw = (request.args.get("base_case_id") or "").strip()
     base_case_id: Optional[int] = None
     if bc_raw:
@@ -865,8 +1149,8 @@ def api_draft_bootstrap():
     out["collections"] = integration_collection_rows()
     org_ctx = integration_org_context_payload()
     out["organizations"] = org_ctx.get("organizations") or []
-    out["activeOrganizationId"] = org_ctx.get("activeOrganizationId")
-    out["activeKnowledgeCollection"] = org_ctx.get("activeKnowledgeCollection")
+    out["activeOrganizationId"] = org_id or org_ctx.get("activeOrganizationId")
+    out["activeKnowledgeCollection"] = resolved_collection or org_ctx.get("activeKnowledgeCollection")
     out["metaOk"] = boot_err is None and bool(bootstrap)
     out["metaError"] = boot_err or (None if bootstrap else "page-bootstrap 异常")
     if isinstance(upstream_body, dict):
@@ -1255,11 +1539,16 @@ def api_jobs_submit():
         fn0 = secure_filename(suggested_fn) or "base.docx"
         base_from_uploads.append((fn0, bdata))
 
-    base_multipart_names = [fn for fn, _ in base_from_uploads]
-    for f in request.files.getlist("base_files") or []:
-        fn = secure_filename(f.filename or "unnamed.bin")
-        if fn and fn not in base_multipart_names:
-            base_multipart_names.append(fn)
+    from .archive_expand import flatten_upload_file_storage
+
+    input_expanded: list[tuple[str, bytes]] = list(
+        flatten_upload_file_storage(request.files.getlist("input_files") or [])
+    )
+    base_expanded: list[tuple[str, bytes]] = list(base_from_uploads)
+    base_expanded.extend(
+        flatten_upload_file_storage(request.files.getlist("base_files") or [])
+    )
+    base_multipart_names = [secure_filename(n) or "base.bin" for n, _ in base_expanded]
     _auto_bind_base_files_by_target(payload_obj, base_multipart_names)
 
     payload_for_upstream = {
@@ -1267,9 +1556,7 @@ def api_jobs_submit():
     }
     payload_str2 = json.dumps(payload_for_upstream, ensure_ascii=False)
 
-    input_parts = request.files.getlist("input_files") or []
-    base_parts = request.files.getlist("base_files") or []
-    display_names = [secure_filename(f.filename or "file") for f in input_parts]
+    display_names = [secure_filename(n) or "file" for n, _ in input_expanded]
 
     snap = {
         k: payload_obj.get(k)
@@ -1306,19 +1593,31 @@ def api_jobs_submit():
     db.session.commit()
 
     files: list[tuple[str, tuple[str, bytes, str]]] = []
-    for f in input_parts:
-        fn = secure_filename(f.filename or "unnamed.bin")
-        files.append(("input_files", (fn, f.read(), "application/octet-stream")))
-    for fn_b, bdata in base_from_uploads:
-        files.append(("base_files", (fn_b, bdata, "application/octet-stream")))
-    for f in base_parts:
-        fn = secure_filename(f.filename or "unnamed.bin")
-        files.append(("base_files", (fn, f.read(), "application/octet-stream")))
+    for fn, blob in input_expanded:
+        files.append(
+            ("input_files", (secure_filename(fn) or "unnamed.bin", blob, "application/octet-stream"))
+        )
+    for fn_b, bdata in base_expanded:
+        files.append(
+            ("base_files", (secure_filename(fn_b) or "base.bin", bdata, "application/octet-stream"))
+        )
+
+    from ._integration_common import client_llm_headers_for_session
+
+    llm_hdrs = client_llm_headers_for_session(provider=p)
+    if _draft_personal_keys_enforced() and not llm_hdrs.get("X-Client-Llm-Api-Key"):
+        return jsonify(
+            {
+                "message": (
+                    "个人 LLM Key 未能随请求发出（可能解密失败或与所选提供方不一致）。"
+                    "请在「个人 LLM 设置」点「测试 Key」或重新保存。"
+                )
+            }
+        ), 400
 
     hdr = {
         **_upstream_headers(for_multipart=True, organization_id=org_id),
-        **_draft_personal_key_headers(),
-        **_client_llm_headers(uid, provider=p),
+        **llm_hdrs,
     }
     url = f"{base}/api/integration/draft/jobs"
     try:
@@ -1386,12 +1685,14 @@ def api_job_status(local_id: str):
     base = _draft_api_base()
     if not base:
         return jsonify({"message": "未配置上游地址"}), 503
+    from ._integration_common import client_llm_headers_for_session
+
     hdr = {
         **_upstream_headers(
             for_multipart=True,
             organization_id=str(getattr(job, "organization_id", "") or "").strip(),
         ),
-        **_client_llm_headers(uid),
+        **client_llm_headers_for_session(),
     }
     url = f"{base}/api/integration/draft/jobs/{job.upstream_job_id}"
     try:
@@ -1430,13 +1731,14 @@ def api_job_download(local_id: str):
     base = _draft_api_base()
     if not base:
         return jsonify({"message": "未配置上游地址"}), 503
+    from ._integration_common import client_llm_headers_for_session
+
     hdr = {
         **_upstream_headers(
             for_multipart=True,
             organization_id=str(getattr(job, "organization_id", "") or "").strip(),
         ),
-        **_draft_personal_key_headers(),
-        **_client_llm_headers(uid),
+        **client_llm_headers_for_session(),
     }
     url = f"{base}/api/integration/draft/jobs/{job.upstream_job_id}/download"
     try:

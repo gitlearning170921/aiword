@@ -49,10 +49,12 @@ from ._integration_common import (
     integration_organization_list_filter,
     login_wall,
     manual_upload_only_from_request,
+    personal_llm_key_wall,
     safe_truncate,
     resolve_aicheckword_project_id_for_upload,
     integration_org_context_response,
     resolve_org_collection_for_integration,
+    sync_active_organization_if_requested,
     upload_record_visible_to_user,
     upstream_headers,
 )
@@ -266,6 +268,7 @@ def api_audit_meta():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    sync_active_organization_if_requested(explicit_org, org_id)
     payload = build_integration_bootstrap_payload(
         resolved_collection,
         read_timeout=min(30, _audit_timeout()),
@@ -307,13 +310,23 @@ def api_audit_review_text():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    provider = str(data.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
     from .aicheckword_core_proxy import upstream_json_post
 
     body = dict(data)
     body["collection"] = collection
     body.pop("organizationId", None)
     body.pop("organization_id", None)
-    resp, code = upstream_json_post("review/text", body=body, organization_id=org_id, read_seconds=600)
+    resp, code = upstream_json_post(
+        "review/text",
+        body=body,
+        organization_id=org_id,
+        read_seconds=600,
+        extra_headers=client_llm_headers_for_session(provider=provider),
+    )
     if code != 200:
         return resp, code
     payload = resp.get_json()
@@ -338,6 +351,10 @@ def api_audit_review_kdocs():
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    provider = str(data.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
     from .aicheckword_core_proxy import upstream_json_post
 
     body = {
@@ -353,6 +370,7 @@ def api_audit_review_kdocs():
         body=body,
         organization_id=org_id,
         read_seconds=600,
+        extra_headers=client_llm_headers_for_session(provider=provider),
     )
     if code != 200:
         return resp, code
@@ -502,6 +520,11 @@ def api_audit_create_job():
             }
         ), 400
 
+    provider = str(payload_obj.get("provider") or "").strip() or None
+    key_err = personal_llm_key_wall(provider=provider)
+    if key_err:
+        return key_err
+
     # 组合 multipart files + display_name_map + aiword_upload_id_map
     resolved_blobs: list[tuple[str, bytes, str]] = []
     if has_task_source:
@@ -515,12 +538,10 @@ def api_audit_create_job():
             ), 400
         resolved_blobs = resolved
     else:
-        for f in uploaded_files:
-            raw_name = (f.filename or "").strip() or "upload.bin"
-            data = f.read()
-            if not data:
-                continue
-            resolved_blobs.append((raw_name, data, ""))
+        from .archive_expand import flatten_upload_file_storage
+
+        for disp_name, blob in flatten_upload_file_storage(uploaded_files):
+            resolved_blobs.append((disp_name, blob, ""))
 
     err_msg = _enforce_audit_stable(mode, len(resolved_blobs))
     if err_msg:
@@ -596,7 +617,7 @@ def api_audit_create_job():
     # 提交上游
     url = f"{base}/api/integration/audit/jobs"
     hdrs = upstream_headers(for_multipart=True, organization_id=org_id)
-    hdrs.update(client_llm_headers_for_session())
+    hdrs.update(client_llm_headers_for_session(provider=provider))
     try:
         r = requests.post(
             url,
@@ -1008,7 +1029,7 @@ def api_audit_report_proxy_get(report_id: int):
 
 @audit_bp.patch("/api/reports/<int:report_id>/points/<int:point_index>")
 def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
-    """代理 aicheckword PATCH /api/reports/{id}/points/{point_index}。"""
+    """代理 aicheckword PATCH /api/reports/{id}/points/{point_index}（含 save_correction 纠正）。"""
     err = login_wall()
     if err:
         return err
@@ -1018,6 +1039,10 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return jsonify({"message": "请求体必须是 JSON 对象"}), 400
+    body = dict(body)
+    upload_id = str(
+        body.pop("upload_id", None) or request.args.get("upload_id") or ""
+    ).strip()
     sub_idx_raw = (request.args.get("sub_report_index") or "0").strip()
     try:
         sub_idx = int(sub_idx_raw)
@@ -1025,24 +1050,100 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
         sub_idx = 0
     if sub_idx < 0:
         sub_idx = 0
-    org_id, _ = resolve_org_collection_for_integration()
+    is_correction = bool(body.get("save_correction")) or bool(
+        str(body.get("correction_kind") or "").strip()
+    )
+    try:
+        org_id, collection = resolve_org_collection_for_integration(
+            upload_id=upload_id or None,
+            preferred_collection=str(body.get("collection") or "").strip() or None,
+        )
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    if is_correction:
+        body["collection"] = collection
     try:
         r = requests.patch(
             f"{base}/api/reports/{int(report_id)}/points/{int(point_index)}",
             params={"sub_report_index": sub_idx},
             json=body,
             headers=upstream_headers(for_multipart=False, organization_id=org_id),
-            timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
+            timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
         )
     except requests.RequestException as e:
         return jsonify({"message": f"上游请求失败：{e}"}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        detail = r.text[:2000]
+        try:
+            up = r.json()
+            detail = up.get("detail") or up.get("message") or detail
+        except Exception:
+            pass
+        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": detail}), 502
     try:
         data = r.json()
     except Exception:
         return jsonify({"message": "上游响应非 JSON"}), 502
-    return jsonify({"ok": True, "data": data})
+    resp = {"ok": True, "data": data, "organizationId": org_id}
+    if is_correction:
+        resp["collection"] = collection
+    return jsonify(resp)
+
+
+@audit_bp.post("/api/reports/<int:report_id>/points/<int:point_index>/correction")
+def api_audit_report_proxy_correction(report_id: int, point_index: int):
+    """代理 aicheckword POST /api/reports/{id}/points/{idx}/correction（误报/弃用/修订+入库）。"""
+    err = login_wall()
+    if err:
+        return err
+    base = integration_api_base()
+    if not base:
+        return jsonify({"message": "未配置上游 API"}), 500
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"message": "请求体必须是 JSON 对象"}), 400
+    body = dict(body)
+    upload_id = str(
+        body.pop("upload_id", None) or request.args.get("upload_id") or ""
+    ).strip()
+    sub_idx_raw = (request.args.get("sub_report_index") or "0").strip()
+    try:
+        sub_idx = int(sub_idx_raw)
+    except (TypeError, ValueError):
+        sub_idx = 0
+    if sub_idx < 0:
+        sub_idx = 0
+    try:
+        org_id, collection = resolve_org_collection_for_integration(
+            upload_id=upload_id or None,
+            preferred_collection=str(body.get("collection") or "").strip() or None,
+        )
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    body["collection"] = collection
+    try:
+        r = requests.post(
+            f"{base}/api/reports/{int(report_id)}/points/{int(point_index)}/correction",
+            params={"sub_report_index": sub_idx},
+            json=body,
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
+            timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
+        )
+    except requests.RequestException as e:
+        return jsonify({"message": f"上游请求失败：{e}"}), 502
+    if r.status_code != 200:
+        detail = r.text[:2000]
+        try:
+            up = r.json()
+            detail = up.get("detail") or up.get("message") or detail
+        except Exception:
+            pass
+        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": detail}), 502
+    try:
+        data = r.json()
+    except Exception:
+        return jsonify({"message": "上游响应非 JSON"}), 502
+    return jsonify({"ok": True, "data": data, "organizationId": org_id, "collection": collection})
 
 
 @audit_bp.get("/api/uploads/<upload_id>/latest-report")

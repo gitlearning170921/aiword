@@ -57,8 +57,9 @@
         </div>
         {% endif %}
         <div class="col-md-{% if manual_upload_only %}12{% else %}6{% endif %}">
-          <label class="form-label">{% if manual_upload_only %}手动上传 1 个 Base 文件{% else %}或手动上传 1 个 Base 文件{% endif %}</label>
-          <input type="file" id="amod_base_files" class="form-control" accept=".docx,.doc,.xlsx,.xls,.txt,.md"/>
+          <label class="form-label">{% if manual_upload_only %}手动上传 Base 文件{% else %}或手动上传 Base 文件{% endif %}</label>
+          <p class="text-muted small mb-1">稳态模式需<strong>恰好 1 个</strong> Base（单个 Word/Excel 或压缩包内仅含一个文档）。支持 <code>.zip / .tar / .tgz</code> 自动解压。</p>
+          <input type="file" id="amod_base_files" class="form-control" accept=".docx,.doc,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz"/>
         </div>
       </div>
     </div>
@@ -131,6 +132,11 @@
           <div id="amod_progress_caption" class="small text-muted mt-1">准备中…</div>
         </div>
         <div class="mt-2 small text-muted">当前本地任务编号：<code id="amod_local_job_id">—</code></div>
+        <div class="mt-3 d-none" id="amod_coverage_wrap">
+          <div class="small fw-semibold mb-2">审核点修改覆盖（任务完成后）</div>
+          <div id="amod_coverage_summary" class="small text-muted mb-2"></div>
+          <div id="amod_coverage_list" class="small border rounded p-2 bg-light" style="max-height: 420px; overflow: auto;"></div>
+        </div>
       </div>
     </div>
 

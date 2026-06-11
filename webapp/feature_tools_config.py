@@ -114,24 +114,31 @@ def feature_tools_csv_configured_in_db(key: str, app=None) -> bool:
 
 
 def apply_feature_tools_csv_to_flags(flags: dict[str, bool], app=None) -> None:
-    """按 FEATURE_TOOLS_PAGE* 覆盖 legacy 开关；并写入 FEATURE_PAGE0_* 衍生键。"""
+    """按 FEATURE_TOOLS_PAGE* 覆盖 legacy 开关；并写入 FEATURE_PAGE0_* 衍生键。
+
+    仅当 CSV 非空时才按 slug 覆盖；库中仅有空占位或未配置时仍读 legacy FEATURE_PAGE* 单项开关。
+    """
     from .app_settings import get_setting
 
     page0_csv = (get_setting("FEATURE_TOOLS_PAGE0", default="", app=app) or "").strip()
     page1_csv = (get_setting("FEATURE_TOOLS_PAGE1", default="", app=app) or "").strip()
     page2_csv = (get_setting("FEATURE_TOOLS_PAGE2", default="", app=app) or "").strip()
 
-    if feature_tools_csv_configured_in_db("FEATURE_TOOLS_PAGE1", app) or page1_csv:
+    if page1_csv:
         _apply_slug_map_to_flags(flags, parse_feature_tools_csv(page1_csv), PAGE1_SLUG_TO_FLAG)
-    if feature_tools_csv_configured_in_db("FEATURE_TOOLS_PAGE2", app) or page2_csv:
+    if page2_csv:
         _apply_slug_map_to_flags(flags, parse_feature_tools_csv(page2_csv), PAGE2_SLUG_TO_FLAG)
 
-    if feature_tools_csv_configured_in_db("FEATURE_TOOLS_PAGE0", app) or page0_csv:
+    if page0_csv:
         page0_slugs = parse_feature_tools_csv(page0_csv)
         _apply_slug_map_to_flags(flags, page0_slugs, PAGE0_SLUG_TO_FLAG)
     else:
         for k, v in _legacy_page0_flags_from_page1(flags).items():
             flags[k] = v
+
+    flags["FEATURE_EXAM_CENTER"] = bool(
+        flags.get("FEATURE_PAGE1_EXAM_CENTER") or flags.get("FEATURE_PAGE2_EXAM_CENTER")
+    )
 
 
 def ensure_feature_tools_csv_in_settings(settings: dict[str, str]) -> None:

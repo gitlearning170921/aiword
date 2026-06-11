@@ -1,0 +1,30 @@
+---
+description: 任务录入与下载模板/导入待办字段联动；改录入区须同步 task_entry_schema
+globs:
+  - web/static/js/app.js
+  - webapp/routes.py
+  - webapp/task_entry_schema.py
+  - web/templates/upload.html
+  - webapp/templates/upload.html
+---
+
+# 任务录入 ↔ 模板/导入 联动
+
+页面1「任务录入」、**下载空/示例模板**、**导入待办** 共用 `webapp/task_entry_schema.py` 中的 `TASK_ENTRY_IMPORT_COLUMNS`。
+
+## 修改任务录入字段时必做
+
+1. **`webapp/task_entry_schema.py`**：更新 `TASK_ENTRY_IMPORT_COLUMNS` 的 `key` / `label` / `layer` 与列顺序；必要时补 `_IMPORT_HEADER_ALIASES` 兼容旧表头。
+2. **`web/static/js/app.js`**：`createProjectBlock`（第一层项目）、`createTaskRowUnderProject`（第二层任务行）DOM 顺序与文案与 schema 对齐。
+3. **`api_upload` / 编辑弹窗 / `api_uploads_import`**：读写相同 UploadRecord 字段；导入解析走 `import_header_map()`，勿另写表头常量。
+4. **下载模板**：前端只调 `GET /api/uploads/import-template`，禁止在 JS 内硬编码 CSV 表头。
+
+## 禁止
+
+- 在 `app.js` 或 `routes.py` 重复维护 `_CSV_HEADERS`、`_IMPORT_TEMPLATE_HEADERS` 等独立表头列表。
+- 把「任务类别」映射到 `task_type`（任务类别为文件型/事项型，任务类型为配置项名称；类别仅用于导入校验与模板展示）。
+
+## 自检
+
+- `GET /api/task-entry/import-schema` 返回的 `headers` 与录入区字段一致。
+- 空模板下载后首行表头与任务录入表格列顺序可读性一致（项目块 → 任务行）。

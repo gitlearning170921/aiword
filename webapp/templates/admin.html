@@ -5,7 +5,7 @@
     <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
         <div>
             <h1>页面4 · 系统管理</h1>
-            <p class="mb-0 small text-muted">超级管理员入口：注册国家/项目组字典、账号与配置、系统参数与钉钉联调。须已通过页面4 访问密码验证。</p>
+            <p class="mb-0 small text-muted">超级管理员入口：业务字典（注册国家/项目组/任务类型等）、账号、系统参数与钉钉联调。须已通过页面4 访问密码验证。</p>
         </div>
         <div class="text-end">
             <span class="badge bg-warning text-dark">超级管理员</span>
@@ -24,13 +24,13 @@
             <button class="nav-link" id="tab-users-btn" data-bs-toggle="tab" data-bs-target="#tab-users" type="button" role="tab">账号管理</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="tab-config-btn" data-bs-toggle="tab" data-bs-target="#tab-config" type="button" role="tab">配置管理</button>
-        </li>
-        <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-system-btn" data-bs-toggle="tab" data-bs-target="#tab-system" type="button" role="tab">系统与钉钉</button>
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-scope-btn" data-bs-toggle="tab" data-bs-target="#tab-scope" type="button" role="tab">作用域诊断</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-feedback-btn" data-bs-toggle="tab" data-bs-target="#tab-feedback" type="button" role="tab">问题反馈</button>
         </li>
     </ul>
 
@@ -70,6 +70,55 @@
                             <ul class="list-group list-group-flush small dict-item-list" id="teamsDictList">
                                 <li class="list-group-item text-muted">加载中…</li>
                             </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card h-100 dict-panel-card">
+                        <div class="card-header">
+                            <span>任务类型</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">页面1 任务登记下拉选项；与注册国家/项目组同属业务字典。</p>
+                            <div class="input-group input-group-sm mb-3">
+                                <select class="form-select" id="newTaskCategory" style="max-width:96px" title="任务类别">
+                                    <option value="file" selected>文件型</option>
+                                    <option value="matter">事项型</option>
+                                </select>
+                                <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
+                                <button class="btn btn-primary" type="button" id="addTaskTypeBtn">添加</button>
+                            </div>
+                            <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card h-100 dict-panel-card">
+                        <div class="card-header">
+                            <span>完成状态</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">页面2 生成页任务完成状态下拉选项。</p>
+                            <div class="input-group input-group-sm mb-3">
+                                <input type="text" class="form-control" id="newCompletionStatus" placeholder="新增完成状态">
+                                <button class="btn btn-primary" type="button" id="addCompletionStatusBtn">添加</button>
+                            </div>
+                            <div id="completionStatusesList" class="d-flex flex-wrap gap-1"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card h-100 dict-panel-card">
+                        <div class="card-header">
+                            <span>审核状态</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">页面1 审核状态下拉选项。</p>
+                            <div class="input-group input-group-sm mb-3">
+                                <input type="text" class="form-control" id="newAuditStatus" placeholder="新增审核状态">
+                                <button class="btn btn-primary" type="button" id="addAuditStatusBtn">添加</button>
+                            </div>
+                            <div id="auditStatusesList" class="d-flex flex-wrap gap-1"></div>
                         </div>
                     </div>
                 </div>
@@ -174,135 +223,123 @@
             </div>
         </div>
 
-        <div class="tab-pane fade" id="tab-config" role="tabpanel">
-            <div class="card">
-                <div class="card-body">
-                    <h5 class="card-title">配置管理</h5>
-                    <div class="mb-3">
-                        <label class="form-label small fw-bold">任务类型</label>
-                        <div class="input-group input-group-sm mb-2">
-                            <select class="form-select" id="newTaskCategory" style="max-width:96px" title="任务类别">
-                                <option value="file" selected>文件型</option>
-                                <option value="matter">事项型</option>
-                            </select>
-                            <input type="text" class="form-control" id="newTaskType" placeholder="新增任务类型">
-                            <button class="btn btn-outline-success" type="button" id="addTaskTypeBtn">+</button>
-                        </div>
-                        <div id="taskTypesList" class="d-flex flex-wrap gap-1"></div>
-                    </div>
-                    <hr>
-                    <div>
-                        <label class="form-label small fw-bold">完成状态（页面2）</label>
-                        <div class="input-group input-group-sm mb-2">
-                            <input type="text" class="form-control" id="newCompletionStatus" placeholder="新增完成状态">
-                            <button class="btn btn-outline-success" type="button" id="addCompletionStatusBtn">+</button>
-                        </div>
-                        <div id="completionStatusesList" class="d-flex flex-wrap gap-1"></div>
-                    </div>
-                    <hr>
-                    <div>
-                        <label class="form-label small fw-bold">审核状态（页面1）</label>
-                        <div class="input-group input-group-sm mb-2">
-                            <input type="text" class="form-control" id="newAuditStatus" placeholder="新增审核状态">
-                            <button class="btn btn-outline-success" type="button" id="addAuditStatusBtn">+</button>
-                        </div>
-                        <div id="auditStatusesList" class="d-flex flex-wrap gap-1"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <div class="tab-pane fade" id="tab-system" role="tabpanel">
-            <p class="small text-muted mb-3">催办通知与体系记录机器人为<strong>两套独立配置</strong>，可填不同 Webhook；填相同地址则实际为同一机器人。详细参数在「系统配置」弹窗对应分区。</p>
-            <div class="card mb-3">
-                <div class="card-body">
-                    <h6 class="small fw-bold mb-2">催办 · 自动通知时间</h6>
-                    <div class="row g-2 align-items-end">
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">每周任务完成提醒</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00">
+            <p class="small text-muted mb-3">左侧为钉钉催办与机器人快捷配置；右侧为系统参数（功能开关、数据库、Session 等）。催办通知与体系记录机器人为<strong>两套独立配置</strong>，可填不同 Webhook。</p>
+            <div class="row g-3 admin-system-split">
+                <div class="col-lg-6">
+                    <div class="card admin-system-panel h-100">
+                        <div class="card-header py-2">
+                            <span class="small fw-bold">钉钉与催办</span>
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small mb-0">逾期前一日催告</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00">
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">每两天项目统计</label>
-                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30">
-                        </div>
-                        <div class="col-md-1">
-                            <button type="button" class="btn btn-sm btn-primary w-100" id="saveScheduleConfigBtn">保存</button>
-                        </div>
-                        <div class="col-md-2 mt-2">
-                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
-                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5">
-                        </div>
-                    </div>
-                    <p class="small text-muted mb-2 mt-2">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30。</p>
-                    <div id="scheduleInfo" class="d-flex flex-wrap gap-3 small"></div>
-                    <div class="mt-3 pt-3 border-top">
-                        <h6 class="small fw-bold mb-2">测试自动催办</h6>
-                        <p class="small text-muted mb-2">按定时任务相同逻辑立即发送（全部分项目组）。若钉钉群未收到，请检查机器人是否设置了关键词且消息内容包含该关键词。</p>
-                        <div class="d-flex flex-wrap gap-1">
-                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
-                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
+                        <div class="card-body admin-system-panel-body p-2 p-md-3">
+                            <details class="admin-dingtalk-section" open>
+                                <summary class="admin-dingtalk-section-summary">
+                                    <span>自动通知时间</span>
+                                    <span class="admin-dingtalk-section-tag">定时</span>
+                                </summary>
+                                <div class="admin-dingtalk-section-body">
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-0">每周任务完成提醒</label>
+                                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-0">逾期前一日催告</label>
+                                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-0">每两天项目统计</label>
+                                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
+                                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5">
+                                        </div>
+                                        <div class="col-12">
+                                            <button type="button" class="btn btn-sm btn-primary" id="saveScheduleConfigBtn">保存定时</button>
+                                        </div>
+                                    </div>
+                                    <p class="small text-muted mb-2 mt-2">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30。</p>
+                                    <div id="scheduleInfo" class="d-flex flex-wrap gap-2 small mb-2"></div>
+                                    <div class="border-top pt-2 mt-2">
+                                        <div class="small fw-semibold mb-1">测试自动催办</div>
+                                        <p class="small text-muted mb-2">按定时任务相同逻辑立即发送（全部分项目组）。</p>
+                                        <div class="d-flex flex-wrap gap-1">
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </details>
+                            <details class="admin-dingtalk-section">
+                                <summary class="admin-dingtalk-section-summary">
+                                    <span>项目组钉钉</span>
+                                    <span class="admin-dingtalk-section-tag">Webhook</span>
+                                </summary>
+                                <div class="admin-dingtalk-section-body">
+                                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；留空时回退全局催办 Webhook。</p>
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-12">
+                                            <label class="form-label small mb-0">项目组</label>
+                                            <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small mb-0">Webhook</label>
+                                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
+                                            <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
+                                        </div>
+                                        <div class="col-md-8">
+                                            <label class="form-label small mb-0">Secret（留空不改）</label>
+                                            <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="保持不变请留空">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <button type="button" class="btn btn-sm btn-outline-primary w-100" id="saveTeamDingtalkBtn">保存</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </details>
+                            <details class="admin-dingtalk-section">
+                                <summary class="admin-dingtalk-section-summary">
+                                    <span>通知文案</span>
+                                    <span class="admin-dingtalk-section-tag">模板</span>
+                                </summary>
+                                <div class="admin-dingtalk-section-body">
+                                    <p class="small text-muted mb-2">手动催办与模板消息 Markdown；定时任务正文在代码中生成。</p>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#notifyTemplateModal">
+                                        编辑通知文案
+                                    </button>
+                                </div>
+                            </details>
+                            <details class="admin-dingtalk-section">
+                                <summary class="admin-dingtalk-section-summary">
+                                    <span>体系记录机器人</span>
+                                    <span class="admin-dingtalk-section-tag">回调</span>
+                                </summary>
+                                <div class="admin-dingtalk-section-body">
+                                    <p class="small text-muted mb-2">HTTP 回调接收 @机器人 / 关键词消息。回调 URL 由右侧系统配置中的 <code>BASE_URL</code> 自动生成。</p>
+                                    <div id="adminChatbotCallbackUrlPanel" class="mb-2">
+                                        <div class="small text-muted">加载回调 URL…</div>
+                                    </div>
+                                    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
+                                </div>
+                            </details>
                         </div>
                     </div>
                 </div>
-            </div>
-            <div class="card mb-3">
-                <div class="card-body py-2">
-                    <h6 class="small fw-bold mb-2">催办 · 项目组钉钉</h6>
-                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；<strong>留空</strong>时回退全局催办 Webhook（不会预填体系记录机器人地址）。</p>
-                    <div class="row g-2 align-items-end">
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">项目组</label>
-                            <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
+                <div class="col-lg-6">
+                    <div class="card admin-system-panel h-100 d-flex flex-column">
+                        <div class="card-header py-2">
+                            <span class="small fw-bold">系统配置</span>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small mb-0">Webhook</label>
-                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
-                            <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
+                        <div class="card-body admin-system-panel-body flex-grow-1 p-2 p-md-3">
+                            <p class="small text-muted mb-2">功能开关、数据库、访问密码及钉钉全局参数等。敏感项留空表示不修改；修改数据库连接后需重启服务。</p>
+                            <div id="systemSettingsForm" class="sys-cfg-form sys-cfg-form--inline"></div>
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small mb-0">Secret（留空不改）</label>
-                            <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="保持不变请留空">
+                        <div class="card-footer py-2 bg-white border-top">
+                            <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
                         </div>
-                        <div class="col-md-1">
-                            <button type="button" class="btn btn-sm btn-outline-primary w-100" id="saveTeamDingtalkBtn">保存</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="card mb-3">
-                <div class="card-body py-2">
-                    <h6 class="small fw-bold mb-2">催办 · 通知文案</h6>
-                    <p class="small text-muted mb-2">配置按项目/按人员/单条任务等手动催办与模板消息的 Markdown 文案；定时任务正文在代码中生成，此处主要影响页面3 手动催办。</p>
-                    <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#notifyTemplateModal">
-                        编辑通知文案
-                    </button>
-                </div>
-            </div>
-            <div class="card mb-3">
-                <div class="card-body">
-                    <h6 class="small fw-bold mb-2">体系记录机器人</h6>
-                    <p class="small text-muted mb-2">HTTP 回调接收 @机器人 / 关键词消息并自动回复。回调 URL 由系统配置中的 <code>BASE_URL</code> 自动生成（调试填穿透地址，正式填域名），复制到钉钉开放平台即可。</p>
-                    <div id="adminChatbotCallbackUrlPanel" class="mb-2">
-                        <div class="small text-muted">加载回调 URL…</div>
-                    </div>
-                    <div class="d-flex flex-wrap gap-2 mb-0">
-                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
-                    </div>
-                </div>
-            </div>
-            <div class="card">
-                <div class="card-body">
-                    <h6 class="small fw-bold mb-2">系统配置</h6>
-                    <p class="small text-muted mb-2">功能开关、数据库、Session、访问密码，以及「催办与定时通知」「体系记录机器人」等分区。敏感项留空表示不修改。修改数据库连接后需重启服务。</p>
-                    <div class="d-flex flex-wrap gap-2 mb-2">
-                        <button type="button" class="btn btn-sm btn-primary" id="openSystemSettingsBtn">打开系统配置</button>
                     </div>
                 </div>
             </div>
@@ -317,6 +354,47 @@
                 <div class="card-body">
                     <p class="small text-muted mb-3">排查「看不到数据」时，核对账号绑定、Session 当前公司/项目组与各页 API 实际过滤规则是否一致。</p>
                     <div id="scopeDiagnosticsPanel" class="small text-muted">加载中…</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-feedback" role="tabpanel">
+            <div class="card" id="adminFeedbackPanel">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span>用户问题反馈</span>
+                    <div class="d-flex gap-2 align-items-center">
+                        <select class="form-select form-select-sm" id="adminFeedbackStatusFilter" style="width:auto;min-width:8rem">
+                            <option value="">全部状态</option>
+                            <option value="pending">待处理</option>
+                            <option value="processing">处理中</option>
+                            <option value="resolved">已解决</option>
+                            <option value="closed">已关闭</option>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshAdminFeedback">刷新</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">各业务页面右下角浮动按钮提交的反馈；可更新状态与处理方案，提交人可在「我的反馈」中查看。</p>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-bordered align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>提交时间</th>
+                                    <th>提交人</th>
+                                    <th>功能模块</th>
+                                    <th>优先级</th>
+                                    <th>问题描述</th>
+                                    <th>截图</th>
+                                    <th>状态</th>
+                                    <th style="min-width:12rem">处理方案 / 处理时间</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminFeedbackTableBody">
+                                <tr><td colspan="9" class="text-muted text-center small py-3">切换到本 Tab 后加载…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -395,9 +473,9 @@
                         <div id="newUserTeamsPicker" class="mb-1"></div>
                         <p class="form-text small mb-0">每人仅可绑定一个项目组；修改后将看不到原项目组的数据。</p>
                     </div>
-                    <div class="mb-0 mt-2 border-top pt-2">
+                    <div class="mb-0 mt-2 border-top pt-2" id="newUserFeaturePermsWrap">
                         <label class="form-label small mb-0">功能权限</label>
-                        <p class="form-text small mb-2">页面1 与页面2 分项独立：须先在「系统配置」对应分区开启全局开关；选「跟随系统」表示不因本账号单独限制。仅超级管理员不受限。</p>
+                        <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关；「跟随系统」表示不因本账号单独限制。</p>
                         <div id="newUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
                     </div>
                 </form>
@@ -452,9 +530,9 @@
                     <div id="editUserTeamsPicker" class="mb-1"></div>
                     <p class="form-text small mb-0">每人仅可绑定一个项目组；修改后将看不到原项目组的数据。</p>
                 </div>
-                <div class="mb-2 border-top pt-2">
+                <div class="mb-2 border-top pt-2" id="editUserFeaturePermsWrap">
                     <label class="form-label small">功能权限</label>
-                    <p class="form-text small mb-2">页面1 与页面2 分项独立：须先在「系统配置」对应分区开启全局开关；选「跟随系统」表示不因本账号单独限制。仅超级管理员不受限。</p>
+                    <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关；「跟随系统」表示不因本账号单独限制。</p>
                     <div id="editUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
                 </div>
                 <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
@@ -472,7 +550,7 @@
             </div>
             <div class="modal-body">
                 <p class="small text-muted mb-2" id="batchUserFeaturePermsHint">已选 0 个账号</p>
-                <p class="form-text small mb-2">页面1 与页面2 分项独立。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。须先在「系统配置」对应分区开启全局开关。</p>
+                <p class="form-text small mb-2">字段与新建/编辑账号中的功能权限一致（含页面0/1/2 分组）。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。须先在「系统配置」对应分区开启全局开关。</p>
                 <div id="batchUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
             </div>
             <div class="modal-footer">
@@ -501,21 +579,6 @@
     </div>
 </div>
 
-<div id="systemSettingsModal" class="system-modal" aria-hidden="true">
-    <div class="system-modal-backdrop" data-close="1"></div>
-    <div class="system-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="systemSettingsModalTitle">
-        <div class="system-modal-header">
-            <div class="system-modal-title" id="systemSettingsModalTitle">系统配置</div>
-            <button type="button" class="system-modal-close" id="closeSystemSettingsBtn" aria-label="关闭">×</button>
-        </div>
-        <div class="system-modal-body">
-            <div id="systemSettingsForm" class="sys-cfg-form"></div>
-        </div>
-        <div class="system-modal-footer">
-            <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
-        </div>
-    </div>
-</div>
 {% endblock %}
 {% block body_extra %}
 <script src="{{ url_for('static', filename='js/company_registry.js', v=static_version) }}"></script>

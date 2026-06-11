@@ -6,7 +6,8 @@
     <h2 class="mb-3">审核报告编辑（AI Word 内置）</h2>
     <p class="text-muted small">
       对齐 aicheckword 报告点编辑：支持单报告/批量子报告（<code>sub_report_index</code>），
-      可 PATCH 问题描述、修改建议、处理状态、需修改文档列表。
+      可 PATCH 问题描述、修改建议、处理状态、需修改文档列表；
+      <strong>纠正</strong>支持修订 / 标记误报 / 弃用，并可写入反馈知识库供后续审核参考。
       仅<strong>处理状态为「立即修改」</strong>的审核点会进入「审核后修改」待办。
     </p>
     <div id="are_msg" class="alert d-none"></div>
@@ -81,6 +82,77 @@
         </div>
         <div class="col-12">
           <button id="are_btn_save" type="button" class="btn btn-success">保存当前审核点（PATCH）</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3 border-warning" id="are_correction_panel">
+      <div class="card-header bg-warning-subtle">纠正审核点（误报 / 弃用 / 修订 + 入库）</div>
+      <div class="card-body row g-2">
+        <div class="col-12">
+          <label class="form-label">纠正方式</label>
+          <div class="d-flex flex-wrap gap-3">
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="are_corr_kind" id="are_corr_revision" value="revision" checked>
+              <label class="form-check-label" for="are_corr_revision">修订本条内容</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="are_corr_kind" id="are_corr_fp" value="false_positive">
+              <label class="form-check-label" for="are_corr_fp">标记为误报</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="are_corr_kind" id="are_corr_dep" value="deprecated">
+              <label class="form-check-label" for="are_corr_dep">弃用本条</label>
+            </div>
+          </div>
+        </div>
+        <div id="are_corr_fp_panel" class="col-12 d-none">
+          <p class="small text-muted mb-1">误报：本条不再作为有效审核问题，处理状态将设为「无需修改」。</p>
+          <label class="form-label">误报原因（必填）</label>
+          <textarea id="are_fp_reason" class="form-control" rows="3" placeholder="例如：封面已有受控编号，模型未提取到"></textarea>
+        </div>
+        <div id="are_corr_dep_panel" class="col-12 d-none">
+          <p class="small text-muted mb-1">弃用：本条从有效问题清单中移除（不计入统计）。</p>
+          <label class="form-label">弃用说明（可选）</label>
+          <textarea id="are_dep_note" class="form-control" rows="2"></textarea>
+          <div class="form-check mt-2">
+            <input class="form-check-input" type="checkbox" id="are_add_replace">
+            <label class="form-check-label" for="are_add_replace">同时新增一条正确的审核点</label>
+          </div>
+          <div id="are_replace_fields" class="border rounded p-2 mt-2 d-none">
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">类别</label>
+                <input id="are_rep_category" class="form-control" value="一致性">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">位置</label>
+                <input id="are_rep_location" class="form-control">
+              </div>
+              <div class="col-12">
+                <label class="form-label">问题描述（正确结论，必填）</label>
+                <textarea id="are_rep_desc" class="form-control" rows="3"></textarea>
+              </div>
+              <div class="col-12">
+                <label class="form-label">修改建议</label>
+                <textarea id="are_rep_suggestion" class="form-control" rows="2"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="are_corr_revision_hint" class="col-12">
+          <p class="small text-muted mb-0">修订：使用上方「审核点编辑」区字段，保存纠正时将一并提交。</p>
+        </div>
+        <div class="col-12">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="are_feed_kb" checked>
+            <label class="form-check-label" for="are_feed_kb">将纠正内容写入知识库（下次审核可参考）</label>
+          </div>
+          <div class="form-text">入库目标（当前公司 collection）：<code id="are_kb_collection">—</code></div>
+        </div>
+        <div class="col-12 d-flex flex-wrap align-items-center gap-2">
+          <button id="are_btn_correct" type="button" class="btn btn-warning">保存纠正</button>
+          <span id="are_corr_feedback" class="small" aria-live="polite"></span>
         </div>
       </div>
     </div>

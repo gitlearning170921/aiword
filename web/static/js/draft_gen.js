@@ -1,6 +1,7 @@
 (function () {
   const root = (typeof window.__SCRIPT_ROOT__ === "string" ? window.__SCRIPT_ROOT__ : "") || "";
   let lastHasLlmKey = false;
+  let lastPersonalKeysOnly = true;
   /** @type {Record<string, boolean>} */
   var lastHasApiKeyByProvider = { deepseek: false, cursor: false, tongyi: false };
   /** @type {Record<string, string>} */
@@ -921,10 +922,20 @@
     const url = root + path;
     const o = opts || {};
     return fetch(url, Object.assign({ credentials: "same-origin" }, o)).then(function (r) {
-      return r.json().then(function (j) {
+      return r.text().then(function (text) {
+        var j = null;
+        try {
+          j = text ? JSON.parse(text) : {};
+        } catch (e) {
+          j = {
+            message:
+              "非 JSON 响应（HTTP " +
+              r.status +
+              "）：" +
+              String(text || "").replace(/\s+/g, " ").slice(0, 240),
+          };
+        }
         return { ok: r.ok, status: r.status, json: j };
-      }).catch(function () {
-        return { ok: r.ok, status: r.status, json: { message: "非 JSON 响应" } };
       });
     });
   }
@@ -1081,29 +1092,52 @@
     const klab = el("dg_key_label");
     var pmap = lastHasApiKeyByProvider || {};
     var hasThis = Object.prototype.hasOwnProperty.call(pmap, prov) ? !!pmap[prov] : !!lastHasLlmKey;
+    var reqPersonal = !!lastPersonalKeysOnly;
+    var keyRequired = reqPersonal;
     if (prov === "cursor") {
       if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = "Cursor API Key（必填）";
-      if (hint) hint.textContent = hasThis ? "已加密落库，重启后仍有效；输入框不留存明文（留空则不修改）" : "当前提供方尚未保存 Key，须填写并保存";
+      if (klab) klab.textContent = keyRequired ? "Cursor API Key（必填）" : "Cursor API Key（可选）";
+      if (hint) {
+        hint.textContent = hasThis
+          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
+          : keyRequired
+            ? "当前账号尚未保存 Key，须填写并保存"
+            : "未保存时将使用 aicheckword 系统 Cursor Key";
+      }
       if (sub) {
-        sub.textContent =
-          "个人 Key 独立；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。";
+        sub.textContent = reqPersonal
+          ? "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。"
+          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。";
       }
     } else if (prov === "tongyi") {
       if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = "DashScope API Key（必填）";
-      if (hint) hint.textContent = hasThis ? "已加密落库，重启后仍有效；输入框不留存明文（留空则不修改）" : "当前提供方尚未保存 Key，须填写并保存";
+      if (klab) klab.textContent = keyRequired ? "DashScope API Key（必填）" : "DashScope API Key（可选）";
+      if (hint) {
+        hint.textContent = hasThis
+          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
+          : keyRequired
+            ? "当前账号尚未保存 Key，须填写并保存"
+            : "未保存时将使用 aicheckword 系统通义 Key";
+      }
       if (sub) {
-        sub.textContent =
-          "个人 Key 独立；模型名可空（上游默认）。API Base 对通义通常留空（官方端点）。";
+        sub.textContent = reqPersonal
+          ? "本账号个人 Key，他人不可共用；模型名可空（上游默认）。API Base 对通义通常留空（官方端点）。"
+          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。模型名可空。";
       }
     } else {
       if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = "DeepSeek API Key（必填）";
-      if (hint) hint.textContent = hasThis ? "已加密落库，重启后仍有效；输入框不留存明文（留空则不修改）" : "当前提供方尚未保存 Key，须填写并保存";
+      if (klab) klab.textContent = keyRequired ? "DeepSeek API Key（必填）" : "DeepSeek API Key（可选）";
+      if (hint) {
+        hint.textContent = hasThis
+          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
+          : keyRequired
+            ? "当前账号尚未保存 Key，须填写并保存"
+            : "未保存时将使用 aicheckword 系统 DeepSeek Key";
+      }
       if (sub) {
-        sub.textContent =
-          "个人 Key 独立；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用上游默认。";
+        sub.textContent = reqPersonal
+          ? "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用上游默认。"
+          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。";
       }
     }
   }
@@ -1547,7 +1581,9 @@
 
       var IP = window.IntegrationPrefill;
       if (orgEl && IP && IP.fillOrganizationSelect) {
-        IP.fillOrganizationSelect("dg", b.organizations || [], b.activeOrganizationId || orgId);
+        window["__integrationOrgs_dg"] = b.organizations || [];
+        var pickOrg = orgId || b.activeOrganizationId;
+        IP.fillOrganizationSelect("dg", b.organizations || [], pickOrg);
         if (IP.wireOrganizationSelect) {
           IP.wireOrganizationSelect("dg", {
             root: (window.__SCRIPT_ROOT__ || "").replace(/\/+$/, ""),
@@ -1644,13 +1680,14 @@
   }
 
   function loadLlmSettings() {
-    api("/draft-gen/api/llm-settings", { method: "GET" }).then(function (x) {
+    return api("/draft-gen/api/llm-settings", { method: "GET" }).then(function (x) {
       if (!x.ok) {
         showMsg(x.json.message || "加载失败", true);
         return;
       }
       const d = x.json;
       lastHasLlmKey = !!d.hasApiKey;
+      lastPersonalKeysOnly = d.personalKeysOnly !== false;
       lastHasApiKeyByProvider = d.hasApiKeyByProvider && typeof d.hasApiKeyByProvider === "object"
         ? d.hasApiKeyByProvider
         : { deepseek: !!d.hasApiKey, cursor: false, tongyi: false };
@@ -1674,10 +1711,21 @@
       showInteropInfo(d);
       var rq = document.querySelector("#dg_api_key_block .dg-req-llm");
       if (rq) {
-        if (d.personalKeysOnly) rq.classList.remove("d-none");
+        if (lastPersonalKeysOnly) rq.classList.remove("d-none");
         else rq.classList.add("d-none");
       }
       syncLlmProviderUi();
+      if (d.hasEncryptedBlobByProvider && d.keyDecryptOkByProvider) {
+        var provWarn = el("dg_provider").value || "deepseek";
+        var hasBlob = !!d.hasEncryptedBlobByProvider[provWarn];
+        var decryptOk = !!d.keyDecryptOkByProvider[provWarn];
+        if (hasBlob && !decryptOk) {
+          showMsg(
+            "检测到已保存的 Key 无法解密（常见原因：系统 SECRET_KEY 曾变更）。请重新粘贴 Key 并保存。",
+            true
+          );
+        }
+      }
     });
   }
 
@@ -1700,8 +1748,31 @@
         return;
       }
       el("dg_api_key").value = "";
-      showMsg("已保存 LLM 设置（API Key 已加密写入数据库，重启后仍可用）", false);
+      showMsg("已保存个人 LLM 设置（初稿/审核/翻译/审核后修改共用，API Key 已加密落库）", false);
       loadLlmSettings();
+    });
+  }
+
+  function testLlmSettings() {
+    const prov = el("dg_provider").value.trim();
+    stashLlmExtrasForProvider(prov);
+    const body = {
+      provider: prov,
+      testOnly: true,
+      apiKey: el("dg_api_key").value.trim(),
+      apiBaseUrl: el("dg_api_base_url").value.trim(),
+      llmModel: el("dg_llm_model").value.trim(),
+    };
+    api("/draft-gen/api/llm-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (x) {
+      if (!x.ok || x.json.ok === false) {
+        showMsg((x.json && x.json.message) || "Key 测试失败", true);
+        return;
+      }
+      showMsg((x.json && x.json.message) || "Key 验证通过", false);
     });
   }
 
@@ -2015,7 +2086,12 @@
     }
     var provUse = ((el("dg_provider") && el("dg_provider").value) || "").trim();
     var keyMap = lastHasApiKeyByProvider || {};
-    if (provUse && Object.prototype.hasOwnProperty.call(keyMap, provUse) && !keyMap[provUse]) {
+    if (
+      lastPersonalKeysOnly &&
+      provUse &&
+      Object.prototype.hasOwnProperty.call(keyMap, provUse) &&
+      !keyMap[provUse]
+    ) {
       showMsg(
         "当前选择的是「" +
           provUse +
@@ -2118,7 +2194,7 @@
   }
 
   function loadJobList() {
-    api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10&" + dgIntegrationScopeQuery(), { method: "GET" }).then(function (x) {
+    return api("/draft-gen/api/jobs?page=" + encodeURIComponent(String(_dgJobsPage || 1)) + "&page_size=10&" + dgIntegrationScopeQuery(), { method: "GET" }).then(function (x) {
       const tb = el("dg_job_rows");
       if (!tb) return;
       if (!x.ok) {
@@ -2227,9 +2303,6 @@
   }
 
   function initDraftGenPage() {
-    loadLlmSettings();
-    loadJobList();
-    loadDraftBootstrap();
     var ar0 = el("dg_author_role");
     if (ar0) {
       ar0.addEventListener("change", function () {
@@ -2241,6 +2314,8 @@
     if (sel) sel.addEventListener("change", onProviderSelectChange);
     var b1 = el("dg_btn_save_llm");
     if (b1) b1.addEventListener("click", saveLlmSettings);
+    var b1t = el("dg_btn_test_llm");
+    if (b1t) b1t.addEventListener("click", testLlmSettings);
     var b2 = el("dg_btn_refresh_bootstrap");
     if (b2) b2.addEventListener("click", function () { loadDraftBootstrap(); });
     var ts = el("dg_template_scope");
@@ -2264,11 +2339,6 @@
       if (_dgJobsPage >= _dgJobsTotalPages) return;
       _dgJobsPage += 1;
       loadJobList();
-    });
-    var org0 = el("dg_organization");
-    if (org0) org0.addEventListener("change", function () {
-      if (el("dg_base_case")) el("dg_base_case").value = "";
-      loadDraftBootstrap();
     });
     var c1 = el("dg_base_case");
     if (c1) c1.addEventListener("change", loadDraftBootstrap);
@@ -2316,11 +2386,19 @@
       });
     }
     updateTemplateSelectionSummary();
+    return Promise.all([loadLlmSettings(), loadJobList(), loadDraftBootstrap()]);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initDraftGenPage);
+  function runDraftGenInit() {
+    if (!el("dg_meta_preview") && !el("dg_job_rows")) return;
+    return initDraftGenPage();
+  }
+
+  if (typeof registerPageInit === "function") {
+    registerPageInit(runDraftGenInit);
+  } else if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", runDraftGenInit);
   } else {
-    initDraftGenPage();
+    runDraftGenInit();
   }
 })();

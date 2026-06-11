@@ -166,17 +166,16 @@ def _scheduler_team_in_scope(team_id: str | None, scope_team_ids: frozenset[str]
     return tid in scope_team_ids
 
 
-def _scheduler_upload_team_id(rec) -> str | None:
-    from .dingtalk_team import resolve_team_id_by_upload
+def _scheduler_upload_team_id(rec, proj_meta: dict | None = None) -> str | None:
+    from .dingtalk_team import resolve_team_id_by_upload_with_meta
 
-    return resolve_team_id_by_upload(rec)
+    return resolve_team_id_by_upload_with_meta(rec, proj_meta)
 
 
-def _scheduler_group_uploads_by_team(uploads) -> dict[str | None, list]:
-    out: dict[str | None, list] = defaultdict(list)
-    for u in uploads:
-        out[_scheduler_upload_team_id(u)].append(u)
-    return dict(out)
+def _scheduler_group_uploads_by_team(uploads, proj_meta: dict | None = None) -> dict[str | None, list]:
+    from .dingtalk_team import group_uploads_by_team
+
+    return group_uploads_by_team(uploads, proj_meta=proj_meta)
 
 
 def _filter_uploads_by_scheduler_team_scope(uploads, proj_meta: dict, scope_team_ids: frozenset[str] | None):
@@ -184,7 +183,7 @@ def _filter_uploads_by_scheduler_team_scope(uploads, proj_meta: dict, scope_team
         return uploads
     out = []
     for u in uploads:
-        if _scheduler_team_in_scope(_scheduler_upload_team_id(u), scope_team_ids):
+        if _scheduler_team_in_scope(_scheduler_upload_team_id(u, proj_meta), scope_team_ids):
             out.append(u)
     return out
 
@@ -540,7 +539,7 @@ def _run_thursday_reminder(
             if ended:
                 q_all = q_all.filter(~UploadRecord.project_name.in_(list(ended)))
             all_tasks = q_all.all()
-            team_all_tasks = _scheduler_group_uploads_by_team(all_tasks)
+            team_all_tasks = _scheduler_group_uploads_by_team(all_tasks, proj_meta)
 
             q_pending = UploadRecord.query.filter(
                 UploadRecord.task_status == "pending",
@@ -555,7 +554,7 @@ def _run_thursday_reminder(
                 pending_tasks = _filter_uploads_by_scheduler_team_scope(
                     pending_tasks, proj_meta, scope_team_ids
                 )
-                team_all_tasks = _scheduler_group_uploads_by_team(all_tasks)
+                team_all_tasks = _scheduler_group_uploads_by_team(all_tasks, proj_meta)
 
             if not all_tasks:
                 return {"no_tasks": True, "teams_sent": 0}
@@ -583,14 +582,11 @@ def _run_thursday_reminder(
                     return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(本分钟已由其他实例发送)"}
             send_ok = False
             teams_sent = 0
-            team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks)
+            team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks, proj_meta)
             try:
-                team_to_projects: dict[str | None, set[str]] = {}
-                for u in pending_tasks:
-                    pn = u.project_name or ""
-                    if not pn:
-                        continue
-                    team_to_projects.setdefault(_scheduler_upload_team_id(u), set()).add(pn)
+                from .dingtalk_team import group_project_names_by_team
+
+                team_to_projects = group_project_names_by_team(all_tasks, proj_meta=proj_meta)
                 if not team_to_projects:
                     team_to_projects = {None: set()}
                 for team_id, team_projects in team_to_projects.items():
@@ -600,6 +596,12 @@ def _run_thursday_reminder(
                     if not webhook:
                         logger.warning("自动催办(周四提醒)：team_id=%s 未配置 webhook，已跳过", team_id)
                         continue
+                    logger.info(
+                        "自动催办(周四提醒)：发送至 team_id=%s projects=%d pending=%d",
+                        team_id or "(default)",
+                        len(team_projects),
+                        len(team_pending_by_id.get(team_id, [])),
+                    )
                     team_pending = team_pending_by_id.get(team_id, [])
                     team_project_list = sorted(team_projects)
                     team_records = team_all_tasks.get(team_id, [])
@@ -744,7 +746,7 @@ def _run_overdue_reminder(
                 name = (t.assignee_name or t.author or "").strip()
                 if not name:
                     continue
-                team_id = _scheduler_upload_team_id(t)
+                team_id = _scheduler_upload_team_id(t, proj_meta)
                 key = (team_id, name)
                 by_team_assignee.setdefault(key, []).append(t)
 
@@ -876,15 +878,12 @@ def _run_project_stats(
             send_ok = False
             teams_sent = 0
             try:
-                team_to_projects: dict[str | None, set[str]] = {}
-                for u in pending_tasks:
-                    pn = u.project_name or ""
-                    if not pn:
-                        continue
-                    team_to_projects.setdefault(_scheduler_upload_team_id(u), set()).add(pn)
+                from .dingtalk_team import group_project_names_by_team
+
+                team_to_projects = group_project_names_by_team(pending_tasks, proj_meta=proj_meta)
                 if not team_to_projects:
                     team_to_projects = {None: set()}
-                team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks)
+                team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks, proj_meta)
                 for team_id, team_projects in team_to_projects.items():
                     if not _scheduler_team_in_scope(team_id, scope_team_ids):
                         continue
@@ -892,6 +891,11 @@ def _run_project_stats(
                     if not webhook:
                         logger.warning("自动催办(项目统计)：team_id=%s 未配置 webhook，已跳过", team_id)
                         continue
+                    logger.info(
+                        "自动催办(项目统计)：发送至 team_id=%s projects=%d",
+                        team_id or "(default)",
+                        len(team_projects),
+                    )
                     team_pending = team_pending_by_id.get(team_id, [])
                     team_project_list = sorted(team_projects)
                     if not team_pending:
