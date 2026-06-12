@@ -85,7 +85,7 @@ services:
       - appnet
     restart: unless-stopped
 
-  # 可选：对外 HTTPS 反代（profile nginx）
+  # 可选：本机模拟生产域名反代（profile nginx，80 → aiword:5000）
   nginx:
     profiles: ["nginx"]
     image: nginx:1.27-alpine

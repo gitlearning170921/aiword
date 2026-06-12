@@ -1,6 +1,6 @@
 # 生产部署：仅使用预构建镜像，不在服务器上 build
 # 用法：docker compose -f docker-compose.prod.yml up -d
-# 镜像由本机 build-images + export-images 生成，经 docker load 导入
+# 对外：Nginx 80 → aiword:5000（访问 http://aiword.yuwell.com 无需 :5000）
 
 name: aiword-stack
 
@@ -8,8 +8,8 @@ services:
   aiword:
     image: ${AIWORD_IMAGE:?set AIWORD_IMAGE in .env}
     container_name: aiword
-    ports:
-      - "${AIWORD_PUBLISH_PORT:-5000}:5000"
+    expose:
+      - "5000"
     env_file:
       - .env
     environment:
@@ -54,7 +54,6 @@ services:
       retries: 3
 
   nginx:
-    profiles: ["nginx"]
     image: nginx:1.27-alpine
     container_name: aiword-nginx
     ports:

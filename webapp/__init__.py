@@ -1295,7 +1295,7 @@ def init_default_configs():
         ("project_author_reminder", "按项目+人员催办通知",
          "【个人任务催办】\n致：{author}\n\n项目：{project_name}\n\n您在该项目下有 {pending_count} 个任务待完成：\n\n{task_list}\n\n请抓紧处理！"),
         ("single_task_reminder", "单条任务催办通知",
-         "【任务催办】\n致：{author}\n\n- **{title}**\n - 截止日期：{due_date}\n - 影响业务方：{business_side}\n - 产品：{product}\n - 国家：{country}\n - 项目编号：{project_code}\n - 项目备注：{project_notes}\n - 文件版本号：{file_version}\n - 文档体现日期：{document_display_date}\n - 审核人员：{reviewer}\n - 批准人员：{approver}\n - 文档地址：{doc_link_md}\n\n请抓紧处理！"),
+         "【任务催办】\n致：{author}\n\n- {title}\n - 截止日期：{due_date}\n - 影响业务方：{business_side}\n - 产品：{product}\n - 国家：{country}\n - 项目编号：{project_code}\n - 项目备注：{project_notes}\n - 文件版本号：{file_version}\n - 文档体现日期：{document_display_date}\n - 审核人员：{reviewer}\n - 批准人员：{approver}\n - 文档地址：{doc_link_md}\n\n请抓紧处理！"),
     ]
     
     for name, order in default_task_types:
@@ -1323,6 +1323,10 @@ def init_default_configs():
                 template_key=key, template_name=name, template_content=content
             ))
         elif key == "project_reminder":
+            existing.template_content = content
+            existing.template_name = name
+            db.session.add(existing)
+        elif key == "single_task_reminder" and "- **{title}**" in (existing.template_content or ""):
             existing.template_content = content
             existing.template_name = name
             db.session.add(existing)

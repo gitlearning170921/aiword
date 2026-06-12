@@ -34,6 +34,17 @@ def user_author_pick_label(user: "User") -> str:
     return dn or un
 
 
+def notify_project_name_md(raw: str | None, *, empty_label: str = "（空）") -> str:
+    """钉钉 Markdown：项目名称加粗。"""
+    name = (raw or "").strip() or empty_label
+    return f"**{name}**"
+
+
+def notify_project_label_line_md(raw: str | None, *, prefix: str = "项目：") -> str:
+    """钉钉 Markdown：「项目：」行，仅名称加粗。"""
+    return f"{prefix}{notify_project_name_md(raw)}"
+
+
 def normalize_dingtalk_at_mobile(raw: str) -> str:
     """
     钉钉 atMobiles 用 11 位大陆手机号。

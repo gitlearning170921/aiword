@@ -40,4 +40,5 @@ COMPOSE=(docker compose -f docker-compose.prod.yml)
 
 sleep 5
 "${COMPOSE[@]}" ps
-echo "[deploy] 日志: ${COMPOSE[*]} logs -f aiword aicheckword"
+echo "[deploy] 日志: ${COMPOSE[*]} logs -f nginx aiword aicheckword"
+echo "[deploy] 访问: http://aiword.yuwell.com （需 DNS 指向本机且放行 80）"

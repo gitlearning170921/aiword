@@ -11492,15 +11492,17 @@ def _notify_pending_task_list_md(pending_uploads: list) -> str:
         groups.setdefault(_group_key(u), []).append(u)
 
     def _task_block_md(key, uploads_in_group):
+        from .notify_content import notify_doc_link_suffix_md, notify_project_name_md
+
         proj, bs, pr = key
         lines = []
         proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
         header = (
-            f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  "
-            f"影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+            f"项目：{notify_project_name_md(proj)}  "
+            f"项目编号：{proj_code or '-'}  "
+            f"影响业务方：{bs or '-'}  产品：{pr or '-'}"
         )
         lines.append(header)
-        from .notify_content import notify_doc_link_suffix_md
 
         for u in uploads_in_group:
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
@@ -11549,16 +11551,20 @@ def api_notify_by_project():
     if not pending_uploads:
         return jsonify({"message": f"项目 {project_name} 没有未完成的任务"})
     
-    from .notify_content import page2_my_tasks_link_md
+    from .notify_content import notify_project_label_line_md, page2_my_tasks_link_md
 
     from .notify_content import (
         collect_notify_person_names_from_uploads,
         resolve_mobiles_for_author_labels,
     )
     team_id = _resolve_team_id_by_project_name(project_name)
-    webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+    webhook, secret, webhook_source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
         return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
+
+    from .dingtalk_team import notify_routing_meta
+
+    routing = notify_routing_meta(team_id)
 
     assignees = collect_notify_person_names_from_uploads(pending_uploads)
     task_list_with_links_md = _notify_pending_task_list_md(pending_uploads)
@@ -11566,7 +11572,7 @@ def api_notify_by_project():
     at_mobiles, unmatched, no_mobile = resolve_mobiles_for_author_labels(assignees)
     message_plain = (
         "【项目任务催办】\n\n"
-        f"项目：{project_name}\n\n"
+        f"{notify_project_label_line_md(project_name)}\n\n"
         f"未完成任务数：{len(pending_uploads)}\n\n"
         f"请以下人员尽快完成：{'、'.join(assignees)}\n\n\n"
         "未完成列表：\n\n"
@@ -11594,6 +11600,7 @@ def api_notify_by_project():
             "atMobiles": at_mobiles,
             "unmatchedAuthors": unmatched,
             "authorsWithoutMobile": no_mobile,
+            **routing,
         }), 200
     err = result.get("error", "未知错误") if result else "未知错误"
     if isinstance(err, dict):
@@ -11632,12 +11639,17 @@ def api_notify_by_author():
         groups.setdefault(k, []).append(u)
     
     def _task_block_md(key, uploads_in_group):
+        from .notify_content import notify_doc_link_suffix_md, notify_project_name_md
+
         proj, bs, pr = key
         lines = []
         proj_code = getattr(uploads_in_group[0], "project_code", None) if uploads_in_group else None
-        header = f"**项目：{proj or '-'}  项目编号：{proj_code or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        header = (
+            f"项目：{notify_project_name_md(proj)}  "
+            f"项目编号：{proj_code or '-'}  "
+            f"影响业务方：{bs or '-'}  产品：{pr or '-'}"
+        )
         lines.append(header)
-        from .notify_content import notify_doc_link_suffix_md
 
         for u in uploads_in_group:
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
@@ -11774,7 +11786,7 @@ def api_notify_by_project_author():
             "请抓紧处理！"
         )
 
-    from .notify_content import page2_my_tasks_link_md
+    from .notify_content import notify_project_name_md, page2_my_tasks_link_md
 
     from .notify_content import resolve_mobiles_for_author_labels
 
@@ -11789,7 +11801,7 @@ def api_notify_by_project_author():
         task_list = _notify_pending_task_list_md(uploads)
         message = template.format(
             author=author,
-            project_name=project_name,
+            project_name=notify_project_name_md(project_name),
             pending_count=len(uploads),
             task_list=task_list,
             page2_url=page2_url,
@@ -11853,11 +11865,15 @@ def api_notify_single_task():
     from .dingtalk_team import resolve_team_id_by_upload
 
     team_id = resolve_team_id_by_upload(upload)
-    webhook, secret, _source = _resolve_dingtalk_for_team(team_id)
+    webhook, secret, webhook_source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
         return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
+
+    from .dingtalk_team import notify_routing_meta
+
+    routing = notify_routing_meta(team_id)
     
-    from .notify_content import notify_doc_link_md_for_template
+    from .notify_content import notify_doc_link_md_for_template, notify_project_name_md
 
     due_date_str = upload.due_date.strftime("%Y-%m-%d") if upload.due_date else "-"
     due_red = f'<font color="red">{due_date_str}</font>' if due_date_str != "-" else "-"
@@ -11870,14 +11886,15 @@ def api_notify_single_task():
     reviewer = getattr(upload, "reviewer", None) or "-"
     approver = getattr(upload, "approver", None) or "-"
     project_notes = getattr(upload, "project_notes", None) or "-"
-    title = f"{upload.project_name}/{upload.file_name}" + (f" ({upload.task_type})" if upload.task_type else "")
+    file_label = upload.file_name + (f" ({upload.task_type})" if upload.task_type else "")
+    title = f"{notify_project_name_md(upload.project_name)}/{file_label}"
     doc_link_md = notify_doc_link_md_for_template(upload)
 
     template = _get_notify_template("single_task_reminder")
     if not template:
         template = (
             "【任务催办】\n致：{author}\n\n"
-            "- **{title}**\n"
+            "- {title}\n"
             " - 截止日期：{due_date}\n"
             " - 影响业务方：{business_side}\n"
             " - 产品：{product}\n"
@@ -11892,7 +11909,7 @@ def api_notify_single_task():
 
     message_plain = template.format(
         author=upload.author,
-        project_name=upload.project_name,
+        project_name=notify_project_name_md(upload.project_name),
         file_name=upload.file_name,
         task_type=upload.task_type or "-",
         title=title,

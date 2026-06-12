@@ -6189,8 +6189,10 @@ async function _initDashboardPageInner() {
         if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
         if (teamSecretInput) teamSecretInput.value = "";
         if (teamWebhookHint) {
-            teamWebhookHint.textContent = cur?.dingtalkWebhook
-                ? "已配置本项目组独立 Webhook"
+            teamWebhookHint.textContent = cur?.dingtalkUsesGlobalFallback
+                ? "该 Webhook 与全局催办相同，不会单独发到本组群，任务仍走默认机器人"
+                : cur?.dingtalkWebhook
+                ? "已配置本项目组独立 Webhook（与全局 URL 不同）"
                 : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
         }
         if (saveTeamBtn) saveTeamBtn.disabled = false;
@@ -6214,8 +6216,10 @@ async function _initDashboardPageInner() {
         if (teamWebhookInput) teamWebhookInput.value = cur?.dingtalkWebhook || "";
         if (teamSecretInput) teamSecretInput.value = "";
         if (teamWebhookHint) {
-            teamWebhookHint.textContent = cur?.dingtalkWebhook
-                ? "已配置本项目组独立 Webhook"
+            teamWebhookHint.textContent = cur?.dingtalkUsesGlobalFallback
+                ? "该 Webhook 与全局催办相同，不会单独发到本组群，任务仍走默认机器人"
+                : cur?.dingtalkWebhook
+                ? "已配置本项目组独立 Webhook（与全局 URL 不同）"
                 : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
         }
     });
@@ -6247,11 +6251,13 @@ async function _initDashboardPageInner() {
             }
             if (teamSecretInput) teamSecretInput.value = "";
             if (teamWebhookHint) {
-                teamWebhookHint.textContent = savedTeam?.dingtalkWebhook
-                    ? "已配置本项目组独立 Webhook"
+                teamWebhookHint.textContent = savedTeam?.dingtalkUsesGlobalFallback
+                    ? "该 Webhook 与全局催办相同，不会单独发到本组群，任务仍走默认机器人"
+                    : savedTeam?.dingtalkWebhook
+                    ? "已配置本项目组独立 Webhook（与全局 URL 不同）"
                     : "未单独配置；留空时催办使用「系统配置 → 催办与定时通知」全局 Webhook（非体系记录机器人）";
             }
-            App.notify(res?.message || "项目组钉钉配置已保存", res?.webhookEchoesGlobal ? "info" : "success");
+            App.notify(res?.message || "项目组钉钉配置已保存", res?.webhookEchoesGlobal ? "warning" : "success");
         } catch (e) {
             App.notify((e && e.message) || "保存失败", "danger");
         } finally {

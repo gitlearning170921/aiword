@@ -166,26 +166,146 @@ def _scheduler_team_in_scope(team_id: str | None, scope_team_ids: frozenset[str]
     return tid in scope_team_ids
 
 
-def _scheduler_upload_team_id(rec, proj_meta: dict | None = None) -> str | None:
-    from .dingtalk_team import resolve_team_id_by_upload_with_meta
+def _scheduler_upload_team_id(rec, team_maps=None, proj_meta: dict | None = None) -> str | None:
+    from .dingtalk_team import build_project_team_maps, resolve_team_id_by_upload, upload_team_id_from_maps
 
-    return resolve_team_id_by_upload_with_meta(rec, proj_meta)
+    maps = team_maps if team_maps is not None else build_project_team_maps()
+    tid = upload_team_id_from_maps(rec, maps)
+    if tid:
+        return tid
+    if proj_meta is not None and rec is not None:
+        pn = (getattr(rec, "project_name", None) or "").strip()
+        if pn:
+            m = proj_meta.get(pn) or {}
+            fallback = _norm_scheduler_team_id(m.get("team_id"))
+            if fallback:
+                return fallback
+    # 与手动催办 resolve_team_id_by_upload 对齐：maps 未命中时按 Project 行解析所属组
+    return _norm_scheduler_team_id(resolve_team_id_by_upload(rec))
 
 
-def _scheduler_group_uploads_by_team(uploads, proj_meta: dict | None = None) -> dict[str | None, list]:
-    from .dingtalk_team import group_uploads_by_team
+def _scheduler_group_uploads_by_team(
+    uploads, team_maps=None, proj_meta: dict | None = None
+) -> dict[str | None, list]:
+    out: dict[str | None, list] = {}
+    for rec in uploads:
+        tid = _norm_scheduler_team_id(_scheduler_upload_team_id(rec, team_maps, proj_meta))
+        out.setdefault(tid, []).append(rec)
+    return out
 
-    return group_uploads_by_team(uploads, proj_meta=proj_meta)
 
-
-def _filter_uploads_by_scheduler_team_scope(uploads, proj_meta: dict, scope_team_ids: frozenset[str] | None):
+def _filter_uploads_by_scheduler_team_scope(
+    uploads, team_maps, scope_team_ids: frozenset[str] | None, proj_meta: dict | None = None
+):
     if scope_team_ids is None:
         return uploads
     out = []
     for u in uploads:
-        if _scheduler_team_in_scope(_scheduler_upload_team_id(u, proj_meta), scope_team_ids):
+        if _scheduler_team_in_scope(_scheduler_upload_team_id(u, team_maps, proj_meta), scope_team_ids):
             out.append(u)
     return out
+
+
+def _norm_scheduler_team_id(team_id: str | None) -> str | None:
+    tid = (team_id or "").strip()
+    return tid or None
+
+
+def _scheduler_upload_team_id_normalized(rec, team_maps, proj_meta: dict | None = None) -> str | None:
+    return _norm_scheduler_team_id(_scheduler_upload_team_id(rec, team_maps, proj_meta))
+
+
+def _upload_record_is_completed(rec) -> bool:
+    return bool((getattr(rec, "completion_status", None) or "").strip())
+
+
+def _scheduler_team_uploads(uploads, team_id: str | None, team_maps, proj_meta: dict | None = None) -> list:
+    want = _norm_scheduler_team_id(team_id)
+    return [
+        u
+        for u in uploads
+        if _scheduler_upload_team_id_normalized(u, team_maps, proj_meta) == want
+    ]
+
+
+def _scheduler_tasks_for_default_webhook(
+    uploads,
+    team_maps,
+    dedicated_team_ids: frozenset[str],
+    proj_meta: dict | None = None,
+) -> list:
+    """未配置独立 Webhook 的项目组 / 未归属项目组的任务，走默认机器人。"""
+    out = []
+    for u in uploads:
+        tid = _scheduler_upload_team_id_normalized(u, team_maps, proj_meta)
+        if tid and tid in dedicated_team_ids:
+            continue
+        out.append(u)
+    return out
+
+
+def _scheduler_notify_targets(scope_team_ids: frozenset[str] | None = None) -> list[dict]:
+    """按「已配置独立 Webhook 的项目组」逐条发送；其余任务合并走默认机器人。"""
+    from .dingtalk_team import dedicated_webhook_team_ids, iter_teams_with_dedicated_webhook
+
+    targets: list[dict] = []
+    for team_id, team_name, webhook, secret in iter_teams_with_dedicated_webhook():
+        tid = _norm_scheduler_team_id(team_id)
+        if not _scheduler_team_in_scope(tid, scope_team_ids):
+            continue
+        targets.append(
+            {
+                "team_id": tid,
+                "team_name": team_name,
+                "webhook": webhook,
+                "secret": secret,
+                "mode": "dedicated",
+            }
+        )
+    dedicated_ids = dedicated_webhook_team_ids()
+    default_wh, default_sec = _get_webhook_secret(None)
+    if default_wh:
+        targets.append(
+            {
+                "team_id": None,
+                "team_name": "默认催办（未单独配置 Webhook 的项目组）",
+                "webhook": default_wh,
+                "secret": default_sec,
+                "mode": "default",
+                "dedicated_team_ids": dedicated_ids,
+            }
+        )
+    return targets
+
+
+def _scheduler_tasks_for_target(
+    uploads,
+    target: dict,
+    team_maps,
+    proj_meta: dict | None = None,
+) -> list:
+    if target.get("mode") == "dedicated":
+        return _scheduler_team_uploads(uploads, target.get("team_id"), team_maps, proj_meta)
+    exclude = target.get("dedicated_team_ids") or frozenset()
+    return _scheduler_tasks_for_default_webhook(uploads, team_maps, exclude, proj_meta)
+
+
+def _scheduler_distinct_team_ids(uploads, team_maps, proj_meta: dict | None = None) -> list[str | None]:
+    ids: set[str | None] = set()
+    for u in uploads:
+        ids.add(_scheduler_upload_team_id_normalized(u, team_maps, proj_meta))
+    return sorted(ids, key=lambda t: (t is None, t or ""))
+
+
+def _scheduler_team_display_name(team_id: str | None) -> str:
+    tid = _norm_scheduler_team_id(team_id)
+    if not tid:
+        return "（未分配项目组）"
+    from .models import ProjectTeam
+
+    team = ProjectTeam.query.get(tid)
+    name = (getattr(team, "name", None) or "").strip() if team else ""
+    return name or tid
 
 
 def _project_name_in_scheduler_team_scope(
@@ -297,13 +417,17 @@ def _dedupe_upload_records_for_notify(uploads: list) -> list:
 
 def _task_block_md(key, uploads_in_group, project_name: str = None):
     """未完成列表块。若传入 project_name 则块标题只显示影响业务方、产品（与上方「项目：xxx」合并为一条，不重复项目名）。"""
+    from .notify_content import notify_doc_link_suffix_md, notify_project_name_md
+
     proj, bs, pr = key
     if project_name is not None:
         header = f"**影响业务方：{bs or '-'}  产品：{pr or '-'}**"
     else:
-        header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        header = (
+            f"项目：{notify_project_name_md(proj)}  "
+            f"影响业务方：{bs or '-'}  产品：{pr or '-'}"
+        )
     lines = [header]
-    from .notify_content import notify_doc_link_suffix_md
 
     for u in uploads_in_group:
         due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"
@@ -533,16 +657,19 @@ def _run_thursday_reminder(
         with app.app_context():
             from . import dingtalk_service
             from .models import UploadRecord
+            from .notify_content import notify_project_label_line_md
 
             proj_meta, ended = _project_meta_for_scheduler()
+            from .dingtalk_team import build_project_team_maps
+
+            team_maps = build_project_team_maps()
             q_all = UploadRecord.query.filter(UploadRecord.assignee_name.isnot(None))
             if ended:
                 q_all = q_all.filter(~UploadRecord.project_name.in_(list(ended)))
             all_tasks = q_all.all()
-            team_all_tasks = _scheduler_group_uploads_by_team(all_tasks, proj_meta)
 
             q_pending = UploadRecord.query.filter(
-                UploadRecord.task_status == "pending",
+                UploadRecord.completion_status.is_(None),
                 UploadRecord.assignee_name.isnot(None),
             )
             if ended:
@@ -550,11 +677,12 @@ def _run_thursday_reminder(
             pending_tasks = q_pending.order_by(UploadRecord.due_date).all()
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
             if scope_team_ids is not None:
-                all_tasks = _filter_uploads_by_scheduler_team_scope(all_tasks, proj_meta, scope_team_ids)
-                pending_tasks = _filter_uploads_by_scheduler_team_scope(
-                    pending_tasks, proj_meta, scope_team_ids
+                all_tasks = _filter_uploads_by_scheduler_team_scope(
+                    all_tasks, team_maps, scope_team_ids, proj_meta
                 )
-                team_all_tasks = _scheduler_group_uploads_by_team(all_tasks, proj_meta)
+                pending_tasks = _filter_uploads_by_scheduler_team_scope(
+                    pending_tasks, team_maps, scope_team_ids, proj_meta
+                )
 
             if not all_tasks:
                 return {"no_tasks": True, "teams_sent": 0}
@@ -567,13 +695,6 @@ def _run_thursday_reminder(
             def _group_key(u):
                 return (u.project_name or "", u.business_side or "", u.product or "")
 
-            by_project = {}
-            for u in pending_tasks:
-                p = u.project_name or ""
-                if p not in by_project:
-                    by_project[p] = []
-                by_project[p].append(u)
-
             dedupe_key = None
             if not skip_dedupe:
                 dedupe_key = _cron_send_dedupe_slot_key("thursday_reminder")
@@ -582,34 +703,32 @@ def _run_thursday_reminder(
                     return {"no_tasks": False, "teams_sent": 0, "last_error": "跳过(本分钟已由其他实例发送)"}
             send_ok = False
             teams_sent = 0
-            team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks, proj_meta)
             try:
-                from .dingtalk_team import group_project_names_by_team
-
-                team_to_projects = group_project_names_by_team(all_tasks, proj_meta=proj_meta)
-                if not team_to_projects:
-                    team_to_projects = {None: set()}
-                for team_id, team_projects in team_to_projects.items():
-                    if not _scheduler_team_in_scope(team_id, scope_team_ids):
-                        continue
-                    webhook, secret = _get_webhook_secret(team_id)
+                for target in _scheduler_notify_targets(scope_team_ids):
+                    webhook = target.get("webhook")
+                    secret = target.get("secret")
                     if not webhook:
-                        logger.warning("自动催办(周四提醒)：team_id=%s 未配置 webhook，已跳过", team_id)
                         continue
-                    logger.info(
-                        "自动催办(周四提醒)：发送至 team_id=%s projects=%d pending=%d",
-                        team_id or "(default)",
-                        len(team_projects),
-                        len(team_pending_by_id.get(team_id, [])),
-                    )
-                    team_pending = team_pending_by_id.get(team_id, [])
-                    team_project_list = sorted(team_projects)
-                    team_records = team_all_tasks.get(team_id, [])
+                    team_records = _scheduler_tasks_for_target(all_tasks, target, team_maps, proj_meta)
+                    team_pending = _scheduler_tasks_for_target(pending_tasks, target, team_maps, proj_meta)
+                    if not team_records:
+                        continue
                     team_total = len(team_records)
-                    team_completed = sum(1 for u in team_records if u.task_status == "completed")
+                    team_completed = sum(1 for u in team_records if _upload_record_is_completed(u))
                     team_pending_count = len(team_pending)
+                    team_name = target.get("team_name") or _scheduler_team_display_name(target.get("team_id"))
+                    logger.info(
+                        "自动催办(周四提醒)：发送至 team=%s mode=%s total=%d completed=%d pending=%d",
+                        team_name,
+                        target.get("mode"),
+                        team_total,
+                        team_completed,
+                        team_pending_count,
+                    )
                     lines = [
                         "【每周任务完成提醒】",
+                        "",
+                        f"项目组：**{team_name}**",
                         "",
                         f"全部事项共 {team_total} 项：已完成 {team_completed} 项，未完成 {team_pending_count} 项。",
                         "",
@@ -617,17 +736,22 @@ def _run_thursday_reminder(
                     if not team_pending:
                         lines.append("当前无未完成任务。")
                     else:
+                        team_pending_by_project: dict[str, list] = {}
+                        for u in team_pending:
+                            pn = u.project_name or ""
+                            team_pending_by_project.setdefault(pn, []).append(u)
+
                         def _proj_sort_key(pn: str):
                             m = proj_meta.get(pn) or {}
                             return (-int(m.get("priority") or 2), pn or "")
 
-                        for project_name in sorted(team_project_list, key=_proj_sort_key):
-                            uploads = by_project.get(project_name) or []
+                        for project_name in sorted(team_pending_by_project.keys(), key=_proj_sort_key):
+                            uploads = team_pending_by_project.get(project_name) or []
                             groups = {}
                             for u in uploads:
                                 k = _group_key(u)
                                 groups.setdefault(k, []).append(u)
-                            lines.append(f"项目：{project_name or '（空）'}")
+                            lines.append(notify_project_label_line_md(project_name))
                             lines.append("")
                             lines.append(f"未完成任务数：{len(uploads)}")
                             lines.append("")
@@ -709,9 +833,12 @@ def _run_overdue_reminder(
 
             tomorrow = (now_local().date() + timedelta(days=1))
             proj_meta, ended = _project_meta_for_scheduler()
+            from .dingtalk_team import build_project_team_maps
+
+            team_maps = build_project_team_maps()
             q = UploadRecord.query.filter(
                 UploadRecord.due_date == tomorrow,
-                UploadRecord.task_status == "pending",
+                UploadRecord.completion_status.is_(None),
                 UploadRecord.assignee_name.isnot(None),
             )
             if ended:
@@ -719,7 +846,9 @@ def _run_overdue_reminder(
             tasks = q.order_by(UploadRecord.assignee_name, UploadRecord.due_date).all()
             tasks = _dedupe_upload_records_for_notify(tasks)
             if scope_team_ids is not None:
-                tasks = _filter_uploads_by_scheduler_team_scope(tasks, proj_meta, scope_team_ids)
+                tasks = _filter_uploads_by_scheduler_team_scope(
+                    tasks, team_maps, scope_team_ids, proj_meta
+                )
 
             if not tasks:
                 return {"no_tasks": True, "sent": 0, "failed": 0, "last_error": None}
@@ -746,20 +875,23 @@ def _run_overdue_reminder(
                 name = (t.assignee_name or t.author or "").strip()
                 if not name:
                     continue
-                team_id = _scheduler_upload_team_id(t, proj_meta)
-                key = (team_id, name)
+                team_id = _scheduler_upload_team_id(t, team_maps, proj_meta)
+                key = (_norm_scheduler_team_id(team_id), name)
                 by_team_assignee.setdefault(key, []).append(t)
 
             sent = 0
             failed = 0
             last_error = None
+            webhook_cache: dict[str | None, tuple[str, str | None]] = {}
             try:
                 for (team_id, assignee_name), person_tasks in by_team_assignee.items():
                     if not _scheduler_team_in_scope(team_id, scope_team_ids):
                         continue
                     if not person_tasks:
                         continue
-                    webhook, secret = _get_webhook_secret(team_id)
+                    if team_id not in webhook_cache:
+                        webhook_cache[team_id] = _get_webhook_secret(team_id)
+                    webhook, secret = webhook_cache[team_id]
                     if not webhook:
                         failed += 1
                         last_error = "未配置钉钉 Webhook"
@@ -842,6 +974,7 @@ def _run_project_stats(
         with app.app_context():
             from . import dingtalk_service
             from .models import UploadRecord, now_local
+            from .notify_content import notify_project_label_line_md
 
             from .app_settings import get_setting_for_scheduler
             base_url = (get_setting_for_scheduler("BASE_URL", default="", app=app) or "").strip().rstrip("/")
@@ -849,6 +982,9 @@ def _run_project_stats(
             page2_url = f"{base_url}{page2_path}" if base_url else ""
 
             proj_meta, ended = _project_meta_for_scheduler()
+            from .dingtalk_team import build_project_team_maps
+
+            team_maps = build_project_team_maps()
             q_pending = UploadRecord.query.filter(UploadRecord.completion_status.is_(None))
             if ended:
                 q_pending = q_pending.filter(~UploadRecord.project_name.in_(list(ended)))
@@ -856,17 +992,10 @@ def _run_project_stats(
             pending_tasks = _dedupe_upload_records_for_notify(pending_tasks)
             if scope_team_ids is not None:
                 pending_tasks = _filter_uploads_by_scheduler_team_scope(
-                    pending_tasks, proj_meta, scope_team_ids
+                    pending_tasks, team_maps, scope_team_ids, proj_meta
                 )
 
-            by_project = {}
-            for u in pending_tasks:
-                p = u.project_name or ""
-                if p not in by_project:
-                    by_project[p] = []
-                by_project[p].append(u)
-
-            if scope_team_ids is not None and not by_project:
+            if scope_team_ids is not None and not pending_tasks:
                 return {"no_tasks": True, "teams_sent": 0}
 
             dedupe_key = None
@@ -878,33 +1007,44 @@ def _run_project_stats(
             send_ok = False
             teams_sent = 0
             try:
-                from .dingtalk_team import group_project_names_by_team
-
-                team_to_projects = group_project_names_by_team(pending_tasks, proj_meta=proj_meta)
-                if not team_to_projects:
-                    team_to_projects = {None: set()}
-                team_pending_by_id = _scheduler_group_uploads_by_team(pending_tasks, proj_meta)
-                for team_id, team_projects in team_to_projects.items():
-                    if not _scheduler_team_in_scope(team_id, scope_team_ids):
-                        continue
-                    webhook, secret = _get_webhook_secret(team_id)
+                for target in _scheduler_notify_targets(scope_team_ids):
+                    webhook = target.get("webhook")
+                    secret = target.get("secret")
                     if not webhook:
-                        logger.warning("自动催办(项目统计)：team_id=%s 未配置 webhook，已跳过", team_id)
+                        continue
+                    team_pending = _scheduler_tasks_for_target(pending_tasks, target, team_maps, proj_meta)
+                    team_name = target.get("team_name") or _scheduler_team_display_name(target.get("team_id"))
+                    team_project_list = sorted(
+                        {(u.project_name or "") for u in team_pending if (u.project_name or "").strip()}
+                    )
+                    if not team_pending and target.get("mode") == "default":
                         continue
                     logger.info(
-                        "自动催办(项目统计)：发送至 team_id=%s projects=%d",
-                        team_id or "(default)",
-                        len(team_projects),
+                        "自动催办(项目统计)：发送至 team=%s mode=%s projects=%d pending=%d",
+                        team_name,
+                        target.get("mode"),
+                        len(team_project_list),
+                        len(team_pending),
                     )
-                    team_pending = team_pending_by_id.get(team_id, [])
-                    team_project_list = sorted(team_projects)
                     if not team_pending:
-                        lines = ["【每两天项目完成情况统计】", "", "当前无未完成任务。"]
+                        lines = [
+                            "【每两天项目完成情况统计】",
+                            "",
+                            f"项目组：**{team_name}**",
+                            "",
+                            "当前无未完成任务。",
+                        ]
                         at_names = None
                         at_mobiles = None
                     else:
+                        team_pending_by_project: dict[str, list] = {}
+                        for u in team_pending:
+                            pn = u.project_name or ""
+                            team_pending_by_project.setdefault(pn, []).append(u)
                         lines = [
                             "【每两天项目完成情况统计】",
+                            "",
+                            f"项目组：**{team_name}**",
                             "",
                             f"本项目组未完成任务数：{len(team_pending)} 项，涉及 {len(team_project_list)} 个项目。",
                             "",
@@ -913,15 +1053,15 @@ def _run_project_stats(
                             m = proj_meta.get(pn) or {}
                             return (-int(m.get("priority") or 2), pn or "")
 
-                        for project_name in sorted(team_project_list, key=_proj_sort_key):
-                            uploads = by_project.get(project_name) or []
+                        for project_name in sorted(team_pending_by_project.keys(), key=_proj_sort_key):
+                            uploads = team_pending_by_project.get(project_name) or []
                             by_person = {}
                             for u in uploads:
                                 name = (u.assignee_name or u.author or "").strip() or "（未指定）"
                                 by_person[name] = by_person.get(name, 0) + 1
                             person_stats = "、".join(f"{name} {cnt} 项" for name, cnt in sorted(by_person.items()))
                             pn = project_name or "（空）"
-                            lines.append(f"项目：**{pn}**")
+                            lines.append(notify_project_label_line_md(pn))
                             lines.append("")
                             lines.append(f"未完成任务（按人统计）：{person_stats}")
                             today = now_local().date()
@@ -1002,10 +1142,14 @@ def _send_module_cascade_for_project(project_name: str, trigger_module: str, tar
         return (u.project_name or "", u.business_side or "", u.product or "")
 
     def _task_block_md_for_cascade(key, uploads_in_group):
+        from .notify_content import notify_doc_link_suffix_md, notify_project_name_md
+
         proj, bs, pr = key
-        header = f"**项目：{proj or '-'}  影响业务方：{bs or '-'}  产品：{pr or '-'}**"
+        header = (
+            f"项目：{notify_project_name_md(proj)}  "
+            f"影响业务方：{bs or '-'}  产品：{pr or '-'}"
+        )
         lines = [header]
-        from .notify_content import notify_doc_link_suffix_md
 
         for u in uploads_in_group:
             due = u.due_date.strftime("%Y-%m-%d") if u.due_date else "-"

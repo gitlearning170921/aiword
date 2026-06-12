@@ -137,14 +137,18 @@ cp .env.example .env
 vi .env           # MySQL、LLM 密钥、AIPRINTWORD_BASE_URL 等
 ```
 
-`.env` 中镜像 tag 需与版本一致：
+`.env` 中镜像 tag 与对外域名（**80 反代，无需 :5000**）：
 
 ```env
 IMAGE_VERSION=1.0.0
 AIWORD_IMAGE=aiword:1.0.0
 AICHECKWORD_IMAGE=aicheckword:1.0.0
+BASE_URL=http://aiword.yuwell.com
+NGINX_HTTP_PORT=80
 AIWORD_BOOTSTRAP_DATABASE_URL=mysql+pymysql://user:pass@mysql-host:3306/aiword?charset=utf8mb4
 ```
+
+DNS 将 `aiword.yuwell.com` **A 记录** 解析到 Linux 服务器 IP（CNAME 指到同域网关亦可）；防火墙放行 **80**（上 HTTPS 时再放行 **443**）。
 
 ### 3. 一键启动
 
@@ -153,14 +157,15 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 ./server-deploy.sh 1.0.0
 ```
 
-等价于：`docker load` 两个 tar.gz（或 tar）→ `docker compose -f docker-compose.prod.yml up -d`
+等价于：`docker load` 两个 tar.gz（或 tar）→ `docker compose -f docker-compose.prod.yml up -d`（含 **nginx + aiword + aicheckword**）
 
-访问：`http://<服务器IP>:5000`
+访问：`http://aiword.yuwell.com`（Nginx 80 → 容器内 aiword:5000）
 
 ### 4. 页面3 核对
 
 | 配置项 | 值 |
 |--------|-----|
+| `BASE_URL` | `http://aiword.yuwell.com` |
 | `QUIZ_API_BASE_URL` | `http://aicheckword:8000` |
 | `AICHECKWORD_DRAFT_API_BASE` | `http://aicheckword:8000` |
 | `AIPRINTWORD_BASE_URL` | `http://<Windows IP>:5050` |
@@ -204,7 +209,7 @@ docker compose down -v    # 删除命名卷，数据全丢
 ## 四、Windows aiprintword 联调
 
 ```env
-AIWORD_BASE_URL=http://<Linux服务器>:5000
+AIWORD_BASE_URL=http://aiword.yuwell.com
 AIWORD_HANDOFF_SECRET=<与 aiword 相同>
 AIWORD_INTEGRATION_SECRET=<与 aiword 相同>
 ```
@@ -231,7 +236,7 @@ AIWORD_INTEGRATION_SECRET=<与 aiword 相同>
 | 文件 | 用途 |
 |------|------|
 | `docker-compose.yml` | 本机开发，含 `build`，可 `--build`；profile `admin` 可启 Streamlit |
-| `docker-compose.prod.yml` | **Linux 生产**，仅 `image`，无源码 |
+| `docker-compose.prod.yml` | **Linux 生产**，仅 `image`；**默认 nginx:80 → aiword:5000** |
 
 ### Streamlit 运维 UI（可选）
 
@@ -246,6 +251,24 @@ docker compose --profile admin up -d aicheckword-streamlit
 ```
 
 访问：`http://localhost:8501`
+
+### 生产架构（域名不带端口）
+
+```mermaid
+flowchart LR
+  Browser[浏览器 aiword.yuwell.com] -->|80| Nginx[nginx 容器]
+  Nginx -->|appnet 5000| Aiword[aiword 容器]
+  Aiword --> Aicheck[aicheckword:8000]
+```
+
+- 生产 `docker-compose.prod.yml` **默认启动 nginx**，aiword **不映射宿主机 5000**，仅内网可达。
+- 本机开发仍可用 `docker-compose.yml` 直连 `http://127.0.0.1:5000`；模拟生产域名时：`docker compose --profile nginx up -d`。
+
+### HTTPS（可选）
+
+1. 证书放入 `deploy/nginx/certs/fullchain.pem` 与 `privkey.pem`
+2. 取消 `deploy/nginx/nginx.conf` 中 443 `server` 注释
+3. `.env` 中 `BASE_URL=https://aiword.yuwell.com`，放行防火墙 443
 
 ---
 

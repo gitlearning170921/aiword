@@ -49,6 +49,7 @@ FEEDBACK_STATUSES: tuple[tuple[str, str], ...] = (
     ("processing", "处理中"),
     ("resolved", "已解决"),
     ("closed", "已关闭"),
+    ("wont_fix", "不予解决"),
 )
 
 _FEATURE_KEYS = {k for k, _ in FEEDBACK_FEATURE_MODULES}
@@ -93,6 +94,17 @@ def _safe_screenshot_filename(name: str) -> str:
     return (base or "screenshot.png")[:200]
 
 
+def _submitter_label(row: UserFeedback) -> str:
+    dn = (row.submitter_display_name or "").strip()
+    un = (row.submitter_username or "").strip()
+    if dn and un and dn != un:
+        return f"{dn}（{un}）"
+    return dn or un or "—"
+
+
+_TERMINAL_STATUSES = frozenset({"resolved", "closed", "wont_fix"})
+
+
 def _serialize(row: UserFeedback, *, include_admin_fields: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": row.id,
@@ -110,6 +122,7 @@ def _serialize(row: UserFeedback, *, include_admin_fields: bool = False) -> dict
         "resolvedAt": row.resolved_at.isoformat(sep=" ", timespec="seconds") if row.resolved_at else None,
         "createdAt": row.created_at.isoformat(sep=" ", timespec="seconds") if row.created_at else None,
         "updatedAt": row.updated_at.isoformat(sep=" ", timespec="seconds") if row.updated_at else None,
+        "canResubmit": row.status in _TERMINAL_STATUSES,
     }
     if include_admin_fields:
         out.update(
@@ -117,6 +130,7 @@ def _serialize(row: UserFeedback, *, include_admin_fields: bool = False) -> dict
                 "userId": row.user_id,
                 "submitterUsername": row.submitter_username,
                 "submitterDisplayName": row.submitter_display_name,
+                "submitterLabel": _submitter_label(row),
                 "resolvedByLabel": row.resolved_by_label,
             }
         )
@@ -243,7 +257,7 @@ def update_feedback(feedback_id: str):
         if status not in _STATUS_KEYS:
             return jsonify({"message": "无效的状态"}), 400
         row.status = status
-        if status in ("resolved", "closed"):
+        if status in _TERMINAL_STATUSES:
             row.resolved_at = now_local()
             row.resolved_by_label = "超级管理员"
         elif status in ("pending", "processing"):

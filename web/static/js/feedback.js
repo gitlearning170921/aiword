@@ -90,11 +90,34 @@
         return "other";
     }
 
+    const TERMINAL_STATUSES = new Set(["resolved", "closed", "wont_fix"]);
+
     function statusBadgeClass(status) {
         if (status === "resolved") return "bg-success";
         if (status === "processing") return "bg-info text-dark";
         if (status === "closed") return "bg-secondary";
+        if (status === "wont_fix") return "bg-dark";
         return "bg-warning text-dark";
+    }
+
+    let mineItemsCache = [];
+
+    async function prefillResubmitForm(item) {
+        await populateSubmitForm();
+        const modSel = document.getElementById("feedbackFeatureModule");
+        const priSel = document.getElementById("feedbackPriority");
+        const descEl = document.getElementById("feedbackDescription");
+        if (!modSel || !priSel || !descEl) return;
+        if (modSel.querySelector(`option[value="${item.featureModule}"]`)) {
+            modSel.value = item.featureModule;
+        }
+        if (priSel.querySelector(`option[value="${item.priority}"]`)) {
+            priSel.value = item.priority;
+        }
+        const base = (item.description || "").trim();
+        descEl.value = base.startsWith("[跟进反馈]") ? base : `[跟进反馈] ${base}`;
+        document.getElementById("feedback-tab-submit-btn")?.click();
+        descEl.focus();
     }
 
     function renderMineItem(item) {
@@ -108,6 +131,9 @@
             : "";
         const resolvedAt = item.resolvedAt
             ? `<div class="text-muted">处理时间：${escapeHtml(item.resolvedAt)}</div>`
+            : "";
+        const resubmit = item.canResubmit || TERMINAL_STATUSES.has(item.status)
+            ? `<button type="button" class="btn btn-sm btn-outline-primary mt-2 feedback-resubmit-btn" data-feedback-id="${escapeHtml(item.id)}">问题仍存在，再次提交</button>`
             : "";
         return `
             <div class="border rounded p-3 mb-2 bg-white">
@@ -123,6 +149,7 @@
                 ${resolution}
                 ${resolvedAt}
                 ${shot}
+                ${resubmit}
             </div>`;
     }
 
@@ -163,6 +190,7 @@
         try {
             const data = await apiRequest("/api/feedback/mine");
             const items = data.items || [];
+            mineItemsCache = items;
             if (!items.length) {
                 box.innerHTML = '<div class="text-muted">暂无反馈记录</div>';
                 return;
@@ -276,6 +304,19 @@
 
         document.getElementById("feedback-tab-mine-btn")?.addEventListener("shown.bs.tab", loadMineList);
 
+        document.getElementById("feedbackMineList")?.addEventListener("click", async (ev) => {
+            const btn = ev.target.closest(".feedback-resubmit-btn");
+            if (!btn) return;
+            const id = btn.getAttribute("data-feedback-id");
+            const item = mineItemsCache.find((x) => x.id === id);
+            if (!item) return;
+            try {
+                await prefillResubmitForm(item);
+            } catch (e) {
+                notify(e.message || "无法打开提交表单", "danger");
+            }
+        });
+
         const shotInput = document.getElementById("feedbackScreenshot");
         const previewWrap = document.getElementById("feedbackScreenshotPreview");
         shotInput?.addEventListener("change", () => {
@@ -332,7 +373,7 @@
         return `
             <tr data-feedback-id="${escapeHtml(item.id)}">
                 <td class="small text-muted">${escapeHtml(item.createdAt || "")}</td>
-                <td class="small">${escapeHtml(item.submitterDisplayName || item.submitterUsername || "")}<br><span class="text-muted">${escapeHtml(item.submitterUsername || "")}</span></td>
+                <td class="small">${escapeHtml(item.submitterLabel || item.submitterDisplayName || item.submitterUsername || "—")}</td>
                 <td class="small">${escapeHtml(item.featureModuleLabel)}</td>
                 <td class="small"><span class="badge bg-light text-dark border">${escapeHtml(item.priorityLabel)}</span></td>
                 <td class="small" title="${escapeHtml(item.description)}">${descShort}</td>
