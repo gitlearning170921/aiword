@@ -289,8 +289,11 @@
       showMsg("Base 来源唯一性：base_upload_id 与上传 Base 不可同时提供", true);
       return;
     }
-    if (!bUid && !bFile) {
-      showMsg("请提供 base_upload_id 或上传 1 个 Base 文件", true);
+    if (!bUid && !bFile && !uid) {
+      showMsg(
+        "请提供 base_upload_id、上传 1 个 Base 文件，或填写 upload_id（将用审核时那份文档作 Base）",
+        true
+      );
       return;
     }
     if (rid) fd.append("report_id", rid);
@@ -389,7 +392,7 @@
         prog.setRunning(false); prog.setTerminal(false);
         var isAbort = !!(e && (e.name === "AbortError" || /aborted|abort/i.test(String(e.message || ""))));
         var msg = isAbort
-          ? "提交超时（95秒）：上游未及时返回，可在历史记录里刷新查看是否已创建任务。"
+          ? (window.ufText ? window.ufText("提交超时（95秒）：上游未及时返回，可在历史记录里刷新查看是否已创建任务。", "提交超时：服务未及时返回，可在历史记录里刷新查看是否已创建任务。") : "提交超时：服务未及时返回，可在历史记录里刷新查看是否已创建任务。")
           : String((e && e.message) || e || "提交异常");
         showMsg(msg, true);
       });

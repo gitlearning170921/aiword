@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}页面2 - 我的任务{% endblock %}
+{% block title %}{% if is_page13_super_admin %}页面2 - {% endif %}我的任务{% endblock %}
 {% block content %}
 <div class="hero-bar d-flex justify-content-between align-items-center">
     <div>
-        <h1>页面2 · 我的任务</h1>
+        <h1>{% if is_page13_super_admin %}页面2 · {% endif %}我的任务</h1>
         <p class="mb-0">查看分配给您的任务列表，<span class="page2-completion-hint">请及时更新完成状态</span>或填写占位符生成文档。</p>
     </div>
     <div id="heroBarActions" class="text-end">

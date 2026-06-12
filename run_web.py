@@ -21,6 +21,12 @@ def main() -> None:
     startup_note("正在连接数据库并初始化（首次约 30–60 秒，请稍候）…")
 
     from app import app
+    from webapp.environment_profile import get_deploy_env, is_env_separation_enabled
+
+    if is_env_separation_enabled():
+        print(f"环境分离: 开 | AIWORD_ENV={get_deploy_env()}", flush=True)
+    else:
+        print("环境分离: 关（与改前单环境一致，AIWORD_ENV 不生效）", flush=True)
 
     startup_note("初始化完成，正在监听 HTTP 请求…")
     # use_reloader=False：后台运行时避免 reloader 杀子进程导致“daemon threads + stderr”崩溃

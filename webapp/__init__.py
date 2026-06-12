@@ -1369,10 +1369,26 @@ def create_app() -> Flask:
     # 尝试从 .env 加载环境变量（若已安装 python-dotenv）
     try:
         from dotenv import load_dotenv
-        load_dotenv(project_root / ".env")
+
+        _dotenv_raw = (os.environ.get("AIWORD_DOTENV_PATH") or "").strip()
+        if _dotenv_raw:
+            _dotenv_path = Path(_dotenv_raw)
+            if not _dotenv_path.is_absolute():
+                _dotenv_path = project_root / _dotenv_raw
+        else:
+            _dotenv_path = project_root / ".env"
+        load_dotenv(_dotenv_path)
     except ImportError:
         pass
-    
+
+    from .environment_profile import apply_environment_profile, is_env_separation_enabled
+
+    _active_env = apply_environment_profile(project_root)
+    if is_env_separation_enabled():
+        startup_note(f"环境分离已开启，AIWORD_ENV={_active_env}")
+    else:
+        startup_note("环境分离已关闭（FEATURE_ENV_SEPARATION=0）")
+
     # 从配置文件读取可选项（config.json 在项目根目录；若不存在则尝试 config.json.example）
     def _config_file_value(key: str, default: str = "") -> str:
         for name in ("config.json", "config.json.example"):
@@ -1391,9 +1407,11 @@ def create_app() -> Flask:
                 continue
         return default
 
-    uploads_dir = project_root / "uploads"
+    _uploads_name = (os.environ.get("AIWORD_UPLOADS_DIR") or "uploads").strip() or "uploads"
+    _outputs_name = (os.environ.get("AIWORD_OUTPUTS_DIR") or "outputs").strip() or "outputs"
+    uploads_dir = project_root / _uploads_name
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    outputs_dir = project_root / "outputs"
+    outputs_dir = project_root / _outputs_name
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
     _web_templates = project_root / "web" / "templates"
@@ -1408,8 +1426,13 @@ def create_app() -> Flask:
             "未找到模板目录：需要存在 web/templates 或 webapp/templates。"
             "请完整部署项目（含 web 目录），或更新代码使 webapp/templates 随包发布。"
         )
+    from .app_settings import resolve_instance_dir
+
+    _instance_dir = resolve_instance_dir(project_root)
+    _instance_dir.mkdir(parents=True, exist_ok=True)
     app = Flask(
         __name__,
+        instance_path=str(_instance_dir),
         template_folder=_template_paths[0],
         static_folder=str(project_root / "web" / "static"),
     )

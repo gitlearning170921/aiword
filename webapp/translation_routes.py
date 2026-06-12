@@ -42,6 +42,16 @@ from ._integration_common import (
     integration_scope_list_filter,
     integration_organization_list_filter,
     login_wall,
+    msg_proxy_download_failed,
+    msg_upstream_http,
+    msg_upstream_not_configured,
+    msg_upstream_not_configured_env,
+    msg_upstream_not_json,
+    msg_upstream_no_job_id,
+    msg_upstream_not_ready,
+    msg_upstream_submit_failed,
+    sanitize_integration_message,
+    msg_upstream_sync_failed,
     personal_llm_key_wall,
     resolve_org_collection_for_integration,
     sync_active_organization_if_requested,
@@ -243,7 +253,7 @@ def api_translate_create_job():
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 500
+        return jsonify({"message": msg_upstream_not_configured_env()}), 500
 
     payload_str = (request.form.get("payload") or "").strip()
     if not payload_str:
@@ -406,27 +416,27 @@ def api_translate_create_job():
         local_job.message = "提交上游失败"
         local_job.error_summary = safe_truncate(str(e), 4000)
         db.session.commit()
-        return jsonify({"message": f"提交上游失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_submit_failed(e)}), 502
 
     if r.status_code != 200:
         local_job.status = "failed"
         local_job.message = f"上游 HTTP {r.status_code}"
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
     try:
         upstream = r.json()
     except Exception:
         local_job.status = "failed"
         local_job.message = "上游响应非 JSON"
         db.session.commit()
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     upstream_id = (upstream.get("job_id") or "").strip()
     if not upstream_id:
         local_job.status = "failed"
         local_job.message = "上游未返回 job_id"
         db.session.commit()
-        return jsonify({"message": "上游未返回 job_id", "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -463,13 +473,13 @@ def api_translate_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
+                "message": sanitize_integration_message(job.message),
                 "error": job.error_summary or None,
             }
         )
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     url = f"{base}/api/integration/translation/jobs/{job.upstream_job_id}"
     org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
@@ -487,8 +497,8 @@ def api_translate_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": f"上游同步失败：{e}",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_sync_failed(e),
             }
         )
     if r.status_code != 200:
@@ -498,8 +508,8 @@ def api_translate_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": f"上游 HTTP {r.status_code}",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_http(r.status_code),
             }
         )
     try:
@@ -511,8 +521,8 @@ def api_translate_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": "上游响应非 JSON",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_not_json(),
             }
         )
 
@@ -524,7 +534,7 @@ def api_translate_status(local_id: str):
             "upstreamJobId": job.upstream_job_id,
             "status": job.status,
             "progress": job.progress or 0.0,
-            "message": job.message or "",
+            "message": sanitize_integration_message(job.message),
             "error": job.error_summary or None,
             "errorSummary": job.error_summary or None,
             "result": (data.get("result") if isinstance(data, dict) else None),
@@ -557,7 +567,7 @@ def api_translate_download(local_id: str):
         )
     base = integration_api_base()
     if not base or not job.upstream_job_id:
-        return jsonify({"message": "上游未就绪"}), 400
+        return jsonify({"message": msg_upstream_not_ready()}), 400
     url = f"{base}/api/integration/translation/jobs/{job.upstream_job_id}/download"
     org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
@@ -570,7 +580,7 @@ def api_translate_download(local_id: str):
     except requests.RequestException as e:
         return jsonify({"message": f"代理下载失败：{e}"}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:1000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:1000]}), 502
     out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "translation_zips"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -669,7 +679,7 @@ def api_translate_correct_create_job():
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 500
+        return jsonify({"message": msg_upstream_not_configured_env()}), 500
 
     payload_str = (request.form.get("payload") or "").strip()
     if not payload_str:
@@ -824,27 +834,27 @@ def api_translate_correct_create_job():
         local_job.message = "提交上游失败"
         local_job.error_summary = safe_truncate(str(e), 4000)
         db.session.commit()
-        return jsonify({"message": f"提交上游失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_submit_failed(e)}), 502
 
     if r.status_code != 200:
         local_job.status = "failed"
         local_job.message = f"上游 HTTP {r.status_code}"
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
     try:
         upstream = r.json()
     except Exception:
         local_job.status = "failed"
         local_job.message = "上游响应非 JSON"
         db.session.commit()
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     upstream_id = (upstream.get("job_id") or "").strip()
     if not upstream_id:
         local_job.status = "failed"
         local_job.message = "上游未返回 job_id"
         db.session.commit()
-        return jsonify({"message": "上游未返回 job_id", "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -886,7 +896,7 @@ def api_translate_correct_download(local_id: str):
         )
     base = integration_api_base()
     if not base or not job.upstream_job_id:
-        return jsonify({"message": "上游未就绪"}), 400
+        return jsonify({"message": msg_upstream_not_ready()}), 400
     url = f"{base}/api/integration/translation/correct/jobs/{job.upstream_job_id}/download"
     org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
@@ -899,7 +909,7 @@ def api_translate_correct_download(local_id: str):
     except requests.RequestException as e:
         return jsonify({"message": f"代理下载失败：{e}"}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:1000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:1000]}), 502
     out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "translation_zips"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)

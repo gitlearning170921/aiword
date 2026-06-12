@@ -5,8 +5,12 @@
   <div class="col-lg-10 mx-auto">
     <h2 class="mb-3">审核报告编辑（AI Word 内置）</h2>
     <p class="text-muted small">
+      {% if is_page13_super_admin %}
       对齐 aicheckword 报告点编辑：支持单报告/批量子报告（<code>sub_report_index</code>），
-      可 PATCH 问题描述、修改建议、处理状态、需修改文档列表；
+      {% else %}
+      支持单报告/批量子报告编辑，
+      {% endif %}
+      可修改问题描述、修改建议、处理状态、需修改文档列表；
       <strong>纠正</strong>支持修订 / 标记误报 / 弃用，并可写入反馈知识库供后续审核参考。
       仅<strong>处理状态为「立即修改」</strong>的审核点会进入「审核后修改」待办。
     </p>

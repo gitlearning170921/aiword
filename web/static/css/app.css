@@ -504,20 +504,31 @@ tr[draggable="true"].dragging {
     background-color: var(--bs-table-hover-bg, rgba(0, 0, 0, 0.075));
 }
 
+.table-compact {
+    font-size: 0.72rem;
+}
+.table-compact thead th {
+    font-size: 0.68rem;
+    font-weight: 600;
+}
+.table-compact tbody td {
+    line-height: 1.25;
+}
 .table-compact .form-control,
 .table-compact .form-select,
 .table-compact .input-group {
-    font-size: 0.78rem;
+    font-size: 0.68rem;
     min-height: auto;
     border-radius: 4px;
+    padding: 0.12rem 0.35rem;
 }
 .table-compact .btn-sm,
 .table-compact .btn {
-    font-size: 0.75rem;
-    padding: 2px 6px;
+    font-size: 0.68rem;
+    padding: 1px 5px;
 }
 .table-compact .badge {
-    font-size: 0.72rem;
+    font-size: 0.65rem;
 }
 
 /* 页面0 · 公司项目总览：特别关注行 */
@@ -1164,12 +1175,12 @@ body.app-page-loading-active {
 }
 .page1-projects-table {
     min-width: 1180px;
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
 }
 .page1-projects-table thead th {
     white-space: nowrap;
     font-weight: 600;
-    font-size: 0.75rem;
+    font-size: 0.68rem;
     color: #475569;
     vertical-align: middle;
     border-bottom-width: 2px;

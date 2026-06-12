@@ -24,27 +24,27 @@
             <ul class="navbar-nav me-auto gap-2">
                 {% if nav_show_page0|default(false) %}
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/company' %}active{% endif %}" href="{{ url_for('company.company_registry_page') }}">页面0 · 公司总览</a>
+                    <a class="nav-link {% if request.path == '/company' %}active{% endif %}" href="{{ url_for('company.company_registry_page') }}">{% if is_page13_super_admin %}页面0 · {% endif %}公司总览</a>
                 </li>
                 {% endif %}
                 {% if nav_show_page123_staff|default(false) %}
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="{{ url_for('pages.upload_page') }}">页面1 · 上传</a>
+                    <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="{{ url_for('pages.upload_page') }}">{% if is_page13_super_admin %}页面1 · {% endif %}任务管理</a>
                 </li>
                 {% endif %}
                 {% if nav_show_page2|default(false) %}
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/generate' %}active{% endif %}" href="{{ url_for('pages.generate_page') }}">页面2 · 生成</a>
+                    <a class="nav-link {% if request.path == '/generate' %}active{% endif %}" href="{{ url_for('pages.generate_page') }}">{% if is_page13_super_admin %}页面2 · {% endif %}我的任务</a>
                 </li>
                 {% endif %}
                 {% if nav_show_page123_staff|default(false) %}
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" href="{{ url_for('pages.dashboard_page') }}">页面3 · 统计</a>
+                    <a class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" href="{{ url_for('pages.dashboard_page') }}">{% if is_page13_super_admin %}页面3 · {% endif %}统计</a>
                 </li>
                 {% endif %}
                 {% if nav_show_page4|default(false) %}
                 <li class="nav-item">
-                    <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="{{ url_for('admin.admin_page') }}">页面4 · 系统管理</a>
+                    <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="{{ url_for('admin.admin_page') }}">{% if is_page13_super_admin %}页面4 · {% endif %}系统管理</a>
                 </li>
                 {% endif %}
             </ul>
@@ -139,6 +139,9 @@
     window.__FEATURE_FLAGS__ = {{ (feature_flags or {})|tojson }};
     window.__COMPANY_REGISTRY_ENABLED__ = {{ company_registry_enabled|default(false)|tojson }};
     window.__PAGE13_SUPER_ADMIN__ = {{ is_page13_super_admin|default(false)|tojson }};
+    window.ufText = function (adminText, userText) {
+        return window.__PAGE13_SUPER_ADMIN__ ? adminText : userText;
+    };
 </script>
 {% if not gate_page %}
 <script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>

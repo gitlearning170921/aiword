@@ -3,7 +3,8 @@
 {% block content %}
 <div class="row">
   <div class="col-lg-10 mx-auto">
-    <h2 class="mb-3">文档翻译（aicheckword）</h2>
+    <h2 class="mb-3">文档翻译{% if is_page13_super_admin %}（aicheckword）{% endif %}</h2>
+    {% if is_page13_super_admin %}
     <p class="text-muted small">
       调用 aicheckword 的 <code>/api/integration/translation/*</code>。支持 <code>.docx / .txt / .xlsx</code>，
       以及 <code>.zip</code> 压缩包（自动解压内部可译文件），单次最多 5 个文件 + 1 个目标语言。
@@ -13,6 +14,16 @@
       可从「页面2 任务」带入 <code>upload_ids</code>，也可手动上传。
       {% endif %}
     </p>
+    {% else %}
+    <p class="text-muted small">
+      支持 Word / 文本 / Excel，以及 <code>.zip</code> 压缩包（自动解压），单次最多 5 个文件 + 1 个目标语言。
+      {% if manual_upload_only %}
+      本页为<strong>手动上传</strong>模式，请直接选择待译文件。
+      {% else %}
+      可从<strong>我的任务</strong>带入，也可手动上传。
+      {% endif %}
+    </p>
+    {% endif %}
     <div id="tr_msg" class="alert d-none" role="alert"></div>
 
     <div class="card mb-3">
@@ -20,7 +31,7 @@
       <div class="card-body row g-2">
         {% if not manual_upload_only %}
         <div class="col-md-6">
-          <label class="form-label">从页面2 任务带入（upload_ids）</label>
+          <label class="form-label">{% if is_page13_super_admin %}从页面2 任务带入（upload_ids）{% else %}从我的任务带入{% endif %}</label>
           <textarea id="tr_upload_ids" class="form-control font-monospace" rows="3" placeholder="一行一个；二选一"></textarea>
           <div id="tr_upload_names" class="small text-muted mt-1"></div>
         </div>
@@ -51,10 +62,10 @@
           <input type="hidden" id="tr_collection" value="regulations"/>
         </div>
         <div class="col-md-3">
-          <label class="form-label"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">aicheckword 项目</span><span id="tr_pf_project" class="dg-prefill-tag d-none">已匹配</span></label>
+          <label class="form-label"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">{% if is_page13_super_admin %}aicheckword 项目{% else %}专属项目{% endif %}</span><span id="tr_pf_project" class="dg-prefill-tag d-none">已匹配</span></label>
           <input type="search" id="tr_project_sel_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目（名称/产品/ID）…" autocomplete="off"/>
           <select id="tr_project_sel" class="form-select" required>
-            <option value="">请选择 aicheckword 项目（必选）</option>
+            <option value="">请选择{% if is_page13_super_admin %} aicheckword {% endif %}项目（必选）</option>
           </select>
           <input type="hidden" id="tr_project_id" value=""/>
         </div>
@@ -68,7 +79,7 @@
           <div class="form-text">翻译走直连聊天 API，不支持 Cursor 代理；选「沿用」时若初稿为 Cursor 将自动改用 DeepSeek/系统默认。</div>
         </div>
         <div class="col-md-3">
-          <label class="form-label">使用知识库（use_kb）</label>
+          <label class="form-label">使用知识库{% if is_page13_super_admin %}（use_kb）{% endif %}</label>
           <select id="tr_use_kb" class="form-select">
             <option value="true">是</option>
             <option value="false">否</option>
@@ -94,7 +105,7 @@
     </div>
 
     <div class="card mb-3">
-      <div class="card-header">公司信息翻译配置（与 aicheckword 一致）</div>
+      <div class="card-header">公司信息翻译配置{% if is_page13_super_admin %}（与 aicheckword 一致）{% endif %}</div>
       <div class="card-body row g-2">
         <div class="col-md-6">
           <label class="form-label">公司名称（目标语言）</label>
@@ -121,7 +132,7 @@
           <input id="tr_email" class="form-control"/>
         </div>
         <div class="col-12">
-          <button type="button" class="btn btn-sm btn-outline-secondary" id="tr_btn_load_company_default">载入 aicheckword 默认公司配置</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="tr_btn_load_company_default">{% if is_page13_super_admin %}载入 aicheckword 默认公司配置{% else %}载入默认公司配置{% endif %}</button>
         </div>
       </div>
     </div>
@@ -149,7 +160,7 @@
         <div class="col-12">
           <label class="form-label">手工替换与词条（每行：错误译文|正确译文|中文词条）</label>
           <textarea id="tr_manual_rules" class="form-control" rows="4" placeholder="Occasiona|Occasional|偶发&#10;through|pass|通过"></textarea>
-          <div class="form-text">与 aicheckword 翻译页一致；第三列可空则只替换、不写词条库。</div>
+          <div class="form-text">{% if is_page13_super_admin %}与 aicheckword 翻译页一致；{% endif %}第三列可空则只替换、不写词条库。</div>
         </div>
         <div class="col-12">
           <div class="form-check">

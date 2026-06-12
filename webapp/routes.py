@@ -73,6 +73,8 @@ from .dingtalk_callback_crypto import (
 bp = Blueprint("pages", __name__)
 _chatbot_group_last_reply_at: dict[str, float] = {}
 
+from ._integration_common import user_facing_text, user_facing_upstream_error
+
 
 def _dingtalk_webhook_str() -> str:
     from .app_settings import get_setting
@@ -899,7 +901,10 @@ def _quiz_api_call(
     if not base_url:
         return 503, {
             "code": "QUIZ_API_NOT_CONFIGURED",
-            "message": "未配置考试训练中心后端地址，请在页面4 · 系统与钉钉「系统配置」中设置 QUIZ_API_BASE_URL",
+            "message": user_facing_text(
+                "未配置考试训练中心后端地址，请在页面4 · 系统与钉钉「系统配置」中设置 QUIZ_API_BASE_URL",
+                "未配置考试训练中心后端地址，请联系管理员",
+            ),
             "data": None,
             "trace_id": trace_id,
             "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
@@ -1032,7 +1037,7 @@ def _quiz_try_paths(
     last_status = 502
     last_payload: dict[str, Any] = {
         "code": "QUIZ_API_UNKNOWN_ERROR",
-        "message": "未尝试任何上游请求",
+        "message": user_facing_upstream_error("未尝试任何上游请求"),
         "data": None,
         "trace_id": uuid.uuid4().hex,
     }
@@ -3856,12 +3861,15 @@ def page13_access_required(f):
             return blocked
         if company_registry_enabled():
             if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.path.startswith("/api/"):
-                return jsonify({"message": "页面1/3 仅项目管理员可访问"}), 403
+                return jsonify({"message": user_facing_text("页面1/3 仅项目管理员可访问", "任务管理与统计仅项目管理员可访问")}), 403
             return (
                 render_template(
                     "error.html",
                     title="无访问权限",
-                    message="页面1/3 仅项目管理员可访问，请使用项目管理员账号登录。",
+                    message=user_facing_text(
+                        "页面1/3 仅项目管理员可访问，请使用项目管理员账号登录。",
+                        "任务管理与统计仅项目管理员可访问，请使用项目管理员账号登录。",
+                    ),
                     back_url=url_for("pages.login_page"),
                     back_label="重新登录",
                     hide_main_nav=True,
@@ -4130,7 +4138,10 @@ def _exam_student_scope_context_payload() -> dict:
             "canSwitchTeam": False,
             "canSwitchOrganization": False,
             "page13SuperAdmin": is_page13_super_admin(),
-            "message": "当前账号未分配所属公司，请联系管理员在页面4配置",
+            "message": user_facing_text(
+                "当前账号未分配所属公司，请联系管理员在页面4配置",
+                "当前账号未分配所属公司，请联系管理员",
+            ),
         }
     from .exam_scope import resolve_active_organization_id
 
@@ -4178,7 +4189,10 @@ def _exam_project_admin_scope_context_payload() -> dict:
             "canSwitchOrganization": False,
             "page13SuperAdmin": False,
             "isProjectAdmin": True,
-            "message": "当前账号未分配项目组，请联系管理员在页面4配置",
+            "message": user_facing_text(
+                "当前账号未分配项目组，请联系管理员在页面4配置",
+                "当前账号未分配项目组，请联系管理员",
+            ),
         }
     org_ids = _exam_project_admin_organization_ids()
     orgs = organizations_payload_for_ids(org_ids)
@@ -4196,7 +4210,10 @@ def _exam_project_admin_scope_context_payload() -> dict:
             "canSwitchOrganization": False,
             "page13SuperAdmin": is_page13_super_admin(),
             "isProjectAdmin": True,
-            "message": "所属项目组未关联任何公司，请超级管理员在页面4维护项目组关联公司",
+            "message": user_facing_text(
+                "所属项目组未关联任何公司，请超级管理员在页面4维护项目组关联公司",
+                "所属项目组未关联任何公司，请联系超级管理员维护项目组关联公司",
+            ),
         }
     from .exam_scope import resolve_active_organization_id
 
@@ -4261,7 +4278,7 @@ def api_exam_scope_context():
         is_page13_super_admin()
         or session.get("user_id")
     ):
-        return jsonify({"message": "请先登录或使用页面4 访问密码"}), 401
+        return jsonify({"message": user_facing_text("请先登录或使用页面4 访问密码", "请先登录")}), 401
     if is_normal_user():
         return jsonify(_exam_student_scope_context_payload())
     if is_project_admin() and not is_page13_super_admin():
@@ -5958,7 +5975,7 @@ def api_exam_teacher_create_assignment():
                 jsonify(
                     {
                         "code": 0,
-                        "message": "ok（上游不支持下发接口，已改为仅本地下发）",
+                        "message": user_facing_upstream_error("ok（上游不支持下发接口，已改为仅本地下发）"),
                         "data": {
                             "assignment_id": row.assignment_id,
                             "title": row.title,
@@ -6399,7 +6416,9 @@ def api_teacher_patch_assignment(assignment_id: str):
     return jsonify(
         {
             "code": 0,
-            "message": "已更新本地任务" + ("；上游 PATCH 未成功（可忽略，仅 loc- 任务时正常）" if not (200 <= int(last_st) < 300 or int(last_st) == 204) else ""),
+            "message": user_facing_upstream_error(
+                "已更新本地任务" + ("；上游 PATCH 未成功（可忽略，仅 loc- 任务时正常）" if not (200 <= int(last_st) < 300 or int(last_st) == 204) else "")
+            ),
             "data": {
                 "assignment_id": aid,
                 "upstream_attempts": upstream_attempts,
@@ -6431,7 +6450,9 @@ def api_teacher_delete_local_assignment(assignment_id: str):
     return jsonify(
         {
             "code": 0,
-            "message": "已删除本地任务记录" + ("；上游返回值见 data.last_upstream。" if attempts else ""),
+            "message": user_facing_upstream_error(
+                "已删除本地任务记录" + ("；上游返回值见 data.last_upstream。" if attempts else "")
+            ),
             "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
             "trace_id": uuid.uuid4().hex,
         }
@@ -6459,7 +6480,9 @@ def api_teacher_unpublish_local_assignment(assignment_id: str):
     return jsonify(
         {
             "code": 0,
-            "message": "已标记本地任务下架（inactive）；" + ("上游返回码=" + str(last_st)),
+            "message": user_facing_upstream_error(
+                "已标记本地任务下架（inactive）；" + ("上游返回码=" + str(last_st))
+            ),
             "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
             "trace_id": uuid.uuid4().hex,
         }
@@ -6489,7 +6512,9 @@ def api_teacher_publish_local_assignment(assignment_id: str):
     return jsonify(
         {
             "code": 0,
-            "message": "已标记本地任务上架（published）；" + ("上游返回码=" + str(last_st)),
+            "message": user_facing_upstream_error(
+                "已标记本地任务上架（published）；" + ("上游返回码=" + str(last_st))
+            ),
             "data": {"assignment_id": aid, "upstream_attempts": attempts, "last_upstream": last_pl, "last_http_status": last_st},
             "trace_id": uuid.uuid4().hex,
         }
@@ -7501,7 +7526,7 @@ def api_exam_student_start_exam_local():
     up = _unwrap_quiz_api_success_data(pl_set)
     items = _find_set_item_dicts(up)
     if not items:
-        return jsonify({"code": "UPSTREAM_EMPTY_SET", "message": "上游套题明细为空", "data": {"set_id": set_id}, "trace_id": uuid.uuid4().hex}), 502
+        return jsonify({"code": "UPSTREAM_EMPTY_SET", "message": user_facing_upstream_error("上游套题明细为空"), "data": {"set_id": set_id}, "trace_id": uuid.uuid4().hex}), 502
 
     attempt_id = uuid.uuid4().hex
     try:
@@ -7985,13 +8010,13 @@ def api_exam_activity_attempt_items(activity_id: str):
         return jsonify(
             {
                 "code": 0,
-                "message": "ok（上游明细不可用，已降级为本地提交快照）",
+                "message": user_facing_upstream_error("ok（上游明细不可用，已降级为本地提交快照）"),
                 "data": {"items": fb},
                 "trace_id": uuid.uuid4().hex,
                 "request": {"url": "", "method": "GET", "upstreamPath": f"quiz/attempts/{att_id}/answers → snapshot"},
             }
         ), 200
-    return jsonify({"code": "UPSTREAM_ERROR", "message": "上游明细不可用", "data": pl, "trace_id": uuid.uuid4().hex}), 502
+    return jsonify({"code": "UPSTREAM_ERROR", "message": user_facing_upstream_error("上游明细不可用"), "data": pl, "trace_id": uuid.uuid4().hex}), 502
 
 
 @bp.get("/api/exam-center/stats/mode")
@@ -10459,7 +10484,7 @@ def api_projects_sync_from_company_registry():
     from .authz import is_page13_super_admin, user_team_ids
 
     if not is_page13_super_admin() and not user_team_ids():
-        return jsonify({"message": "请先在页面4账号管理中分配所属项目组"}), 403
+        return jsonify({"message": user_facing_text("请先在页面4账号管理中分配所属项目组", "请先联系管理员分配所属项目组")}), 403
     try:
         synced = _sync_company_registry_projects_to_page1()
     except Exception as e:
@@ -10467,7 +10492,10 @@ def api_projects_sync_from_company_registry():
         return jsonify({"message": f"同步失败：{e}"}), 500
     return jsonify(
         {
-            "message": f"已从页面0 同步 {synced} 个项目到页面1（仅新建尚未关联的页面1 项目）",
+            "message": user_facing_text(
+                f"已从页面0 同步 {synced} 个项目到页面1（仅新建尚未关联的页面1 项目）",
+                f"已从公司总览同步 {synced} 个项目到任务列表（仅新建尚未关联的项目）",
+            ),
             "synced": synced,
         }
     )
@@ -11560,7 +11588,10 @@ def api_notify_by_project():
     team_id = _resolve_team_id_by_project_name(project_name)
     webhook, secret, webhook_source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
-        return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
+        return jsonify({"message": user_facing_text(
+            "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人",
+            "未配置催办 Webhook，请联系管理员在系统管理中配置；未配置时将使用默认机器人",
+        )}), 400
 
     from .dingtalk_team import notify_routing_meta
 
@@ -11867,7 +11898,10 @@ def api_notify_single_task():
     team_id = resolve_team_id_by_upload(upload)
     webhook, secret, webhook_source = _resolve_dingtalk_for_team(team_id)
     if not webhook:
-        return jsonify({"message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人"}), 400
+        return jsonify({"message": user_facing_text(
+            "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉」或系统配置「催办与定时通知」填写；未配置时将使用互联网产品部机器人",
+            "未配置催办 Webhook，请联系管理员在系统管理中配置；未配置时将使用默认机器人",
+        )}), 400
 
     from .dingtalk_team import notify_routing_meta
 
@@ -12276,7 +12310,10 @@ def api_notify_test_auto():
         return jsonify({
             "success": False,
             "webhook_configured": False,
-            "message": "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉配置」或系统配置「催办与定时通知」中填写",
+            "message": user_facing_text(
+                "未配置催办 Webhook，请在页面4 · 系统与钉钉「项目组钉钉配置」或系统配置「催办与定时通知」中填写",
+                "未配置催办 Webhook，请联系管理员在系统管理中配置",
+            ),
             "type": test_type or "default",
         }), 400
     content = "【自动催办测试】通道正常。定时任务将按配置时间发送每周任务完成提醒、逾期前一日催告、每两天项目完成情况统计。"

@@ -51,7 +51,16 @@ from ._integration_common import (
     latest_audit_report_id_for_scope,
     login_wall,
     manual_upload_only_from_request,
+    msg_select_integration_project,
+    msg_upstream_http,
+    msg_upstream_no_job_id,
+    msg_page1_project_code_required,
+    msg_upstream_not_json,
+    msg_upstream_submit_failed,
+    msg_upstream_not_configured_env,
     personal_llm_key_wall,
+    user_facing_text,
+    user_facing_upstream_error,
     resolve_org_collection_for_integration,
     sync_active_organization_if_requested,
     resolve_aicheckword_project_id_for_upload,
@@ -379,7 +388,7 @@ def api_audit_modify_create_job():
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 500
+        return jsonify({"message": msg_upstream_not_configured_env()}), 500
 
     payload_str = (request.form.get("payload") or "").strip()
     if not payload_str:
@@ -472,8 +481,8 @@ def api_audit_modify_create_job():
         return jsonify(
             {
                 "message": (
-                    "请先选择 aicheckword 项目后再提交审核后修改。"
-                    "未绑定项目会显著降低审核点约束与修订命中率。"
+                    msg_select_integration_project()
+                    + "未绑定项目会显著降低审核点约束与修订命中率。"
                 )
             }
         ), 400
@@ -507,8 +516,40 @@ def api_audit_modify_create_job():
         for disp_name, blob in flatten_upload_file_storage(base_files_form):
             base_uploads.append((disp_name, blob))
 
+    if not base_uploads and upload_id and not base_upload_id:
+        # 未单独上传 Base 时：以审核来源任务中的文档作为 Base（对应报告「需修改文档」）
+        rec_src = UploadRecord.query.get(upload_id)
+        if rec_src and upload_record_visible_to_user(rec_src):
+            from .draft_generation_routes import _base_doc_bytes_from_upload, _template_display_filename
+
+            try:
+                blob, _name = _base_doc_bytes_from_upload(rec_src)
+            except Exception as e:  # noqa: BLE001
+                return jsonify({"message": f"从审核来源任务取 Base 失败：{e}"}), 500
+            if blob:
+                disp = _template_display_filename(rec_src) or rec_src.file_name or "base.docx"
+                base_uploads.append((disp, blob))
+            else:
+                return jsonify(
+                    {
+                        "message": user_facing_text(
+                            "审核来源任务尚无可用文档，请上传 Base，"
+                            "或先在页面2 保存/上传该任务的模板文件后再试。",
+                            "审核来源任务尚无可用文档，请上传 Base，"
+                            "或先在我的任务中保存/上传该任务的模板文件后再试。",
+                        )
+                    }
+                ), 400
+
     if not base_uploads:
-        return jsonify({"message": "请提供 base_upload_id 或上传 Base 文件（支持 .zip/.tar 压缩包）"}), 400
+        return jsonify(
+            {
+                "message": (
+                    "请提供 base_upload_id、上传 Base 文件，"
+                    "或填写带文档的 upload_id（将自动用审核时那份文档作 Base）。"
+                )
+            }
+        ), 400
     if len(base_uploads) > 1:
         names_preview = "、".join(n for n, _ in base_uploads[:6])
         if len(base_uploads) > 6:
@@ -517,7 +558,7 @@ def api_audit_modify_create_job():
             {
                 "message": (
                     f"审核后修改稳态模式仅支持 1 个 Base 文件，当前解压/选择后共 {len(base_uploads)} 个"
-                    f"（{names_preview}）。请只上传单个 Word/Excel 或仅含一个文档的压缩包。"
+                    f"（{names_preview}）。请只上传单个文档（Word / Excel / PDF / 文本等）或仅含一个文档的压缩包。"
                 )
             }
         ), 400
@@ -558,11 +599,11 @@ def api_audit_modify_create_job():
         organization_id=org_id,
     )
     if prep_err:
-        return jsonify({"message": prep_err}), 400
+        return jsonify({"message": user_facing_upstream_error(prep_err)}), 400
 
     draft_from_upstream = (prep_data or {}).get("draftPayload") if isinstance(prep_data, dict) else {}
     if not isinstance(draft_from_upstream, dict) or not draft_from_upstream:
-        return jsonify({"message": "上游未返回 draftPayload"}), 502
+        return jsonify({"message": user_facing_upstream_error("上游未返回 draftPayload")}), 502
 
     for k, v in draft_from_upstream.items():
         payload_obj[k] = v
@@ -572,7 +613,7 @@ def api_audit_modify_create_job():
 
     target_names = list(payload_obj.get("template_file_names") or [])
     if not target_names:
-        return jsonify({"message": "上游未返回 template_file_names"}), 502
+        return jsonify({"message": user_facing_upstream_error("上游未返回 template_file_names")}), 502
 
     stable_err = _enforce_audit_modify_stable(target_names, len(base_uploads))
     if stable_err:
@@ -653,31 +694,31 @@ def api_audit_modify_create_job():
         )
     except requests.RequestException as e:
         local_job.status = "failed"
-        local_job.message = "提交上游失败"
+        local_job.message = msg_upstream_submit_failed(e)
         local_job.error_summary = safe_truncate(str(e), 4000)
         db.session.commit()
-        return jsonify({"message": f"提交上游失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_submit_failed(e)}), 502
 
     if r.status_code != 200:
         local_job.status = "failed"
-        local_job.message = f"上游 HTTP {r.status_code}"
+        local_job.message = msg_upstream_http(r.status_code)
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
     try:
         upstream = r.json()
     except Exception:
         local_job.status = "failed"
-        local_job.message = "上游响应非 JSON"
+        local_job.message = msg_upstream_not_json()
         db.session.commit()
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
 
     upstream_id = (upstream.get("job_id") or "").strip()
     if not upstream_id:
         local_job.status = "failed"
-        local_job.message = "上游未返回 job_id"
+        local_job.message = msg_upstream_no_job_id()
         db.session.commit()
-        return jsonify({"message": "上游未返回 job_id", "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -820,7 +861,7 @@ def api_post_audit_defaults():
         organization_id=org_id,
     )
     if up_err:
-        return jsonify({"message": up_err}), 502
+        return jsonify({"message": user_facing_upstream_error(up_err)}), 502
     return jsonify({"ok": True, "meta": data or {}})
 
 
@@ -832,7 +873,7 @@ def api_preview_remediation():
         return err
     raw_report, report_id, load_err = _load_raw_report_for_request()
     if load_err:
-        return jsonify({"message": load_err}), 400
+        return jsonify({"message": user_facing_upstream_error(load_err)}), 400
     selected_refs = _parse_selected_refs(request.args.get("selected_refs"))
     org_id, _ = resolve_org_collection_for_integration(
         upload_id=(request.args.get("upload_id") or "").strip()
@@ -844,7 +885,7 @@ def api_preview_remediation():
         organization_id=org_id,
     )
     if rem_err:
-        return jsonify({"message": rem_err}), 400
+        return jsonify({"message": user_facing_upstream_error(rem_err)}), 400
     return jsonify(
         {
             "ok": True,

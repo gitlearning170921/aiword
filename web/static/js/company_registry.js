@@ -22,12 +22,23 @@
     const STAR_FILTER_STORAGE_KEY = "companyRegistryStarFilter";
     const ORG_FILTER_STORAGE_KEY = "companyRegistryOrgFilter";
     const canOverridePage1Lock = !!window.__PAGE13_SUPER_ADMIN__;
-    const TEAM_LOCK_HINT =
-        "页面1 已下发任务，公司管理员不可修改所属项目组；仅超级管理员（页面4 访问密码）可改。";
-    const STATUS_LOCK_HINT =
-        "页面1 已下发任务，公司管理员不可在页面0 修改项目状态；请由项目管理员在页面1 修改，或联系超级管理员。";
-    const ORG_LOCK_HINT =
-        "页面1 已绑定任务，不可修改所属公司；仅超级管理员（页面4 访问密码）可改。";
+    function ufText(adminText, userText) {
+        return typeof window.ufText === "function"
+            ? window.ufText(adminText, userText)
+            : (window.__PAGE13_SUPER_ADMIN__ ? adminText : userText);
+    }
+    const TEAM_LOCK_HINT = ufText(
+        "页面1 已下发任务，公司管理员不可修改所属项目组；仅超级管理员（页面4 访问密码）可改。",
+        "已有下发任务时，不可修改所属项目组；请联系超级管理员。"
+    );
+    const STATUS_LOCK_HINT = ufText(
+        "页面1 已下发任务，公司管理员不可在页面0 修改项目状态；请由项目管理员在页面1 修改，或联系超级管理员。",
+        "已有下发任务时，不可在此修改项目状态；请在任务管理中修改，或联系超级管理员。"
+    );
+    const ORG_LOCK_HINT = ufText(
+        "页面1 已绑定任务，不可修改所属公司；仅超级管理员（页面4 访问密码）可改。",
+        "已绑定任务时，不可修改所属公司；请联系超级管理员。"
+    );
 
     const COLS = 15;
     const EMPTY_COUNTRY_LABEL = "（未填写注册国家）";
@@ -79,7 +90,7 @@
             );
         }
         if (usage.projects) {
-            parts.push(`${usage.projects} 个页面1 项目的${kind === "country" ? "注册国家" : "项目组归属"}`);
+            parts.push(ufText(`${usage.projects} 个页面1 项目的${kind === "country" ? "注册国家" : "项目组归属"}`, `${usage.projects} 个任务项目的${kind === "country" ? "注册国家" : "项目组归属"}`));
         }
         if (kind === "country" && usage.userScopes) {
             parts.push(`${usage.userScopes} 条账号国家维度绑定`);
@@ -113,10 +124,10 @@
             payload.assignedTeamId !== undefined &&
             String(payload.assignedTeamId || "").trim() !== String(editing.assignedTeamId || "").trim();
         if (orgChanged) {
-            msgs.push("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务");
+            msgs.push(ufText("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务", "所属公司及关联任务、任务记录、审核/翻译/初稿任务"));
         }
         if (teamChanged) {
-            msgs.push("所属项目组及关联页面1 项目");
+            msgs.push(ufText("所属项目组及关联页面1 项目", "所属项目组及关联任务项目"));
         }
         if (!msgs.length) return "";
         return `当前操作${msgs.join("与")}都会被更新，是否确认？`;
@@ -130,10 +141,10 @@
         const teamChanged = payload.assignedTeamId !== undefined;
         const msgs = [];
         if (orgChanged) {
-            msgs.push("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务");
+            msgs.push(ufText("所属公司及关联页面1 项目、任务记录、审核/翻译/初稿任务", "所属公司及关联任务、任务记录、审核/翻译/初稿任务"));
         }
         if (teamChanged) {
-            msgs.push("所属项目组及关联页面1 项目");
+            msgs.push(ufText("所属项目组及关联页面1 项目", "所属项目组及关联任务项目"));
         }
         if (!msgs.length) return "";
         const n = selected.filter(projectHasPage1Tasks).length;
@@ -364,7 +375,7 @@
         const u = item?.usage || {};
         const parts = [];
         if (u.companyProjects) parts.push(`总览${u.companyProjects}`);
-        if (u.projects) parts.push(`页面1 ${u.projects}`);
+        if (u.projects) parts.push(ufText(`页面1 ${u.projects}`, `任务 ${u.projects}`));
         if (u.userScopes) parts.push(`账号${u.userScopes}`);
         if (u.userMemberships) parts.push(`账号${u.userMemberships}`);
         return parts.length ? parts.join(" · ") : "";
@@ -644,7 +655,7 @@
         if (!cid) return;
         document.getElementById("linkPage1CompanyId").value = cid;
         const title = document.getElementById("companyLinkPage1ModalTitle");
-        if (title) title.textContent = `关联页面1 项目 · ${companyProject.name || ""}`;
+        if (title) title.textContent = ufText(`关联页面1 项目 · ${companyProject.name || ""}`, `关联任务项目 · ${companyProject.name || ""}`);
         const box = document.getElementById("linkPage1Candidates");
         if (box) box.innerHTML = '<div class="text-muted small">加载中…</div>';
         if (linkModalEl) new bootstrap.Modal(linkModalEl).show();
@@ -659,7 +670,7 @@
                 (companyProject.linkedPage1Projects || []).map((x) => x.id)
             );
             if (!Array.isArray(candidates) || !candidates.length) {
-                if (box) box.innerHTML = '<div class="text-muted small">暂无页面1 项目，请先在页面1 创建。</div>';
+                if (box) box.innerHTML = '<div class="text-muted small">' + esc(ufText("暂无页面1 项目，请先在页面1 创建。", "暂无任务项目，请先在任务管理中创建。")) + '</div>';
                 return;
             }
             if (box) {
@@ -888,7 +899,10 @@
             btn.addEventListener("click", () => {
                 removeFromRegistry(
                     [btn.dataset.id],
-                    "确定移出该公司总览记录？\n仅删除公司层数据并解除与页面1 的关联，页面1/2/3 的项目与任务均保留。"
+                    ufText(
+                        "确定移出该公司总览记录？\n仅删除公司层数据并解除与页面1 的关联，页面1/2/3 的项目与任务均保留。",
+                        "确定移出该公司总览记录？\n仅删除公司层数据并解除与任务的关联，任务数据均保留。"
+                    )
                 );
             });
         });
@@ -903,7 +917,10 @@
         if (!displayRows.length) {
             const hint = getStarFilterMode() === "starred"
                 ? "暂无特别关注项目。点击列表左侧 ☆ 可标记关注。"
-                : "暂无项目。可点击「登记新项目」，或在页面1 使用「同步页面0项目」导入所属项目组下的公司总览项目。";
+                : ufText(
+                    "暂无项目。可点击「登记新项目」，或在页面1 使用「同步页面0项目」导入所属项目组下的公司总览项目。",
+                    "暂无项目。可点击「登记新项目」，或使用「同步公司总览项目」导入所属项目组下的公司总览项目。"
+                  );
             body.innerHTML =
                 window.ScopeBar && ScopeBar.emptyTableRow
                     ? ScopeBar.emptyTableRow(COLS, "page0_projects", [hint])
@@ -943,7 +960,7 @@
             const { projects, synced } = normalizeProjectsResponse(res);
             renderProjects(projects);
             if (synced > 0) {
-                notify(`已从页面1 同步 ${synced} 个已有项目，可直接编辑`, "success");
+                notify(ufText(`已从页面1 同步 ${synced} 个已有项目，可直接编辑`, `已同步 ${synced} 个已有任务项目，可直接编辑`), "success");
             }
         } catch (e) {
             body.innerHTML = `<tr><td colspan="${COLS}" class="text-danger small p-3">${esc(e.message || "加载失败")} <button type="button" class="btn btn-link btn-sm p-0" id="btnRetryLoadProjects">重试</button></td></tr>`;
@@ -1051,7 +1068,10 @@
             const ids = selectedProjectIds();
             removeFromRegistry(
                 ids,
-                `确定将选中的 ${ids.length} 条公司总览记录移出？\n仅解除关联，页面1/2/3 数据均保留。`
+                ufText(
+                    `确定将选中的 ${ids.length} 条公司总览记录移出？\n仅解除关联，页面1/2/3 数据均保留。`,
+                    `确定将选中的 ${ids.length} 条公司总览记录移出？\n仅解除关联，任务数据均保留。`
+                )
             );
         });
 
@@ -1726,8 +1746,8 @@
         if (body) {
             wireCompanyLogoutButton();
             initCompanySessionBar();
-            initCompanyTrainingPanel();
-            initTrainingHubExtras();
+            /* 知识库训练入口已下线，保留函数定义供日后恢复 */
+            /* initCompanyTrainingPanel(); initTrainingHubExtras(); */
             initStarFilterSelect();
             initGroupBySelect();
             bindEvents();

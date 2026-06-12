@@ -97,13 +97,23 @@
     function emptyMessages(contextKey) {
         var ctx = _ctx || {};
         var reasons = (ctx.emptyReasons || []).slice();
+        var uf = typeof window.ufText === "function"
+            ? window.ufText
+            : function (a, u) { return window.__PAGE13_SUPER_ADMIN__ ? a : u; };
         var base = {
-            page0_projects:
+            page0_projects: uf(
                 "当前筛选条件下暂无公司总览项目。可点击「登记新项目」，或在页面1 使用「同步页面0项目」建立关联。",
-            page1_projects:
+                "当前筛选条件下暂无公司总览项目。可点击「登记新项目」，或在任务管理中使用「同步公司总览项目」建立关联。"
+            ),
+            page1_projects: uf(
                 "暂无页面1 项目。可点击「新增项目」，或使用「同步页面0项目」从公司总览导入。",
+                "暂无项目。可点击「新增项目」，或使用「同步公司总览项目」从公司总览导入。"
+            ),
             page1_records: "暂无任务记录。请在下方任务录入区新建任务，或检查项目组/公司筛选是否过窄。",
-            page2_records: "暂无生成记录。请先在页面1 创建任务并完成上传/生成流程。",
+            page2_records: uf(
+                "暂无生成记录。请先在页面1 创建任务并完成上传/生成流程。",
+                "暂无任务记录。请先在任务管理中创建任务并完成上传/生成流程。"
+            ),
             page3_stats: "当前统计范围内暂无数据。",
             exam_student_history: "暂无练习/考试记录。提交成功后会在此显示。",
             exam_teacher_assignments: "暂无考试任务。项目管理员/老师可在老师端下发任务。",
@@ -210,7 +220,9 @@
                     '<div class="modal-footer">' +
                     '<a class="btn btn-sm btn-outline-primary" href="' +
                     esc((global.__SCRIPT_ROOT__ || "") + "/admin") +
-                    '">打开页面4</a>' +
+                    '">' +
+                    (global.ufText ? global.ufText("打开页面4", "打开系统管理") : "打开系统管理") +
+                    '</a>' +
                     '<button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">关闭</button>' +
                     "</div></div></div></div>";
                 document.body.appendChild(wrap.firstElementChild);

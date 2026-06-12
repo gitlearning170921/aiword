@@ -173,6 +173,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "多公司租户开关（1=启用公司维度隔离；空或0=关闭并保持现网单租户行为）",
         False,
     ),
+    (
+        "FEATURE_ENV_SEPARATION",
+        "环境分离开关（1=启用后 AIWORD_ENV=test|prod 隔离 aiword 库与目录；空或0=关闭，与改前一致。须在 .env 同步并重启生效）",
+        False,
+    ),
 ]
 
 
@@ -194,6 +199,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_EXAM_CENTER",
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
+    "FEATURE_ENV_SEPARATION",
 )
 
 PAGE1_FEATURE_FLAG_KEYS: tuple[str, ...] = (
@@ -245,12 +251,13 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
+            "FEATURE_ENV_SEPARATION",
         ),
     },
     {
         "id": "core",
         "title": "基础与安全",
-        "hint": "部署、访问控制与对外地址；修改数据库连接后需重启服务。",
+        "hint": "部署、访问控制与对外地址；修改数据库连接后需重启服务。开启环境分离时请在 .env 设置 AIWORD_ENV=test 或 prod。",
         "defaultExpanded": True,
         "keys": (
             "DATABASE_URL",
@@ -783,6 +790,8 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "AICHECKWORD_CHAT_TIMEOUT_SECONDS": ("AICHECKWORD_CHAT_TIMEOUT_SECONDS",),
     "AIPRINTWORD_BASE_URL": ("AIPRINTWORD_BASE_URL",),
     "AIPRINTWORD_HANDOFF_SECRET": ("AIPRINTWORD_HANDOFF_SECRET", "AIWORD_HANDOFF_SECRET"),
+    "FEATURE_ENV_SEPARATION": ("FEATURE_ENV_SEPARATION",),
+    "AIWORD_ENV": ("AIWORD_ENV",),
 }
 
 # 这些键在 os.environ 里按「名称大写相等」再扫一遍（解决 Windows 等环境下变量名不一致）
@@ -957,8 +966,14 @@ def _project_root_from_app(app: Optional["Flask"]) -> Optional[Path]:
         return None
 
 
+def resolve_instance_dir(project_root: Path) -> Path:
+    """instance 目录；测试环境可通过 AIWORD_INSTANCE_DIR=instance_test 与生产隔离。"""
+    name = (os.environ.get("AIWORD_INSTANCE_DIR") or "instance").strip() or "instance"
+    return project_root / name
+
+
 def _bootstrap_database_url_file(project_root: Path) -> Optional[str]:
-    p = project_root / "instance" / "database_url.txt"
+    p = resolve_instance_dir(project_root) / "database_url.txt"
     if not p.exists():
         return None
     try:
@@ -991,7 +1006,7 @@ def _persist_database_url_bootstrap_file(project_root: Path, uri: str) -> None:
     val = (uri or "").strip()
     if not val or "****" in val:
         return
-    inst = project_root / "instance"
+    inst = resolve_instance_dir(project_root)
     inst.mkdir(parents=True, exist_ok=True)
     (inst / "database_url.txt").write_text(val + "\n", encoding="utf-8")
 

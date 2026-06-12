@@ -324,7 +324,7 @@ def super_admin_required(fn: Callable):
             return (
                 jsonify(
                     {
-                        "message": "仅超级管理员可访问，请先在页面4 完成访问密码验证",
+                        "message": "仅超级管理员可访问",
                         "needsPage13Auth": True,
                     }
                 ),
@@ -364,7 +364,11 @@ def _company_admin_blocked_response():
         return (
             jsonify(
                 {
-                    "message": "公司管理员仅可访问页面0 · 公司总览",
+                    "message": (
+                        "公司管理员仅可访问页面0 · 公司总览"
+                        if is_page13_super_admin()
+                        else "公司管理员仅可访问公司总览"
+                    ),
                     "needsCompanyAdmin": True,
                     "redirect": url_for("company.company_registry_page"),
                 }
@@ -857,7 +861,11 @@ def company_registry_api_required(fn: Callable):
         if not is_company_admin():
             return jsonify(
                 {
-                    "message": "仅公司管理员账号或页面4 访问密码（超级管理员）可访问页面0",
+                    "message": (
+                        "仅公司管理员账号或页面4 访问密码（超级管理员）可访问页面0"
+                        if is_page13_super_admin()
+                        else "仅公司管理员账号可访问公司总览"
+                    ),
                     "needsCompanyAdmin": True,
                 }
             ), 403
@@ -895,7 +903,11 @@ def company_registry_page_required(fn: Callable):
                 render_template(
                     "error.html",
                     title="公司总览未启用",
-                    message="公司项目总览模块未启用。可在页面4 · 系统与钉钉「系统配置」中开启 FEATURE_COMPANY_REGISTRY。",
+                    message=(
+                        "公司项目总览模块未启用。可在页面4 · 系统与钉钉「系统配置」中开启 FEATURE_COMPANY_REGISTRY。"
+                        if is_page13_super_admin()
+                        else "公司项目总览模块未启用，请联系超级管理员。"
+                    ),
                     hide_main_nav=True,
                     gate_page=True,
                 ),
@@ -911,7 +923,11 @@ def company_registry_page_required(fn: Callable):
                 render_template(
                     "error.html",
                     title="无访问权限",
-                    message="仅「公司管理员」账号或页面4 访问密码（超级管理员）可访问页面0。",
+                    message=(
+                        "仅「公司管理员」账号或页面4 访问密码（超级管理员）可访问页面0。"
+                        if is_page13_super_admin()
+                        else "仅公司管理员账号可访问公司总览。"
+                    ),
                     back_url=url_for("pages.login_page"),
                     back_label="重新登录",
                     hide_main_nav=True,

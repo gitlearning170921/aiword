@@ -40,10 +40,18 @@ from ._integration_common import (
     integration_scope_list_filter,
     integration_organization_list_filter,
     manual_upload_only_from_request,
+    msg_page1_project_code_required,
+    msg_upstream_http,
+    msg_upstream_no_job_id,
+    msg_upstream_not_json,
+    msg_upstream_submit_failed,
+    user_facing_text,
+    user_facing_upstream_error,
     resolve_aicheckword_project_id_for_upload,
     resolve_org_collection_for_integration,
     sync_active_organization_if_requested,
     upstream_get_json,
+    upstream_post_json,
 )
 from .llm_credential_crypto import (
     coerce_encrypted_blob,
@@ -53,7 +61,7 @@ from .llm_credential_crypto import (
     normalize_llm_base_url,
     verify_api_key_roundtrip,
 )
-from .models import DraftGenerationJob, UploadRecord, UserLlmCredential, now_local
+from .models import DraftGenerationJob, Project, UploadRecord, UserLlmCredential, now_local
 
 # 上游 HTTP「读超时」配置上限（秒）：提交大 multipart、下载 ZIP 等单请求可等待的最长时间。
 # 与前端 draft_gen.js 中轮询墙钟上限保持一致，避免服务端允许 72h 而浏览器约 32min 就判超时。
@@ -779,20 +787,27 @@ def _llm_key_test_response(uid: str, data: dict[str, Any]):
                     {
                         **resp_base,
                         "ok": True,
-                        "message": f"{msg}（Key 来源：{src_label}；经 aicheckword 验证）",
+                        "message": user_facing_text(
+                            f"{msg}（Key 来源：{src_label}；经 aicheckword 验证）",
+                            f"{msg}（Key 来源：{src_label}）",
+                        ),
                     }
                 )
             if not ok:
                 hint = ""
                 if diag.get("systemKeyWorks") is True:
-                    hint = (
+                    hint = user_facing_text(
                         "【结论】aicheckword 侧栏系统 Key 可用，但你保存的个人 Key 无效或不是同一把；"
-                        "请从 DeepSeek 控制台重新复制 Key 粘贴保存，或把 aicheckword 侧栏里可用的 Key 原样复制过来。"
+                        "请从 DeepSeek 控制台重新复制 Key 粘贴保存，或把 aicheckword 侧栏里可用的 Key 原样复制过来。",
+                        "【结论】系统 Key 可用，但你保存的个人 Key 无效或不是同一把；"
+                        "请从 DeepSeek 控制台重新复制 Key 粘贴保存，或联系管理员确认系统 Key。",
                     )
                 elif diag.get("systemKeyWorks") is False:
-                    hint = (
+                    hint = user_facing_text(
                         "【结论】个人 Key 与 aicheckword 系统 Key 均不可用；"
-                        "请先在 aicheckword 侧栏保存可用的 DeepSeek Key（Base URL: https://api.deepseek.com/v1）。"
+                        "请先在 aicheckword 侧栏保存可用的 DeepSeek Key（Base URL: https://api.deepseek.com/v1）。",
+                        "【结论】个人 Key 与系统 Key 均不可用；"
+                        "请联系管理员配置可用的 DeepSeek Key（Base URL: https://api.deepseek.com/v1）。",
                     )
                 elif diag.get("receivedKeyPrefixOk") is False:
                     hint = "【结论】Key 格式异常（DeepSeek 通常以 sk- 开头），请重新复制。"
@@ -819,7 +834,10 @@ def _llm_key_test_response(uid: str, data: dict[str, Any]):
             return jsonify(
                 {
                     "ok": False,
-                    "message": f"{msg}（Key 来源：{src_label}；aiword 直连，未配置上游）",
+                    "message": user_facing_text(
+                        f"{msg}（Key 来源：{src_label}；aiword 直连，未配置上游）",
+                        f"{msg}（Key 来源：{src_label}；直连验证，文档服务未配置）",
+                    ),
                     "keySource": key_source,
                     "testPath": "direct",
                 }
@@ -909,7 +927,10 @@ def api_llm_settings_post():
         setattr(row, key_attr, encrypt_api_key(sk, api_key))
         row.api_key_encrypted = None
     elif not _encrypted_key_blob_for_provider(row, provider) and _draft_personal_keys_enforced():
-        return jsonify({"message": f"{labels[provider]} 须填写并保存个人 API Key（仅本账号可用，不使用 aicheckword 系统管理员 Key）"}), 400
+        return jsonify({"message": user_facing_text(
+            f"{labels[provider]} 须填写并保存个人 API Key（仅本账号可用，不使用 aicheckword 系统管理员 Key）",
+            f"{labels[provider]} 须填写并保存个人 API Key（仅本账号可用）",
+        )}), 400
     db.session.commit()
     return jsonify({"ok": True, "message": "已保存"})
 
@@ -1192,9 +1213,9 @@ def api_suggest_author_role():
     except requests.RequestException as e:
         return jsonify({"ok": False, "message": str(e)[:500]}), 502
     except Exception:
-        return jsonify({"ok": False, "message": "上游返回非 JSON"}), 502
+        return jsonify({"ok": False, "message": msg_upstream_not_json()}), 502
     if r.status_code >= 400:
-        return jsonify(body if isinstance(body, dict) else {"message": f"上游 HTTP {r.status_code}"}), r.status_code
+        return jsonify(body if isinstance(body, dict) else {"message": msg_upstream_http(r.status_code)}), r.status_code
     return jsonify(body)
 
 
@@ -1213,6 +1234,391 @@ def api_project_draft_defaults(project_id: int):
     return jsonify({"ok": True, "data": data or {}})
 
 
+def _first_upload_field_for_project(project_id: str, attr: str) -> str:
+    pid = (project_id or "").strip()
+    if not pid:
+        return ""
+    rows = (
+        UploadRecord.query.filter_by(project_id=pid)
+        .order_by(UploadRecord.updated_at.desc())
+        .all()
+    )
+    for u in rows:
+        v = (getattr(u, attr, None) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _norm_acw_dedup_token(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _missing_acw_dedup_field_labels(
+    product_name: str,
+    registration_country: str,
+    registration_type: str,
+) -> list[str]:
+    missing: list[str] = []
+    if not str(product_name or "").strip():
+        missing.append("产品名称")
+    if not str(registration_country or "").strip():
+        missing.append("注册国家")
+    if not str(registration_type or "").strip():
+        missing.append("注册类别")
+    return missing
+
+
+def _missing_acw_dedup_fields_message(missing: list[str]) -> str:
+    return (
+        f"页面1 项目缺少判重所需信息（{'、'.join(missing)}），"
+        "请先到页面1 补充维护后再新建。"
+    )
+
+
+def _user_sees_upstream_brand() -> bool:
+    from .authz import is_page13_super_admin
+
+    return is_page13_super_admin()
+
+
+def _normalize_knowledge_search_options_fields(body: dict[str, Any]) -> dict[str, Any]:
+    fields = body.get("fields")
+    if isinstance(fields, dict) and fields:
+        return fields
+    return {
+        "registration_country": {"options": body.get("registration_country") or []},
+        "registration_type": {"options": body.get("registration_type") or []},
+        "registration_component": {"options": body.get("registration_component") or []},
+        "project_form": {"options": body.get("project_form") or []},
+    }
+
+
+def _duplicate_acw_project_message(existing: dict[str, Any]) -> str:
+    pid = existing.get("id")
+    pn = str(existing.get("productName") or existing.get("product_name") or "").strip()
+    rc = str(
+        existing.get("registrationCountry") or existing.get("registration_country") or ""
+    ).strip()
+    rt = str(
+        existing.get("registrationType") or existing.get("registration_type") or ""
+    ).strip()
+    parts = [f"产品名称：{pn or '—'}", f"注册国家：{rc or '—'}", f"注册类别：{rt or '—'}"]
+    tail = f"（ID：{pid}）" if pid is not None else ""
+    if _user_sees_upstream_brand():
+        return f"aicheckword 中已存在相同项目（{'，'.join(parts)}）{tail}，请勿重复创建。"
+    return f"已存在相同专属项目（{'，'.join(parts)}）{tail}，请勿重复创建。"
+
+
+def _fetch_upstream_projects_list(
+    collection: str,
+    *,
+    organization_id: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    base = _draft_api_base()
+    if not base:
+        return [], "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"
+    try:
+        r = requests.get(
+            f"{base.rstrip('/')}/api/integration/projects",
+            params={"collection": (collection or "regulations").strip() or "regulations"},
+            headers=_upstream_headers(for_multipart=False, organization_id=organization_id),
+            timeout=_draft_requests_timeout(read_seconds=30),
+        )
+    except requests.RequestException as e:
+        return [], str(e)[:500]
+    if r.status_code != 200:
+        return [], f"上游 HTTP {r.status_code}"
+    try:
+        body = r.json()
+    except Exception:
+        return [], "上游响应非 JSON"
+    if not isinstance(body, dict):
+        return [], "上游响应无效"
+    rows = body.get("projects")
+    return (rows if isinstance(rows, list) else []), None
+
+
+def _find_acw_duplicate_project(
+    collection: str,
+    *,
+    product_name: str,
+    registration_country: str,
+    registration_type: str,
+    organization_id: Optional[str] = None,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """按产品名称+注册国家+注册类别判重；返回 (已有项目, 错误信息)。"""
+    missing = _missing_acw_dedup_field_labels(
+        product_name, registration_country, registration_type
+    )
+    if missing:
+        return None, _missing_acw_dedup_fields_message(missing)
+    projects, list_err = _fetch_upstream_projects_list(
+        collection, organization_id=organization_id
+    )
+    if list_err:
+        return None, f"无法校验是否已有重复项目：{list_err}"
+    key = (
+        _norm_acw_dedup_token(product_name),
+        _norm_acw_dedup_token(registration_country),
+        _norm_acw_dedup_token(registration_type),
+    )
+    for row in projects:
+        if not isinstance(row, dict):
+            continue
+        row_key = (
+            _norm_acw_dedup_token(row.get("productName") or row.get("product_name")),
+            _norm_acw_dedup_token(
+                row.get("registrationCountry") or row.get("registration_country")
+            ),
+            _norm_acw_dedup_token(row.get("registrationType") or row.get("registration_type")),
+        )
+        if row_key == key:
+            return row, _duplicate_acw_project_message(row)
+    return None, None
+
+
+_ACW_PROJECT_REQUIRED_FIELD_LABELS: list[tuple[str, str]] = [
+    ("name", "项目名称"),
+    ("project_code", "项目编号"),
+    ("name_en", "项目名称（英文）"),
+    ("product_name", "产品名称"),
+    ("product_name_en", "产品名称（英文）"),
+    ("model", "型号"),
+    ("model_en", "型号（英文）"),
+    ("registration_country", "注册国家"),
+    ("registration_country_en", "注册国家（英文）"),
+    ("registration_type", "注册类别"),
+    ("registration_component", "注册组成"),
+    ("project_form", "项目形态"),
+    ("scope_of_application", "产品适用范围"),
+]
+
+
+def _missing_acw_project_required_fields(payload: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for key, label in _ACW_PROJECT_REQUIRED_FIELD_LABELS:
+        if not str(payload.get(key) or "").strip():
+            missing.append(label)
+    return missing
+
+
+def _acw_project_incomplete_message(missing: list[str]) -> str:
+    admin_tail = "也可联系超级管理员在 aicheckword 中代为新建专属项目。"
+    user_tail = "也可联系超级管理员代为新建专属项目。"
+    return (
+        f"请填写完整项目信息（尚缺：{'、'.join(missing)}）。"
+        "信息齐全有助于提升初稿/审核对项目维度与适用范围的约束效果；"
+        + (admin_tail if _user_sees_upstream_brand() else user_tail)
+    )
+
+
+def _page1_project_aicheckword_prefill(page1_project_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """页面1 项目 → aicheckword 专属项目表单默认值（与 b 页字段对齐）。"""
+    from .authz import project_in_scope
+
+    pid = (page1_project_id or "").strip()
+    if not pid:
+        return None, "缺少 page1 项目 id"
+    p = Project.query.get(pid)
+    if not p:
+        return None, "未找到页面1 项目"
+    if not project_in_scope(p):
+        return None, "无权限访问该项目"
+    project_code = _first_upload_field_for_project(pid, "project_code")
+    if not project_code:
+        return None, "该页面1 项目尚未填写项目编号，请先到页面1 任务列表中为该项目填写项目编号后再试。"
+    model = _first_upload_field_for_project(pid, "model")
+    country_upload = _first_upload_field_for_project(pid, "country")
+    reg_product = _first_upload_field_for_project(pid, "registered_product_name")
+    reg_country = (getattr(p, "registered_country", None) or country_upload or "").strip()
+    reg_type = (getattr(p, "registered_category", None) or "").strip()
+    reg_comp = (getattr(p, "product_type", None) or "").strip()
+    return {
+        "page1ProjectId": p.id,
+        "page1ProjectName": p.name,
+        # 页面1 项目编号 → aicheckword 项目名称（只读预填；无编号时接口直接报错）
+        "name": project_code,
+        "project_code": project_code,
+        # 页面1 项目名称 → aicheckword 产品名称
+        "product_name": (p.name or reg_product or "").strip(),
+        "name_en": "",
+        "product_name_en": "",
+        "registration_country": reg_country,
+        "registration_country_en": "",
+        "registration_type": reg_type,
+        "registration_component": reg_comp,
+        "project_form": "",
+        "model": model,
+        "model_en": "",
+        "scope_of_application": "",
+    }, None
+
+
+@draft_gen_bp.get("/api/page1-projects/<page1_project_id>/aicheckword-prefill")
+def api_page1_aicheckword_prefill(page1_project_id: str):
+    err = _login_wall()
+    if err:
+        return err
+    data, msg = _page1_project_aicheckword_prefill(page1_project_id)
+    if msg:
+        if "无权限" in msg:
+            status = 403
+        elif "项目编号" in msg or "判重" in msg:
+            status = 400
+        elif data is None:
+            status = 404
+        else:
+            status = 400
+        return jsonify({"ok": False, "message": msg}), status
+    collection = (request.args.get("collection") or "regulations").strip() or "regulations"
+    explicit_org = (
+        request.args.get("organizationId") or request.args.get("organization_id") or ""
+    ).strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    assert data is not None
+    dup_row, dup_err = _find_acw_duplicate_project(
+        resolved_collection,
+        product_name=str(data.get("product_name") or ""),
+        registration_country=str(data.get("registration_country") or ""),
+        registration_type=str(data.get("registration_type") or ""),
+        organization_id=org_id,
+    )
+    if dup_err:
+        status = 409 if dup_row else 400
+        body: dict[str, Any] = {"ok": False, "message": dup_err}
+        if dup_row and dup_row.get("id") is not None:
+            body["duplicateProjectId"] = dup_row.get("id")
+        return jsonify(body), status
+    return jsonify({"ok": True, "data": data})
+
+
+@draft_gen_bp.post("/api/aicheckword-projects")
+def api_create_aicheckword_project():
+    """在 aicheckword 专属项目中新建一条记录（字段与 Streamlit b 页一致）。"""
+    err = _login_wall()
+    if err:
+        return err
+    body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"message": "请求体须为 JSON 对象"}), 400
+    page1_id = str(body.get("page1ProjectId") or body.get("page1_project_id") or "").strip()
+    prefill_locked_name = ""
+    if page1_id:
+        prefill, scope_err = _page1_project_aicheckword_prefill(page1_id)
+        if scope_err:
+            return jsonify({"message": scope_err}), 403
+        if prefill:
+            prefill_locked_name = str(prefill.get("name") or "").strip()
+    collection = str(body.get("collection") or "regulations").strip() or "regulations"
+    explicit_org = str(body.get("organizationId") or body.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    upstream_body = {
+        "collection": resolved_collection,
+        "name": prefill_locked_name or str(body.get("name") or "").strip(),
+        "registration_country": str(body.get("registration_country") or "").strip(),
+        "registration_type": str(body.get("registration_type") or "").strip(),
+        "registration_component": str(body.get("registration_component") or "").strip(),
+        "project_form": str(body.get("project_form") or "").strip(),
+        "scope_of_application": str(body.get("scope_of_application") or "").strip(),
+        "product_name": str(body.get("product_name") or "").strip(),
+        "name_en": str(body.get("name_en") or "").strip(),
+        "product_name_en": str(body.get("product_name_en") or "").strip(),
+        "registration_country_en": str(body.get("registration_country_en") or "").strip(),
+        "model": str(body.get("model") or "").strip(),
+        "model_en": str(body.get("model_en") or "").strip(),
+        "project_code": str(body.get("project_code") or "").strip(),
+    }
+    if not upstream_body["name"]:
+        return jsonify({"message": msg_page1_project_code_required()}), 400
+    missing_required = _missing_acw_project_required_fields(upstream_body)
+    if missing_required:
+        return jsonify({"message": _acw_project_incomplete_message(missing_required)}), 400
+    dup_row, dup_err = _find_acw_duplicate_project(
+        resolved_collection,
+        product_name=upstream_body["product_name"],
+        registration_country=upstream_body["registration_country"],
+        registration_type=upstream_body["registration_type"],
+        organization_id=org_id,
+    )
+    if dup_err:
+        status = 409 if dup_row else 400
+        resp: dict[str, Any] = {"ok": False, "message": dup_err}
+        if dup_row and dup_row.get("id") is not None:
+            resp["duplicateProjectId"] = dup_row.get("id")
+        return jsonify(resp), status
+    data, up_err = upstream_post_json(
+        "api/integration/projects",
+        upstream_body,
+        read_timeout_seconds=30,
+        organization_id=org_id,
+    )
+    if up_err:
+        return jsonify({"message": up_err}), 502
+    pid = None
+    if isinstance(data, dict):
+        try:
+            pid = int(data.get("projectId") or data.get("id") or 0) or None
+        except (TypeError, ValueError):
+            pid = None
+    if not pid:
+        return jsonify({"message": user_facing_text("上游未返回 projectId", "创建失败：未返回项目编号")}), 502
+    return jsonify({"ok": True, "projectId": pid, "data": data})
+
+
+@draft_gen_bp.get("/api/acw-project-form-options")
+def api_acw_project_form_options():
+    """弹窗维度下拉：代理上游 knowledge/search/options（draft/meta 不含注册国家/类别等）。"""
+    err = _login_wall()
+    if err:
+        return err
+    base = _draft_api_base()
+    if not base:
+        msg = (
+            "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"
+            if _user_sees_upstream_brand()
+            else "文档生成服务未配置，请联系管理员"
+        )
+        return jsonify({"ok": False, "message": msg}), 503
+    collection = (request.args.get("collection") or "regulations").strip()
+    org_id, resolved_collection = resolve_org_collection_for_integration(
+        preferred_collection=collection
+    )
+    url = f"{base.rstrip('/')}/knowledge/search/options"
+    try:
+        r = requests.get(
+            url,
+            params={"collection": resolved_collection},
+            headers=_upstream_headers(for_multipart=False, organization_id=org_id),
+            timeout=_draft_requests_timeout(read_seconds=30),
+        )
+        try:
+            body = r.json()
+        except Exception:
+            body = {}
+    except requests.RequestException as e:
+        return jsonify({"ok": False, "message": f"加载项目维度选项失败：{e}"}), 503
+    if r.status_code >= 400:
+        return jsonify(
+            {"ok": False, "message": f"加载项目维度选项失败（HTTP {r.status_code}）"}
+        ), 502
+    if not isinstance(body, dict):
+        body = {}
+    return jsonify({"ok": True, "fields": _normalize_knowledge_search_options_fields(body)})
+
+
 @draft_gen_bp.get("/api/meta")
 def api_meta():
     err = _login_wall()
@@ -1220,7 +1626,12 @@ def api_meta():
         return err
     base = _draft_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"}), 503
+        msg = (
+            "未配置 AICHECKWORD_DRAFT_API_BASE 或 QUIZ_API_BASE_URL"
+            if _user_sees_upstream_brand()
+            else "文档生成服务未配置，请联系管理员"
+        )
+        return jsonify({"message": msg}), 503
     collection = (request.args.get("collection") or "regulations").strip()
     org_id, resolved_collection = resolve_org_collection_for_integration(
         preferred_collection=collection
@@ -1248,7 +1659,7 @@ def api_meta():
             body = {"raw": r.text[:2000]}
         return jsonify(body), r.status_code
     except requests.RequestException as e:
-        return jsonify({"message": f"上游请求失败: {e}"}), 503
+        return jsonify({"message": user_facing_upstream_error(f"上游请求失败: {e}", f"请求失败: {e}")}), 503
 
 
 @draft_gen_bp.get("/api/jobs")
@@ -1444,7 +1855,7 @@ def api_check_input_vector_duplicates():
             ), r.status_code
         return jsonify(data)
     except requests.RequestException as e:
-        return jsonify({"ok": False, "message": f"上游检测失败：{e}"}), 502
+        return jsonify({"ok": False, "message": user_facing_upstream_error(f"上游检测失败：{e}")}), 502
 
 
 @draft_gen_bp.post("/api/jobs")
@@ -1631,9 +2042,9 @@ def api_jobs_submit():
     except requests.RequestException as e:
         job.status = "failed"
         job.error_summary = str(e)[:2000]
-        job.message = "提交上游失败（网络）"
+        job.message = user_facing_text("提交上游失败（网络）", "提交失败（网络）")
         db.session.commit()
-        return jsonify({"message": str(e), "localJobId": job.id}), 503
+        return jsonify({"message": user_facing_upstream_error(str(e), str(e)), "localJobId": job.id}), 503
 
     try:
         body = r.json()
@@ -1643,14 +2054,15 @@ def api_jobs_submit():
     if r.status_code >= 400 or not body.get("ok"):
         job.status = "failed"
         job.error_summary = json.dumps(body, ensure_ascii=False)[:4000]
-        job.message = (body.get("message") or body.get("detail") or "上游返回错误")[:2000]
+        raw_msg = (body.get("message") or body.get("detail") or "上游返回错误")[:2000]
+        job.message = user_facing_upstream_error(raw_msg, raw_msg)[:2000]
         db.session.commit()
         return jsonify({"message": job.message, "upstream": body, "localJobId": job.id}), 502
 
     upstream_id = (body.get("job_id") or "").strip()
     job.upstream_job_id = upstream_id or None
     job.status = str(body.get("status") or "queued").lower() or "queued"
-    job.message = (body.get("message") or "已提交上游")[:2000]
+    job.message = user_facing_text("已提交上游", "已提交")[:2000]
     try:
         job.progress = float(body.get("progress") or 0.02)
     except (TypeError, ValueError):
@@ -1684,7 +2096,7 @@ def api_job_status(local_id: str):
 
     base = _draft_api_base()
     if not base:
-        return jsonify({"message": "未配置上游地址"}), 503
+        return jsonify({"message": user_facing_text("未配置上游地址", "文档服务未配置，请联系管理员")}), 503
     from ._integration_common import client_llm_headers_for_session
 
     hdr = {
@@ -1705,7 +2117,7 @@ def api_job_status(local_id: str):
     except requests.RequestException as e:
         return jsonify({"message": str(e), "localJobId": job.id}), 503
     except ValueError:
-        return jsonify({"message": "上游返回非 JSON", "localJobId": job.id}), 502
+        return jsonify({"message": msg_upstream_not_json(), "localJobId": job.id}), 502
 
     if isinstance(body, dict):
         _apply_upstream_status_to_job(job, body)
@@ -1721,7 +2133,7 @@ def api_job_download(local_id: str):
     uid = _session_user_id()
     job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
     if not job or not job.upstream_job_id:
-        return jsonify({"message": "任务不存在或未提交上游"}), 404
+        return jsonify({"message": user_facing_text("任务不存在或未提交上游", "任务不存在或未提交")}), 404
 
     if job.local_zip_path:
         p = Path(job.local_zip_path)
@@ -1730,7 +2142,7 @@ def api_job_download(local_id: str):
 
     base = _draft_api_base()
     if not base:
-        return jsonify({"message": "未配置上游地址"}), 503
+        return jsonify({"message": user_facing_text("未配置上游地址", "文档服务未配置，请联系管理员")}), 503
     from ._integration_common import client_llm_headers_for_session
 
     hdr = {

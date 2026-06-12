@@ -7,6 +7,7 @@ from typing import Any, Optional
 from flask import has_request_context, session
 
 from .app_settings import is_multi_tenant_enabled
+from ._integration_common import user_facing_text
 from .models import (
     ADMIN_ROLE_COMPANY,
     Organization,
@@ -164,7 +165,10 @@ def validate_resolved_collection(collection: str) -> str | None:
     if not ck:
         return "知识库 collection 不能为空"
     if not is_collection_bound_to_organization(ck):
-        return f"知识库「{ck}」未绑定任何公司，请先在系统管理/页面4 维护公司与 knowledge_collection"
+        return user_facing_text(
+            f"知识库「{ck}」未绑定任何公司，请先在系统管理/页面4 维护公司与 knowledge_collection",
+            f"知识库「{ck}」未绑定任何公司，请联系管理员维护公司配置",
+        )
     return None
 
 
@@ -211,7 +215,10 @@ def integration_org_context_payload() -> dict[str, Any]:
             "organizations": [],
             "activeOrganizationId": None,
             "activeKnowledgeCollection": "regulations",
-            "message": "当前账号未绑定任何公司，请联系管理员在页面4配置「所属公司」",
+            "message": user_facing_text(
+                "当前账号未绑定任何公司，请联系管理员在页面4配置「所属公司」",
+                "当前账号未绑定任何公司，请联系管理员配置所属公司",
+            ),
         }
     active = active_organization_id_from_session()
     allowed = {str(x.get("id") or "").strip() for x in orgs}
@@ -296,7 +303,10 @@ def resolve_organization_context(
             d = default_organization()
             oid = str(getattr(d, "id", "") or "").strip()
         if _strict_org_scope() and oid and not organization_id_allowed(oid):
-            raise ValueError("无权使用该公司或未绑定所属公司，请联系管理员在页面4配置")
+            raise ValueError(user_facing_text(
+                "无权使用该公司或未绑定所属公司，请联系管理员在页面4配置",
+                "无权使用该公司或未绑定所属公司，请联系管理员",
+            ))
         coll = collection_for_organization(oid)
         if prefer and prefer != coll:
             if is_collection_bound_to_organization(prefer) and organization_id_for_collection(prefer) == oid:

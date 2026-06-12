@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}页面0 · 公司项目总览{% endblock %}
+{% block title %}{% if is_page13_super_admin %}页面0 · {% endif %}公司项目总览{% endblock %}
 {% block head_extra %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=static_version) }}">
 {% endblock %}
 {% block content %}
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
     <div>
-        <h1>页面0 · 公司项目总览</h1>
-        <p class="text-muted mb-1">公司总览项目单独存储，可<strong>一对多</strong>关联多个页面1 项目。「移出总览」只删除公司层记录并解除关联，页面1/2/3 不变。</p>
+        <h1>{% if is_page13_super_admin %}页面0 · {% endif %}公司项目总览</h1>
+        <p class="text-muted mb-1">公司总览项目单独存储，可<strong>一对多</strong>关联多个{% if is_page13_super_admin %}页面1 {% endif %}任务项目。「移出总览」只删除公司层记录并解除关联，{% if is_page13_super_admin %}页面1/2/3 {% endif %}任务数据不变。</p>
         <p class="small text-muted mb-0">当前可见范围（注册国家）：<strong>{{ country_scope_label }}</strong></p>
     </div>
     <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center">
@@ -19,7 +19,7 @@
 <div class="card mb-4">
     <div class="card-header">文档工具</div>
     <div class="card-body">
-        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从页面1/2 任务带入。</p>
+        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，{% if is_page13_super_admin %}不从页面1/2 任务带入{% else %}不从任务列表带入{% endif %}。</p>
         <div class="d-flex flex-wrap gap-2">
             {% if feature_flags.FEATURE_PAGE0_DRAFT_GEN %}
             <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
@@ -37,7 +37,7 @@
     </div>
 </div>
 
-<div class="card mb-4" id="companyKnowledgeTrainCard">
+<div class="card mb-4 d-none" id="companyKnowledgeTrainCard" aria-hidden="true">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span>知识库训练（aicheckword）</span>
         <ul class="nav nav-pills nav-pills-sm gap-1" id="companyTrainTabs" role="tablist">
@@ -269,7 +269,7 @@
                     <th class="cp-col-date">预计取证</th>
                     <th class="cp-col-date">预计递交</th>
                     <th class="cp-col-progress">进度描述</th>
-                    <th class="cp-col-link text-center">关联页面1</th>
+                    <th class="cp-col-link text-center">{% if is_page13_super_admin %}关联页面1{% else %}关联任务{% endif %}</th>
                     <th class="cp-col-actions text-end">操作</th>
                 </tr>
                 </thead>
@@ -379,12 +379,12 @@
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h6 class="modal-title" id="companyLinkPage1ModalTitle">关联页面1 项目</h6>
+                <h6 class="modal-title" id="companyLinkPage1ModalTitle">{% if is_page13_super_admin %}关联页面1 项目{% else %}关联任务项目{% endif %}</h6>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="linkPage1CompanyId">
-                <p class="small text-muted">勾选要纳入本公司总览的页面1 项目（可多选，一对多）。未勾选的项目若原已关联将被解除。</p>
+                <p class="small text-muted">勾选要纳入本公司总览的{% if is_page13_super_admin %}页面1 {% endif %}任务项目（可多选，一对多）。未勾选的项目若原已关联将被解除。</p>
                 <div id="linkPage1Candidates" class="border rounded p-2" style="max-height:360px;overflow:auto">
                     <div class="text-muted small">加载中…</div>
                 </div>

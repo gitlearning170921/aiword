@@ -3,6 +3,12 @@
         return (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
     }
 
+    function ecUf(adminText, userText) {
+        return typeof window.ufText === "function"
+            ? window.ufText(adminText, userText)
+            : (window.__PAGE13_SUPER_ADMIN__ ? adminText : userText);
+    }
+
     function escExam(s) {
         return String(s == null ? "" : s)
             .replace(/&/g, "&amp;")
@@ -780,8 +786,14 @@
                 readonlyEl.classList.remove("d-none");
                 readonlyEl.textContent = assigned.map(function (t) { return t.name || t.id; }).join("、");
                 readonlyEl.title = ctx.isProjectAdmin
-                    ? "当前账号所属项目组（由超级管理员在页面4分配，每人仅一组）"
-                    : "项目组由超级管理员在页面4指定，每人仅一组，不可自行切换";
+                    ? ecUf(
+                        "当前账号所属项目组（由超级管理员在页面4分配，每人仅一组）",
+                        "当前账号所属项目组（由管理员分配，每人仅一组）"
+                    )
+                    : ecUf(
+                        "项目组由超级管理员在页面4指定，每人仅一组，不可自行切换",
+                        "项目组由管理员指定，每人仅一组，不可自行切换"
+                    );
             }
             return;
         }
@@ -1109,7 +1121,10 @@
                 var settings = res.settings || {};
                 if (!keys.length) {
                     formEl.innerHTML =
-                        '<div class="col-12"><div class="alert alert-warning mb-0 small">未获取到配置项，请先在页面4 完成访问密码验证（超级管理员）。</div></div>';
+                        '<div class="col-12"><div class="alert alert-warning mb-0 small">' + ecUf(
+                            "未获取到配置项，请先在页面4 完成访问密码验证（超级管理员）。",
+                            "未获取到配置项，请联系超级管理员。"
+                        ) + '</div></div>';
                     return;
                 }
                 formEl.innerHTML = keys
@@ -1404,12 +1419,16 @@
         var inputPolicyVersion = document.getElementById("teacherRegPolicyVersion");
         var btnSavePolicyVersion = document.getElementById("btnTeacherSavePolicyVersion");
         if (btnSetDetailReview) {
-            btnSetDetailReview.title =
-                "套题级 AI 复审：调用上游按 set_id 批量处理本套全部题目。逐题编辑推荐下方题库「修改」。";
+            btnSetDetailReview.title = ecUf(
+                "套题级 AI 复审：调用上游按 set_id 批量处理本套全部题目。逐题编辑推荐下方题库「修改」。",
+                "套题级 AI 复审：对本套全部题目批量处理。逐题编辑推荐下方题库「修改」。"
+            );
         }
         if (btnSetDetailPublish) {
-            btnSetDetailPublish.title =
-                "同步：将套题同步到上游可用状态（显示为“已同步”），供学生端练习或挂载考试任务（以上游为准）；不是自动创建一场独立「正式考试」记录。";
+            btnSetDetailPublish.title = ecUf(
+                "同步：将套题同步到上游可用状态（显示为“已同步”），供学生端练习或挂载考试任务（以上游为准）；不是自动创建一场独立「正式考试」记录。",
+                "同步：将套题同步为可用状态（显示为“已同步”），供学生端练习或挂载考试任务；不是自动创建一场独立「正式考试」记录。"
+            );
         }
 
         function isNonTerminalIngestStatus(st) {
@@ -1763,7 +1782,7 @@
                 if (resp && resp.data && Array.isArray(resp.data.users)) rows = resp.data.users;
                 else if (resp && Array.isArray(resp.users)) rows = resp.users;
                 if (!rows.length) {
-                    assignModalUsers.innerHTML = '<div class="text-muted small">暂无人员（请先在页面1录入/管理用户）。</div>';
+                    assignModalUsers.innerHTML = '<div class="text-muted small">' + (window.ufText ? window.ufText("暂无人员（请先在页面1录入/管理用户）。", "暂无人员（请先在任务管理中录入用户）。") : "暂无人员（请先在任务管理中录入用户）。") + '</div>';
                     return;
                 }
                 var html = [];
@@ -2025,7 +2044,10 @@
             if (!setDetailItemsBody) return;
             if (!items.length) {
                 setDetailItemsBody.innerHTML =
-                    '<tr><td colspan="4" class="text-muted small">暂无题目明细（录题 running 请等 done；或上游返回结构不含 items）。</td></tr>';
+                    '<tr><td colspan="4" class="text-muted small">' + ecUf(
+                        "暂无题目明细（录题 running 请等 done；或上游返回结构不含 items）。",
+                        "暂无题目明细（录题进行中请稍候；或返回结构不含题目列表）。"
+                    ) + '</td></tr>';
                 return;
             }
             setDetailItemsBody.innerHTML = items.map(function (it, idx) {
@@ -2073,7 +2095,10 @@
                 }
                 if (!Array.isArray(sets) || sets.length === 0) {
                     tbodySets.innerHTML =
-                        '<tr><td colspan="6" class="text-muted small">暂无套题数据（上游未实现或返回空）。</td></tr>';
+                        '<tr><td colspan="6" class="text-muted small">' + ecUf(
+                            "暂无套题数据（上游未实现或返回空）。",
+                            "暂无套题数据。"
+                        ) + '</td></tr>';
                     return;
                 }
                 tbodySets.innerHTML = "";
@@ -3047,7 +3072,10 @@
 
                 var jobId = pickJobId(startResp);
                 if (!jobId) {
-                    setIngestProgress(true, "未获取到 job_id（请查看接口响应 data；上游应在 POST 后立刻返回 job_id）");
+                    setIngestProgress(true, ecUf(
+                        "未获取到 job_id（请查看接口响应 data；上游应在 POST 后立刻返回 job_id）",
+                        "未获取到任务编号（请查看接口响应或稍后刷新）"
+                    ));
                     return;
                 }
                 ingestState.jobId = jobId;
@@ -3063,7 +3091,10 @@
                         break;
                     }
                     if (Date.now() - startTs > maxMs) {
-                        setIngestProgress(true, "轮询超时（超过 10 分钟），请稍后重试或查看 aicheckword 日志。job_id=" + jobId);
+                        setIngestProgress(true, ecUf(
+                            "轮询超时（超过 10 分钟），请稍后重试或查看 aicheckword 日志。job_id=" + jobId,
+                            "轮询超时（超过 10 分钟），请稍后重试。任务编号=" + jobId
+                        ));
                         break;
                     }
                     await sleep(pollMs);
@@ -6413,7 +6444,7 @@
         btnHealth && btnHealth.addEventListener("click", async function () {
             if (btnHealth && btnHealth.disabled) return;
             setButtonLoading(btnHealth, true, "检查中…");
-            renderRaw({ code: "UI", message: "正在健康检查（上游超时=3秒）…", data: null });
+            renderRaw({ code: "UI", message: ecUf("正在健康检查（上游超时=3秒）…", "正在健康检查…"), data: null });
             try {
                 var data = await apiRequest("/api/exam-center/health", "GET");
                 renderRaw(data);

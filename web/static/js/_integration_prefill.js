@@ -152,7 +152,18 @@
     return sc;
   }
 
-  var PROJECT_EMPTY_OPT = { value: "", label: "请选择 aicheckword 项目（必选）" };
+  function ufText(adminText, userText) {
+    if (typeof global.ufText === "function") return global.ufText(adminText, userText);
+    return global.__PAGE13_SUPER_ADMIN__ ? adminText : userText;
+  }
+
+  function projectEmptyOpt() {
+    return {
+      value: "",
+      label: ufText("请选择 aicheckword 项目（必选）", "请选择专属项目（必选）"),
+    };
+  }
+
   var PROJECT_SELECT_CACHE = {};
 
   function projectSelectId(prefix) {
@@ -187,7 +198,7 @@
       rows: rows || [],
       valueKey: "id",
       labelKey: "label",
-      emptyOpt: PROJECT_EMPTY_OPT,
+      emptyOpt: projectEmptyOpt(),
     };
   }
 
@@ -288,7 +299,10 @@
     pid = String(pid || "").trim();
     var n = parseInt(pid, 10);
     if (!pid || isNaN(n) || n <= 0) {
-      return { ok: false, message: "请从下拉列表选择 aicheckword 项目（数据来自 aicheckword，与 Streamlit 按项目审核一致）" };
+      return { ok: false, message: ufText(
+        "请从下拉列表选择 aicheckword 项目（数据来自 aicheckword，与 Streamlit 按项目审核一致）",
+        "请从下拉列表选择专属项目"
+      ) };
     }
     return { ok: true, projectId: n };
   }
@@ -702,7 +716,7 @@
       }
 
       rememberProjectSelectRows(prefix, b.projects || []);
-      fillSelect(projectSelectId(prefix), b.projects || [], "id", "label", PROJECT_EMPTY_OPT);
+      fillSelect(projectSelectId(prefix), b.projects || [], "id", "label", projectEmptyOpt());
       wireProjectFilter(prefix);
       var pfin = $(projectFilterId(prefix));
       if (pfin) pfin.value = "";
@@ -859,6 +873,7 @@
     integrationScopeQuery: integrationScopeQuery,
     appendIntegrationScope: appendIntegrationScope,
     classifyRegRouteFromCountry: classifyRegRouteFromCountry,
-    PROJECT_EMPTY_OPT: PROJECT_EMPTY_OPT,
+    projectEmptyOpt: projectEmptyOpt,
+    ufText: ufText,
   };
 })(window);

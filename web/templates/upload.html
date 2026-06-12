@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}页面1 - 上传{% endblock %}
+{% block title %}{% if is_page13_super_admin %}页面1 - {% endif %}任务管理{% endblock %}
 {% block content %}
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
-        <h1>页面1 · 模板上传与任务管理</h1>
-        <p>批量录入任务信息，支持上传模板文件（含与 aicheckword 一致的 .zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
+        <h1>{% if is_page13_super_admin %}页面1 · {% endif %}模板上传与任务管理</h1>
+        <p>批量录入任务信息，支持上传模板文件（含 {% if is_page13_super_admin %}与 aicheckword 一致的 {% endif %}.zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
     <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center text-end">
         <span id="userInfo" class="badge bg-light text-dark border"></span>
@@ -18,7 +18,7 @@
 <div class="card mb-4">
     <div class="card-header">文档工具</div>
     <div class="card-body">
-        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从本页任务列表带入（与页面0 文档工具相同）。</p>
+        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从本页任务列表带入{% if is_page13_super_admin %}（与页面0 文档工具相同）{% endif %}。</p>
         <div class="d-flex flex-wrap gap-2">
             {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
             <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
@@ -42,13 +42,13 @@
             <span class="fw-semibold">项目管理（优先级 / 状态）</span>
             <div class="d-flex gap-2 flex-wrap align-items-center">
                 <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="从页面0 同步分配到本账号所属项目组的公司总览项目">同步页面0项目</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="{% if is_page13_super_admin %}从页面0 同步分配到本账号所属项目组的公司总览项目{% else %}从公司总览同步分配到本账号所属项目组的项目{% endif %}">{% if is_page13_super_admin %}同步页面0项目{% else %}同步公司总览项目{% endif %}</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
             </div>
         </div>
         {% if is_page13_super_admin %}
-        <p class="small text-muted mb-0 mt-2 pt-2 border-top border-light-subtle">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在页面1/2展示，页面3统计与自动通知也不计入。</p>
+        <p class="small text-muted mb-0 mt-2 pt-2 border-top border-light-subtle">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在{% if is_page13_super_admin %}页面1/2{% else %}任务管理与我的任务{% endif %}展示，{% if is_page13_super_admin %}页面3{% else %}统计{% endif %}与自动通知也不计入。</p>
         {% endif %}
         <div id="projectsFilterRow" class="collapse mt-2 pt-2 border-top border-light-subtle">
             <div class="row g-2 align-items-end">
@@ -81,7 +81,7 @@
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
             {% if is_page13_super_admin %}
-            <span class="small text-muted">产品类型/取证/递交/进度与页面0 公司总览双向同步；超级管理员可修改所属公司/所属项目组（含已下发任务项目）。</span>
+            <span class="small text-muted">产品类型/取证/递交/进度与{% if is_page13_super_admin %}页面0 {% endif %}公司总览双向同步；{% if is_page13_super_admin %}超级管理员{% else %}管理员{% endif %}可修改所属公司/所属项目组（含已下发任务项目）。</span>
             {% endif %}
         </div>
         <div class="table-responsive page1-projects-table-wrap">
@@ -185,7 +185,7 @@
                         </div>
                         <div class="form-check mb-0" id="newProjectIncludeCompanyWrap" style="display:none">
                             <input class="form-check-input" type="checkbox" id="newProjectIncludeCompany">
-                            <label class="form-check-label small" for="newProjectIncludeCompany">纳入公司总览（页面0 可见）</label>
+                            <label class="form-check-label small" for="newProjectIncludeCompany">纳入公司总览{% if is_page13_super_admin %}（页面0 可见）{% endif %}</label>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -354,15 +354,15 @@
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchGoPrintBtn" disabled>批量去打印</button>
             {% endif %}
             {% if feature_flags.FEATURE_PAGE1_AUDIT %}
-            <div class="btn-group ms-2" role="group" aria-label="aicheckword 集成">
-                <button type="button" class="btn btn-sm btn-outline-primary" id="batchAuditBtn" disabled title="对所选任务调用 aicheckword 单文档审核">批量审核（aicheckword）</button>
+            <div class="btn-group ms-2" role="group" aria-label="{% if is_page13_super_admin %}aicheckword 集成{% else %}批量审核{% endif %}">
+                <button type="button" class="btn btn-sm btn-outline-primary" id="batchAuditBtn" disabled title="{% if is_page13_super_admin %}对所选任务调用 aicheckword 单文档审核{% else %}对所选任务发起单文档审核{% endif %}">批量审核{% if is_page13_super_admin %}（aicheckword）{% endif %}</button>
                 <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">
                     <span class="visually-hidden">更多审核模式</span>
                 </button>
                 <ul class="dropdown-menu">
-                    <li><a class="dropdown-item" href="#" data-audit-mode="single">单文档审核（single）</a></li>
-                    <li><a class="dropdown-item" href="#" data-audit-mode="multi">多文档一致性（multi · ≥2）</a></li>
-                    <li><a class="dropdown-item" href="#" data-audit-mode="traceability">跨文档可追溯性（traceability · ≥2）</a></li>
+                    <li><a class="dropdown-item" href="#" data-audit-mode="single">单文档审核{% if is_page13_super_admin %}（single）{% endif %}</a></li>
+                    <li><a class="dropdown-item" href="#" data-audit-mode="multi">多文档一致性{% if is_page13_super_admin %}（multi · ≥2）{% else %}（至少 2 个文件）{% endif %}</a></li>
+                    <li><a class="dropdown-item" href="#" data-audit-mode="traceability">跨文档可追溯性{% if is_page13_super_admin %}（traceability · ≥2）{% else %}（至少 2 个文件）{% endif %}</a></li>
                 </ul>
             </div>
             {% endif %}
@@ -478,7 +478,7 @@
                     <div class="col-md-6">
                         <label class="form-label small">负责人（钉钉@）</label>
                         <div class="input-group input-group-sm">
-                            <input type="text" class="form-control" id="editRecordAssignee" placeholder="可选，需与页面4账号管理中姓名一致">
+                            <input type="text" class="form-control" id="editRecordAssignee" placeholder="{% if is_page13_super_admin %}可选，需与页面4账号管理中姓名一致{% else %}可选，须与系统账号管理中姓名一致{% endif %}"/>
                             <button type="button" class="btn btn-outline-success" id="editRecordQuickUserBtn" title="快捷创建账号">+ 账号</button>
                         </div>
                         <div id="editRecordAssigneeMobileHint" class="form-text small text-muted"></div>
@@ -508,7 +508,7 @@
                     <div class="col-12">
                         <label class="form-label small">重新上传任务模板（Word / 压缩包）</label>
                         <input type="file" class="form-control form-control-sm" id="editRecordTemplateFile" accept=".doc,.docx,.zip,.tar,.gz,.tgz,.rar">
-                        <div class="form-text small">支持单个 .doc/.docx，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。上传后将覆盖已有文件或链接，且来源改为「文件」。</div>
+                        <div class="form-text small">支持单个 .doc/.docx{% if is_page13_super_admin %}，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）{% else %}，或 .zip / .tar / .tar.gz（.tgz）压缩包{% endif %}；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。上传后将覆盖已有文件或链接，且来源改为「文件」。</div>
                     </div>
                     <div class="col-12">
                         <label class="form-label small">下发任务备注</label>

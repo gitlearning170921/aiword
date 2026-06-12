@@ -12,12 +12,14 @@ from ._integration_common import (
     format_upstream_request_error,
     integration_api_base,
     integration_requests_timeout,
+    msg_upstream_http,
+    msg_upstream_not_configured_env,
     upstream_headers,
 )
 
 
 def upstream_unconfigured_response():
-    return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 503
+    return jsonify({"message": msg_upstream_not_configured_env()}), 503
 
 
 def upstream_form_post(
@@ -117,7 +119,7 @@ def upstream_get(
     except Exception:
         payload = {"raw": (resp.text or "")[:8000]}
     if resp.status_code >= 400:
-        return jsonify({"message": f"上游 HTTP {resp.status_code}", "upstream": payload}), resp.status_code
+        return jsonify({"message": msg_upstream_http(resp.status_code), "upstream": payload}), resp.status_code
     return jsonify({"ok": True, "upstream": payload, "organizationId": organization_id}), 200
 
 

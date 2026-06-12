@@ -87,7 +87,7 @@
                     <option value="">全部项目组（当前公司）</option>
                 </select>
             </div>
-            <div class="small text-muted pb-1">当前 collection：<code id="exam_collection_display">regulations</code></div>
+            <div class="small text-muted pb-1">{% if is_page13_super_admin %}当前 collection：{% else %}当前知识库：{% endif %}<code id="exam_collection_display">regulations</code></div>
             <input type="hidden" id="exam_collection" value="regulations"/>
             <input type="hidden" id="teacherBankCollection" value="regulations"/>
         </div>
@@ -95,20 +95,20 @@
     <div class="d-flex gap-2 flex-wrap align-items-center" id="examTopNavReturns">
         <a class="btn btn-sm btn-outline-secondary exam-nav-return-btn {% if exam_role != 'teacher' %}d-none{% endif %}"
            data-exam-nav-for="teacher"
-           href="{{ url_for('pages.upload_page') }}">返回页面1（上传）</a>
+           href="{{ url_for('pages.upload_page') }}">{% if is_page13_super_admin %}返回页面1（上传）{% else %}返回任务管理{% endif %}</a>
         <a class="btn btn-sm btn-outline-secondary exam-nav-return-btn {% if exam_role != 'student' %}d-none{% endif %}"
            data-exam-nav-for="student"
-           href="{{ url_for('pages.generate_page') }}">返回页面2（生成）</a>
+           href="{{ url_for('pages.generate_page') }}">{% if is_page13_super_admin %}返回页面2（生成）{% else %}返回我的任务{% endif %}</a>
         <a class="btn btn-sm btn-outline-secondary exam-nav-return-btn {% if exam_role != 'analytics' %}d-none{% endif %}"
            data-exam-nav-for="analytics"
-           href="{{ url_for('pages.dashboard_page') }}">返回页面3（总览）</a>
+           href="{{ url_for('pages.dashboard_page') }}">{% if is_page13_super_admin %}返回页面3（总览）{% else %}返回统计{% endif %}</a>
         <button type="button" class="btn btn-sm btn-outline-secondary {% if exam_role == 'student' %}d-none{% endif %}" id="btnExamHealth">健康检查</button>
     </div>
 </div>
 
 <div id="examRoleTeacher" class="card mb-4 d-none exam-role-panel">
     <div class="card-body">
-        <h5 class="card-title">页面1能力：老师出题/扩库/发布</h5>
+        <h5 class="card-title">{% if is_page13_super_admin %}页面1能力：{% endif %}老师出题/扩库/发布</h5>
         <div class="exam-sticky-subnav border rounded p-2 mb-3">
             <div class="d-flex flex-wrap gap-2 align-items-center">
                 <span class="small text-muted">快速跳转：</span>
@@ -149,8 +149,8 @@
                     </select>
                     <div id="teacherProjectCaseRow" class="mt-2 pt-2 border-top d-none">
                         <label class="form-label mb-1" for="teacherProjectCaseId">项目案例</label>
-                        <div class="small text-muted mb-1">与「题库管理」当前 collection 一致；选项含注册国家/类别</div>
-                        <select class="form-select exam-project-case-select" id="teacherProjectCaseId" disabled title="须先在「题库管理」选择 collection，且案例已在 aicheckword 训练入库">
+                        <div class="small text-muted mb-1">{% if is_page13_super_admin %}与「题库管理」当前 collection 一致；{% endif %}选项含注册国家/类别</div>
+                        <select class="form-select exam-project-case-select" id="teacherProjectCaseId" disabled title="{% if is_page13_super_admin %}须先在「题库管理」选择 collection，且案例已在 aicheckword 训练入库{% else %}须先选择题库，且案例已训练入库{% endif %}">
                             <option value="">请选择…</option>
                         </select>
                     </div>
@@ -243,7 +243,9 @@
                     <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherIngestJobsRefresh">刷新列表</button>
                 </div>
             </div>
+            {% if is_page13_super_admin %}
             <p class="small text-muted mb-2">列表来自数据库表 <code>exam_bank_ingest_jobs</code>；轮询接口会刷新上游状态并回写快照。</p>
+            {% endif %}
             <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
                 <table class="table table-sm table-striped align-middle mb-0">
                     <thead class="table-light sticky-top">
@@ -252,7 +254,7 @@
                         <th style="width: 120px">状态</th>
                         <th style="width: 120px">体考</th>
                         <th style="width: 90px">目标</th>
-                        <th>上游 job_id</th>
+                        <th>{% if is_page13_super_admin %}上游 job_id{% else %}任务 ID{% endif %}</th>
                         <th>套题 set_id</th>
                         <th style="width: 160px">操作</th>
                     </tr>
@@ -275,7 +277,7 @@
                         <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherReviewJobsRefresh">刷新列表</button>
                     </div>
                 </div>
-                <p class="small text-muted mb-2">列表来自数据库表 <code>exam_set_review_jobs</code>；轮询接口会刷新上游状态并回写快照。</p>
+                <p class="small text-muted mb-2">{% if is_page13_super_admin %}列表来自数据库表 <code>exam_set_review_jobs</code>；轮询接口会刷新上游状态并回写快照。{% else %}展示 AI 复审任务记录；可刷新查看最新状态。{% endif %}</p>
                 <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
                     <table class="table table-sm table-striped align-middle mb-0">
                         <thead class="table-light sticky-top">
@@ -283,7 +285,7 @@
                             <th style="width: 160px">创建时间</th>
                             <th style="width: 100px">状态</th>
                             <th style="width: 120px">套题 set_id</th>
-                            <th>上游 job_id</th>
+                            <th>{% if is_page13_super_admin %}上游 job_id{% else %}任务 ID{% endif %}</th>
                             <th style="width: 120px">操作</th>
                         </tr>
                         </thead>
@@ -309,7 +311,7 @@
                     <button type="button" class="btn btn-sm btn-outline-danger" id="btnTeacherBatchDelete">批量删除</button>
                 </div>
             </div>
-            <p class="small text-muted mb-2">本表优先展示上游套题列表，并用 set_id 关联显示本地批量录题任务状态（running/done 等）。复审/发布支持多选批量操作。状态为已同步时，行内按钮显示「已同步」并与详情弹窗一致为灰色不可点。</p>
+            <p class="small text-muted mb-2">{% if is_page13_super_admin %}本表优先展示上游套题列表，并用 set_id 关联显示本地批量录题任务状态（running/done 等）。{% else %}展示套题列表与录题任务状态。{% endif %}复审/发布支持多选批量操作。状态为已同步时，行内按钮显示「已同步」并与详情弹窗一致为灰色不可点。</p>
             <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
                 <table class="table table-sm table-striped align-middle mb-0">
                     <thead class="table-light sticky-top">
@@ -337,7 +339,7 @@
                 <h6 class="form-section-title mb-0">已下发考试任务</h6>
                 <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherIssuedAssignmentsRefresh">刷新列表</button>
             </div>
-            <p class="small text-muted mb-2">由「批量下发考试任务」等操作写入 aiword 本地镜像；可对任务<strong>下架</strong>（学生端不再见于本地兜底列表）或<strong>删除记录</strong>（将尝试上游并同步移除本地条目）。</p>
+            <p class="small text-muted mb-2">{% if is_page13_super_admin %}由「批量下发考试任务」等操作写入 aiword 本地镜像；可对任务<strong>下架</strong>（学生端不再见于本地兜底列表）或<strong>删除记录</strong>（将尝试上游并同步移除本地条目）。{% else %}可对已下发任务<strong>下架</strong>或<strong>删除记录</strong>。{% endif %}</p>
             <div class="table-responsive" style="max-height: 240px; overflow-y: auto;">
                 <table class="table table-sm table-striped align-middle mb-0">
                     <thead class="table-light sticky-top">
@@ -374,14 +376,14 @@
                         <option value="false">仅下架</option>
                         <option value="">全部</option>
                     </select>
-                    <input class="form-control form-control-sm" id="teacherBankFilterSetId" placeholder="套题 set_id（可选）" style="width: 140px;" title="与上游 GET quiz/bank/questions 的 set_id 查询一致；可从套题列表点「题库筛选」带入">
+                    <input class="form-control form-control-sm" id="teacherBankFilterSetId" placeholder="套题 ID（可选）" style="width: 140px;" title="{% if is_page13_super_admin %}与上游 GET quiz/bank/questions 的 set_id 查询一致；{% endif %}可从套题列表点「题库筛选」带入">
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherBankClearSetFilter" title="清除套题筛选并刷新列表">清除套题</button>
                     <input class="form-control form-control-sm" id="teacherBankQ" placeholder="按题干 stem 搜索" style="width: 220px;">
                     <button type="button" class="btn btn-sm btn-outline-primary" id="btnTeacherBankRefresh">查询</button>
                     <button type="button" class="btn btn-sm btn-outline-danger" id="btnTeacherBankBatchDeactivate">批量下架</button>
                 </div>
             </div>
-            <p class="small text-muted mb-2">按套题筛选时，请求会携带 <code>set_id</code> 查询参数透传上游（若上游不支持则可能仍返回全量或报错，以接口为准）。地址栏可加 <code>bank_set_id=</code> 深链到本区块。</p>
+            <p class="small text-muted mb-2">{% if is_page13_super_admin %}按套题筛选时，请求会携带 <code>set_id</code> 查询参数透传上游（若上游不支持则可能仍返回全量或报错，以接口为准）。地址栏可加 <code>bank_set_id=</code> 深链到本区块。{% else %}可按套题 ID 筛选题库题目。{% endif %}</p>
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <div class="small text-muted" id="teacherBankMeta">-</div>
                 <div class="d-flex gap-2 align-items-center">
@@ -484,7 +486,7 @@
                             </div>
                         </div>
                         <div class="alert alert-warning small mt-3 mb-0">
-                            提示：options/evidence/answer 需要是合法 JSON 时会按 JSON 传；否则按字符串传。answer 只有勾选 answer_present 才会下发到上游。
+                            提示：options/evidence/answer 需要是合法 JSON 时会按 JSON 传；否则按字符串传。{% if is_page13_super_admin %}answer 只有勾选 answer_present 才会下发到上游。{% else %}answer 只有勾选 answer_present 才会更新。{% endif %}
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -510,7 +512,7 @@
                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherSetDetailReview"
                                         title="套题级复审：本套全部题目批量处理。逐题编辑推荐下方题库「修改」。">复审</button>
                                 <button type="button" class="btn btn-sm btn-success" id="btnTeacherSetDetailPublish"
-                                        title="同步本套题供学生端使用（完成后显示“已同步”，以上游为准）。">同步</button>
+                                        title="{% if is_page13_super_admin %}同步本套题供学生端使用（完成后显示“已同步”，以上游为准）。{% else %}同步本套题供学生端使用（完成后显示“已同步”）。{% endif %}">同步</button>
                                 <button type="button" class="btn btn-sm btn-outline-danger" id="btnTeacherSetDetailDelete">删除</button>
                             </div>
                         </div>
@@ -563,7 +565,7 @@
                                 <input type="text" class="form-control" id="teacherAssignModalPurpose" placeholder="例如：阶段测评/章节验收/摸底测试">
                             </div>
                             <div class="col-12">
-                                <label class="form-label">考试对象（可多选；来自页面1录入人员）</label>
+                                <label class="form-label">考试对象（可多选；{% if is_page13_super_admin %}来自页面1录入人员{% else %}来自任务录入人员{% endif %}）</label>
                                 <div class="d-flex gap-2 flex-wrap align-items-center mb-2">
                                     <input class="form-control form-control-sm" id="teacherAssignModalUserSearch" placeholder="搜索姓名/账号" style="width: 220px;">
                                     <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherAssignModalSelectAll">全选</button>
@@ -603,7 +605,7 @@
         <div id="studentObserverBanner" class="alert alert-warning d-none py-2 small mb-3">
             当前为<strong>只读观察</strong>模式（超级管理员）：可查看范围内学员的练习/考试记录，不可发起练习或考试。
         </div>
-        <h5 class="card-title">页面2能力：来一套练习/考试作答（前端交互）</h5>
+        <h5 class="card-title">{% if is_page13_super_admin %}页面2能力：{% endif %}来一套练习/考试作答</h5>
         <div id="studentOperationFeedback" class="mb-3 d-none" role="status" aria-live="polite"></div>
         <div class="row g-3 align-items-stretch student-write-only">
             <div class="col-lg-3 col-md-4">
@@ -623,8 +625,8 @@
                     </select>
                     <div id="studentProjectCaseRow" class="mt-2 pt-2 border-top d-none">
                         <label class="form-label mb-1" for="studentProjectCaseId">项目案例</label>
-                        <div class="small text-muted mb-1">选项含注册国家/类别（与 aicheckword 已训练案例一致）</div>
-                        <select class="form-select exam-project-case-select" id="studentProjectCaseId" disabled title="与 aicheckword 项目案例知识库一致">
+                        <div class="small text-muted mb-1">选项含注册国家/类别{% if is_page13_super_admin %}（与 aicheckword 已训练案例一致）{% endif %}</div>
+                        <select class="form-select exam-project-case-select" id="studentProjectCaseId" disabled title="{% if is_page13_super_admin %}与 aicheckword 项目案例知识库一致{% else %}与项目案例知识库一致{% endif %}">
                             <option value="">请选择…</option>
                         </select>
                     </div>
@@ -748,7 +750,7 @@
 
 <div id="examRoleAnalytics" class="card mb-4 d-none exam-role-panel">
     <div class="card-body">
-        <h5 class="card-title">页面3能力：学习与考试统计</h5>
+        <h5 class="card-title">{% if is_page13_super_admin %}页面3能力：{% endif %}学习与考试统计</h5>
         <div class="d-flex justify-content-between align-items-end flex-wrap gap-2">
             <div class="small text-muted">
                 说明：顶部<strong>所属公司 / 项目组</strong>切换后，看板与记录列表均按当前作用域汇总；下方「类型 / 结果」等筛选仅作用于记录列表。
@@ -1031,7 +1033,7 @@
             <button type="button" class="system-modal-close" id="closeExamTeacherSystemSettingsBtn" aria-label="关闭">×</button>
         </div>
         <div class="system-modal-body">
-            <p class="small text-muted mb-2">与页面4 · 系统与钉钉「系统配置」相同机制：写入数据库 <code>app_configs</code>；保存后立即影响本进程及格线与录题策略。</p>
+            <p class="small text-muted mb-2">{% if is_page13_super_admin %}与页面4 · 系统与钉钉「系统配置」相同机制：写入数据库 <code>app_configs</code>；{% else %}配置保存后立即{% endif %}影响本进程及格线与录题策略。</p>
             <div id="examTeacherSystemSettingsForm" class="row g-2"></div>
         </div>
         <div class="system-modal-footer">

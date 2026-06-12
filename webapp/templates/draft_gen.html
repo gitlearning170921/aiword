@@ -3,13 +3,20 @@
 {% block content %}
 <div class="row">
   <div class="col-lg-10 mx-auto">
-    <h2 class="mb-3">文档初稿生成（aicheckword）</h2>
+    <h2 class="mb-3">文档初稿生成{% if is_page13_super_admin %}（aicheckword）{% endif %}</h2>
+    {% if is_page13_super_admin %}
     <p class="text-muted small">
       以下为<strong>页面2个人</strong>初稿用 LLM 配置（加密存 Key），<strong>不会写入或覆盖</strong> aicheckword 系统设置里的管理员 AI 配置。
       可选提供方与策略由上游 <code>interop-config</code> 同步。
       下方「生成设置」中的名称、顺序与 aicheckword 侧栏知识库及<strong>文档初稿生成</strong>页下拉选项<strong>对齐</strong>；选项数据来自上游 <code>/api/integration/draft/meta</code>。
       系统需配置 <code>AICHECKWORD_DRAFT_API_BASE</code> 或 <code>QUIZ_API_BASE_URL</code>。
     </p>
+    {% else %}
+    <p class="text-muted small">
+      以下为<strong>个人</strong>初稿用 LLM 配置（加密存 Key），不会覆盖系统管理员 AI 配置。
+      下方「生成设置」中的选项与知识库案例、模板对齐。
+    </p>
+    {% endif %}
     <div id="dg_msg" class="alert d-none" role="alert"></div>
     <div id="dg_interop_info" class="alert alert-secondary d-none small" role="status"></div>
 
@@ -24,12 +31,12 @@
     >
       <div class="text-center p-4 rounded-3 bg-white shadow-sm border">
         <div class="spinner-border text-primary mb-2" role="status" aria-label="加载中"></div>
-        <div id="dg_bootstrap_loading_text" class="small text-body-secondary">正在加载清单与生成选项（上游知识库/案例/模板）…</div>
+        <div id="dg_bootstrap_loading_text" class="small text-body-secondary">{% if is_page13_super_admin %}正在加载清单与生成选项（上游知识库/案例/模板）…{% else %}正在加载案例、模板与项目选项…{% endif %}</div>
       </div>
     </div>
 
     <div class="card mb-4">
-      <div class="card-header">个人 LLM 设置（页面2专用）</div>
+      <div class="card-header">个人 LLM 设置{% if is_page13_super_admin %}（页面2专用）{% endif %}</div>
       <div class="card-body">
         <div class="row g-2">
           <div class="col-md-4">
@@ -41,35 +48,35 @@
             </select>
           </div>
           <div class="col-12" id="dg_api_key_block">
-            <label class="form-label"><span class="dg-req dg-req-llm d-none" title="上游要求仅个人 Key 时须填写并保存">*</span><span id="dg_key_label">API Key</span> <span id="dg_key_hint" class="text-muted small"></span></label>
+            <label class="form-label"><span class="dg-req dg-req-llm d-none" title="{% if is_page13_super_admin %}上游要求仅个人 Key 时须填写并保存{% else %}须个人 Key 时须填写并保存{% endif %}">*</span><span id="dg_key_label">API Key</span> <span id="dg_key_hint" class="text-muted small"></span></label>
             <input id="dg_api_key" type="password" class="form-control" autocomplete="new-password"/>
             <div id="dg_provider_hint" class="form-text"></div>
           </div>
           <div class="col-12">
             <label class="form-label">API Base URL（可选）</label>
-            <input id="dg_api_base_url" class="form-control" placeholder="留空则用 aicheckword 默认（DeepSeek/Cursor 等）" autocomplete="off"/>
+            <input id="dg_api_base_url" class="form-control" placeholder="{% if is_page13_super_admin %}留空则用 aicheckword 默认（DeepSeek/Cursor 等）{% else %}留空则用系统默认（DeepSeek/Cursor 等）{% endif %}" autocomplete="off"/>
           </div>
           <div class="col-12">
             <label class="form-label">审核/对话模型（可选）</label>
-            <input id="dg_llm_model" class="form-control" placeholder="留空则用 aicheckword 默认；通义示例 qwen-plus" autocomplete="off"/>
-            <div class="form-text">以上两项与 API Key 均按<strong>当前所选提供方</strong>分别保存（便于本地记录）；<strong>提交初稿/审核/翻译时仅上传 API Key</strong>，Base URL 与模型以 aicheckword 系统/侧栏配置为准（与侧栏直连行为一致）。</div>
+            <input id="dg_llm_model" class="form-control" placeholder="{% if is_page13_super_admin %}留空则用 aicheckword 默认；通义示例 qwen-plus{% else %}留空则用系统默认；通义示例 qwen-plus{% endif %}" autocomplete="off"/>
+            <div class="form-text">以上两项与 API Key 均按<strong>当前所选提供方</strong>分别保存（便于本地记录）；<strong>提交初稿/审核/翻译时仅上传 API Key</strong>，Base URL 与模型以{% if is_page13_super_admin %} aicheckword 系统/侧栏{% else %}系统{% endif %}配置为准。</div>
           </div>
           <div class="col-12">
             <button type="button" class="btn btn-primary" id="dg_btn_save_llm">保存个人 LLM 设置</button>
             <button type="button" class="btn btn-outline-secondary ms-2" id="dg_btn_test_llm">测试 Key</button>
-            <div class="form-text">API Key 加密保存在 aiword 数据库，<strong>仅当前登录账号</strong>可用；初稿/审核/翻译/审核后修改共用。若 aicheckword 未开启「须个人 Key」，未保存时将使用 aicheckword 系统 Key。保存前可先点「测试 Key」验证。</div>
+            <div class="form-text">API Key 加密保存在本系统数据库，<strong>仅当前登录账号</strong>可用；初稿/审核/翻译/审核后修改共用。{% if is_page13_super_admin %}若 aicheckword 未开启「须个人 Key」，未保存时将使用 aicheckword 系统 Key。{% else %}若未开启「须个人 Key」，未保存时将使用系统 Key。{% endif %}保存前可先点「测试 Key」验证。</div>
           </div>
         </div>
       </div>
     </div>
 
     <div class="card mb-4">
-      <div class="card-header">生成设置（与 aicheckword 初稿页一致）</div>
+      <div class="card-header">生成设置{% if is_page13_super_admin %}（与 aicheckword 初稿页一致）{% endif %}</div>
       <div class="card-body row g-3">
         <div class="col-md-6">
           <label class="form-label" id="dg_lbl_collection"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">所属公司</span><span id="dg_pf_collection" class="dg-prefill-tag d-none">已默认</span></label>
           <select id="dg_organization" class="form-select"></select>
-          <div class="form-text">知识库 collection：<code id="dg_collection_display">—</code>（须为已绑定公司的知识库）</div>
+          <div class="form-text">{% if is_page13_super_admin %}知识库 collection：{% else %}知识库：{% endif %}<code id="dg_collection_display">—</code>（须为已绑定公司的知识库）</div>
           <input type="hidden" id="dg_collection" value="regulations"/>
         </div>
         <div class="col-md-6 d-flex align-items-end">
@@ -87,7 +94,7 @@
           <select id="dg_template_scope" class="form-select"></select>
         </div>
         <div class="col-12">
-          <label class="form-label" id="dg_lbl_templates"><span class="dg-req" title="选择「仅所选」时至少勾选一个">*</span><span class="dg-lbl-text">2.2) 选择要生成的文件名称（勾选多选；与 aicheckword 案例库文件名一致）</span><span id="dg_pf_templates" class="dg-prefill-tag d-none">已默认</span></label>
+          <label class="form-label" id="dg_lbl_templates"><span class="dg-req" title="选择「仅所选」时至少勾选一个">*</span><span class="dg-lbl-text">2.2) 选择要生成的文件名称（勾选多选{% if is_page13_super_admin %}；与 aicheckword 案例库文件名一致{% endif %}）</span><span id="dg_pf_templates" class="dg-prefill-tag d-none">已默认</span></label>
           <input type="search" id="dg_template_filter" class="form-control form-control-sm mb-1" placeholder="筛选模板文件名…" autocomplete="off"/>
           <div id="dg_template_selection_summary" class="small text-body-secondary mb-2" role="status" aria-live="polite"></div>
           <div class="d-flex flex-wrap gap-2 mb-2" id="dg_tpl_actions_bar">
@@ -123,11 +130,23 @@
           <select id="dg_project_mode" class="form-select"></select>
         </div>
         <div class="col-md-6" id="dg_project_pick_wrap">
-          <label class="form-label" id="dg_lbl_project_id"><span class="dg-lbl-text">选择已有项目</span><span id="dg_pf_project" class="dg-prefill-tag d-none">已默认</span></label>
+          <label class="form-label" id="dg_lbl_project_id"><span class="dg-lbl-text">选择已有项目{% if is_page13_super_admin %}（aicheckword）{% endif %}</span><span id="dg_pf_project" class="dg-prefill-tag d-none">已默认</span></label>
           <input type="search" id="dg_project_id_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目（名称/编号/ID）…" autocomplete="off"/>
           <select id="dg_project_id" class="form-select">
             <option value="">（请先刷新列表）</option>
           </select>
+        </div>
+        <div class="col-md-6" id="dg_page1_project_wrap" style="display:none">
+          <label class="form-label">{% if is_page13_super_admin %}选择页面1已有项目{% else %}选择任务列表中的项目{% endif %}</label>
+          <input type="search" id="dg_page1_project_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目…" autocomplete="off"/>
+          <select id="dg_page1_project_id" class="form-select">
+            <option value="">（加载中…）</option>
+          </select>
+          <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+            <button type="button" class="btn btn-sm btn-primary" id="dg_btn_open_acw_project_modal" disabled>新建项目</button>
+            <span id="dg_page1_acw_linked" class="small text-muted"></span>
+          </div>
+          <p class="form-text small mb-0">新建前请补全弹窗内<strong>全部</strong>项目信息，以便提升初稿质量；若{% if is_page13_super_admin %}页面1 {% endif %}信息不全，可先维护任务/项目字段，或联系<strong>超级管理员</strong>{% if is_page13_super_admin %}在 aicheckword 中{% endif %}代为新建专属项目。</p>
         </div>
         <div class="col-md-6">
           <label class="form-label" id="dg_inplace_label"><span class="dg-lbl-text">就地修改</span><span id="dg_pf_inplace" class="dg-prefill-tag d-none">已默认</span></label>
@@ -145,10 +164,14 @@
           <label class="form-label" id="dg_track_label"><span class="dg-lbl-text">Word 修订标记</span><span id="dg_pf_track" class="dg-prefill-tag d-none">已默认</span></label>
           <select id="dg_docx_track" class="form-select"></select>
         </div>
+        {% if is_page13_super_admin %}
         <details class="col-12">
           <summary class="text-muted small">上游 meta 原始 JSON（排障）</summary>
           <textarea id="dg_meta_preview" class="form-control font-monospace mt-2" rows="6" readonly></textarea>
         </details>
+        {% else %}
+        <textarea id="dg_meta_preview" class="d-none" readonly></textarea>
+        {% endif %}
       </div>
     </div>
 
@@ -157,9 +180,9 @@
       <div class="card-body">
         <div class="row g-2">
           <div class="col-md-6">
-            <label class="form-label" id="dg_lbl_input_files"><span class="dg-req" title="提交前须至少一个文件">*</span><span class="dg-lbl-text">8) 上传输入/参考文件（可多批追加，与 aicheckword 多文件上传一致）</span></label>
+            <label class="form-label" id="dg_lbl_input_files"><span class="dg-req" title="提交前须至少一个文件">*</span><span class="dg-lbl-text">8) 上传输入/参考文件（可多批追加）</span></label>
             <p class="text-muted small mb-1">
-              与 aicheckword「文档初稿生成」相同：支持 Word / Excel / PDF 等；可<strong>多次</strong>点「选择文件」继续追加。
+              支持 Word / Excel / PDF 等；可<strong>多次</strong>点「选择文件」继续追加。
               在系统文件对话框内仍可用 Ctrl/Shift 一次多选。
             </p>
             <div class="d-flex flex-wrap gap-2 mb-2">
@@ -173,7 +196,7 @@
           </div>
           <div class="col-md-6">
             <label class="form-label">基础文件 Base（可选，可多批追加）</label>
-            <p class="text-muted small mb-1">与 aicheckword 就地修改用基底一致；可多次追加多份 Base。<strong>建议 Base 文件名与模板目标文件名一致</strong>（或与压缩包内叶子名一致），以便与上游自动绑定；否则请在「附加 JSON」中传 <code>base_files_by_target</code>。</p>
+            <p class="text-muted small mb-1">不上传 Base 时，系统以所选<strong>案例模板文件</strong>作为基底；<strong>案例与 Base 不能都为空</strong>（须先选案例并勾选模板）。若要在<strong>已有文档上就地修改</strong>，可上传 Base（格式与左侧输入/参考文件一致：Word / Excel / PDF / 文本等，支持 zip/tar 压缩包；文件名建议与模板目标名一致）。可多次追加。</p>
             <div class="d-flex flex-wrap gap-2 mb-2">
               <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_pick_base">选择 Base…</button>
               <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_clear_base">清空列表</button>
@@ -182,10 +205,11 @@
               accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz"/>
             <ul class="list-group list-group-flush border rounded small" id="dg_base_files_list" style="max-height: 10rem; overflow-y: auto;"></ul>
             <div class="form-text" id="dg_base_files_count"></div>
+            <div class="form-text small">Base 支持 .docx / .doc / .pdf / .xlsx / .xls / .txt / .md 及 .zip / .tar / .tgz。</div>
             <div class="mt-2 d-none" id="dg_task_base_hint_wrap">
-              <label class="form-label small mb-1" for="dg_task_base_ftp_display">页面2任务 Base（FTP 路径或服务端读取库内文件）</label>
+              <label class="form-label small mb-1" for="dg_task_base_ftp_display">{% if is_page13_super_admin %}页面2任务 Base（FTP 路径或服务端读取库内文件）{% else %}任务带入的 Base 文件{% endif %}</label>
               <div class="input-group input-group-sm align-items-start">
-                <textarea class="form-control form-control-sm" id="dg_task_base_ftp_display" rows="2" readonly placeholder="从页面2「初稿生成」带入后自动加载"></textarea>
+                <textarea class="form-control form-control-sm" id="dg_task_base_ftp_display" rows="2" readonly placeholder="{% if is_page13_super_admin %}从页面2「初稿生成」带入后自动加载{% else %}从我的任务带入后自动加载{% endif %}"></textarea>
                 <button type="button" class="btn btn-outline-secondary" id="dg_btn_clear_task_base" title="不再使用当前任务的模板作 Base">清除</button>
               </div>
               <div class="form-text">提交时按任务 ID 由服务端读取 FTP 真实路径并下载，此处仅展示；无需再手动选择同一文件。</div>
@@ -194,7 +218,7 @@
           <div class="col-12">
             <label class="form-label" for="dg_user_prompt_append">自定义提示（追加到每文件生成提示词末尾，可选）</label>
             <textarea id="dg_user_prompt_append" class="form-control" rows="4" maxlength="8000" placeholder="例如：必须根据参考文件更新「第4章 软件需求」中所有表格；不得删减模板中的法规引用段落编号；输出 PATCH_JSON 时须带段落锚点。"></textarea>
-            <div class="form-text">与 aicheckword 内置提示词、skills/rules 叠加；单任务最多 8000 字。若正文几乎无变化，请优先确认已选「就地修改」且已上传对应 Base，并在此写清须改范围。</div>
+            <div class="form-text">{% if is_page13_super_admin %}与 aicheckword 内置提示词、skills/rules 叠加；{% endif %}单任务最多 8000 字。若正文几乎无变化，请优先确认已选「就地修改」且已上传对应 Base，并在此写清须改范围。</div>
           </div>
           <div class="col-12">
             <label class="form-label">附加高级参数（JSON，可选）</label>
@@ -226,8 +250,12 @@
       <div class="card-header">初稿生成历史记录（可下载）</div>
       <div class="card-body">
         <p class="text-muted small mb-2">
+          {% if is_page13_super_admin %}
           与 aicheckword「文档初稿生成」历史区类似：展示最近任务、摘要与上游任务号；成功且已落本地 ZIP 时可下载。
           任务元数据保存在 aiword 数据库表 <code>draft_generation_jobs</code>，重启服务后列表仍在；ZIP 需在成功后在当前环境至少下载一次才会缓存在 <code>outputs/draft_zips</code>。
+          {% else %}
+          展示最近初稿任务与摘要；成功生成后可下载 ZIP 结果包。
+          {% endif %}
         </p>
         <div class="table-responsive">
         <table class="table table-sm table-striped align-middle">
@@ -237,7 +265,7 @@
               <th>状态</th>
               <th>摘要</th>
               <th>本地编号</th>
-              <th>上游任务号</th>
+              <th>{% if is_page13_super_admin %}上游任务号{% else %}任务号{% endif %}</th>
               <th>耗时(ms)</th>
               <th>操作</th>
             </tr>
@@ -252,6 +280,83 @@
             <button type="button" class="btn btn-outline-secondary" id="dg_job_next">下一页</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="dgAcwProjectModal" tabindex="-1" aria-labelledby="dgAcwProjectModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="dgAcwProjectModalLabel">新建{% if is_page13_super_admin %} aicheckword {% endif %}专属项目</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-2">
+          {% if is_page13_super_admin %}与 aicheckword「项目与专属资料」字段一致；{% endif %}已尽量{% if is_page13_super_admin %}从页面1 {% endif %}带入，<strong>弹窗内每一项均须填写完整</strong>后再保存，否则会影响审核/初稿对项目维度与适用范围的约束效果。
+          按<strong>产品名称、注册国家、注册类别</strong>判重；缺项请先在{% if is_page13_super_admin %}页面1 {% endif %}任务列表维护，或联系<strong>超级管理员</strong>{% if is_page13_super_admin %}在 aicheckword 中{% endif %}代为新建项目。
+        </p>
+        <div id="dg_acw_modal_msg" class="alert d-none" role="alert"></div>
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label">项目名称 *</label>
+            <input type="text" class="form-control bg-light" id="dg_acw_name" readonly tabindex="-1" placeholder="{% if is_page13_super_admin %}来自页面1 项目编号{% else %}来自任务项目编号{% endif %}"/>
+            <div class="form-text small">须先在{% if is_page13_super_admin %}页面1 {% endif %}任务列表填写项目编号；本弹窗不可修改。</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">项目编号 *</label>
+            <input type="text" class="form-control" id="dg_acw_project_code" placeholder="例如：OXGWIS"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">项目名称（英文） *</label>
+            <input type="text" class="form-control" id="dg_acw_name_en" placeholder="Project name in English"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">产品名称 *</label>
+            <input type="text" class="form-control" id="dg_acw_product_name" placeholder="{% if is_page13_super_admin %}默认来自页面1 项目名称{% else %}默认来自任务项目名称{% endif %}"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">产品名称（英文） *</label>
+            <input type="text" class="form-control" id="dg_acw_product_name_en" placeholder="Product name in English"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">型号（Model） *</label>
+            <input type="text" class="form-control" id="dg_acw_model"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">型号（英文） *</label>
+            <input type="text" class="form-control" id="dg_acw_model_en" placeholder="Model in English"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">注册国家 *</label>
+            <select class="form-select" id="dg_acw_registration_country"></select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">注册国家（英文） *</label>
+            <input type="text" class="form-control" id="dg_acw_registration_country_en" placeholder="e.g. China, USA"/>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">注册类别 *</label>
+            <select class="form-select" id="dg_acw_registration_type"></select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">注册组成 *</label>
+            <select class="form-select" id="dg_acw_registration_component"></select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">项目形态 *</label>
+            <select class="form-select" id="dg_acw_project_form"></select>
+          </div>
+          <div class="col-12">
+            <label class="form-label">产品适用范围 *</label>
+            <textarea class="form-control" id="dg_acw_scope" rows="3" placeholder="审核时要求文档描述内容不超出此范围"></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-primary" id="dg_btn_save_acw_project">{% if is_page13_super_admin %}保存到 aicheckword{% else %}保存项目{% endif %}</button>
       </div>
     </div>
   </div>

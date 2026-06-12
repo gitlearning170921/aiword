@@ -1388,7 +1388,7 @@ async function initUploadPage() {
                 const emptyHtml =
                     window.ScopeBar && ScopeBar.emptyTableRow
                         ? ScopeBar.emptyTableRow(tableColspan, "page1_projects")
-                        : `<tr><td colspan="${tableColspan}" class="text-muted small">暂无页面1 项目</td></tr>`;
+                        : `<tr><td colspan="${tableColspan}" class="text-muted small">${typeof window.ufText === "function" ? window.ufText("暂无页面1 项目", "暂无项目") : "暂无项目"}</td></tr>`;
                 projectsManageBody.innerHTML = emptyHtml;
                 updateBatchProjectsBtnState();
                 return;
@@ -1413,7 +1413,7 @@ async function initUploadPage() {
                 tr.dataset.organizationLocked = orgLocked ? "1" : "0";
                 tr.dataset.page1HasUploadTasks = p.organizationIdLocked ? "1" : "0";
                 const linkHint = p.companyProjectId
-                    ? ' <span class="badge bg-secondary" title="已关联页面0">总览</span>' : "";
+                    ? ' <span class="badge bg-secondary" title="' + (typeof window.ufText === "function" ? window.ufText("已关联页面0", "已纳入公司总览") : "已纳入公司总览") + '">总览</span>' : "";
                 const teamCell = page13SuperAdminFlag
                     ? `<td class="p1-cell-team">${buildProjectTeamSelectHtml(p.assignedTeamId, teamLocked, page1Teams)}</td>`
                     : "";
@@ -1488,7 +1488,7 @@ async function initUploadPage() {
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify(bodyPayload),
                         });
-                        App.notify("项目已更新（已与页面0 同步）", "success");
+                        App.notify(typeof window.ufText === "function" ? window.ufText("项目已更新（已与页面0 同步）", "项目已更新（已与公司总览同步）") : "项目已更新（已与公司总览同步）", "success");
                         // 单个保存时不要刷新整张表/任务列表，避免把页面1录入块中已填内容冲掉。
                         // 仅刷新“任务录入”的项目下拉选项（会保持当前已选值）。
                         document.querySelectorAll(".project-block .project-name").forEach((sel) => _populateProjectNameSelect(sel));
@@ -2225,7 +2225,12 @@ function page1TeamChangeConfirmMessage(tr, newTeamId) {
     const nextTeam = String(newTeamId || "").trim();
     if (oldTeam === nextTeam) return "";
     const name = tr.dataset.projectName || "该项目";
-    return `当前操作项目「${name}」所属项目组及关联页面0 公司总览（若已关联）都会被更新，是否确认？`;
+    return typeof window.ufText === "function"
+        ? window.ufText(
+            `当前操作项目「${name}」所属项目组及关联页面0 公司总览（若已关联）都会被更新，是否确认？`,
+            `当前操作项目「${name}」所属项目组及关联公司总览（若已关联）都会被更新，是否确认？`
+          )
+        : `当前操作项目「${name}」所属项目组及关联公司总览（若已关联）都会被更新，是否确认？`;
 }
 
 function page1ProjectSaveConfirmMessage(tr, bodyPayload) {
@@ -2293,7 +2298,12 @@ function page1BatchOrgCascadeConfirmMessage(body) {
                 return page1TeamChangeConfirmMessage(tr, tr.querySelector(".project-team-select")?.value);
             }
         }
-        return `当前操作已选 ${teamCount} 个项目的所属项目组及关联页面0 数据将被更新，是否确认？`;
+        return typeof window.ufText === "function"
+            ? window.ufText(
+                `当前操作已选 ${teamCount} 个项目的所属项目组及关联页面0 数据将被更新，是否确认？`,
+                `当前操作已选 ${teamCount} 个项目的所属项目组及关联公司总览数据将被更新，是否确认？`
+              )
+            : `当前操作已选 ${teamCount} 个项目的所属项目组及关联公司总览数据将被更新，是否确认？`;
     }
     if (!count) return "";
     if (count === 1) {
@@ -2992,7 +3002,9 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
     const hintEl = document.getElementById("editRecordAssigneeMobileHint");
     if (!hintEl) return;
     if (!assigneeName || !assigneeName.trim()) {
-        hintEl.textContent = "填写负责人姓名且需在页面4账号管理中配置手机号，催办时才能@成功";
+        hintEl.textContent = typeof window.ufText === "function"
+            ? window.ufText("填写负责人姓名且需在页面4账号管理中配置手机号，催办时才能@成功", "填写负责人姓名且须在系统账号管理中配置手机号，催办时才能@成功")
+            : "填写负责人姓名且须在系统账号管理中配置手机号，催办时才能@成功";
         hintEl.className = "form-text small text-muted";
         return;
     }
@@ -3005,7 +3017,9 @@ function updateEditRecordAssigneeMobileHint(assigneeName) {
             hintEl.textContent = "已配置手机号：" + masked + "，催办时可@";
             hintEl.className = "form-text small text-success";
         } else {
-            hintEl.textContent = "该负责人未在页面4账号管理中填写手机号，催办无法@成功。请先联系超级管理员补全手机号。";
+            hintEl.textContent = typeof window.ufText === "function"
+                ? window.ufText("该负责人未在页面4账号管理中填写手机号，催办无法@成功。请先联系超级管理员补全手机号。", "该负责人未在系统账号管理中填写手机号，催办无法@成功。请先联系超级管理员补全手机号。")
+                : "该负责人未在系统账号管理中填写手机号，催办无法@成功。请先联系超级管理员补全手机号。";
             hintEl.className = "form-text small text-warning";
         }
     };
@@ -3871,7 +3885,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             ? `<button type="button" class="btn btn-sm btn-outline-secondary btn-go-print me-1" data-id="${r.id}"${ahDis} title="${_escTitle(ahTitle)}">去打印</button>`
             : "";
         const auditBtnHtml = _page1Feature("FEATURE_PAGE1_AUDIT")
-            ? `<button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="aicheckword 单文档审核">单审</button>`
+            ? `<button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="${_escTitle(typeof window.ufText === "function" ? window.ufText("aicheckword 单文档审核", "单文档审核") : "单文档审核")}">单审</button>`
             : "";
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>

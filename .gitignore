@@ -49,10 +49,12 @@ htmlcov/
 # 环境变量
 .env
 .env.local
+.env.test
 
 # 配置文件（含访问密码等敏感信息）
 config.json
 instance/database_url.txt
+instance_test/database_url.txt
 
 # 操作系统
 .DS_Store

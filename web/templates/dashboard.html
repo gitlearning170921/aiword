@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}页面3 - 统计{% endblock %}
+{% block title %}{% if is_page13_super_admin %}页面3 - {% endif %}统计{% endblock %}
 {% block content %}
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
-        <h1>页面3 · 统计面板</h1>
+        <h1>{% if is_page13_super_admin %}页面3 · {% endif %}统计面板</h1>
         <p class="mb-1">实时掌握任务完成情况，帮助你快速定位项目执行情况。完成状态为空视为未完成，标记了状态视为已完成。</p>
         {% if is_page13_super_admin %}
         <p class="small text-muted mb-0">项目管理员仅统计<strong>所属项目组</strong>下绑定项目；催办按项目组 webhook 发送，未配置时使用「互联网产品部」机器人。</p>

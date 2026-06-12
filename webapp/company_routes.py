@@ -12,7 +12,7 @@ from flask import Blueprint, current_app, jsonify, render_template, request, ses
 from sqlalchemy import or_
 
 from . import db
-from ._integration_common import integration_api_base, integration_requests_timeout, upstream_headers
+from ._integration_common import integration_api_base, integration_requests_timeout, upstream_headers, user_facing_text, user_facing_upstream_error
 from .app_settings import is_multi_tenant_enabled
 from .authz import (
     company_admin_write_required,
@@ -949,13 +949,13 @@ def api_company_training_upload():
             timeout=integration_requests_timeout(read_seconds=600),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游训练请求失败：{exc}"}), 502
+        return jsonify({"message": user_facing_upstream_error(f"上游训练请求失败：{exc}")}), 502
     try:
         body = resp.json()
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": f"上游训练失败（HTTP {resp.status_code}）", "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游训练失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
     return jsonify(
         {
             "message": "训练请求已完成",
@@ -1002,13 +1002,13 @@ def api_company_training_project_case_create():
             timeout=integration_requests_timeout(read_seconds=60),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游创建案例失败：{exc}"}), 502
+        return jsonify({"message": user_facing_upstream_error(f"上游创建案例失败：{exc}")}), 502
     try:
         body = resp.json()
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": f"上游创建案例失败（HTTP {resp.status_code}）", "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游创建案例失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
     return jsonify(
         {
             "message": "项目案例已创建",
@@ -1061,13 +1061,13 @@ def api_company_training_project_case_upload():
             timeout=integration_requests_timeout(read_seconds=900),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": f"上游案例训练失败：{exc}"}), 502
+        return jsonify({"message": user_facing_upstream_error(f"上游案例训练失败：{exc}")}), 502
     try:
         body = resp.json()
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": f"上游案例训练失败（HTTP {resp.status_code}）", "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游案例训练失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
     return jsonify(
         {
             "message": "案例文档训练完成",
@@ -1085,7 +1085,10 @@ def api_company_projects_sync_legacy():
     n = _sync_unlinked_page1_one_to_one()
     return jsonify(
         {
-            "message": f"已同步 {n} 个页面1 项目到公司总览（各建一条公司项目记录，可在「关联」中合并为多对一）",
+            "message": user_facing_text(
+                f"已同步 {n} 个页面1 项目到公司总览（各建一条公司项目记录，可在「关联」中合并为多对一）",
+                f"已同步 {n} 个任务项目到公司总览（各建一条公司项目记录，可在「关联」中合并为多对一）",
+            ),
             "synced": n,
         }
     )
@@ -1202,7 +1205,10 @@ def api_company_page1_links_put(company_project_id: str):
     cp = CompanyProject.query.get(company_project_id)
     return jsonify(
         {
-            "message": f"已关联 {result['linked']} 个页面1 项目，页面0 登记信息已同步到页面1",
+            "message": user_facing_text(
+                f"已关联 {result['linked']} 个页面1 项目，页面0 登记信息已同步到页面1",
+                f"已关联 {result['linked']} 个任务项目，公司总览登记信息已同步到任务列表",
+            ),
             "project": _serialize_company_project(cp) if cp else None,
         }
     )
@@ -1389,7 +1395,10 @@ def api_company_project_remove_from_registry(company_project_id: str):
     n = _delete_company_projects([company_project_id])
     return jsonify(
         {
-            "message": "已从公司总览移除；关联的页面1 项目与任务均保留，可再次同步或重新关联",
+            "message": user_facing_text(
+                "已从公司总览移除；关联的页面1 项目与任务均保留，可再次同步或重新关联",
+                "已从公司总览移除；关联的任务项目与任务均保留，可再次同步或重新关联",
+            ),
             "removed": n,
         }
     )
@@ -1410,7 +1419,10 @@ def api_company_projects_batch_remove():
     n = _delete_company_projects(scoped_ids)
     return jsonify(
         {
-            "message": f"已从公司总览移除 {n} 条记录；页面1/2/3 不受影响",
+            "message": user_facing_text(
+                f"已从公司总览移除 {n} 条记录；页面1/2/3 不受影响",
+                f"已从公司总览移除 {n} 条记录；任务管理与我的任务不受影响",
+            ),
             "removed": n,
         }
     )

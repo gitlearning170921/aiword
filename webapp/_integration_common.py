@@ -39,6 +39,125 @@ INTEGRATION_READ_TIMEOUT_MAX_SECONDS = 72 * 3600
 _DOCKER_INTERNAL_UPSTREAM_HOSTS = frozenset({"aicheckword"})
 
 
+def user_facing_text(admin_text: str, user_text: str) -> str:
+    """超级管理员看 admin 文案，其余角色看 user 文案。"""
+    from .authz import is_page13_super_admin
+
+    return admin_text if is_page13_super_admin() else user_text
+
+
+def user_facing_upstream_error(admin_text: str, user_text: str | None = None) -> str:
+    """集成 API 错误提示：普通用户隐藏上游/aicheckword/页面编号等内部用语。"""
+    from .authz import is_page13_super_admin
+
+    if is_page13_super_admin():
+        return admin_text
+    if user_text:
+        return user_text
+    t = admin_text
+    for old, new in (
+        ("上游请求失败", "服务请求失败"),
+        ("上游 HTTP", "服务请求失败（HTTP"),
+        ("上游返回", "服务返回"),
+        ("上游响应", "服务响应"),
+        ("上游未", "服务未"),
+        ("上游不可达", "服务不可达"),
+        ("上游", "服务"),
+        ("aicheckword", "系统"),
+        ("AICHECKWORD_DRAFT_API_BASE", "文档服务地址"),
+        ("QUIZ_API_BASE_URL", "考试/文档服务地址"),
+        ("页面4 · 系统与钉钉「系统配置」", "系统管理"),
+        ("页面4", "系统管理"),
+        ("页面1", "任务列表"),
+        ("页面2", "我的任务"),
+        ("页面0", "公司总览"),
+    ):
+        t = t.replace(old, new)
+    return t.strip()
+
+
+def msg_upstream_not_configured() -> str:
+    return user_facing_text("未配置上游 API", "文档服务未配置，请联系管理员")
+
+
+def msg_upstream_submit_failed(exc: Exception | str) -> str:
+    e = str(exc)[:500]
+    return user_facing_text(f"提交上游失败：{e}", f"提交失败：{e}")
+
+
+def msg_upstream_http(status: int) -> str:
+    return user_facing_text(f"上游 HTTP {status}", f"服务请求失败（HTTP {status}）")
+
+
+def msg_upstream_not_json() -> str:
+    return user_facing_text("上游响应非 JSON", "服务响应异常，请联系管理员")
+
+
+def msg_upstream_no_job_id() -> str:
+    return user_facing_text("上游未返回 job_id", "未收到任务编号，请稍后刷新查看")
+
+
+def msg_select_integration_project() -> str:
+    return user_facing_text(
+        "请先选择 aicheckword 项目后再提交。",
+        "请先选择专属项目后再提交。",
+    )
+
+
+def msg_page1_project_code_required() -> str:
+    return user_facing_text(
+        "该页面1 项目尚未填写项目编号，请先到页面1 任务列表中为该项目填写项目编号后再试。",
+        "该项目尚未填写项目编号，请先在任务列表中填写项目编号后再试。",
+    )
+
+
+def msg_upstream_request_failed(exc: Exception | str) -> str:
+    e = str(exc)[:500]
+    return user_facing_text(f"上游请求失败：{e}", f"服务请求失败：{e}")
+
+
+def msg_upstream_not_ready() -> str:
+    return user_facing_text("上游未就绪", "文档服务暂不可用，请稍后重试")
+
+
+def msg_upstream_query_failed(exc: Exception | str) -> str:
+    e = str(exc)[:500]
+    return user_facing_text(f"上游查询失败：{e}", f"查询失败：{e}")
+
+
+def msg_upstream_sync_failed(exc: Exception | str) -> str:
+    e = str(exc)[:500]
+    return user_facing_text(f"上游同步失败：{e}", f"同步失败：{e}")
+
+
+def msg_proxy_download_failed(exc: Exception | str) -> str:
+    e = str(exc)[:500]
+    return user_facing_text(f"代理下载失败：{e}", f"下载失败：{e}")
+
+
+def msg_upstream_not_configured_env() -> str:
+    return user_facing_text(
+        "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL",
+        "文档服务未配置，请联系管理员",
+    )
+
+
+def msg_select_integration_project_for_audit() -> str:
+    return user_facing_text(
+        "请先选择 aicheckword 项目后再提交审核。"
+        "未绑定项目会显著降低审核点召回与项目约束命中率。",
+        "请先选择专属项目后再提交审核。"
+        "未绑定项目会显著降低审核点召回与项目约束命中率。",
+    )
+
+
+def sanitize_integration_message(msg: str | None) -> str:
+    raw = (msg or "").strip()
+    if not raw:
+        return ""
+    return user_facing_upstream_error(raw)
+
+
 def resolve_integration_api_base(raw: str) -> str:
     """解析 aicheckword 根地址；Docker 主机名在本机开发时自动回退 127.0.0.1。"""
     base = (raw or "").strip().rstrip("/")
@@ -93,16 +212,24 @@ def format_upstream_request_error(exc: Exception, base: str = "") -> str:
         or "nameresolutionerror" in msg.lower()
         or "failed to resolve" in msg.lower()
     ):
-        hint = (
+        hint = user_facing_text(
             " 当前为 Docker 内部主机名 aicheckword，在本机直接运行 aiword 时无法解析。"
             "请在页面4「系统配置」将 QUIZ_API_BASE_URL 与 AICHECKWORD_DRAFT_API_BASE"
-            " 设为 http://127.0.0.1:8000（端口与 aicheckword 一致），或确认 aicheckword 容器已启动且端口已映射。"
+            " 设为 http://127.0.0.1:8000（端口与 aicheckword 一致），或确认 aicheckword 容器已启动且端口已映射。",
+            " 文档服务地址在本机无法连接，请联系管理员检查服务配置与运行状态。",
         )
     elif ("127.0.0.1" in base_l or "localhost" in base_l) and (
         "connection refused" in msg.lower() or "actively refused" in msg.lower()
     ):
-        hint = " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。"
-    return f"上游请求失败：{exc}.{hint}" if hint else f"上游请求失败：{exc}"
+        hint = user_facing_text(
+            " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。",
+            " 请确认文档生成服务已在该地址启动。",
+        )
+    admin = f"上游请求失败：{exc}.{hint}" if hint else f"上游请求失败：{exc}"
+    return user_facing_upstream_error(
+        admin,
+        f"服务请求失败：{exc}。" + (hint if hint else "请稍后重试或联系管理员。"),
+    )
 
 
 def integration_api_base() -> str:
@@ -289,14 +416,15 @@ def fetch_draft_page_bootstrap(
     try:
         body = r.json()
     except Exception:
-        return None, f"上游返回非 JSON（HTTP {r.status_code}）", None
+        return None, user_facing_upstream_error(f"上游返回非 JSON（HTTP {r.status_code}）"), None
     if r.status_code >= 400:
-        return None, f"上游 HTTP {r.status_code}", body if isinstance(body, dict) else None
+        return None, user_facing_upstream_error(f"上游 HTTP {r.status_code}"), body if isinstance(body, dict) else None
     if not isinstance(body, dict) or not body.get("ok"):
-        return None, (body.get("detail") or body.get("message") or "上游 page-bootstrap 异常") if isinstance(body, dict) else "上游异常", body
+        raw = (body.get("detail") or body.get("message") or "上游 page-bootstrap 异常") if isinstance(body, dict) else "上游异常"
+        return None, user_facing_upstream_error(raw, "加载选项失败，请稍后重试或联系管理员"), body
     data = body.get("data")
     if not isinstance(data, dict):
-        return None, "上游 page-bootstrap 无 data", body
+        return None, user_facing_upstream_error("上游 page-bootstrap 无 data", "加载选项失败"), body
     return data, None, body
 
 

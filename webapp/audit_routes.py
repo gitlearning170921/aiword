@@ -49,7 +49,20 @@ from ._integration_common import (
     integration_organization_list_filter,
     login_wall,
     manual_upload_only_from_request,
+    msg_proxy_download_failed,
+    msg_select_integration_project_for_audit,
+    msg_upstream_http,
+    msg_upstream_no_job_id,
+    msg_upstream_not_configured,
+    msg_upstream_not_configured_env,
+    msg_upstream_not_json,
+    msg_upstream_not_ready,
+    msg_upstream_query_failed,
+    msg_upstream_request_failed,
+    msg_upstream_submit_failed,
+    msg_upstream_sync_failed,
     personal_llm_key_wall,
+    sanitize_integration_message,
     safe_truncate,
     resolve_aicheckword_project_id_for_upload,
     integration_org_context_response,
@@ -57,6 +70,7 @@ from ._integration_common import (
     sync_active_organization_if_requested,
     upload_record_visible_to_user,
     upstream_headers,
+    user_facing_text,
 )
 from .models import AuditJob, UploadRecord, now_local
 
@@ -455,7 +469,7 @@ def api_audit_create_job():
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 500
+        return jsonify({"message": msg_upstream_not_configured_env()}), 500
 
     # 表单字段：payload(JSON 字符串) + upload_ids（CSV）+ input_files[]
     payload_str = (request.form.get("payload") or "").strip()
@@ -513,10 +527,7 @@ def api_audit_create_job():
     if pid <= 0:
         return jsonify(
             {
-                "message": (
-                    "请先选择 aicheckword 项目后再提交审核。"
-                    "未绑定项目会显著降低审核点召回与项目约束命中率。"
-                )
+                "message": msg_select_integration_project_for_audit(),
             }
         ), 400
 
@@ -631,14 +642,14 @@ def api_audit_create_job():
         local_job.message = "提交上游失败"
         local_job.error_summary = safe_truncate(str(e), 4000)
         db.session.commit()
-        return jsonify({"message": f"提交上游失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_submit_failed(e)}), 502
 
     if r.status_code != 200:
         local_job.status = "failed"
         local_job.message = f"上游 HTTP {r.status_code}"
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
 
     try:
         upstream = r.json()
@@ -646,14 +657,14 @@ def api_audit_create_job():
         local_job.status = "failed"
         local_job.message = "上游响应非 JSON"
         db.session.commit()
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
 
     upstream_id = (upstream.get("job_id") or "").strip()
     if not upstream_id:
         local_job.status = "failed"
         local_job.message = "上游未返回 job_id"
         db.session.commit()
-        return jsonify({"message": "上游未返回 job_id", "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -687,14 +698,14 @@ def api_audit_job_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
+                "message": sanitize_integration_message(job.message),
                 "error": job.error_summary or None,
             }
         )
 
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     url = f"{base}/api/integration/audit/jobs/{job.upstream_job_id}"
     org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
@@ -710,8 +721,8 @@ def api_audit_job_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": f"上游同步失败：{e}",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_sync_failed(e),
             }
         )
     if r.status_code != 200:
@@ -721,8 +732,8 @@ def api_audit_job_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": f"上游 HTTP {r.status_code}",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_http(r.status_code),
             }
         )
     try:
@@ -734,8 +745,8 @@ def api_audit_job_status(local_id: str):
                 "localJobId": job.id,
                 "status": job.status,
                 "progress": job.progress or 0.0,
-                "message": job.message or "",
-                "error": "上游响应非 JSON",
+                "message": sanitize_integration_message(job.message),
+                "error": msg_upstream_not_json(),
             }
         )
 
@@ -748,7 +759,7 @@ def api_audit_job_status(local_id: str):
             "upstreamJobId": job.upstream_job_id,
             "status": job.status,
             "progress": job.progress or 0.0,
-            "message": job.message or "",
+            "message": sanitize_integration_message(job.message),
             "error": job.error_summary or None,
             "errorSummary": job.error_summary or None,
             "result": (data.get("result") if isinstance(data, dict) else None),
@@ -796,7 +807,7 @@ def _fetch_upstream_report_row(
     """拉取 aicheckword ``GET /api/reports/{id}`` 完整行（含 report JSON）。"""
     base = integration_api_base()
     if not base:
-        return None, "未配置上游 API"
+        return None, msg_upstream_not_configured()
     try:
         r = requests.get(
             f"{base}/api/reports/{int(report_id)}",
@@ -807,15 +818,15 @@ def _fetch_upstream_report_row(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as e:
-        return None, f"上游请求失败：{e}"
+        return None, msg_upstream_request_failed(e)
     if r.status_code != 200:
-        return None, f"上游 HTTP {r.status_code}"
+        return None, msg_upstream_http(r.status_code)
     try:
         data = r.json()
     except Exception:
-        return None, "上游响应非 JSON"
+        return None, msg_upstream_not_json()
     if not isinstance(data, dict):
-        return None, "上游响应格式异常"
+        return None, user_facing_text("上游响应格式异常", "服务响应格式异常")
     return data, None
 
 
@@ -901,7 +912,7 @@ def api_audit_job_download(local_id: str):
         return jsonify({"message": "无权限"}), 403
     base = integration_api_base()
     if not base or not job.upstream_job_id:
-        return jsonify({"message": "上游未就绪"}), 400
+        return jsonify({"message": msg_upstream_not_ready()}), 400
     url = f"{base}/api/integration/audit/jobs/{job.upstream_job_id}/download"
     org_id = str(getattr(job, "organization_id", "") or "").strip()
     try:
@@ -912,9 +923,9 @@ def api_audit_job_download(local_id: str):
             stream=False,
         )
     except requests.RequestException as e:
-        return jsonify({"message": f"代理下载失败：{e}"}), 502
+        return jsonify({"message": msg_proxy_download_failed(e)}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:1000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:1000]}), 502
     return send_file(
         io.BytesIO(r.content),
         as_attachment=True,
@@ -961,7 +972,7 @@ def api_audit_jobs_list():
                 "progress": j.progress or 0.0,
                 "mode": j.mode,
                 "source": j.source,
-                "message": j.message or "",
+                "message": sanitize_integration_message(j.message),
                 "error": j.error_summary or None,
                 "uploadIds": list(j.upload_ids_json or []),
                 "reportIds": list(j.report_ids_json or []),
@@ -1008,7 +1019,7 @@ def api_audit_report_proxy_get(report_id: int):
     """代理 aicheckword GET /api/reports/{id}，供 aiword 内置编辑器读取。"""
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     org_id, _ = resolve_org_collection_for_integration()
     try:
         r = requests.get(
@@ -1017,13 +1028,13 @@ def api_audit_report_proxy_get(report_id: int):
             timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
         )
     except requests.RequestException as e:
-        return jsonify({"message": f"上游请求失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_request_failed(e)}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
     try:
         data = r.json()
     except Exception:
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     return jsonify({"ok": True, "data": data})
 
 
@@ -1035,7 +1046,7 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return jsonify({"message": "请求体必须是 JSON 对象"}), 400
@@ -1071,7 +1082,7 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
             timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
         )
     except requests.RequestException as e:
-        return jsonify({"message": f"上游请求失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_request_failed(e)}), 502
     if r.status_code != 200:
         detail = r.text[:2000]
         try:
@@ -1079,11 +1090,11 @@ def api_audit_report_proxy_patch_point(report_id: int, point_index: int):
             detail = up.get("detail") or up.get("message") or detail
         except Exception:
             pass
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": detail}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": detail}), 502
     try:
         data = r.json()
     except Exception:
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     resp = {"ok": True, "data": data, "organizationId": org_id}
     if is_correction:
         resp["collection"] = collection
@@ -1098,7 +1109,7 @@ def api_audit_report_proxy_correction(report_id: int, point_index: int):
         return err
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return jsonify({"message": "请求体必须是 JSON 对象"}), 400
@@ -1130,7 +1141,7 @@ def api_audit_report_proxy_correction(report_id: int, point_index: int):
             timeout=integration_requests_timeout(read_seconds=min(60, _audit_timeout())),
         )
     except requests.RequestException as e:
-        return jsonify({"message": f"上游请求失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_request_failed(e)}), 502
     if r.status_code != 200:
         detail = r.text[:2000]
         try:
@@ -1138,11 +1149,11 @@ def api_audit_report_proxy_correction(report_id: int, point_index: int):
             detail = up.get("detail") or up.get("message") or detail
         except Exception:
             pass
-        return jsonify({"message": f"上游 HTTP {r.status_code}", "detail": detail}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), "detail": detail}), 502
     try:
         data = r.json()
     except Exception:
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     return jsonify({"ok": True, "data": data, "organizationId": org_id, "collection": collection})
 
 
@@ -1187,7 +1198,7 @@ def api_upload_latest_report(upload_id: str):
 
     # fallback：按 upload_id / 展示名查
     if not base:
-        return jsonify({"message": "未配置上游 API"}), 500
+        return jsonify({"message": msg_upstream_not_configured()}), 500
     fn = (rec.original_file_name or rec.file_name or "").strip()
     try:
         r = requests.get(
@@ -1203,13 +1214,13 @@ def api_upload_latest_report(upload_id: str):
             timeout=integration_requests_timeout(read_seconds=min(30, _audit_timeout())),
         )
     except requests.RequestException as e:
-        return jsonify({"message": f"上游查询失败：{e}"}), 502
+        return jsonify({"message": msg_upstream_query_failed(e)}), 502
     if r.status_code != 200:
-        return jsonify({"message": f"上游 HTTP {r.status_code}"}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code)}), 502
     try:
         data = r.json()
     except Exception:
-        return jsonify({"message": "上游响应非 JSON"}), 502
+        return jsonify({"message": msg_upstream_not_json()}), 502
     items = (data or {}).get("items") or []
     if not items:
         return jsonify(

@@ -170,7 +170,7 @@
           + (firstUploadId ? ("&upload_id=" + encodeURIComponent(firstUploadId) + "&base_upload_id=" + encodeURIComponent(firstUploadId)) : "");
         tdOp = selectHtml
           + '<button type="button" class="btn btn-sm btn-outline-success me-1 aud-btn-view-results" data-job-id="'
-          + esc(it.id || '') + '" title="加载与 aicheckword 一致的完整审核点">查看结果</button>'
+          + esc(it.id || '') + '" title="' + (window.ufText ? window.ufText("加载与 aicheckword 一致的完整审核点", "查看完整审核点") : "查看完整审核点") + '">查看结果</button>'
           + '<a class="btn btn-sm btn-outline-secondary me-1 aud-report-edit-link" target="_blank" rel="noopener"'
           + ' href="' + editHref + '" title="在 aiword 编辑报告">编辑报告</a>'
           + '<a class="btn btn-sm btn-outline-primary aud-report-todo-link" target="_blank" rel="noopener"'
@@ -436,7 +436,7 @@
     _lastViewJobId = localJobId;
     var reloadBtn = $("aud_btn_reload_reports");
     if (reloadBtn) reloadBtn.classList.remove("d-none");
-    box.innerHTML = '<p class="text-muted small">正在从 aicheckword 加载完整审核结果…</p>';
+    box.innerHTML = '<p class="text-muted small">' + (window.ufText ? window.ufText("正在从 aicheckword 加载完整审核结果…", "正在加载完整审核结果…") : "正在加载完整审核结果…") + '</p>';
     return AsyncJob.api(
       root + "/audit/api/jobs/" + encodeURIComponent(localJobId) + "/reports",
       { method: "GET" }
@@ -595,7 +595,7 @@
     if (btn) btn.disabled = true;
     showMsg("正在审核文本…", false);
     prog.show(); prog.setRunning(true); prog.setHeadline("文本审核中…");
-    prog.update(0.2, "调用 aicheckword /review/text …");
+    prog.update(0.2, window.ufText ? window.ufText("调用 aicheckword /review/text …", "正在提交审核…") : "正在提交审核…");
     AsyncJob.api(root + "/audit/api/review-text", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -27,6 +27,14 @@
     return "scope=" + encodeURIComponent(dgIntegrationScopeFromLocation());
   }
 
+  function dgIsSuperAdmin() {
+    return !!window.__PAGE13_SUPER_ADMIN__;
+  }
+
+  function dgUserText(adminText, userText) {
+    return typeof window.ufText === "function" ? window.ufText(adminText, userText) : (dgIsSuperAdmin() ? adminText : userText);
+  }
+
   /** 与 aicheckword 初稿页 file_uploader type= 一致 */
   var DRAFT_UPLOAD_ACCEPT = ".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz";
   /** @type {File[]} */
@@ -36,6 +44,13 @@
   var _dgFilePickersWired = false;
   /** 页面2带入的任务 upload_id，提交时写入 payload.base_upload_id */
   var _dgBaseUploadId = "";
+  /** 页面1 → aicheckword 新建后关联的项目 id */
+  var _dgLinkedAcwProjectId = 0;
+  /** @type {any[]} */
+  var _dgPage1ProjectsCache = [];
+  /** @type {any} */
+  var _dgAcwMetaFields = null;
+  var _dgAcwModalInstance = null;
 
   var __page2Prefill = null;
   var __page2PrefillApplied = false;
@@ -821,7 +836,7 @@
     }
     __page2PrefillApplied = true;
     showMsg(
-      "已从页面2任务按规则匹配案例/项目/模板（请核对）。中文文件名会经内置词库映射为英文关键词后再对齐模板库文件名；可按需修改后提交初稿。",
+      "已从" + dgUserText("页面2", "我的") + "任务按规则匹配案例/项目/模板（请核对）。中文文件名会经内置词库映射为英文关键词后再对齐模板库文件名；可按需修改后提交初稿。",
       false
     );
     return false;
@@ -1102,12 +1117,21 @@
           ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
           : keyRequired
             ? "当前账号尚未保存 Key，须填写并保存"
-            : "未保存时将使用 aicheckword 系统 Cursor Key";
+            : dgUserText(
+                "未保存时将使用 aicheckword 系统 Cursor Key",
+                "未保存时将使用系统 Cursor Key"
+              );
       }
       if (sub) {
         sub.textContent = reqPersonal
-          ? "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。"
-          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。";
+          ? dgUserText(
+              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。",
+              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员配置。"
+            )
+          : dgUserText(
+              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。",
+              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员配置。"
+            );
       }
     } else if (prov === "tongyi") {
       if (keyInp) keyInp.disabled = false;
@@ -1117,12 +1141,18 @@
           ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
           : keyRequired
             ? "当前账号尚未保存 Key，须填写并保存"
-            : "未保存时将使用 aicheckword 系统通义 Key";
+            : dgUserText(
+                "未保存时将使用 aicheckword 系统通义 Key",
+                "未保存时将使用系统通义 Key"
+              );
       }
       if (sub) {
         sub.textContent = reqPersonal
-          ? "本账号个人 Key，他人不可共用；模型名可空（上游默认）。API Base 对通义通常留空（官方端点）。"
-          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。模型名可空。";
+          ? "本账号个人 Key，他人不可共用；模型名可空（系统默认）。API Base 对通义通常留空（官方端点）。"
+          : dgUserText(
+              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。模型名可空。",
+              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。模型名可空。"
+            );
       }
     } else {
       if (keyInp) keyInp.disabled = false;
@@ -1132,12 +1162,21 @@
           ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
           : keyRequired
             ? "当前账号尚未保存 Key，须填写并保存"
-            : "未保存时将使用 aicheckword 系统 DeepSeek Key";
+            : dgUserText(
+                "未保存时将使用 aicheckword 系统 DeepSeek Key",
+                "未保存时将使用系统 DeepSeek Key"
+              );
       }
       if (sub) {
         sub.textContent = reqPersonal
-          ? "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用上游默认。"
-          : "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。";
+          ? dgUserText(
+              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用系统默认。",
+              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用系统默认。"
+            )
+          : dgUserText(
+              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。",
+              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。"
+            );
       }
     }
   }
@@ -1530,12 +1569,319 @@
     });
   }
 
+  function applyProjectModeLabels() {
+    var pm = el("dg_project_mode");
+    if (!pm) return;
+    for (var i = 0; i < pm.options.length; i++) {
+      if (pm.options[i].value === "new") {
+        pm.options[i].text = dgUserText("从页面1已有项目新建", "从任务列表已有项目新建");
+      } else if (pm.options[i].value === "existing") {
+        pm.options[i].text = dgUserText("使用已有项目（aicheckword，不新建）", "使用已有项目（不新建）");
+      }
+    }
+  }
+
+  function updatePage1AcwLinkedLabel() {
+    var lab = el("dg_page1_acw_linked");
+    if (!lab) return;
+    if (_dgLinkedAcwProjectId > 0) {
+      lab.textContent = dgUserText(
+        "已关联 aicheckword 项目 ID：" + _dgLinkedAcwProjectId,
+        "已关联专属项目 ID：" + _dgLinkedAcwProjectId
+      );
+      lab.classList.remove("text-muted");
+      lab.classList.add("text-success");
+    } else {
+      lab.textContent = "";
+      lab.classList.remove("text-success");
+      lab.classList.add("text-muted");
+    }
+  }
+
+  function updatePage1CreateBtnState() {
+    var btn = el("dg_btn_open_acw_project_modal");
+    var sel = el("dg_page1_project_id");
+    if (!btn || !sel) return;
+    btn.disabled = !(String(sel.value || "").trim());
+  }
+
+  function fillAcwModalSelect(selectId, options, preferred) {
+    var sel = el(selectId);
+    if (!sel) return;
+    var opts = Array.isArray(options) ? options.slice() : [];
+    sel.innerHTML = "";
+    if (!opts.length) {
+      var o0 = document.createElement("option");
+      o0.value = "";
+      o0.textContent = "（无可选项）";
+      sel.appendChild(o0);
+      return;
+    }
+    opts.forEach(function (v) {
+      var s = String(v || "").trim();
+      if (!s) return;
+      var o = document.createElement("option");
+      o.value = s;
+      o.textContent = s;
+      sel.appendChild(o);
+    });
+    var pref = String(preferred || "").trim();
+    if (pref && opts.indexOf(pref) >= 0) sel.value = pref;
+    else if (opts.length) sel.selectedIndex = 0;
+  }
+
+  function ensureAcwMetaFields(forceReload) {
+    if (_dgAcwMetaFields && !forceReload) return Promise.resolve(_dgAcwMetaFields);
+    if (forceReload) _dgAcwMetaFields = null;
+    var collEl = el("dg_collection");
+    var orgEl = el("dg_organization");
+    var coll = (collEl && collEl.value ? collEl.value.trim() : "") || "regulations";
+    var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+    var url =
+      "/draft-gen/api/acw-project-form-options?collection=" + encodeURIComponent(coll);
+    if (orgId) url += "&organizationId=" + encodeURIComponent(orgId);
+    return api(url, { method: "GET" }).then(function (x) {
+      var j = x.json || {};
+      if (x.ok && j.fields) {
+        _dgAcwMetaFields = j.fields;
+      } else {
+        _dgAcwMetaFields = null;
+      }
+      return _dgAcwMetaFields;
+    });
+  }
+
+  function loadPage1ProjectsForDraft() {
+    var sel = el("dg_page1_project_id");
+    if (!sel) return Promise.resolve();
+    return api("/api/projects", { method: "GET" }).then(function (x) {
+      if (!x.ok) {
+        sel.innerHTML = '<option value="">（加载失败）</option>';
+        return;
+      }
+      var rows = Array.isArray(x.json) ? x.json : [];
+      _dgPage1ProjectsCache = rows;
+      sel.innerHTML = '<option value="">' + dgUserText("（请选择页面1项目）", "（请选择项目）") + '</option>';
+      rows.forEach(function (p) {
+        var id = String(p.id || "").trim();
+        if (!id) return;
+        var o = document.createElement("option");
+        o.value = id;
+        var label = (p.name || id) + (p.registeredCountry ? " · " + p.registeredCountry : "");
+        o.textContent = label;
+        sel.appendChild(o);
+      });
+      applySelectSearchFilter("dg_page1_project_id");
+      updatePage1CreateBtnState();
+    });
+  }
+
+  function showAcwModalMsg(text, isErr) {
+    var box = el("dg_acw_modal_msg");
+    if (!box) return;
+    if (!text) {
+      box.classList.add("d-none");
+      box.textContent = "";
+      return;
+    }
+    box.textContent = text;
+    box.classList.remove("d-none", "alert-danger", "alert-info");
+    box.classList.add(isErr ? "alert-danger" : "alert-info");
+  }
+
+  function openAcwProjectModal() {
+    var page1Id = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
+    if (!page1Id) {
+      showMsg(dgUserText("请先选择页面1已有项目", "请先选择任务列表中的项目"), true);
+      return;
+    }
+    showAcwModalMsg("", false);
+    var collEl = el("dg_collection");
+    var orgEl = el("dg_organization");
+    var coll = (collEl && collEl.value ? collEl.value.trim() : "") || "regulations";
+    var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+    var prefillUrl =
+      "/draft-gen/api/page1-projects/" +
+      encodeURIComponent(page1Id) +
+      "/aicheckword-prefill?collection=" +
+      encodeURIComponent(coll);
+    if (orgId) prefillUrl += "&organizationId=" + encodeURIComponent(orgId);
+    Promise.all([
+      ensureAcwMetaFields(true),
+      api(prefillUrl, { method: "GET" }),
+    ]).then(function (parts) {
+      var meta = parts[0] || {};
+      var pre = parts[1];
+      if (!pre.ok || !pre.json || !pre.json.data) {
+        var em = (pre.json && pre.json.message) || "加载预填失败";
+        showMsg(em, true);
+        return;
+      }
+      var d = pre.json.data;
+      if (el("dg_acw_name")) el("dg_acw_name").value = d.name || "";
+      if (el("dg_acw_project_code")) el("dg_acw_project_code").value = d.project_code || "";
+      if (el("dg_acw_name_en")) el("dg_acw_name_en").value = d.name_en || "";
+      if (el("dg_acw_product_name")) el("dg_acw_product_name").value = d.product_name || "";
+      if (el("dg_acw_product_name_en")) el("dg_acw_product_name_en").value = d.product_name_en || "";
+      if (el("dg_acw_model")) el("dg_acw_model").value = d.model || "";
+      if (el("dg_acw_model_en")) el("dg_acw_model_en").value = d.model_en || "";
+      if (el("dg_acw_registration_country_en")) el("dg_acw_registration_country_en").value = d.registration_country_en || "";
+      if (el("dg_acw_scope")) el("dg_acw_scope").value = d.scope_of_application || "";
+      fillAcwModalSelect(
+        "dg_acw_registration_country",
+        (meta.registration_country && meta.registration_country.options) || [],
+        d.registration_country
+      );
+      fillAcwModalSelect(
+        "dg_acw_registration_type",
+        (meta.registration_type && meta.registration_type.options) || [],
+        d.registration_type
+      );
+      fillAcwModalSelect(
+        "dg_acw_registration_component",
+        (meta.registration_component && meta.registration_component.options) || [],
+        d.registration_component
+      );
+      fillAcwModalSelect(
+        "dg_acw_project_form",
+        (meta.project_form && meta.project_form.options) || [],
+        d.project_form || "Web"
+      );
+      var countryOpts = (meta.registration_country && meta.registration_country.options) || [];
+      if (!countryOpts.length) {
+        showAcwModalMsg(
+          dgUserText(
+            "未能加载注册国家/类别等选项，请检查 aicheckword 知识库或 collection 配置。",
+            "未能加载注册国家/类别等选项，请刷新列表或联系管理员检查知识库配置。"
+          ),
+          true
+        );
+      }
+      var modalEl = el("dgAcwProjectModal");
+      if (!modalEl || typeof bootstrap === "undefined") return;
+      if (!_dgAcwModalInstance) _dgAcwModalInstance = new bootstrap.Modal(modalEl);
+      _dgAcwModalInstance.show();
+    });
+  }
+
+  function collectAcwModalBody() {
+    var page1Id = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
+    var collEl = el("dg_collection");
+    var orgEl = el("dg_organization");
+    return {
+      page1ProjectId: page1Id,
+      collection: (collEl && collEl.value ? collEl.value.trim() : "") || "regulations",
+      organizationId: orgEl && orgEl.value ? String(orgEl.value).trim() : null,
+      name: String((el("dg_acw_name") && el("dg_acw_name").value) || "").trim(),
+      project_code: String((el("dg_acw_project_code") && el("dg_acw_project_code").value) || "").trim(),
+      name_en: String((el("dg_acw_name_en") && el("dg_acw_name_en").value) || "").trim(),
+      product_name: String((el("dg_acw_product_name") && el("dg_acw_product_name").value) || "").trim(),
+      product_name_en: String((el("dg_acw_product_name_en") && el("dg_acw_product_name_en").value) || "").trim(),
+      model: String((el("dg_acw_model") && el("dg_acw_model").value) || "").trim(),
+      model_en: String((el("dg_acw_model_en") && el("dg_acw_model_en").value) || "").trim(),
+      registration_country: String((el("dg_acw_registration_country") && el("dg_acw_registration_country").value) || "").trim(),
+      registration_country_en: String((el("dg_acw_registration_country_en") && el("dg_acw_registration_country_en").value) || "").trim(),
+      registration_type: String((el("dg_acw_registration_type") && el("dg_acw_registration_type").value) || "").trim(),
+      registration_component: String((el("dg_acw_registration_component") && el("dg_acw_registration_component").value) || "").trim(),
+      project_form: String((el("dg_acw_project_form") && el("dg_acw_project_form").value) || "").trim(),
+      scope_of_application: String((el("dg_acw_scope") && el("dg_acw_scope").value) || "").trim(),
+    };
+  }
+
+  var ACW_MODAL_REQUIRED_FIELDS = [
+    ["name", "项目名称"],
+    ["project_code", "项目编号"],
+    ["name_en", "项目名称（英文）"],
+    ["product_name", "产品名称"],
+    ["product_name_en", "产品名称（英文）"],
+    ["model", "型号"],
+    ["model_en", "型号（英文）"],
+    ["registration_country", "注册国家"],
+    ["registration_country_en", "注册国家（英文）"],
+    ["registration_type", "注册类别"],
+    ["registration_component", "注册组成"],
+    ["project_form", "项目形态"],
+    ["scope_of_application", "产品适用范围"],
+  ];
+
+  function validateAcwModalBody(body) {
+    var missing = [];
+    ACW_MODAL_REQUIRED_FIELDS.forEach(function (pair) {
+      var key = pair[0];
+      var label = pair[1];
+      if (!String(body[key] || "").trim()) missing.push(label);
+    });
+    if (!missing.length) return "";
+    return (
+      "请填写完整项目信息（尚缺：" +
+      missing.join("、") +
+      "）。信息齐全有助于提升初稿质量；" +
+      dgUserText(
+        "也可联系超级管理员在 aicheckword 中代为新建专属项目。",
+        "也可联系超级管理员代为新建专属项目。"
+      )
+    );
+  }
+
+  function saveAcwProjectFromModal() {
+    var body = collectAcwModalBody();
+    var valErr = validateAcwModalBody(body);
+    if (valErr) {
+      showAcwModalMsg(valErr, true);
+      return;
+    }
+    if (!body.name) {
+      showAcwModalMsg(dgUserText("该页面1 项目尚未填写项目编号，请先到页面1 任务列表中填写后再试。", "该项目尚未填写项目编号，请先在任务列表中填写后再试。"), true);
+      return;
+    }
+    var btn = el("dg_btn_save_acw_project");
+    if (btn) btn.disabled = true;
+    showAcwModalMsg("正在保存…", false);
+    api("/draft-gen/api/aicheckword-projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (x) {
+      if (btn) btn.disabled = false;
+      if (!x.ok || !x.json || !x.json.ok) {
+        showAcwModalMsg((x.json && x.json.message) || "保存失败", true);
+        return;
+      }
+      var pid = parseInt(String(x.json.projectId || (x.json.data && x.json.data.projectId) || 0), 10) || 0;
+      if (pid <= 0) {
+        showAcwModalMsg(dgUserText("上游未返回 projectId", "保存失败：未返回项目编号"), true);
+        return;
+      }
+      _dgLinkedAcwProjectId = pid;
+      updatePage1AcwLinkedLabel();
+      showAcwModalMsg(
+        dgUserText("已创建 aicheckword 专属项目 ID：" + pid, "已创建专属项目 ID：" + pid),
+        false
+      );
+      if (_dgAcwModalInstance) _dgAcwModalInstance.hide();
+      showMsg(
+        dgUserText(
+          "已在 aicheckword 创建专属项目（ID " + pid + "），提交初稿时将使用该 project_id。",
+          "已创建专属项目（ID " + pid + "），提交初稿时将自动关联该项目。"
+        ),
+        false
+      );
+      return loadDraftBootstrap();
+    });
+  }
+
   function syncProjectUi() {
     const pm = el("dg_project_mode");
     const wrap = el("dg_project_pick_wrap");
-    if (!pm || !wrap) return;
+    const wrapPage1 = el("dg_page1_project_wrap");
+    if (!pm) return;
     const isExisting = pm.value === "existing";
-    wrap.style.display = isExisting ? "" : "none";
+    const isNewFromPage1 = pm.value === "new";
+    if (wrap) wrap.style.display = isExisting ? "" : "none";
+    if (wrapPage1) wrapPage1.style.display = isNewFromPage1 ? "" : "none";
+    if (isNewFromPage1) {
+      loadPage1ProjectsForDraft();
+    }
     var defSave = pm.value === "new";
     fillYesNo("dg_save_case", defSave);
   }
@@ -1576,7 +1922,13 @@
       lastBootstrap = b;
       if (ta) ta.value = JSON.stringify(b.upstreamBody != null ? b.upstreamBody : b, null, 2);
       if (!b.metaOk && b.metaError) {
-        showMsg("上游列表：" + b.metaError + "（下拉可能为空，请检查 aicheckword 与知识库）", true);
+        showMsg(
+          dgUserText(
+            "上游列表：" + b.metaError + "（下拉可能为空，请检查 aicheckword 与知识库）",
+            "加载选项失败：" + b.metaError + "（下拉可能为空，请检查知识库配置或联系管理员）"
+          ),
+          true
+        );
       }
 
       var IP = window.IntegrationPrefill;
@@ -1637,6 +1989,7 @@
       fillSelectThenCache("dg_strategy", b.draftStrategies || [], "value", "label", null);
       fillSelectThenCache("dg_author_role", b.authorRoles || [], "value", "label", null);
       fillSelect("dg_project_mode", b.projectModes || [], "value", "label", null);
+      applyProjectModeLabels();
       fillSelectThenCache("dg_project_id", b.projects || [], "id", "label", { value: "", label: "（不指定具体项目编号）" });
 
       applyBooleanOptionLabels(b.booleanOptions || []);
@@ -1870,14 +2223,25 @@
       multi_base_auto_route: el("dg_multi_route").value === "1",
       draft_strategy: el("dg_strategy").value.trim() || "change",
       docx_track_changes: el("dg_docx_track").value === "1",
-      persist_project_fields: el("dg_project_mode").value === "new",
+      persist_project_fields: false,
     };
     const ar = el("dg_author_role").value;
     if (ar) payload.author_role = ar;
 
+    const mode = el("dg_project_mode").value;
     const pid = el("dg_project_id").value.trim();
-    if (el("dg_project_mode").value === "existing" && pid) {
+    if (mode === "existing" && pid) {
       payload.project_id = parseInt(pid, 10);
+    } else if (mode === "new") {
+      if (!_dgLinkedAcwProjectId) {
+        throw new Error(
+          dgUserText(
+            "请先从页面1已有项目新建 aicheckword 专属项目",
+            "请先从页面1已有项目新建专属项目"
+          )
+        );
+      }
+      payload.project_id = _dgLinkedAcwProjectId;
     }
 
     if (names.length) payload.template_file_names = names;
@@ -1905,9 +2269,14 @@
     var pollDeadlineMs = Date.now() + 72 * 3600 * 1000;
     var pollN = 0;
     draftProgressSetVisible(true);
-    draftProgressSetHeadline("正在生成（后台轮询上游，与 aicheckword 初稿页进度条一致）");
+    draftProgressSetHeadline(
+      dgUserText(
+        "正在生成（后台轮询上游，与 aicheckword 初稿页进度条一致）",
+        "正在生成，请稍候…"
+      )
+    );
     draftProgressSetRunningStyle(true);
-    draftProgressUpdate(0.06, "任务已提交，等待上游执行…", "本地任务 " + localId);
+    draftProgressUpdate(0.06, dgUserText("任务已提交，等待上游执行…", "任务已提交，请稍候…"), "本地任务 " + localId);
     function tick() {
       if (Date.now() > pollDeadlineMs) {
         draftProgressSetRunningStyle(false);
@@ -1938,7 +2307,7 @@
         draftProgressUpdate(
           pnum,
           msg,
-          "本地 " + localId + (up ? " · 上游 " + up : "")
+          dgUserText("本地 " + localId + (up ? " · 上游 " + up : ""), "本地 " + localId + (up ? " · 任务 " + up : ""))
         );
         if (st === "succeeded" || st === "failed") {
           draftProgressSetRunningStyle(false);
@@ -1948,7 +2317,7 @@
           draftProgressUpdate(
             st === "succeeded" ? 1 : pnum,
             st === "succeeded" ? "生成完成，可下载 ZIP" : msg + (errTail ? " · " + String(errTail).slice(0, 200) : ""),
-            "本地 " + localId + (up ? " · 上游 " + up : "")
+            dgUserText("本地 " + localId + (up ? " · 上游 " + up : ""), "本地 " + localId + (up ? " · 任务 " + up : ""))
           );
           onDone(null, d);
           return;
@@ -1992,10 +2361,10 @@
     }
     showMsg("正在提交…", false);
     draftProgressSetVisible(true);
-    draftProgressSetHeadline("正在上传并提交到上游…");
+    draftProgressSetHeadline(dgUserText("正在上传并提交到上游…", "正在上传并提交…"));
     draftProgressResetBarStyle();
     draftProgressSetRunningStyle(true);
-    draftProgressUpdate(0.03, "正在上传文件并提交到上游…", "");
+    draftProgressUpdate(0.03, dgUserText("正在上传文件并提交到上游…", "正在上传文件并提交…"), "");
     fetch(root + "/draft-gen/api/jobs", { method: "POST", body: fd, credentials: "same-origin" })
       .then(function (r) {
         return r.json().then(function (j) { return { ok: r.ok, json: j }; });
@@ -2015,10 +2384,15 @@
         el("dg_local_job_id").value = localId;
         // 勿在 POST 成功后立刻清空文件列表：若上游随后失败，用户再次提交会因无输入文件而直接 return，
         // 表现为「按钮没反应」。仅在生成成功后再清空，失败/超时时保留文件便于重试。
-        draftProgressSetHeadline("正在生成（后台轮询上游，与 aicheckword 初稿页进度条一致）");
+        draftProgressSetHeadline(
+      dgUserText(
+        "正在生成（后台轮询上游，与 aicheckword 初稿页进度条一致）",
+        "正在生成，请稍候…"
+      )
+    );
         showMsg("已提交，任务号 " + localId + "，轮询中…", false);
         var pr0 = x.json.progress != null ? parseFloat(x.json.progress) : 0.08;
-        if (!isNaN(pr0)) draftProgressUpdate(pr0, "已提交上游，正在排队/执行…", "本地任务 " + localId);
+        if (!isNaN(pr0)) draftProgressUpdate(pr0, dgUserText("已提交上游，正在排队/执行…", "正在排队/执行…"), "本地任务 " + localId);
         pollJob(localId, function (err, finalJson) {
           releaseSubmitBtn();
           if (err) {
@@ -2063,9 +2437,30 @@
       showMsg("请选择「模板项目案例」后再提交。", true);
       return;
     }
+    var projMode = el("dg_project_mode") && el("dg_project_mode").value;
+    if (projMode === "new" && !_dgLinkedAcwProjectId) {
+      showMsg(
+        dgUserText(
+          "项目模式为「从页面1已有项目新建」时，须先选择页面1项目并点击「新建项目」保存到 aicheckword。",
+          "项目模式为「从页面1已有项目新建」时，须先选择页面1项目并点击「新建项目」完成保存。"
+        ),
+        true
+      );
+      return;
+    }
+    if (projMode === "existing") {
+      var pidCheck = parseInt(String((el("dg_project_id") && el("dg_project_id").value) || "").trim(), 10) || 0;
+      if (pidCheck <= 0) {
+        showMsg(dgUserText("请选择 aicheckword 已有项目。", "请选择已有专属项目。"), true);
+        return;
+      }
+    }
     if (!_dgInputFilesAccum.length) {
       showMsg(
-        "请先添加至少一个输入/参考文件（与 aicheckword 一致；可多次点「选择文件」追加，或在对话框内 Ctrl/Shift 多选）。",
+        dgUserText(
+          "请先添加至少一个输入/参考文件（与 aicheckword 一致；可多次点「选择文件」追加，或在对话框内 Ctrl/Shift 多选）。",
+          "请先添加至少一个输入/参考文件（可多次点「选择文件」追加，或在对话框内 Ctrl/Shift 多选）。"
+        ),
         true
       );
       var msgBox = el("dg_msg");
@@ -2076,12 +2471,8 @@
     }
     var hasTaskBase = !!(_dgBaseUploadId && String(_dgBaseUploadId).trim());
     var hasUploadBase = _dgBaseFilesAccum.length > 0;
-    if (!hasTaskBase && !hasUploadBase) {
-      showMsg("请至少提供 1 个 Base 文件（可用页面2带入 Base，或手动上传 Base）。", true);
-      return;
-    }
     if (hasTaskBase && hasUploadBase) {
-      showMsg("Base 来源唯一：请在“页面2带入 Base”与“手动上传 Base”二选一。", true);
+      showMsg(dgUserText("Base 来源唯一：请在“页面2带入 Base”与“手动上传 Base”二选一。", "Base 来源唯一：请在“任务带入 Base”与“手动上传 Base”二选一。"), true);
       return;
     }
     var provUse = ((el("dg_provider") && el("dg_provider").value) || "").trim();
@@ -2268,6 +2659,7 @@
     "dg_strategy",
     "dg_author_role",
     "dg_project_id",
+    "dg_page1_project_id",
   ];
 
   function wireSelectFilter(sid) {
@@ -2343,7 +2735,28 @@
     var c1 = el("dg_base_case");
     if (c1) c1.addEventListener("change", loadDraftBootstrap);
     var pm = el("dg_project_mode");
-    if (pm) pm.addEventListener("change", syncProjectUi);
+    if (pm) {
+      pm.addEventListener("change", function () {
+        if (pm.value === "new") {
+          _dgLinkedAcwProjectId = 0;
+          updatePage1AcwLinkedLabel();
+        }
+        syncProjectUi();
+      });
+    }
+    var p1sel = el("dg_page1_project_id");
+    if (p1sel && p1sel.getAttribute("data-dg-p1-wired") !== "1") {
+      p1sel.setAttribute("data-dg-p1-wired", "1");
+      p1sel.addEventListener("change", function () {
+        _dgLinkedAcwProjectId = 0;
+        updatePage1AcwLinkedLabel();
+        updatePage1CreateBtnState();
+      });
+    }
+    var p1btn = el("dg_btn_open_acw_project_modal");
+    if (p1btn) p1btn.addEventListener("click", openAcwProjectModal);
+    var p1save = el("dg_btn_save_acw_project");
+    if (p1save) p1save.addEventListener("click", saveAcwProjectFromModal);
     var pidSel = el("dg_project_id");
     if (pidSel && pidSel.getAttribute("data-dg-proj-defaults") !== "1") {
       pidSel.setAttribute("data-dg-proj-defaults", "1");
