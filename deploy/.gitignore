@@ -4,3 +4,5 @@ backup/
 dist/
 *.tar
 *.zip
+# 打包服务器配置（含 GIT URL，可能携带 PAT，禁止提交）
+server-build.config.bat

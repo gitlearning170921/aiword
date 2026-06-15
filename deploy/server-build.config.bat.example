@@ -1,0 +1,16 @@
+@echo off
+rem ============================================================
+rem  打包服务器配置（复制为 server-build.config.bat 后填写）
+rem  注意：本文件被 .gitignore 排除（参见 deploy/.gitignore 中 server-build.config.bat）
+rem ============================================================
+
+rem 1) 两个 GitHub 仓库的 URL
+rem    - HTTPS + PAT 形式：   https://<token>@github.com/<org>/aiword.git
+rem    - HTTPS（依赖凭据管理器）：https://github.com/<org>/aiword.git
+rem    - SSH（推荐，需在打包机配置 SSH key）：git@github.com:<org>/aiword.git
+set "GIT_AIWORD_URL=https://github.com/YOUR-ORG/aiword.git"
+set "GIT_AICHECKWORD_URL=https://github.com/YOUR-ORG/aicheckword.git"
+
+rem 2) 工作目录（aiword 与 aicheckword 会被 clone 到这里，作为同级目录）
+rem    必须留出几十 GB 空间用于镜像 + 构建缓存
+set "BUILD_ROOT=%USERPROFILE%\aiword-build"
