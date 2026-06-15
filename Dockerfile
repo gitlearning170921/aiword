@@ -44,4 +44,16 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://127.0.0.1:5000/api/integration/health || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5000", "--timeout", "600", "--access-logfile", "-", "webapp:app"]
+# -w 1 --threads 16 -k gthread：
+#   保持 APScheduler 单进程（避免多 worker 重复触发），同时让静态文件/API 在 I/O wait 时
+#   并发释放 GIL，单页面多个 JS/CSS 不再串行；解决 gunicorn -w 1 单线程的最大瓶颈。
+CMD ["gunicorn", \
+     "-k", "gthread", \
+     "-w", "1", \
+     "--threads", "16", \
+     "-b", "0.0.0.0:5000", \
+     "--timeout", "600", \
+     "--graceful-timeout", "30", \
+     "--keep-alive", "30", \
+     "--access-logfile", "-", \
+     "webapp:app"]

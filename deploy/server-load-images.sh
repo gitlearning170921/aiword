@@ -41,5 +41,6 @@ load_one() {
 
 load_one aiword
 load_one aicheckword
+load_one chroma
 
-echo "[load] 完成。镜像 tag: aiword:${VERSION} / aicheckword:${VERSION}"
+echo "[load] 完成。镜像 tag: aiword:${VERSION} / aicheckword:${VERSION} / chroma:${VERSION}"

@@ -23,6 +23,9 @@ fi
 if ! grep -q "^AICHECKWORD_IMAGE=" .env; then
   echo "AICHECKWORD_IMAGE=aicheckword:${VERSION}" >> .env
 fi
+if ! grep -q "^CHROMA_IMAGE=" .env; then
+  echo "CHROMA_IMAGE=chroma:${VERSION}" >> .env
+fi
 
 # shellcheck disable=SC1091
 set -a
@@ -31,14 +34,17 @@ set +a
 
 export AIWORD_IMAGE="${AIWORD_IMAGE:-aiword:${VERSION}}"
 export AICHECKWORD_IMAGE="${AICHECKWORD_IMAGE:-aicheckword:${VERSION}}"
+export CHROMA_IMAGE="${CHROMA_IMAGE:-chroma:${VERSION}}"
 
 echo "[deploy] AIWORD_IMAGE=${AIWORD_IMAGE}"
 echo "[deploy] AICHECKWORD_IMAGE=${AICHECKWORD_IMAGE}"
+echo "[deploy] CHROMA_IMAGE=${CHROMA_IMAGE}"
 
 COMPOSE=(docker compose -f docker-compose.prod.yml)
 "${COMPOSE[@]}" up -d
 
 sleep 5
 "${COMPOSE[@]}" ps
-echo "[deploy] 日志: ${COMPOSE[*]} logs -f nginx aiword aicheckword"
+echo "[deploy] 日志: ${COMPOSE[*]} logs -f nginx aiword aicheckword chroma"
+echo "[deploy] Chroma 开发机访问: http://<服务器IP>:${CHROMA_PUBLISH_PORT:-8100}"
 echo "[deploy] 访问: http://aiword.yuwell.com （需 DNS 指向本机且放行 80）"

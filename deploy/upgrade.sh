@@ -21,10 +21,11 @@ if [[ -f .env ]]; then
   set +a
   echo "[upgrade] aiword 镜像: ${AIWORD_IMAGE:-aiword:local}"
   echo "[upgrade] aicheckword 镜像: ${AICHECKWORD_IMAGE:-aicheckword:local}"
+  echo "[upgrade] chroma 镜像: ${CHROMA_IMAGE:-chroma:local}"
 fi
 
 echo "[upgrade] 拉取镜像（离线 tar 部署可忽略 pull 失败）..."
-"${COMPOSE[@]}" pull aiword aicheckword 2>/dev/null || true
+"${COMPOSE[@]}" pull aiword aicheckword chroma 2>/dev/null || true
 
 # 若 images/ 或 dist/ 下有新版本 tar，可选加载（环境变量 NEW_IMAGE_VERSION）
 if [[ -n "${NEW_IMAGE_VERSION:-}" && -x "${SCRIPT_DIR}/server-load-images.sh" ]]; then
@@ -33,14 +34,14 @@ if [[ -n "${NEW_IMAGE_VERSION:-}" && -x "${SCRIPT_DIR}/server-load-images.sh" ]]
 fi
 
 echo "[upgrade] 重建容器（不删除卷）..."
-"${COMPOSE[@]}" up -d --no-deps --force-recreate aiword aicheckword nginx
+"${COMPOSE[@]}" up -d --no-deps --force-recreate chroma aicheckword aiword nginx
 
 echo "[upgrade] 等待健康检查..."
 sleep 5
 "${COMPOSE[@]}" ps
 
 echo "[upgrade] 最近日志："
-"${COMPOSE[@]}" logs --tail=40 nginx aiword aicheckword
+"${COMPOSE[@]}" logs --tail=40 nginx aiword aicheckword chroma
 
 echo "[upgrade] 完成。若需回滚：将 .env 中镜像 tag 改回上一版本后再次执行本脚本。"
 echo "[upgrade] 禁止: docker compose down -v"

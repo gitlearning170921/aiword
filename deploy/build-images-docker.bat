@@ -44,6 +44,10 @@ echo ==^> build aicheckword:%VER% platform=%PLATFORM%
 docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%"
 if errorlevel 1 exit /b 1
 
+echo.
+call "%~dp0build-chroma-docker.bat" %VER%
+if errorlevel 1 exit /b 1
+
 docker tag aiword:%VER% aiword:local
 docker tag aicheckword:%VER% aicheckword:local
 

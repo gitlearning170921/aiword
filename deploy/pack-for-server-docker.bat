@@ -35,6 +35,16 @@ if "%AICHECKWORD_IMG%"=="" (
   exit /b 1
 )
 
+set "CHROMA_IMG="
+if exist "%DIST%\chroma-%VER%.tar.gz" (
+  set "CHROMA_IMG=%DIST%\chroma-%VER%.tar.gz"
+) else if exist "%DIST%\chroma-%VER%.tar" (
+  set "CHROMA_IMG=%DIST%\chroma-%VER%.tar"
+)
+if "%CHROMA_IMG%"=="" (
+  echo WARN: missing chroma export for version %VER% ^(remote Chroma will not load offline^)
+)
+
 if exist "%STAGE%" rd /s /q "%STAGE%"
 mkdir "%STAGE%"
 mkdir "%STAGE%\images"
@@ -44,10 +54,12 @@ for %%F in (
   .env.example
   server-deploy.sh
   server-load-images.sh
+  migrate-knowledge-store.sh
   backup.sh
   upgrade.sh
   build-images.bat
   build-images-docker.bat
+  build-chroma-docker.bat
   export-images.bat
   export-images-docker.bat
   pack-for-server.bat
@@ -60,6 +72,8 @@ if exist "%~dp0nginx" xcopy /E /I /Y /Q "%~dp0nginx" "%STAGE%\nginx\" >nul
 
 copy /y "%AIWORD_IMG%" "%STAGE%\images\" >nul
 copy /y "%AICHECKWORD_IMG%" "%STAGE%\images\" >nul
+if not "%CHROMA_IMG%"=="" copy /y "%CHROMA_IMG%" "%STAGE%\images\" >nul
+if exist "%~dp0chroma-image.tag" copy /y "%~dp0chroma-image.tag" "%STAGE%\" >nul
 if exist "%DIST%\manifest-%VER%.txt" copy /y "%DIST%\manifest-%VER%.txt" "%STAGE%\" >nul
 echo %VER%> "%STAGE%\VERSION"
 

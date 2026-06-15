@@ -29,7 +29,11 @@ if "%USE_GZIP%"=="1" (
   docker save aicheckword:%VER% | gzip -1 > "%~dp0dist\aicheckword-%VER%.tar.gz"
   if errorlevel 1 exit /b 1
 
-  echo EXPORT OK: dist\aiword-%VER%.tar.gz dist\aicheckword-%VER%.tar.gz
+  echo ==^> save gzip chroma:%VER%
+  docker save chroma:%VER% | gzip -1 > "%~dp0dist\chroma-%VER%.tar.gz"
+  if errorlevel 1 exit /b 1
+
+  echo EXPORT OK: dist\aiword-%VER%.tar.gz dist\aicheckword-%VER%.tar.gz dist\chroma-%VER%.tar.gz
 ) else (
   echo WARN: gzip not found, exporting uncompressed .tar
   echo ==^> save aiword:%VER%
@@ -40,6 +44,10 @@ if "%USE_GZIP%"=="1" (
   docker save -o "%~dp0dist\aicheckword-%VER%.tar" aicheckword:%VER%
   if errorlevel 1 exit /b 1
 
-  echo EXPORT OK: dist\aiword-%VER%.tar dist\aicheckword-%VER%.tar
+  echo ==^> save chroma:%VER%
+  docker save -o "%~dp0dist\chroma-%VER%.tar" chroma:%VER%
+  if errorlevel 1 exit /b 1
+
+  echo EXPORT OK: dist\aiword-%VER%.tar dist\aicheckword-%VER%.tar dist\chroma-%VER%.tar
 )
 exit /b 0

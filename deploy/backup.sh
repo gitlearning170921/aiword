@@ -71,7 +71,7 @@ backup_volume() {
   fi
 }
 
-for vol in aiword_instance aiword_uploads aiword_outputs aicheck_knowledge aicheck_uploads aicheck_training; do
+for vol in aiword_instance aiword_uploads aiword_outputs aicheck_knowledge aicheck_uploads aicheck_training chroma_data; do
   backup_volume "${vol}"
 done
 
