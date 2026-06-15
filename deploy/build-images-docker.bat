@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
+rem build-images-docker.bat serial-v2 (no parallel/wait_builds)
 
 set "VER=%~1"
 if "%VER%"=="" set "VER=1.0.0"
@@ -15,6 +16,13 @@ if not exist "%AICHECKWORD_ROOT%\Dockerfile" (
   exit /b 1
 )
 
+if not exist "%AIWORD_ROOT%\webapp\__init__.py" (
+  echo ERROR: Wrong working directory for BUILD.
+  echo   Run from: F:\wzl\learning\python\aiword\deploy
+  echo   Do NOT run from deploy\dist\aiword-stack-* ^(that folder is for Linux load only^).
+  exit /b 1
+)
+
 where docker >nul 2>&1
 if errorlevel 1 (
   echo ERROR: docker not found. Install Docker Desktop and restart terminal.
@@ -26,29 +34,15 @@ set "PLATFORM=linux/amd64"
 set "PROGRESS=%DOCKER_PROGRESS%"
 if "%PROGRESS%"=="" set "PROGRESS=plain"
 
-set "TMPDIR=%TEMP%\aiword-docker-build-%RANDOM%"
-mkdir "%TMPDIR%" 2>nul
+echo ==^> build aiword:%VER% platform=%PLATFORM%
+echo     tip: first build may take 15-30 min; aicheckword pip install is slow
+docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%"
+if errorlevel 1 exit /b 1
 
-echo ==^> parallel build aiword:%VER% + aicheckword:%VER% platform=%PLATFORM%
-
-start "build-aiword" /MIN cmd /c "set DOCKER_BUILDKIT=1&& docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%" > "%TMPDIR%\aiword.log" 2>&1 && echo OK> "%TMPDIR%\aiword.ok" || echo FAIL> "%TMPDIR%\aiword.fail""
-
-start "build-aicheckword" /MIN cmd /c "set DOCKER_BUILDKIT=1&& docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%" > "%TMPDIR%\aicheckword.log" 2>&1 && echo OK> "%TMPDIR%\aicheckword.ok" || echo FAIL> "%TMPDIR%\aicheckword.fail""
-
-:wait_builds
-if not exist "%TMPDIR%\aiword.ok" if not exist "%TMPDIR%\aiword.fail" goto wait_builds
-if not exist "%TMPDIR%\aicheckword.ok" if not exist "%TMPDIR%\aicheckword.fail" goto wait_builds
-
-set "RC=0"
-if exist "%TMPDIR%\aiword.fail" (
-  echo ERROR: aiword build failed. See %TMPDIR%\aiword.log
-  set "RC=1"
-)
-if exist "%TMPDIR%\aicheckword.fail" (
-  echo ERROR: aicheckword build failed. See %TMPDIR%\aicheckword.log
-  set "RC=1"
-)
-if not "%RC%"=="0" exit /b %RC%
+echo.
+echo ==^> build aicheckword:%VER% platform=%PLATFORM%
+docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%"
+if errorlevel 1 exit /b 1
 
 docker tag aiword:%VER% aiword:local
 docker tag aicheckword:%VER% aicheckword:local

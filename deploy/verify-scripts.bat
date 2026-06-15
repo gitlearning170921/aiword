@@ -25,6 +25,20 @@ for %%B in (build-images-docker.bat export-images-docker.bat pack-for-server-doc
   if exist "%~dp0%%B" (echo [OK] %%B) else (echo [FAIL] missing %%B & set "FAIL=1")
 )
 
+findstr /c:"serial-v2" "%~dp0build-images-docker.bat" >nul 2>&1
+if errorlevel 1 (
+  echo [FAIL] build-images-docker.bat is OUTDATED ^(missing serial-v2^). Pull latest or copy from repo deploy\ folder.
+  set "FAIL=1"
+) else (
+  echo [OK] build-images-docker.bat serial-v2
+)
+
+findstr /c:"parallel build" "%~dp0build-images-docker.bat" >nul 2>&1
+if not errorlevel 1 (
+  echo [FAIL] build-images-docker.bat still has broken parallel build - replace file
+  set "FAIL=1"
+)
+
 powershell -NoProfile -EP Bypass -Command "exit 0" >nul 2>&1
 if errorlevel 1 (
   echo [FAIL] powershell

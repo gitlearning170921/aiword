@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # aiword Web 服务（生产：gunicorn 单 worker，配合 APScheduler）
 FROM python:3.11-slim-bookworm AS builder
 

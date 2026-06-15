@@ -22,6 +22,9 @@ dist/
 *.spec
 deploy/backup/
 deploy/.env
+deploy/dist/
+server.log
+server.pid
 *.md
 !deploy/README.md
 打包说明.md

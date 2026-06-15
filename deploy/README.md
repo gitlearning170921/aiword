@@ -40,6 +40,8 @@ F:\wzl\learning\python\
 
 ### 3. 自检 + 一键构建
 
+> **必须在 `aiword\deploy` 目录执行**，不要在 `deploy\dist\aiword-stack-*`（那是给 Linux load 用的旧脚本副本）。
+
 ```powershell
 cd F:\wzl\learning\python\aiword\deploy
 
@@ -174,14 +176,102 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 
 ---
 
-## 三、升级（本机重新构建 → 服务器 load）
+## 三、版本升级速查（已有 Linux 服务器）
+
+> 适用：服务器已跑通过，只需换新版镜像（及可选 nginx 配置）。**数据在 MySQL 与 Docker 卷里，升级不丢。**
+
+### 步骤 A — Windows 本机打新包
+
+将下面 `1.0.2` 换成本次版本号（需与旧版不同）：
+
+```powershell
+cd F:\wzl\learning\python\aiword\deploy
+
+# 确认 Docker Desktop 已启动（docker version 无报错）
+.\verify-scripts.bat
+.\build-all.bat 1.0.2
+```
+
+产物：`dist\aiword-stack-1.0.2.zip`（内含 `images/*.tar.gz`、`docker-compose.prod.yml`、`nginx/`、`upgrade.sh` 等）。
+
+### 步骤 B — 上传到 Linux
+
+**方式 1（推荐，含 nginx 配置更新）**：上传整个 zip，解压覆盖配置、仅替换镜像：
+
+```bash
+# 本机
+scp F:/wzl/learning/python/aiword/deploy/dist/aiword-stack-1.0.2.zip user@linux-server:/opt/
+
+# 服务器
+cd /opt/aiword-stack          # 已有部署目录
+./backup.sh                   # 升级前备份
+
+cd /opt
+unzip -o aiword-stack-1.0.2.zip -d aiword-stack-new
+cp -a aiword-stack-new/images/*.tar.gz aiword-stack/images/
+cp -a aiword-stack-new/nginx/nginx.conf aiword-stack/nginx/nginx.conf
+cp -a aiword-stack-new/upgrade.sh aiword-stack-new/server-load-images.sh aiword-stack/
+chmod +x aiword-stack/*.sh
+cd aiword-stack
+```
+
+**方式 2（仅换镜像）**：只 scp 两个 tar.gz 到 `aiword-stack/images/` 即可（nginx 配置未改时）。
+
+```bash
+scp deploy/dist/aiword-1.0.2.tar.gz deploy/dist/aicheckword-1.0.2.tar.gz user@linux-server:/opt/aiword-stack/images/
+```
+
+### 步骤 C — 服务器改版本并升级
+
+```bash
+cd /opt/aiword-stack
+vi .env
+```
+
+至少修改（版本号与本次 build 一致）：
+
+```env
+IMAGE_VERSION=1.0.2
+AIWORD_IMAGE=aiword:1.0.2
+AICHECKWORD_IMAGE=aicheckword:1.0.2
+BASE_URL=http://aiword.yuwell.com
+```
+
+执行升级（自动 backup → load tar.gz → 重建 aiword / aicheckword / **nginx**）：
+
+```bash
+NEW_IMAGE_VERSION=1.0.2 ./upgrade.sh
+```
+
+### 步骤 D — 验证
+
+```bash
+docker compose -f docker-compose.prod.yml ps
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/integration/health   # 期望 200
+```
+
+浏览器访问：`http://aiword.yuwell.com`  
+页面3 确认 `BASE_URL`；Windows `aiprintword` 的 `AIWORD_BASE_URL=http://aiword.yuwell.com`。
+
+### 回滚
+
+`.env` 改回上一版本 tag → 再执行 `NEW_IMAGE_VERSION=旧版本 ./upgrade.sh`（旧版 tar 需在 `images/` 中）。
+
+### 严禁
+
+```bash
+docker compose down -v    # 会删命名卷，uploads/knowledge_store/instance 全丢
+```
+
+---
+
+## 三（附）、升级（简略）
 
 ### 本机
 
 ```powershell
-.\build-images.ps1 -Version 1.0.1
-.\export-images.ps1 -Version 1.0.1
-# 只需上传新的 images/*.tar.gz 或重新 pack
+.\build-all.bat 1.0.2
+# 上传 dist\aiword-stack-1.0.2.zip 或 images\*.tar.gz
 ```
 
 ### Linux 服务器
@@ -189,19 +279,8 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 ```bash
 cd /opt/aiword-stack
 ./backup.sh
-
-# 上传新 tar 到 images/
-./server-load-images.sh 1.0.1
-
-# 修改 .env 中 AIWORD_IMAGE / AICHECKWORD_IMAGE 为 1.0.1
-NEW_IMAGE_VERSION=1.0.1 ./upgrade.sh
-# 或：docker compose -f docker-compose.prod.yml up -d --force-recreate
-```
-
-### 严禁
-
-```bash
-docker compose down -v    # 删除命名卷，数据全丢
+# 更新 images/ 与 .env 中 AIWORD_IMAGE / AICHECKWORD_IMAGE
+NEW_IMAGE_VERSION=1.0.2 ./upgrade.sh
 ```
 
 ---
@@ -303,8 +382,11 @@ docker push registry.example.com/aiword:1.0.0
 |------|------|
 | `docker` 命令不存在 | 安装 Docker Desktop，重启终端 |
 | `.ps1` 解析错误 / 乱码 | 不要用 `.ps1`，改用 `.\build-all.bat 1.0.0` |
+| `failed to resolve ... docker/dockerfile:1` / `manifests/1`: EOF | 已去掉 Dockerfile 首行 `# syntax=...`；若仍失败则是 `python:3.11-slim-bookworm` 拉取问题，配置 Docker Desktop **registry-mirrors** |
 | `failed to resolve python:3.11-slim-bookworm` | Docker Hub 网络不通；Docker Desktop 配置国内 `registry-mirrors` 或 VPN |
-| pip 安装非常慢 / 卡住 | Dockerfile 已默认使用清华 pip 源；如内网另有源，设置 `PIP_INDEX_URL` 构建参数覆盖 |
+| pip 安装非常慢 / 卡住 | Dockerfile 已默认使用清华 pip 源；aicheckword 首次 pip 约 10–20 分钟属正常 |
+| build 窗口长时间无输出 | 已改为**串行**构建并实时打印进度；勿把旧镜像放在 `deploy/dist/`（会拖慢 context，已在 .dockerignore 排除） |
+| `transferring context` 很多 GB | 检查 aiword 下 `deploy/dist/` 是否过大；应排除后再 build |
 | Linux 上镜像架构不对 | 本机构建默认 `linux/amd64`；ARM 服务器需改 PLATFORM |
 | aiword 连不上 MySQL | `AIWORD_BOOTSTRAP_DATABASE_URL`、防火墙 |
 | 初稿 502 | `docker compose logs aicheckword` |

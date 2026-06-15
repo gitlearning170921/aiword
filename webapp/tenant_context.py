@@ -7,7 +7,7 @@ from typing import Any, Optional
 from flask import has_request_context, session
 
 from .app_settings import is_multi_tenant_enabled
-from ._integration_common import user_facing_text
+from .user_facing import user_facing_text
 from .models import (
     ADMIN_ROLE_COMPANY,
     Organization,
