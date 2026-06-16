@@ -283,6 +283,8 @@ function _renderNotesHtml(notes) {
 }
 let recordsSortKey = "";
 let recordsSortDir = "asc";
+/** 任务列表筛选：loadRecordsList 刷新后复用，避免筛选被冲掉 */
+let _applyRecordsFilter = null;
 let recordsGroupBy = "none";
 let recordsCollapsedGroups = new Set();
 
@@ -574,17 +576,19 @@ function _populateProjectNameSelect(selectEl, selectedName) {
         selectEl.appendChild(opt);
     });
     if (current) {
-        // 若当前项目不在列表（历史数据/尚未刷新），临时插入以避免丢值
-        const exists = Array.from(selectEl.options).some((o) => String(o.value) === current);
-        if (!exists) {
+        const want = opts.some((p) => String(p.id || "").trim() === current)
+            ? current
+            : _resolveProjectSelectValueForProjectName(current);
+        const exists = Array.from(selectEl.options).some((o) => String(o.value) === want);
+        if (!exists && want) {
             const opt = document.createElement("option");
-            opt.value = current;
-            opt.textContent = current;
-            opt.dataset.registeredCountry = "";
-            opt.dataset.registeredCategory = "";
+            opt.value = want;
+            opt.textContent = current !== want ? current : want;
+            opt.dataset.projectKey = current;
+            opt.dataset.baseName = current;
             selectEl.appendChild(opt);
         }
-        selectEl.value = current;
+        if (want) selectEl.value = want;
     }
 }
 
@@ -1812,6 +1816,11 @@ async function initUploadPage() {
         appendProjectEntryBlockFromSavedProject(pick);
     });
 
+    document.getElementById("pickSavedProjectForEntry")?.addEventListener("change", () => {
+        const pick = (document.getElementById("pickSavedProjectForEntry")?.value || "").trim();
+        _setRecordsProjectFilter(pick);
+    });
+
     const recordsTableBody = document.getElementById("recordsTableBody");
     if (recordsTableBody && !recordsTableBody.dataset.entryDblBound) {
         recordsTableBody.dataset.entryDblBound = "1";
@@ -2188,10 +2197,10 @@ async function initUploadPage() {
     initUsersListFilter();
     initQuickUserForm();
     initConfigManagement();
+    initRecordsFilter();
     loadRecordsList();
     refreshSavedProjectPickSelect();
     loadAuthorCandidates().catch(() => {});
-    initRecordsFilter();
     initRecordsTableSort();
     initEditUserMobile();
     initEditRecordModal();
@@ -3243,37 +3252,32 @@ function initBatchEditRecords() {
     const selectByProjectMenu = document.getElementById("selectByProjectMenu");
     if (selectByProjectBtn && selectByProjectMenu) {
         selectByProjectBtn.addEventListener("show.bs.dropdown", () => {
-            const projects = [...new Set((lastRenderedRecords || []).map((r) => (r.projectName != null && r.projectName !== "") ? String(r.projectName).trim() : ""))];
-            projects.sort((a, b) => (a || "").localeCompare(b || ""));
+            const entries = _recordsProjectFilterEntries();
             selectByProjectMenu.innerHTML = "";
-            if (projects.length === 0) {
+            const addItem = (label, canon, onPick) => {
+                const li = document.createElement("li");
+                const a = document.createElement("a");
+                a.href = "#";
+                a.className = "dropdown-item";
+                a.textContent = label;
+                a.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    onPick();
+                    bootstrap.Dropdown.getInstance(selectByProjectBtn)?.hide();
+                });
+                li.appendChild(a);
+                selectByProjectMenu.appendChild(li);
+            };
+            if (entries.length === 0) {
                 const li = document.createElement("li");
                 li.innerHTML = '<span class="dropdown-item text-muted">暂无数据</span>';
                 selectByProjectMenu.appendChild(li);
             } else {
-                projects.forEach((p) => {
-                    const li = document.createElement("li");
-                    const a = document.createElement("a");
-                    a.href = "#";
-                    a.className = "dropdown-item";
-                    a.textContent = p || "（空）";
-                    a.dataset.project = p ?? "";
-                    a.addEventListener("click", (e) => {
-                        e.preventDefault();
-                        const tbody = document.getElementById("recordsTableBody");
-                        if (!tbody) return;
-                        const val = a.dataset.project;
-                        tbody.querySelectorAll("tr[data-id]").forEach((tr) => {
-                            if ((tr.dataset.projectName || "") === (val || "")) {
-                                const cb = tr.querySelector(".record-checkbox");
-                                if (cb) cb.checked = true;
-                            }
-                        });
-                        updateBatchEditButtonState();
-                        bootstrap.Dropdown.getInstance(selectByProjectBtn)?.hide();
+                addItem("全部项目", "", () => _setRecordsProjectFilter("", { notify: true }));
+                entries.forEach((ent) => {
+                    addItem(ent.label, ent.canonical, () => {
+                        _setRecordsProjectFilter(ent.canonical, { checkRows: true, notify: true });
                     });
-                    li.appendChild(a);
-                    selectByProjectMenu.appendChild(li);
                 });
             }
         });
@@ -3592,6 +3596,70 @@ function sortRows(rows, key, dir) {
     });
 }
 
+function _recordsProjectFilterEntries() {
+    const map = new Map();
+    (allRecordsCache || []).forEach((r) => {
+        const canon =
+            _canonicalProjectKeyForPick(r.projectName, r.projectId) ||
+            String(r.projectName || "").trim();
+        if (!canon) return;
+        if (!map.has(canon)) map.set(canon, { canonical: canon, count: 0 });
+        map.get(canon).count += 1;
+    });
+    return [...map.values()]
+        .sort((a, b) => a.canonical.localeCompare(b.canonical, "zh"))
+        .map((ent) => {
+            const meta = (projectsMetaCache || []).find(
+                (p) => String(p.name || "").trim() === ent.canonical
+            );
+            let label = ent.canonical;
+            if (meta && (meta.registeredCategory || meta.registeredCountry)) {
+                const bits = [meta.registeredCategory, meta.registeredCountry].filter(Boolean);
+                if (bits.length) label += ` (${bits.join(" / ")})`;
+            }
+            return { canonical: ent.canonical, label, count: ent.count };
+        });
+}
+
+function _setRecordsProjectFilter(projectKey, opts = {}) {
+    const canon = String(projectKey || "").trim();
+    const sel = document.getElementById("filterRecordProject");
+    if (!sel) return false;
+    refreshRecordsProjectFilterOptions();
+    sel.value = canon;
+    if (typeof _applyRecordsFilter === "function") _applyRecordsFilter();
+    if (opts.checkRows) {
+        const tbody = document.getElementById("recordsTableBody");
+        tbody?.querySelectorAll("tr[data-id] .record-checkbox").forEach((cb) => {
+            cb.checked = true;
+        });
+        updateBatchEditButtonState();
+    }
+    if (opts.notify) {
+        if (canon) {
+            const ent = _recordsProjectFilterEntries().find((e) => e.canonical === canon);
+            App.notify(`已筛选项目：${ent?.label || canon}`, "info");
+        } else {
+            App.notify("已显示全部项目", "info");
+        }
+    }
+    return true;
+}
+
+function refreshRecordsProjectFilterOptions() {
+    const sel = document.getElementById("filterRecordProject");
+    if (!sel) return;
+    const cur = String(sel.value || "").trim();
+    sel.innerHTML = '<option value="">全部项目</option>';
+    _recordsProjectFilterEntries().forEach((ent) => {
+        const opt = document.createElement("option");
+        opt.value = ent.canonical;
+        opt.textContent = ent.label;
+        sel.appendChild(opt);
+    });
+    if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
 function initRecordsFilter() {
     const filterProject = document.getElementById("filterRecordProject");
     const filterFile = document.getElementById("filterRecordFile");
@@ -3601,7 +3669,7 @@ function initRecordsFilter() {
     if (!filterProject) return;
     
     const applyFilter = () => {
-        const projectVal = filterProject.value.toLowerCase();
+        const projectVal = String(filterProject.value || "").trim().toLowerCase();
         const fileVal = filterFile.value.toLowerCase();
         const authorVal = filterAuthor.value.toLowerCase();
         const statusVal = filterStatus.value;
@@ -3610,7 +3678,18 @@ function initRecordsFilter() {
         if (!tbody) return;
         
         const filtered = allRecordsCache.filter(r => {
-            if (projectVal && !(String(r.projectName || "").toLowerCase().includes(projectVal))) return false;
+            if (projectVal) {
+                const canon =
+                    _canonicalProjectKeyForPick(r.projectName, r.projectId) ||
+                    String(r.projectName || "").trim();
+                const raw = String(r.projectName || "").trim();
+                if (
+                    String(canon).toLowerCase() !== projectVal &&
+                    !raw.toLowerCase().includes(projectVal)
+                ) {
+                    return false;
+                }
+            }
             if (fileVal && !(String(r.fileName || "").toLowerCase().includes(fileVal))) return false;
             if (authorVal && !(String(r.author || "").toLowerCase().includes(authorVal))) return false;
             if (statusVal === "pending" && (r.completionStatus || r.taskStatus === "completed")) return false;
@@ -3621,10 +3700,14 @@ function initRecordsFilter() {
         renderRecordsTable(sorted);
     };
     
+    _applyRecordsFilter = applyFilter;
+    refreshRecordsProjectFilterOptions();
+    
     [filterProject, filterFile, filterAuthor, filterStatus].forEach(el => {
         el?.addEventListener("input", applyFilter);
         el?.addEventListener("change", applyFilter);
     });
+    applyFilter();
 }
 
 function updateBatchEditButtonState() {
@@ -4140,7 +4223,12 @@ function loadRecordsList() {
     return App.request(url)
         .then((res) => {
             allRecordsCache = res.records || [];
-            renderRecordsTable(allRecordsCache);
+            refreshRecordsProjectFilterOptions();
+            if (typeof _applyRecordsFilter === "function") {
+                _applyRecordsFilter();
+            } else {
+                renderRecordsTable(allRecordsCache);
+            }
             refreshSavedProjectPickSelect();
         })
         .catch((e) => App.notify(e.message || "加载记录失败", "danger"));
@@ -6609,6 +6697,8 @@ async function _initDashboardPageInner() {
             const projectName = (row.projectName != null && row.projectName !== "") ? row.projectName : "";
             const author = (row.author != null && row.author !== "") ? row.author : "";
             const esc = (s) => String(s || "").replace(/"/g, "&quot;");
+            const auditCount = row.auditRejectCount != null ? row.auditRejectCount : 0;
+            const auditCellClass = auditCount > 2 ? "text-danger" : "";
             tr.innerHTML = `
                 <td>${idx + 1}</td>
                 <td>${row.label}</td>
@@ -6616,6 +6706,7 @@ async function _initDashboardPageInner() {
                 <td class="${row.pending > 0 ? 'text-danger' : ''}">${row.pending}</td>
                 <td>${formatRate(row.rate)}</td>
                 <td>${formatStatusBadges(row.byStatus)}</td>
+                <td class="${auditCellClass}">${auditCount}</td>
                 <td class="text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-warning btn-notify-project-author me-1"
                         data-project="${esc(projectName)}" data-author="${esc(author)}"
@@ -6950,9 +7041,11 @@ function renderFilteredStats(tbody, rows, type) {
             const auditCellClass = auditCount > 2 ? "text-danger" : "";
             actionHtml = `<td class="${auditCellClass}">${auditCount}</td><td><button class="btn btn-sm btn-outline-warning btn-notify-author" data-author="${row.label}" ${row.pending === 0 ? 'disabled' : ''}>催办</button></td>`;
         } else if (type === "projectAuthor") {
+            const auditCount = row.auditRejectCount != null ? row.auditRejectCount : 0;
+            const auditCellClass = auditCount > 2 ? "text-danger" : "";
             const pn = (row.projectName != null && row.projectName !== "") ? String(row.projectName).replace(/"/g, "&quot;") : "";
             const au = (row.author != null && row.author !== "") ? String(row.author).replace(/"/g, "&quot;") : "";
-            actionHtml = `<td class="text-nowrap">
+            actionHtml = `<td class="${auditCellClass}">${auditCount}</td><td class="text-nowrap">
                 <button type="button" class="btn btn-sm btn-outline-warning btn-notify-project-author me-1"
                     data-project="${pn}" data-author="${au}" ${row.pending === 0 ? "disabled" : ""}
                     title="仅催办该项目下该编写人员的未完成任务">催办</button>

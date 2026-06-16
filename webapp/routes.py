@@ -138,7 +138,12 @@ def _chatbot_process_incoming_payload(payload: dict[str, Any]) -> tuple[Optional
     text = _chatbot_extract_text(payload)
     if not text:
         return {"ignored": "empty text"}, None
-    if not _chatbot_should_trigger(text):
+    if not _chatbot_should_trigger(text, payload):
+        current_app.logger.info(
+            "chatbot ignored: trigger not matched (text=%r isInAtList=%s)",
+            text[:80],
+            payload.get("isInAtList"),
+        )
         return {"ignored": "trigger not matched"}, None
     if _chatbot_is_cooldown(group_id):
         return {"ignored": "cooldown"}, None
@@ -147,7 +152,7 @@ def _chatbot_process_incoming_payload(payload: dict[str, Any]) -> tuple[Optional
         str(payload.get("msgId") or payload.get("messageId") or payload.get("eventId") or "").strip()
         or uuid.uuid4().hex
     )
-    trigger_type = "at_bot" if "@" in text else "keyword"
+    trigger_type = "at_bot" if (payload and _chatbot_payload_at_bot(payload)) or "@" in text else "keyword"
     recent_messages: list[str] = []
     hist = payload.get("recentMessages")
     if isinstance(hist, list):
@@ -348,6 +353,16 @@ def _chatbot_extract_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _chatbot_payload_at_bot(payload: dict[str, Any]) -> bool:
+    """钉钉 @ 机器人时 text 里常无 @ 字符，以 isInAtList / atUsers 为准。"""
+    if payload.get("isInAtList") is True:
+        return True
+    at_users = payload.get("atUsers")
+    if isinstance(at_users, list) and at_users:
+        return True
+    return False
+
+
 def _chatbot_extract_group_id(payload: dict[str, Any]) -> str:
     for k in ("conversationId", "openConversationId", "chatbotConversationId", "groupId"):
         v = payload.get(k)
@@ -356,7 +371,9 @@ def _chatbot_extract_group_id(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _chatbot_should_trigger(text: str) -> bool:
+def _chatbot_should_trigger(text: str, payload: Optional[dict[str, Any]] = None) -> bool:
+    if payload and _chatbot_payload_at_bot(payload):
+        return True
     t = (text or "").strip().lower()
     if not t:
         return False
@@ -3022,6 +3039,41 @@ def _is_valid_doc_link(value: str) -> bool:
 
 
 AUDIT_REJECT_PENDING_STATUS = "审核不通过待修改"
+AUDIT_REJECT_PENDING_TASK_TYPES = frozenset(
+    {
+        "初稿审核待修改",
+        "初稿审核不通过待修改",
+    }
+)
+
+
+def _is_audit_reject_pending_task_type(task_type: Optional[str]) -> bool:
+    s = (task_type or "").strip()
+    if not s:
+        return False
+    if s in AUDIT_REJECT_PENDING_TASK_TYPES:
+        return True
+    return "审核" in s and "待修改" in s
+
+
+def _was_upload_completed_for_audit_reject_count(
+    completion_status: Optional[str],
+    task_type: Optional[str] = None,
+) -> bool:
+    """完成状态有值，或任务类型本身处于「已完成*」阶段（非审核待修改类）。"""
+    if (completion_status or "").strip():
+        return True
+    tt = (task_type or "").strip()
+    if not tt or _is_audit_reject_pending_task_type(tt):
+        return False
+    return "已完成" in tt
+
+
+def _reset_upload_task_incomplete(upload: UploadRecord) -> None:
+    """任务类型等实质变更后：完成状态回到未完成（与历史上传/编辑行为一致）。"""
+    upload.completion_status = None
+    upload.task_status = "pending"
+    upload.quick_completed = False
 
 
 def _maybe_bump_audit_reject_count(
@@ -3046,6 +3098,39 @@ def _maybe_bump_audit_reject_count(
         new_cs = (target_completion_status or "").strip()
         if new_cs == AUDIT_REJECT_PENDING_STATUS and prev_completed != AUDIT_REJECT_PENDING_STATUS:
             upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
+
+
+def _maybe_bump_audit_reject_on_task_type_change(
+    upload: UploadRecord,
+    *,
+    previous_completion_status: Optional[str],
+    previous_task_type: Optional[str],
+    new_task_type: Optional[str],
+) -> None:
+    """任务类型改为「初稿审核*待修改」且原任务已完成（完成状态或已完成类任务类型）时 +1。"""
+    if not _was_upload_completed_for_audit_reject_count(
+        previous_completion_status, previous_task_type
+    ):
+        return
+    new_tt = (new_task_type or "").strip()
+    old_tt = (previous_task_type or "").strip()
+    if (new_tt or "") == (old_tt or ""):
+        return
+    if not _is_audit_reject_pending_task_type(new_tt):
+        return
+    upload.audit_reject_count = (getattr(upload, "audit_reject_count", 0) or 0) + 1
+
+
+def _upload_audit_reject_count_for_summary(u: UploadRecord) -> int:
+    """页面3 单条任务计入「审核不通过待修改次数」；同一人多任务在汇总时逐项相加。"""
+    stored = int(getattr(u, "audit_reject_count", None) or 0)
+    if stored > 0:
+        return stored
+    if (getattr(u, "audit_status", None) or "").strip() == AUDIT_REJECT_PENDING_STATUS:
+        return 1
+    if _is_audit_reject_pending_task_type(getattr(u, "task_type", None)):
+        return 1
+    return 0
 
 
 def _prepare_summary(upload: UploadRecord) -> GenerationSummary:
@@ -3614,6 +3699,14 @@ def _build_option_tree(records: list[UploadRecord]) -> list[dict[str, Any]]:
     return formatted
 
 
+def _summary_author_key(author: Optional[str]) -> str:
+    """页面3 按编写人员聚合：姓名规范化，避免同一人跨项目因空格/全角等拆成多行。"""
+    from .notify_content import normalize_person_name
+
+    s = normalize_person_name(author or "")
+    return s or "（空）"
+
+
 def _summary_payload():
     """
     统计逻辑：
@@ -3647,8 +3740,8 @@ def _summary_payload():
 
     for u in uploads:
         proj_key = u.project_name
-        auth_key = u.author
-        proj_auth_key = f"{u.project_name}__{u.author}"
+        auth_key = _summary_author_key(u.author)
+        proj_auth_key = f"{u.project_name}__{auth_key}"
         is_completed = bool(u.completion_status)
         status = u.completion_status or "未完成"
 
@@ -3669,7 +3762,7 @@ def _summary_payload():
                 stats["pending"] += 1
                 stats["pendingAuthors"].add(u.author)
             stats["byStatus"][status] = stats["byStatus"].get(status, 0) + 1
-            stats["auditRejectCount"] = stats.get("auditRejectCount", 0) + (getattr(u, "audit_reject_count", None) or 0)
+            stats["auditRejectCount"] = stats.get("auditRejectCount", 0) + _upload_audit_reject_count_for_summary(u)
 
     def _format_with_status(bucket: dict[str, dict[str, Any]], label_join: str = "", include_project_author_keys: bool = False):
         formatted = []
@@ -3754,7 +3847,10 @@ def _summary_payload():
             _format_with_status(by_project),
             key=lambda x: (-int(x.get("projectPriority") or Project.PRIORITY_MEDIUM), str(x.get("label") or "")),
         ),
-        "byAuthor": _format_with_status(by_author),
+        "byAuthor": sorted(
+            _format_with_status(by_author),
+            key=lambda x: str(x.get("label") or ""),
+        ),
         "byProjectAuthor": sorted(
             _format_with_status(by_project_author, label_join=" / ", include_project_author_keys=True),
             key=lambda x: (-int(x.get("projectPriority") or Project.PRIORITY_MEDIUM), str(x.get("label") or "")),
@@ -8813,6 +8909,8 @@ def api_upload():
 
     if existing and replace:
         fm = request.form
+        _snap_completion = existing.completion_status
+        _snap_audit = existing.audit_status
         # 批量保存第二次请求（replace=true）常为「只 append 非空字段」；未出现的键不得写成 None，否则会误清空库内已有数据。
         def _sent(k: str) -> bool:
             return k in fm
@@ -8850,6 +8948,16 @@ def api_upload():
                 existing.template_links = template_links
         existing.author = author
         if _sent("taskType"):
+            prev_task_type = existing.task_type
+            prev_completion = existing.completion_status
+            if (task_type or None) != (prev_task_type or None) and not replacing_template_file:
+                _maybe_bump_audit_reject_on_task_type_change(
+                    existing,
+                    previous_completion_status=prev_completion,
+                    previous_task_type=prev_task_type,
+                    new_task_type=task_type,
+                )
+                _reset_upload_task_incomplete(existing)
             existing.task_type = task_type
         if _sent("notes"):
             existing.notes = notes
@@ -8897,13 +9005,11 @@ def api_upload():
         if _sent("registrationVersion"):
             existing.registration_version = registration_version
         if _sent("auditStatus"):
-            prev_completion = existing.completion_status
-            prev_audit = existing.audit_status
             ast = (request.form.get("auditStatus") or "").strip() or None
             _maybe_bump_audit_reject_count(
                 existing,
-                previous_completion_status=prev_completion,
-                previous_audit_status=prev_audit,
+                previous_completion_status=_snap_completion,
+                previous_audit_status=_snap_audit,
                 target_audit_status=ast,
             )
             existing.audit_status = ast or None
@@ -9606,6 +9712,8 @@ def api_upload_update(upload_id: str):
         return jsonify({"message": "未找到该记录"}), 404
     
     data = request.get_json(force=True) or {}
+    _snap_completion = upload.completion_status
+    _snap_audit = upload.audit_status
     
     project_name = (data.get("projectName") or "").strip() or None
     if project_name:
@@ -9642,7 +9750,20 @@ def api_upload_update(upload_id: str):
         upload.file_name = file_name
     if "taskType" in data:
         raw_tt = data.get("taskType")
-        upload.task_type = (str(raw_tt).strip() if raw_tt is not None else "") or None
+        new_tt = (str(raw_tt).strip() if raw_tt is not None else "") or None
+        prev_tt = upload.task_type
+        prev_completion = upload.completion_status
+        if (new_tt or None) != (prev_tt or None):
+            _maybe_bump_audit_reject_on_task_type_change(
+                upload,
+                previous_completion_status=prev_completion,
+                previous_task_type=prev_tt,
+                new_task_type=new_tt,
+            )
+            upload.task_type = new_tt
+            _reset_upload_task_incomplete(upload)
+        else:
+            upload.task_type = new_tt
     if author is not None:
         if not author:
             return jsonify({"message": "编写人员不能为空"}), 400
@@ -9696,8 +9817,8 @@ def api_upload_update(upload_id: str):
         audit_status = (str(raw_ast).strip() if raw_ast is not None else "") or None
         _maybe_bump_audit_reject_count(
             upload,
-            previous_completion_status=upload.completion_status,
-            previous_audit_status=upload.audit_status,
+            previous_completion_status=_snap_completion,
+            previous_audit_status=_snap_audit,
             target_audit_status=audit_status,
         )
         upload.audit_status = audit_status
@@ -9708,12 +9829,11 @@ def api_upload_update(upload_id: str):
     if "completionStatus" in data:
         raw_cs = data.get("completionStatus")
         completion_status = (str(raw_cs).strip() if raw_cs is not None else "") or None
-        prev_completion = upload.completion_status
         if completion_status:
             _maybe_bump_audit_reject_count(
                 upload,
-                previous_completion_status=prev_completion,
-                previous_audit_status=upload.audit_status,
+                previous_completion_status=_snap_completion,
+                previous_audit_status=_snap_audit,
                 target_completion_status=completion_status,
             )
         upload.completion_status = completion_status
@@ -9757,6 +9877,8 @@ def api_upload_update(upload_id: str):
             "projectName": upload.project_name,
             "fileName": upload.file_name,
             "taskType": upload.task_type,
+            "completionStatus": upload.completion_status,
+            "taskStatus": upload.task_status,
             "author": upload.author,
             "dueDate": upload.due_date.strftime("%Y-%m-%d") if upload.due_date else None,
             "businessSide": upload.business_side,
@@ -11296,6 +11418,12 @@ def _chatbot_deliver_answer(payload: dict[str, Any], answer: str, *, need_human:
     if session_webhook:
         res = dingtalk_service.send_text_message(answer, webhook=session_webhook, secret=None)
         ok = bool(res and res.get("success"))
+        if not ok:
+            current_app.logger.warning(
+                "chatbot sessionWebhook 发送失败: %s body=%s",
+                res.get("error") if isinstance(res, dict) else res,
+                (res.get("body") or "")[:200] if isinstance(res, dict) else "",
+            )
         return {
             "success": ok,
             "message": "reply sent" if ok else (res.get("error") or "reply failed"),
@@ -11328,6 +11456,12 @@ def api_dingtalk_chatbot_callback():
     钉钉 HTTP 回调机器人入口（开放平台加密回调 + 明文联调兼容）。
     配置 DINGTALK_CALLBACK_* 后走加解密；否则按明文 JSON（本地调试）。
     """
+    current_app.logger.info(
+        "dingtalk chatbot callback: POST %s args=%s content_type=%s",
+        request.path,
+        dict(request.args),
+        request.content_type,
+    )
     crypto = _dingtalk_callback_crypto_optional()
     if crypto:
         body = request.get_json(silent=True) or {}
@@ -11366,7 +11500,9 @@ def api_dingtalk_chatbot_callback():
         session_webhook = str(payload.get("sessionWebhook") or "").strip()
 
         if session_webhook:
-            _chatbot_deliver_answer(payload, answer, need_human=need_human, confidence=confidence)
+            deliver = _chatbot_deliver_answer(payload, answer, need_human=need_human, confidence=confidence)
+            if not deliver.get("success"):
+                current_app.logger.warning("chatbot sessionWebhook 发送失败: %s", deliver.get("message"))
             return jsonify(crypto.encrypted_response_map("success"))
 
         reply_plain = build_text_reply_json(answer)
