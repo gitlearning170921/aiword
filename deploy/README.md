@@ -252,9 +252,9 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 ./server-deploy.sh 1.0.0
 ```
 
-等价于：`docker load` 两个 tar.gz（或 tar）→ `docker compose -f docker-compose.prod.yml up -d`（含 **nginx + aiword + aicheckword**）
+等价于：`docker load` 镜像 tar.gz → `docker compose -f docker-compose.prod.yml up -d`（**chroma + aicheckword + aiword**，不含 nginx 容器）
 
-访问：`http://aiword.yuwell.com`（Nginx 80 → 容器内 aiword:5000）
+访问：`http://aiword.yuwell.com`（**宿主机 nginx** 80 → `127.0.0.1:5000` → aiword 容器）
 
 ### 4. 页面3 核对
 
@@ -330,7 +330,7 @@ AICHECKWORD_IMAGE=aicheckword:1.0.2
 BASE_URL=http://aiword.yuwell.com
 ```
 
-执行升级（自动 backup → load tar.gz → 重建 aiword / aicheckword / **nginx**）：
+执行升级（自动 backup → load tar.gz → 重建 chroma / aicheckword / aiword）：
 
 ```bash
 NEW_IMAGE_VERSION=1.0.2 ./upgrade.sh
@@ -408,7 +408,7 @@ AIWORD_INTEGRATION_SECRET=<与 aiword 相同>
 | 文件 | 用途 |
 |------|------|
 | `docker-compose.yml` | 本机开发，含 `build`，可 `--build`；profile `admin` 可启 Streamlit |
-| `docker-compose.prod.yml` | **Linux 生产**，仅 `image`；**默认 nginx:80 → aiword:5000** |
+| `docker-compose.prod.yml` | **Linux 生产**，仅 `image`；**宿主机 nginx** → `127.0.0.1:5000`（compose 不含 nginx 容器） |
 
 ### Streamlit 运维 UI（可选）
 
@@ -424,17 +424,19 @@ docker compose --profile admin up -d aicheckword-streamlit
 
 访问：`http://localhost:8501`
 
-### 生产架构（域名不带端口）
+### 生产架构（域名不带端口，宿主机 nginx）
 
 ```mermaid
 flowchart LR
-  Browser[浏览器 aiword.yuwell.com] -->|80| Nginx[nginx 容器]
-  Nginx -->|appnet 5000| Aiword[aiword 容器]
+  Browser[浏览器 aiword.yuwell.com] -->|80| HostNginx[宿主机 nginx]
+  HostNginx -->|127.0.0.1:5000| Aiword[aiword 容器]
   Aiword --> Aicheck[aicheckword:8000]
+  Aiword --> Chroma[chroma:8000]
 ```
 
-- 生产 `docker-compose.prod.yml` **默认启动 nginx**，aiword **不映射宿主机 5000**，仅内网可达。
-- 本机开发仍可用 `docker-compose.yml` 直连 `http://127.0.0.1:5000`；模拟生产域名时：`docker compose --profile nginx up -d`。
+- 生产 `docker-compose.prod.yml` **不启动 nginx 容器**；`deploy/nginx/nginx.conf` 仅作宿主机配置样例。
+- aiword 映射 **`127.0.0.1:5000:5000`**，仅供本机 nginx 反代，勿暴露公网 5000。
+- 本机开发仍可用 `docker-compose.yml` 直连 `http://127.0.0.1:5000`；模拟容器 nginx 时：`docker compose --profile nginx up -d`。
 
 ### HTTPS（可选）
 

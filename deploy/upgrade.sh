@@ -34,14 +34,14 @@ if [[ -n "${NEW_IMAGE_VERSION:-}" && -x "${SCRIPT_DIR}/server-load-images.sh" ]]
 fi
 
 echo "[upgrade] 重建容器（不删除卷）..."
-"${COMPOSE[@]}" up -d --no-deps --force-recreate chroma aicheckword aiword nginx
+"${COMPOSE[@]}" up -d --no-deps --force-recreate chroma aicheckword aiword
 
 echo "[upgrade] 等待健康检查..."
 sleep 5
 "${COMPOSE[@]}" ps
 
 echo "[upgrade] 最近日志："
-"${COMPOSE[@]}" logs --tail=40 nginx aiword aicheckword chroma
+"${COMPOSE[@]}" logs --tail=40 aiword aicheckword chroma
 
 echo "[upgrade] 完成。若需回滚：将 .env 中镜像 tag 改回上一版本后再次执行本脚本。"
 echo "[upgrade] 禁止: docker compose down -v"

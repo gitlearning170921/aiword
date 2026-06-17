@@ -45,6 +45,7 @@ COMPOSE=(docker compose -f docker-compose.prod.yml)
 
 sleep 5
 "${COMPOSE[@]}" ps
-echo "[deploy] 日志: ${COMPOSE[*]} logs -f nginx aiword aicheckword chroma"
+echo "[deploy] 日志: ${COMPOSE[*]} logs -f aiword aicheckword chroma"
 echo "[deploy] Chroma 开发机访问: http://<服务器IP>:${CHROMA_PUBLISH_PORT:-8100}"
-echo "[deploy] 访问: http://aiword.yuwell.com （需 DNS 指向本机且放行 80）"
+echo "[deploy] 宿主机 nginx 反代 127.0.0.1:${AIWORD_PUBLISH_PORT:-5000}；配置样例 deploy/nginx/nginx.conf"
+echo "[deploy] 访问: http://aiword.yuwell.com （需 DNS + 宿主机 nginx 80）"
