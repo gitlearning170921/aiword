@@ -195,8 +195,8 @@
             <div class="form-text" id="dg_input_files_count"></div>
           </div>
           <div class="col-md-6">
-            <label class="form-label">基础文件 Base（可选，可多批追加）</label>
-            <p class="text-muted small mb-1">未上传 Base 时，系统将自动使用所选<strong>案例模板原件</strong>（训练时落盘的 docx/xlsx 等）作为基底，输出格式与模板一致。若要在<strong>已有项目文档上就地修改</strong>，可另行上传 Base（文件名建议与模板目标名一致）。可多次追加。</p>
+            <label class="form-label"><span class="dg-req d-none" id="dg_lbl_base_req" title="所选模板在服务器无案例/训练原件时必填">*</span>基础文件 Base（可多批追加）</label>
+            <p class="text-muted small mb-1" id="dg_base_help">若服务器上存在所选模板的<strong>案例/训练目录原件</strong>（训练时落盘的 docx/xlsx），可不上传 Base，系统将自动用作基底。若<strong>找不到</strong>这些本地原件，须上传与模板目标名一致的 Base；<strong>Chroma 向量库中的训练文本仅用于检索</strong>，不能替代 Word/Excel 基底。要在已有项目文档上就地修改时，也可另行上传 Base。</p>
             <div class="d-flex flex-wrap gap-2 mb-2">
               <button type="button" class="btn btn-sm btn-outline-primary" id="dg_btn_pick_base">选择 Base…</button>
               <button type="button" class="btn btn-sm btn-outline-secondary" id="dg_btn_clear_base">清空列表</button>

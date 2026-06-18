@@ -36,15 +36,18 @@
 
     var box = $("are_msg");
 
-    if (!box) return;
+    if (box) {
+      box.textContent = msg || "";
+      box.className = "alert " + (isErr ? "alert-danger" : (msg ? "alert-success" : "alert-info"));
+      box.classList.remove("d-none");
+      if (!window.PageToast || !window.PageToast.isMsgVisible(box)) {
+        try { box.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+      }
+    }
 
-    box.textContent = msg || "";
-
-    box.className = "alert " + (isErr ? "alert-danger" : (msg ? "alert-success" : "alert-info"));
-
-    box.classList.remove("d-none");
-
-    try { box.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+    if (window.PageToast) {
+      window.PageToast.maybeToastFor(box, msg, isErr);
+    }
 
   }
 

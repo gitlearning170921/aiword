@@ -1259,3 +1259,19 @@ body.app-page-loading-active {
     outline-offset: 2px;
 }
 
+/* 长页面：右下角 Toast 补显顶部 alert（见 _page_toast.js） */
+.aiword-page-toast-stack {
+    z-index: 1095;
+    max-width: min(420px, calc(100vw - 1.5rem));
+    pointer-events: none;
+}
+.aiword-page-toast-stack .toast {
+    pointer-events: auto;
+    max-width: 100%;
+}
+.aiword-page-toast-stack .toast-body {
+    max-height: 40vh;
+    overflow-y: auto;
+    word-break: break-word;
+}
+

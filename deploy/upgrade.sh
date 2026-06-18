@@ -1,8 +1,9 @@
 #!/bin/bash
 # 拉取新镜像并重建容器（保留命名卷与 MySQL 数据）
 # 用法：
-#   1. 修改 deploy/.env 中 AIWORD_IMAGE / AICHECKWORD_IMAGE
-#   2. ./deploy/upgrade.sh
+#   1. 修改 deploy/.env 中 AIWORD_IMAGE / AICHECKWORD_IMAGE（CHROMA_IMAGE 日常可不变）
+#   2. 日常仅升业务镜像：UPGRADE_APPS_ONLY=1 NEW_IMAGE_VERSION=1.0.3 ./upgrade.sh
+#   3. 全量（含 chroma）：NEW_IMAGE_VERSION=1.0.3 ./upgrade.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,13 +29,23 @@ echo "[upgrade] 拉取镜像（离线 tar 部署可忽略 pull 失败）..."
 "${COMPOSE[@]}" pull aiword aicheckword chroma 2>/dev/null || true
 
 # 若 images/ 或 dist/ 下有新版本 tar，可选加载（环境变量 NEW_IMAGE_VERSION）
-if [[ -n "${NEW_IMAGE_VERSION:-}" && -x "${SCRIPT_DIR}/server-load-images.sh" ]]; then
-  echo "[upgrade] 从 tar 加载镜像版本 ${NEW_IMAGE_VERSION}..."
-  bash "${SCRIPT_DIR}/server-load-images.sh" "${NEW_IMAGE_VERSION}"
+if [[ -n "${NEW_IMAGE_VERSION:-}" ]]; then
+  if [[ -n "${UPGRADE_APPS_ONLY:-}" && -x "${SCRIPT_DIR}/server-load-apps-only.sh" ]]; then
+    echo "[upgrade] 仅加载业务镜像 ${NEW_IMAGE_VERSION}（跳过 chroma）..."
+    bash "${SCRIPT_DIR}/server-load-apps-only.sh" "${NEW_IMAGE_VERSION}"
+  elif [[ -x "${SCRIPT_DIR}/server-load-images.sh" ]]; then
+    echo "[upgrade] 从 tar 加载镜像版本 ${NEW_IMAGE_VERSION}（含 chroma）..."
+    bash "${SCRIPT_DIR}/server-load-images.sh" "${NEW_IMAGE_VERSION}"
+  fi
 fi
 
 echo "[upgrade] 重建容器（不删除卷）..."
-"${COMPOSE[@]}" up -d --no-deps --force-recreate chroma aicheckword aiword
+if [[ -n "${UPGRADE_APPS_ONLY:-}" ]]; then
+  echo "[upgrade] UPGRADE_APPS_ONLY=1：仅重建 aiword + aicheckword，不触碰 chroma 容器"
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate aicheckword aiword
+else
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate chroma aicheckword aiword
+fi
 
 echo "[upgrade] 等待健康检查..."
 sleep 5

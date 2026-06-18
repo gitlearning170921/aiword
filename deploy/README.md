@@ -93,7 +93,7 @@ server-build-from-git.bat 1.0.2
 
 ### 0.4 生产：scp + 升级
 
-参见 [第三节 · 版本升级速查](#三版本升级速查已有-linux-服务器)。把 zip 上传到 Linux 后跑 `upgrade.sh` 即可。
+参见 [第三节 · 版本升级速查](#三版本升级速查已有-linux-服务器)。日常发版用 `build-apps-all.bat` + `UPGRADE_APPS_ONLY=1 ./upgrade.sh`；首次或升 Chroma 时用完整 `build-all.bat`。
 
 ### 0.5 排错（专属于此流程）
 
@@ -271,110 +271,153 @@ chmod +x server-deploy.sh server-load-images.sh backup.sh upgrade.sh
 
 ## 三、版本升级速查（已有 Linux 服务器）
 
-> 适用：服务器已跑通过，只需换新版镜像（及可选 nginx 配置）。**数据在 MySQL 与 Docker 卷里，升级不丢。**
+> 适用：服务器已跑通过，只需换新版镜像（及可选 nginx 配置）。**数据在 MySQL 与 Docker 卷里，升级不丢。**  
+> **Chroma 向量库已在 `chroma_data` 卷中持久化，日常发版不必每次升 chroma 镜像。**
 
-### 步骤 A — Windows 本机打新包
+### 升什么？（先看这张表）
 
-将下面 `1.0.2` 换成本次版本号（需与旧版不同）：
+| 组件 | 日常功能发版 | 何时需要一起升 |
+|------|-------------|----------------|
+| **aiword** | ✅ 每次 | — |
+| **aicheckword** | ✅ 每次（API 有改动时） | — |
+| **chroma** | ❌ 通常跳过 | 首次部署；或修改了 `deploy/chroma-image.tag`（如 0.6.3→0.7.x）；Chroma 服务异常需换官方镜像 |
+| **knowledge_store 迁移** | ❌ 跳过 | 仅**新环境**或**换服务器**且向量在旧机本地目录时，用 `migrate-knowledge-store.sh`（一次性） |
+
+`chroma:x.y.z` 中的 `x.y.z` 只是部署包版本号；实际镜像是 `chromadb/chroma:<chroma-image.tag>`（当前 `0.6.3`）。**随意升 Chroma 大版本可能导致与 aicheckword 内 `chromadb` 客户端不兼容。**
+
+---
+
+### 3.1 日常升级（推荐：仅 aiword + aicheckword）
+
+#### 步骤 A — Windows 本机构建并导出
+
+将 `1.0.3` 换成本次版本号：
 
 ```powershell
 cd F:\wzl\learning\python\aiword\deploy
 
-# 确认 Docker Desktop 已启动（docker version 无报错）
 .\verify-scripts.bat
-.\build-all.bat 1.0.2
+.\build-apps-all.bat 1.0.3
 ```
 
-产物：`dist\aiword-stack-1.0.2.zip`（内含 `images/*.tar.gz`、`docker-compose.prod.yml`、`nginx/`、`upgrade.sh` 等）。
+等价分步：`build-apps-docker.bat` → `export-apps-docker.bat`（**不**构建/导出 chroma）。
 
-### 步骤 B — 上传到 Linux
+产物（只需这两个）：
 
-**方式 1（推荐，含 nginx 配置更新）**：上传整个 zip，解压覆盖配置、仅替换镜像：
+- `dist\aiword-1.0.3.tar.gz`
+- `dist\aicheckword-1.0.3.tar.gz`
 
-```bash
-# 本机
-scp F:/wzl/learning/python/aiword/deploy/dist/aiword-stack-1.0.2.zip user@linux-server:/opt/
+> 若仍用 `build-all.bat`，会顺带打 chroma 镜像，上传时可忽略 `chroma-*.tar.gz`。
 
-# 服务器
-cd /opt/aiword-stack          # 已有部署目录
-./backup.sh                   # 升级前备份
+#### 步骤 B — 上传到 Linux
 
-cd /opt
-unzip -o aiword-stack-1.0.2.zip -d aiword-stack-new
-cp -a aiword-stack-new/images/*.tar.gz aiword-stack/images/
-cp -a aiword-stack-new/nginx/nginx.conf aiword-stack/nginx/nginx.conf
-cp -a aiword-stack-new/upgrade.sh aiword-stack-new/server-load-images.sh aiword-stack/
-chmod +x aiword-stack/*.sh
-cd aiword-stack
+```powershell
+scp F:\wzl\learning\python\aiword\deploy\dist\aiword-1.0.3.tar.gz user@10.26.1.221:/aiword/aiworddocker/aiword-stack/images/
+scp F:\wzl\learning\python\aiword\deploy\dist\aicheckword-1.0.3.tar.gz user@10.26.1.221:/aiword/aiworddocker/aiword-stack/images/
 ```
 
-**方式 2（仅换镜像）**：只 scp 两个 tar.gz 到 `aiword-stack/images/` 即可（nginx 配置未改时）。
+若 nginx 配置或 `upgrade.sh` 有更新，可另传整个 `aiword-stack-*.zip` 解压覆盖脚本（不必覆盖 chroma tar）。
+
+#### 步骤 C — 服务器改 `.env` 并升级
 
 ```bash
-scp deploy/dist/aiword-1.0.2.tar.gz deploy/dist/aicheckword-1.0.2.tar.gz user@linux-server:/opt/aiword-stack/images/
-```
-
-### 步骤 C — 服务器改版本并升级
-
-```bash
-cd /opt/aiword-stack
+cd /aiword/aiworddocker/aiword-stack
+./backup.sh
 vi .env
 ```
 
-至少修改（版本号与本次 build 一致）：
+**只改业务镜像 tag**；`CHROMA_IMAGE` **保持原值不动**（例如仍是 `chroma:1.0.0`）：
 
 ```env
-IMAGE_VERSION=1.0.2
-AIWORD_IMAGE=aiword:1.0.2
-AICHECKWORD_IMAGE=aicheckword:1.0.2
+IMAGE_VERSION=1.0.3
+AIWORD_IMAGE=aiword:1.0.3
+AICHECKWORD_IMAGE=aicheckword:1.0.3
+# CHROMA_IMAGE=chroma:1.0.0   ← 不要改
 BASE_URL=http://aiword.yuwell.com
 ```
 
-执行升级（自动 backup → load tar.gz → 重建 chroma / aicheckword / aiword）：
+执行（`UPGRADE_APPS_ONLY=1` 只 load/重建 aiword + aicheckword，**不碰 chroma 容器**）：
 
 ```bash
-NEW_IMAGE_VERSION=1.0.2 ./upgrade.sh
+UPGRADE_APPS_ONLY=1 NEW_IMAGE_VERSION=1.0.3 ./upgrade.sh
 ```
 
-### 步骤 D — 验证
+等价手动：
+
+```bash
+./server-load-apps-only.sh 1.0.3
+docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate aicheckword aiword
+```
+
+#### 步骤 D — 验证
 
 ```bash
 docker compose -f docker-compose.prod.yml ps
-curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/integration/health   # 期望 200
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/api/integration/health   # 期望 200
+curl -s http://127.0.0.1:8100/api/v1/heartbeat   # Chroma 未重建时应仍正常
 ```
 
-浏览器访问：`http://aiword.yuwell.com`  
-页面3 确认 `BASE_URL`；Windows `aiprintword` 的 `AIWORD_BASE_URL=http://aiword.yuwell.com`。
+浏览器访问 `http://aiword.yuwell.com`，**Ctrl+F5** 强刷。
+
+---
+
+### 3.2 全量升级（含 chroma，少用）
+
+仅在 **首次装 chroma**、**改了 `chroma-image.tag`** 或 **必须换 Chroma 官方镜像** 时使用：
+
+```powershell
+cd F:\wzl\learning\python\aiword\deploy
+.\build-all.bat 1.0.3
+```
+
+上传 `images/` 下三个 tar.gz（含 `chroma-1.0.3.tar.gz`），`.env` 中同步改 `CHROMA_IMAGE`：
+
+```env
+CHROMA_IMAGE=chroma:1.0.3
+```
+
+```bash
+cd /aiword/aiworddocker/aiword-stack
+./backup.sh
+NEW_IMAGE_VERSION=1.0.3 ./upgrade.sh
+```
+
+> 全量升级会 `--force-recreate chroma`，**卷 `chroma_data` 仍在**；但若 Chroma 大版本不兼容，需先评估再升。
+
+---
 
 ### 回滚
 
-`.env` 改回上一版本 tag → 再执行 `NEW_IMAGE_VERSION=旧版本 ./upgrade.sh`（旧版 tar 需在 `images/` 中）。
+`.env` 改回上一版本业务 tag（`CHROMA_IMAGE` 可不变）→  
+`UPGRADE_APPS_ONLY=1 NEW_IMAGE_VERSION=旧版本 ./upgrade.sh`（旧版 tar 需在 `images/` 中）。
 
 ### 严禁
 
 ```bash
-docker compose down -v    # 会删命名卷，uploads/knowledge_store/instance 全丢
+docker compose down -v    # 会删命名卷，chroma_data / uploads / instance 全丢
 ```
 
 ---
 
-## 三（附）、升级（简略）
+## 三（附）、升级（一页纸）
 
-### 本机
+**日常：**
 
 ```powershell
-.\build-all.bat 1.0.2
-# 上传 dist\aiword-stack-1.0.2.zip 或 images\*.tar.gz
+# Windows
+.\build-apps-all.bat 1.0.3
+# scp aiword + aicheckword 两个 tar.gz
 ```
-
-### Linux 服务器
 
 ```bash
-cd /opt/aiword-stack
+# Linux
+cd /aiword/aiworddocker/aiword-stack
 ./backup.sh
-# 更新 images/ 与 .env 中 AIWORD_IMAGE / AICHECKWORD_IMAGE
-NEW_IMAGE_VERSION=1.0.2 ./upgrade.sh
+# .env: 只改 AIWORD_IMAGE / AICHECKWORD_IMAGE
+UPGRADE_APPS_ONLY=1 NEW_IMAGE_VERSION=1.0.3 ./upgrade.sh
 ```
+
+**含 chroma（少见）：** `build-all.bat` → 三个 tar.gz → `NEW_IMAGE_VERSION=... ./upgrade.sh`（不设 `UPGRADE_APPS_ONLY`）。
 
 ---
 
@@ -462,12 +505,14 @@ docker push registry.example.com/aiword:1.0.0
 | 脚本 | 运行位置 | 作用 |
 |------|----------|------|
 | `verify-scripts.bat` | Windows 本机 | 自检（不构建） |
-| `build-all.bat` | Windows 本机 | 一键 build + export + pack |
-| `build-images-docker.bat` 等 | Windows 本机 | 分步纯 cmd 脚本 |
-| `build-images.bat` | Windows 本机 | 转调 `*-docker.bat` |
+| `build-all.bat` | Windows 本机 | 一键 build + export + pack（**含 chroma**） |
+| `build-apps-all.bat` | Windows 本机 | **日常升级**：仅 build/export aiword + aicheckword |
+| `build-apps-docker.bat` / `export-apps-docker.bat` | Windows 本机 | 分步：仅业务镜像 |
+| `build-images-docker.bat` 等 | Windows 本机 | 分步纯 cmd 脚本（含 chroma） |
 | `server-deploy.sh` | Linux | load + 首次启动 |
-| `server-load-images.sh` | Linux | 仅 load 镜像 |
-| `backup.sh` / `upgrade.sh` | Linux | 备份 / 升级 |
+| `server-load-images.sh` | Linux | load 三个镜像（含 chroma） |
+| `server-load-apps-only.sh` | Linux | **仅 load** aiword + aicheckword |
+| `backup.sh` / `upgrade.sh` | Linux | 备份 / 升级（`UPGRADE_APPS_ONLY=1` 跳过 chroma） |
 
 ---
 

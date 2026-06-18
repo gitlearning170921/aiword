@@ -990,10 +990,14 @@
 
   function showMsg(text, isErr) {
     const box = el("dg_msg");
-    if (!box) return;
-    box.textContent = text || "";
-    box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
-    box.classList.remove("d-none");
+    if (box) {
+      box.textContent = text || "";
+      box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
+      box.classList.remove("d-none");
+    }
+    if (window.PageToast && window.PageToast.maybeToastFor(box, text, isErr)) {
+      return;
+    }
   }
 
   var DG_STATUS_ZH = {
@@ -1265,12 +1269,18 @@
       inp.id = "dg_tpl_cb_" + idx;
       inp.value = name;
       inp.setAttribute("data-template-name", name);
+      inp.setAttribute("data-disk-base", row.diskBaseAvailable === false ? "0" : "1");
       inp.checked = !!prev[name];
       inp.disabled = !!disabledAll;
+      inp.addEventListener("change", function () {
+        updateBaseRequirementUI();
+        reorderTemplateCheckboxesSelectedFirst();
+        updateTemplateSelectionSummary();
+      });
       const lbl = document.createElement("label");
       lbl.className = "form-check-label";
       lbl.htmlFor = inp.id;
-      lbl.textContent = lab;
+      lbl.textContent = lab + (row.diskBaseAvailable === false ? "（服务器无原件，需上传 Base）" : "");
       wrap.appendChild(inp);
       wrap.appendChild(lbl);
       box.appendChild(wrap);
@@ -1278,6 +1288,37 @@
     applyTemplateCheckboxFilter();
     reorderTemplateCheckboxesSelectedFirst();
     updateTemplateSelectionSummary();
+    updateBaseRequirementUI();
+  }
+
+  function selectedTemplatesMissingDiskBase() {
+    var scope = (el("dg_template_scope") && el("dg_template_scope").value) || "selected";
+    var templates = (lastBootstrap && lastBootstrap.templates) ? lastBootstrap.templates : [];
+    var byId = {};
+    templates.forEach(function (t) {
+      if (t && t.id != null) byId[String(t.id)] = t;
+    });
+    var names = [];
+    if (scope === "all") {
+      templates.forEach(function (t) {
+        var n = String((t && t.id) || "").trim();
+        if (n) names.push(n);
+      });
+    } else {
+      names = selectedTemplateNames();
+    }
+    return names.filter(function (n) {
+      var row = byId[n];
+      return row && row.diskBaseAvailable === false;
+    });
+  }
+
+  function updateBaseRequirementUI() {
+    var req = el("dg_lbl_base_req");
+    var inplace = el("dg_inplace") && el("dg_inplace").value === "1";
+    var missing = selectedTemplatesMissingDiskBase();
+    var needBase = inplace && missing.length > 0;
+    if (req) req.classList.toggle("d-none", !needBase);
   }
 
   function applyTemplateCheckboxFilter() {
@@ -1390,9 +1431,8 @@
     reorderTemplateCheckboxesSelectedFirst();
     updateTemplateSelectionSummary();
     scheduleApplyAuthorRoleSuggestion();
+    updateBaseRequirementUI();
   }
-
-  function syncTemplateFilesUiDisabled() {
     const scope = (el("dg_template_scope") && el("dg_template_scope").value) || "selected";
     const disabled = scope === "all";
     const box = el("dg_template_files_box");
@@ -1405,9 +1445,8 @@
     applyTemplateCheckboxFilter();
     updateTemplateSelectionSummary();
     scheduleApplyAuthorRoleSuggestion();
+    updateBaseRequirementUI();
   }
-
-  function applyBooleanOptionLabels(rows) {
     const map = {
       inplace_patch: "dg_inplace_label",
       save_as_case: "dg_save_case_label",
@@ -2477,6 +2516,18 @@
       showMsg(dgUserText("Base 来源唯一：请在“页面2带入 Base”与“手动上传 Base”二选一。", "Base 来源唯一：请在“任务带入 Base”与“手动上传 Base”二选一。"), true);
       return;
     }
+    var inplaceOn = el("dg_inplace") && el("dg_inplace").value === "1";
+    var missingDisk = selectedTemplatesMissingDiskBase();
+    if (inplaceOn && missingDisk.length && !hasTaskBase && !hasUploadBase) {
+      var preview = missingDisk.slice(0, 6).map(function (n) { return "「" + n + "」"; }).join("、");
+      var more = missingDisk.length > 6 ? " 等共 " + missingDisk.length + " 个" : "";
+      showMsg(
+        "所选模板在服务器上未找到案例/训练目录原件，请上传 Base：" + preview + more +
+          "。Chroma 中的训练文本不能替代 Word/Excel 基底。",
+        true
+      );
+      return;
+    }
     var provUse = ((el("dg_provider") && el("dg_provider").value) || "").trim();
     var keyMap = lastHasApiKeyByProvider || {};
     if (
@@ -2766,6 +2817,8 @@
     if (b2) b2.addEventListener("click", function () { loadDraftBootstrap(); });
     var ts = el("dg_template_scope");
     if (ts) ts.addEventListener("change", syncTemplateFilesUiDisabled);
+    var inpl = el("dg_inplace");
+    if (inpl) inpl.addEventListener("change", updateBaseRequirementUI);
     var tall = el("dg_btn_tpl_all");
     if (tall) tall.addEventListener("click", function () { setTemplateCheckboxesAll(true); });
     var tnone = el("dg_btn_tpl_none");

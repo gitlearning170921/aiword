@@ -65,6 +65,10 @@ for %%F in (
   pack-for-server.bat
   pack-for-server-docker.bat
   build-all.bat
+  build-apps-all.bat
+  build-apps-docker.bat
+  export-apps-docker.bat
+  server-load-apps-only.sh
   README.md
 ) do if exist "%~dp0%%F" copy /y "%~dp0%%F" "%STAGE%\" >nul
 

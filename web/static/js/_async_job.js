@@ -56,13 +56,17 @@
     return document.getElementById(id);
   }
 
-  /** 显示一段消息到 #<msgElId>（若存在）；isErr 为 true 用红色样式。 */
+  /** 显示一段消息到 #<msgElId>（若存在）；isErr 为 true 用红色样式。长页面且锚点不可见时补 Toast。 */
   function showMsg(msgElId, text, isErr) {
     var box = $(msgElId);
-    if (!box) return;
-    box.textContent = text || "";
-    box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
-    box.classList.remove("d-none");
+    if (box) {
+      box.textContent = text || "";
+      box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
+      box.classList.remove("d-none");
+    }
+    if (global.PageToast && global.PageToast.maybeToastFor(box, text, isErr)) {
+      return;
+    }
   }
 
   /** 把 fetch 响应包装成 {ok, status, json}。 */

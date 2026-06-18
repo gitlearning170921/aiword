@@ -134,6 +134,7 @@
 {% endif %}
 
 <script src="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.bundle.min.js', v=static_version) }}"></script>
+<script src="{{ url_for('static', filename='js/_page_toast.js', v=static_version) }}"></script>
 <script>
     window.__SCRIPT_ROOT__ = {{ request.script_root|tojson }};
     window.__FEATURE_FLAGS__ = {{ (feature_flags or {})|tojson }};
