@@ -2588,6 +2588,7 @@ const USER_FEATURE_PERM_GROUPS_FALLBACK = [
             { key: "FEATURE_PAGE0_DRAFT_GEN", label: "初稿生成" },
             { key: "FEATURE_PAGE0_AUDIT", label: "文档审核" },
             { key: "FEATURE_PAGE0_AUDIT_MODIFY", label: "审核后修改" },
+            { key: "FEATURE_PAGE0_AUDIT_TODO", label: "生成审核待办" },
             { key: "FEATURE_PAGE0_TRANSLATE", label: "文档翻译" },
         ],
     },
@@ -2598,6 +2599,7 @@ const USER_FEATURE_PERM_GROUPS_FALLBACK = [
             { key: "FEATURE_PAGE1_DRAFT_GEN", label: "初稿生成" },
             { key: "FEATURE_PAGE1_AUDIT", label: "文档审核" },
             { key: "FEATURE_PAGE1_AUDIT_MODIFY", label: "审核后修改" },
+            { key: "FEATURE_PAGE1_AUDIT_TODO", label: "生成审核待办" },
             { key: "FEATURE_PAGE1_TRANSLATE", label: "文档翻译" },
             { key: "FEATURE_PAGE1_EXAM_CENTER", label: "考试训练中心" },
             { key: "FEATURE_PAGE1_SIGN", label: "去签字" },
@@ -5468,7 +5470,7 @@ function _page2Feature(name) {
 function _buildPage2ActionButtonsHtml(r) {
     const isMatter = taskTypeCategoryOf(r.taskType) === TASK_TYPE_CATEGORY_MATTER;
     if (isMatter) {
-        // 事项型任务：仅做事项跟进；隐藏「上传/替换、填写、初稿生成、审核后修改、翻译」
+        // 事项型任务：仅做事项跟进；隐藏「上传/替换、初稿生成、审核后修改、翻译」
         return '<span class="small text-muted">事项型任务</span>';
     }
     const parts = [];
@@ -5478,11 +5480,6 @@ function _buildPage2ActionButtonsHtml(r) {
         );
         parts.push(
             `<button type="button" class="btn btn-sm btn-outline-secondary btn-replace-template-file" title="上传模板到 FTP；覆盖已有文件或链接">上传/替换</button>`
-        );
-    }
-    if (r.hasFile || (r.placeholders && r.placeholders.length > 0)) {
-        parts.push(
-            `<button class="btn btn-sm btn-outline-primary btn-fill-placeholders ms-1" data-id="${r.id}">填写</button>`
         );
     }
     if (_page2Feature("FEATURE_PAGE2_DRAFT_GEN")) {

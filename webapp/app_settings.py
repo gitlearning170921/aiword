@@ -178,6 +178,16 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         "环境分离开关（1=启用后 AIWORD_ENV=test|prod 隔离 aiword 库与目录；空或0=关闭，与改前一致。须在 .env 同步并重启生效）",
         False,
     ),
+    (
+        "FEATURE_PAGE0_AUDIT_TODO",
+        "页面0 · 审核结果「生成待办」按钮（1=显示；0=关闭；未保存时默认与「文档审核」一致）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE1_AUDIT_TODO",
+        "页面1 · 审核结果「生成待办」按钮（1=显示；0=关闭；未保存时默认与「文档审核」一致）",
+        False,
+    ),
 ]
 
 
@@ -186,6 +196,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE1_DRAFT_GEN",
     "FEATURE_PAGE1_AUDIT",
     "FEATURE_PAGE1_AUDIT_MODIFY",
+    "FEATURE_PAGE1_AUDIT_TODO",
     "FEATURE_PAGE1_TRANSLATE",
     "FEATURE_PAGE1_EXAM_CENTER",
     "FEATURE_PAGE1_SIGN",
@@ -200,12 +211,14 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
     "FEATURE_ENV_SEPARATION",
+    "FEATURE_PAGE0_AUDIT_TODO",
 )
 
 PAGE1_FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE1_DRAFT_GEN",
     "FEATURE_PAGE1_AUDIT",
     "FEATURE_PAGE1_AUDIT_MODIFY",
+    "FEATURE_PAGE1_AUDIT_TODO",
     "FEATURE_PAGE1_TRANSLATE",
     "FEATURE_PAGE1_EXAM_CENTER",
     "FEATURE_PAGE1_SIGN",
@@ -252,6 +265,8 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
             "FEATURE_ENV_SEPARATION",
+            "FEATURE_PAGE0_AUDIT_TODO",
+            "FEATURE_PAGE1_AUDIT_TODO",
         ),
     },
     {
@@ -472,6 +487,21 @@ def _apply_legacy_global_feature_flags(
     )
 
 
+def _apply_audit_todo_default_flags(
+    flags: dict[str, bool], app: Optional["Flask"] = None
+) -> None:
+    """未在系统配置中保存过「生成待办」开关时，默认跟随同页「文档审核」开关（保持改前可见）。"""
+    pairs = (
+        ("FEATURE_PAGE0_AUDIT_TODO", "FEATURE_PAGE0_AUDIT"),
+        ("FEATURE_PAGE1_AUDIT_TODO", "FEATURE_PAGE1_AUDIT"),
+    )
+    for todo_key, audit_key in pairs:
+        if _feature_flag_configured_in_db(todo_key, app):
+            flags[todo_key] = _parse_flag(get_setting(todo_key, default="", app=app))
+        else:
+            flags[todo_key] = bool(flags.get(audit_key))
+
+
 def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]:
     """返回当前数据库内功能开关布尔值，便于注入 Jinja / 前端。"""
     out: dict[str, bool] = {}
@@ -483,6 +513,7 @@ def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]
     apply_feature_tools_csv_to_flags(out, app)
     for key in PAGE0_DERIVED_FLAG_KEYS:
         out.setdefault(key, False)
+    _apply_audit_todo_default_flags(out, app)
     return out
 
 

@@ -2127,63 +2127,95 @@ def api_job_status(local_id: str):
 
 @draft_gen_bp.get("/api/jobs/<local_id>/download")
 def api_job_download(local_id: str):
-    err = _login_wall()
-    if err:
-        return err
-    uid = _session_user_id()
-    job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
-    if not job or not job.upstream_job_id:
-        return jsonify({"message": user_facing_text("任务不存在或未提交上游", "任务不存在或未提交")}), 404
-
-    if job.local_zip_path:
-        p = Path(job.local_zip_path)
-        if p.is_file():
-            return send_file(str(p), as_attachment=True, download_name=f"draft_{local_id}.zip")
-
-    base = _draft_api_base()
-    if not base:
-        return jsonify({"message": user_facing_text("未配置上游地址", "文档服务未配置，请联系管理员")}), 503
-    from ._integration_common import client_llm_headers_for_session
-
-    hdr = {
-        **_upstream_headers(
-            for_multipart=True,
-            organization_id=str(getattr(job, "organization_id", "") or "").strip(),
-        ),
-        **client_llm_headers_for_session(),
-    }
-    url = f"{base}/api/integration/draft/jobs/{job.upstream_job_id}/download"
+    job = None
     try:
-        r = requests.get(
-            url,
-            headers=hdr,
-            timeout=_draft_requests_timeout(read_seconds=_draft_timeout()),
-            stream=True,
-        )
-    except requests.RequestException as e:
-        return jsonify({"message": str(e)}), 503
-    if r.status_code >= 400:
+        err = _login_wall()
+        if err:
+            return err
+        uid = _session_user_id()
+        job = DraftGenerationJob.query.filter_by(id=local_id, user_id=uid).first()
+        if not job or not job.upstream_job_id:
+            return jsonify({"message": user_facing_text("任务不存在或未提交上游", "任务不存在或未提交")}), 404
+
+        if job.local_zip_path:
+            p = Path(job.local_zip_path)
+            if p.is_file():
+                return send_file(
+                    str(p),
+                    as_attachment=True,
+                    download_name=f"draft_{local_id}.zip",
+                    mimetype="application/zip",
+                )
+
+        base = _draft_api_base()
+        if not base:
+            return jsonify({"message": user_facing_text("未配置上游地址", "文档服务未配置，请联系管理员")}), 503
+        from ._integration_common import client_llm_headers_for_session
+
+        hdr = {
+            **_upstream_headers(
+                for_multipart=False,
+                organization_id=str(getattr(job, "organization_id", "") or "").strip(),
+            ),
+            **client_llm_headers_for_session(),
+        }
+        hdr["Accept"] = "application/zip, application/octet-stream, */*"
+        url = f"{base}/api/integration/draft/jobs/{job.upstream_job_id}/download"
         try:
-            detail = r.json()
-        except Exception:
-            detail = {"raw": (r.text or "")[:2000]}
-        return jsonify({"message": "下载失败", "upstream": detail}), 502
+            r = requests.get(
+                url,
+                headers=hdr,
+                timeout=_draft_requests_timeout(read_seconds=_draft_timeout()),
+                stream=True,
+            )
+        except requests.RequestException as e:
+            return jsonify({"message": str(e)}), 503
+        if r.status_code >= 400:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = {"raw": (r.text or "")[:2000]}
+            return jsonify({"message": "下载失败", "upstream": detail}), 502
 
-    out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "draft_zips"
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    out_path = out_dir / f"{local_id}.zip"
-    try:
-        with open(out_path, "wb") as fh:
-            for chunk in r.iter_content(65536):
-                if chunk:
-                    fh.write(chunk)
-    except OSError as e:
-        return jsonify({"message": f"保存 ZIP 失败: {e}"}), 500
+        out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "draft_zips"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        out_path = out_dir / f"{local_id}.zip"
+        try:
+            with open(out_path, "wb") as fh:
+                for chunk in r.iter_content(65536):
+                    if chunk:
+                        fh.write(chunk)
+        except OSError as e:
+            return jsonify({"message": f"保存 ZIP 失败: {e}"}), 500
 
-    job.local_zip_path = str(out_path.resolve())
-    db.session.commit()
-    return send_file(str(out_path), as_attachment=True, download_name=f"draft_{local_id}.zip")
+        job.local_zip_path = str(out_path.resolve())
+        db.session.commit()
+        return send_file(
+            str(out_path),
+            as_attachment=True,
+            download_name=f"draft_{local_id}.zip",
+            mimetype="application/zip",
+        )
+    except Exception as e:
+        current_app.logger.exception("draft job download failed: %s", local_id)
+        if job and getattr(job, "local_zip_path", None):
+            p = Path(job.local_zip_path)
+            if p.is_file():
+                return send_file(
+                    str(p),
+                    as_attachment=True,
+                    download_name=f"draft_{local_id}.zip",
+                    mimetype="application/zip",
+                )
+        return jsonify(
+            {
+                "message": user_facing_text(
+                    f"下载失败：{e}",
+                    "下载失败，请稍后从下方历史记录重试或联系管理员。",
+                )
+            }
+        ), 500
 

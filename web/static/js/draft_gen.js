@@ -2402,12 +2402,14 @@
           }
           const st = (finalJson.status || "").toLowerCase();
           if (st === "succeeded") {
-            // 保留输入/参考与 Base 列表，便于改参数后直接再次「提交生成」（勿清空，否则二次点击会因无文件而看似无反应）
             showMsg(
               "生成成功，可下载 ZIP。可修改选项后再次点击「提交生成」（已保留本次上传的文件列表）。",
               false
             );
-            el("dg_btn_download").disabled = false;
+            warmDraftZipCache(localId).finally(function () {
+              var db = el("dg_btn_download");
+              if (db) db.disabled = false;
+            });
           } else {
             var failDetail = finalJson.message || finalJson.error || finalJson.errorSummary || "";
             showMsg("任务结束: " + dgStatusZh(st) + (failDetail ? " · " + failDetail : ""), true);
@@ -2542,10 +2544,60 @@
     postDraftJob(payload);
   }
 
+  function downloadZipById(localId) {
+    if (!localId) return Promise.resolve();
+    var url = root + "/draft-gen/api/jobs/" + encodeURIComponent(localId) + "/download";
+    return fetch(url, { method: "GET", credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.text().then(function (text) {
+            var msg = "下载失败（HTTP " + r.status + "）";
+            try {
+              var j = JSON.parse(text);
+              if (j && j.message) msg = j.message;
+            } catch (e) {
+              if (text && text.indexOf("Internal Server Error") >= 0) {
+                msg = "下载失败：服务器内部错误。请从下方历史记录再次点击下载，或刷新页面后重试。";
+              }
+            }
+            throw new Error(msg);
+          });
+        }
+        return r.blob();
+      })
+      .then(function (blob) {
+        var a = document.createElement("a");
+        var objUrl = URL.createObjectURL(blob);
+        a.href = objUrl;
+        a.download = "draft_" + localId + ".zip";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(objUrl);
+        showMsg("下载已开始", false);
+        loadJobList();
+      });
+  }
+
+  function warmDraftZipCache(localId) {
+    if (!localId) return Promise.resolve();
+    var url = root + "/draft-gen/api/jobs/" + encodeURIComponent(localId) + "/download";
+    return fetch(url, { method: "GET", credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function () { return false; });
+        return r.blob().then(function () { return true; });
+      })
+      .catch(function () { return false; })
+      .then(function () { loadJobList(); });
+  }
+
   function downloadZip() {
     const localId = el("dg_local_job_id").value.trim();
     if (!localId) return;
-    window.location.href = root + "/draft-gen/api/jobs/" + encodeURIComponent(localId) + "/download";
+    showMsg("正在准备下载…", false);
+    downloadZipById(localId).catch(function (e) {
+      showMsg(String(e.message || e), true);
+    });
   }
 
   function applyJobSnapshot(jobId) {
@@ -2608,15 +2660,17 @@
         tdText(j.upstreamJobId || "");
         tdText(j.durationMs != null ? j.durationMs : "");
         const tdOp = document.createElement("td");
-        if (st === "succeeded" && j.hasLocalZip) {
-          const a = document.createElement("a");
-          a.className = "btn btn-sm btn-outline-primary";
-          a.href = root + "/draft-gen/api/jobs/" + encodeURIComponent(j.id || "") + "/download";
-          a.setAttribute("download", "");
-          a.textContent = "下载ZIP";
-          tdOp.appendChild(a);
-        } else if (st === "succeeded") {
-          tdOp.appendChild(document.createTextNode("成功（ZIP未缓存）"));
+        if (st === "succeeded") {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "btn btn-sm btn-outline-primary";
+          b.textContent = "下载ZIP";
+          b.addEventListener("click", function () {
+            downloadZipById(j.id || "").catch(function (e) {
+              showMsg(String(e.message || e), true);
+            });
+          });
+          tdOp.appendChild(b);
         } else {
           const b = document.createElement("button");
           b.type = "button";

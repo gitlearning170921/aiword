@@ -13,6 +13,25 @@
   var _audFilesAccum = [];
   var AUD_UPLOAD_ACCEPT = ".docx,.doc,.pdf,.xlsx,.xls,.txt,.md,.zip,.tar,.gz,.tgz";
 
+  function auditIntegrationScopeIsPage0() {
+    try {
+      var q = new URLSearchParams(window.location.search || "");
+      var scope = (q.get("scope") || "").trim().toLowerCase();
+      if (scope === "page0") return true;
+      var manual = (q.get("manual") || "").trim().toLowerCase();
+      return manual === "1" || manual === "true" || manual === "yes" || manual === "on";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function auditTodoFeatureEnabled() {
+    var f = window.__FEATURE_FLAGS__ || {};
+    return auditIntegrationScopeIsPage0()
+      ? !!f.FEATURE_PAGE0_AUDIT_TODO
+      : !!f.FEATURE_PAGE1_AUDIT_TODO;
+  }
+
   function audIsArchiveName(name) {
     var l = String(name || "").toLowerCase();
     return l.endsWith(".zip") || l.endsWith(".tar") || l.endsWith(".tgz")
@@ -168,13 +187,16 @@
           + (firstUploadId ? ("&upload_id=" + encodeURIComponent(firstUploadId)) : "");
         var todoHref = root + "/audit-modify/?report_id=" + encodeURIComponent(firstReportId)
           + (firstUploadId ? ("&upload_id=" + encodeURIComponent(firstUploadId) + "&base_upload_id=" + encodeURIComponent(firstUploadId)) : "");
+        var todoLink = auditTodoFeatureEnabled()
+          ? ('<a class="btn btn-sm btn-outline-primary aud-report-todo-link" target="_blank" rel="noopener"'
+            + ' href="' + todoHref + '" title="基于该报告生成审核后修改任务">生成待办</a>')
+          : "";
         tdOp = selectHtml
           + '<button type="button" class="btn btn-sm btn-outline-success me-1 aud-btn-view-results" data-job-id="'
           + esc(it.id || '') + '" title="' + (window.ufText ? window.ufText("加载与 aicheckword 一致的完整审核点", "查看完整审核点") : "查看完整审核点") + '">查看结果</button>'
           + '<a class="btn btn-sm btn-outline-secondary me-1 aud-report-edit-link" target="_blank" rel="noopener"'
           + ' href="' + editHref + '" title="在 aiword 编辑报告">编辑报告</a>'
-          + '<a class="btn btn-sm btn-outline-primary aud-report-todo-link" target="_blank" rel="noopener"'
-          + ' href="' + todoHref + '" title="基于该报告生成审核后修改任务">生成待办</a>';
+          + todoLink;
       } else if (it.status === "succeeded") {
         tdOp = '<button type="button" class="btn btn-sm btn-outline-success aud-btn-view-results" data-job-id="'
           + esc(it.id || '') + '">查看结果</button>';
@@ -288,7 +310,7 @@
           todoHref += "&upload_id=" + encodeURIComponent(uploadId);
           todoHref += "&base_upload_id=" + encodeURIComponent(uploadId);
         }
-        var todoBtn = rid
+        var todoBtn = (rid && auditTodoFeatureEnabled())
           ? ('<a class="btn btn-sm btn-outline-primary ms-1" target="_blank" rel="noopener"'
               + ' href="' + todoHref + '">生成审核后修改待办</a>')
           : "";

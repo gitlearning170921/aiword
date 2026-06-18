@@ -1,0 +1,12 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 340" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <rect width="720" height="340" fill="#f8f9fa"/>
+  <text x="360" y="28" text-anchor="middle" font-size="15" font-weight="600" fill="#212529">我的任务（普通用户）</text>
+  <rect x="24" y="44" width="672" height="44" rx="6" fill="#ffffff" stroke="#dee2e6"/>
+  <text x="40" y="72" font-size="12" fill="#495057">我的任务 · [ 初稿生成 ] [ 退出登录 ]</text>
+  <rect x="24" y="100" width="672" height="200" rx="6" fill="#ffffff" stroke="#fd7e14"/>
+  <text x="40" y="128" font-size="12" fill="#fd7e14" font-weight="600">任务列表（仅本人）</text>
+  <text x="48" y="162" font-size="10" fill="#868e96">项目 | 文件名称 | 任务类型 | 完成状态 | 操作</text>
+  <text x="48" y="188" font-size="10" fill="#495057">示例：BreathCare | 软件需求规范 | 初稿待编写 | 待办 | [初稿][单审]</text>
+  <text x="40" y="228" font-size="11" fill="#495057">任务行初稿生成：自动带入项目与文件名</text>
+  <text x="40" y="248" font-size="11" fill="#495057">任务行单审：打开文档审核并关联任务文件</text>
+</svg>
