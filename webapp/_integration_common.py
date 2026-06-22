@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from typing import Any, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
@@ -122,11 +123,52 @@ def sanitize_integration_message(msg: str | None) -> str:
     return user_facing_upstream_error(raw)
 
 
+def _running_in_aiword_docker() -> bool:
+    return str(os.environ.get("AIWORD_PROJECT_ROOT") or "").strip() == "/app"
+
+
+def _rewrite_localhost_upstream_for_docker(base: str) -> str:
+    """生产容器内误配 127.0.0.1:8000 会连到 aiword 自身；自动改为 aicheckword:8000。"""
+    if not _running_in_aiword_docker():
+        return base
+    try:
+        parsed = urlparse(base)
+    except Exception:
+        return base
+    host = (parsed.hostname or "").strip().lower()
+    if host not in ("127.0.0.1", "localhost"):
+        return base
+    port = parsed.port
+    if port is not None and port != 8000:
+        return base
+    rewritten = urlunparse(
+        (
+            parsed.scheme or "http",
+            "aicheckword:8000",
+            parsed.path or "",
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    ).rstrip("/")
+    try:
+        current_app.logger.warning(
+            "容器内检测到 aicheckword 地址为 %s，已自动改用 %s"
+            "（请在页面4 系统配置永久改为 http://aicheckword:8000）",
+            base,
+            rewritten,
+        )
+    except RuntimeError:
+        pass
+    return rewritten
+
+
 def resolve_integration_api_base(raw: str) -> str:
     """解析 aicheckword 根地址；Docker 主机名在本机开发时自动回退 127.0.0.1。"""
     base = (raw or "").strip().rstrip("/")
     if not base:
         return ""
+    base = _rewrite_localhost_upstream_for_docker(base)
     try:
         parsed = urlparse(base)
     except Exception:
@@ -186,8 +228,14 @@ def format_upstream_request_error(exc: Exception, base: str = "") -> str:
         "connection refused" in msg.lower() or "actively refused" in msg.lower()
     ):
         hint = user_facing_text(
-            " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。",
-            " 请确认文档生成服务已在该地址启动。",
+            " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。"
+            + (
+                " Docker 部署时页面4 须设为 http://aicheckword:8000，勿用 127.0.0.1:8000。"
+                if _running_in_aiword_docker()
+                else ""
+            ),
+            " 请确认文档生成服务已在该地址启动。"
+            + (" 请联系管理员检查 Docker 内 aicheckword 服务配置。" if _running_in_aiword_docker() else ""),
         )
     admin = f"上游请求失败：{exc}.{hint}" if hint else f"上游请求失败：{exc}"
     return user_facing_upstream_error(

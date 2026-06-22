@@ -190,7 +190,11 @@ async function flushPageInitHandlers() {
     try {
         await new Promise((r) => requestAnimationFrame(r));
         const handlers = App._pageInitHandlers.slice();
-        await Promise.allSettled(handlers.map((fn) => Promise.resolve().then(fn)));
+        const BOOT_TIMEOUT_MS = 120000;
+        await Promise.race([
+            Promise.allSettled(handlers.map((fn) => Promise.resolve().then(fn))),
+            new Promise((resolve) => setTimeout(resolve, BOOT_TIMEOUT_MS)),
+        ]);
     } finally {
         App.pageLoading.hide();
     }

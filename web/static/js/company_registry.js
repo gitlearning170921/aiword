@@ -1746,8 +1746,8 @@
         if (body) {
             wireCompanyLogoutButton();
             initCompanySessionBar();
-            /* 知识库训练入口已下线，保留函数定义供日后恢复 */
-            /* initCompanyTrainingPanel(); initTrainingHubExtras(); */
+            initCompanyTrainingPanel();
+            initTrainingHubExtras();
             initStarFilterSelect();
             initGroupBySelect();
             bindEvents();

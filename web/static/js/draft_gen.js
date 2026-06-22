@@ -57,6 +57,7 @@
   var __page2PrefillBootstrapExtra = 0;
   /** loadDraftBootstrap 并发/递归重入计数，避免提前关掉遮罩 */
   var __dgBootstrapLoadingDepth = 0;
+  var _dgBootstrapSeq = 0;
   /** 质量管理体系文件清单：中文名 ↔ 英文名（由 scripts/build_iso13485_name_match_data.py 从 xlsx 生成） */
   var __iso13485DocPairs = null;
   /** @type {Promise<any[]> | null} */
@@ -65,6 +66,7 @@
   var _dgJobsTotalPages = 1;
 
   var _dgAuthorRoleUserTouched = false;
+  var _dgBaseCaseUserTouched = false;
   var _dgAuthorRoleAutoSig = "";
   var _dgAuthRoleTimer = null;
   var __page2DidTemplatePrefill = false;
@@ -779,7 +781,7 @@
     }
     var needReload = false;
     var bcEl = el("dg_base_case");
-    if (bcEl) {
+    if (bcEl && !_dgBaseCaseUserTouched) {
       var targetBc = null;
       if (pf.base_case_id) {
         var ids0 = (b.cases || []).map(function (c) { return String(c.id); });
@@ -936,23 +938,56 @@
   function api(path, opts) {
     const url = root + path;
     const o = opts || {};
-    return fetch(url, Object.assign({ credentials: "same-origin" }, o)).then(function (r) {
-      return r.text().then(function (text) {
-        var j = null;
+    var timeoutMs = o.timeoutMs != null ? Number(o.timeoutMs) : 90000;
+    if (!timeoutMs || timeoutMs < 1000) timeoutMs = 90000;
+    var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timer = null;
+    if (controller) {
+      timer = window.setTimeout(function () {
         try {
-          j = text ? JSON.parse(text) : {};
-        } catch (e) {
-          j = {
-            message:
-              "非 JSON 响应（HTTP " +
-              r.status +
-              "）：" +
-              String(text || "").replace(/\s+/g, " ").slice(0, 240),
+          controller.abort();
+        } catch (_) {}
+      }, timeoutMs);
+    }
+    var fetchInit = Object.assign({ credentials: "same-origin" }, o);
+    delete fetchInit.timeoutMs;
+    if (controller) fetchInit.signal = controller.signal;
+    return fetch(url, fetchInit)
+      .then(function (r) {
+        return r.text().then(function (text) {
+          var j = null;
+          try {
+            j = text ? JSON.parse(text) : {};
+          } catch (e) {
+            j = {
+              message:
+                "非 JSON 响应（HTTP " +
+                r.status +
+                "）：" +
+                String(text || "").replace(/\s+/g, " ").slice(0, 240),
+            };
+          }
+          return { ok: r.ok, status: r.status, json: j };
+        });
+      })
+      .catch(function (err) {
+        if (err && err.name === "AbortError") {
+          return {
+            ok: false,
+            status: 0,
+            json: {
+              message:
+                "请求超时（" +
+                Math.round(timeoutMs / 1000) +
+                "s），请检查网络或文档服务（aicheckword）配置。",
+            },
           };
         }
-        return { ok: r.ok, status: r.status, json: j };
+        throw err;
+      })
+      .finally(function () {
+        if (timer) window.clearTimeout(timer);
       });
-    });
   }
 
   function el(id) {
@@ -975,9 +1010,11 @@
     }
   }
 
-  function beginDraftBootstrapLoading() {
+  function beginDraftBootstrapLoading(showOverlay) {
     __dgBootstrapLoadingDepth += 1;
-    if (__dgBootstrapLoadingDepth === 1) setDraftBootstrapLoadingVisible(true);
+    if (__dgBootstrapLoadingDepth === 1 && showOverlay !== false) {
+      setDraftBootstrapLoadingVisible(true);
+    }
   }
 
   function endDraftBootstrapLoading() {
@@ -994,6 +1031,9 @@
       box.textContent = text || "";
       box.className = "alert " + (isErr ? "alert-danger" : "alert-info");
       box.classList.remove("d-none");
+      try {
+        box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      } catch (_) {}
     }
     if (window.PageToast && window.PageToast.maybeToastFor(box, text, isErr)) {
       return;
@@ -1433,6 +1473,8 @@
     scheduleApplyAuthorRoleSuggestion();
     updateBaseRequirementUI();
   }
+
+  function syncTemplateFilesUiDisabled() {
     const scope = (el("dg_template_scope") && el("dg_template_scope").value) || "selected";
     const disabled = scope === "all";
     const box = el("dg_template_files_box");
@@ -1447,6 +1489,8 @@
     scheduleApplyAuthorRoleSuggestion();
     updateBaseRequirementUI();
   }
+
+  function applyBooleanOptionLabels(rows) {
     const map = {
       inplace_patch: "dg_inplace_label",
       save_as_case: "dg_save_case_label",
@@ -1905,7 +1949,7 @@
         ),
         false
       );
-      return loadDraftBootstrap();
+      return loadDraftBootstrap({ fullOverlay: false });
     });
   }
 
@@ -1925,10 +1969,13 @@
     fillYesNo("dg_save_case", defSave);
   }
 
-  function loadDraftBootstrap() {
-    beginDraftBootstrapLoading();
+  function loadDraftBootstrap(opts) {
+    opts = opts || {};
+    var showOverlay = opts.fullOverlay !== false;
+    var seq = ++_dgBootstrapSeq;
+    beginDraftBootstrapLoading(showOverlay);
     clearAllPrefillBadges();
-    _dgAuthorRoleUserTouched = false;
+    if (!opts.keepAuthorRoleTouch) _dgAuthorRoleUserTouched = false;
     __page2DidTemplatePrefill = false;
     const collEl = el("dg_collection");
     const orgEl = el("dg_organization");
@@ -1939,7 +1986,7 @@
     if (!coll) coll = "regulations";
     const bcEl = el("dg_base_case");
     let bcRaw = bcEl && bcEl.value ? String(bcEl.value).trim() : "";
-    if (!bcRaw && pf && pf.base_case_id) bcRaw = String(pf.base_case_id);
+    if (!bcRaw && pf && pf.base_case_id && !_dgBaseCaseUserTouched) bcRaw = String(pf.base_case_id);
     let path = "/draft-gen/api/draft-bootstrap?collection=" + encodeURIComponent(coll || "regulations");
     if (orgId) path += "&organizationId=" + encodeURIComponent(orgId);
     if (bcRaw) path += "&base_case_id=" + encodeURIComponent(bcRaw);
@@ -1948,6 +1995,8 @@
         return api(path, { method: "GET" });
       })
       .then(function (x) {
+      if (seq !== _dgBootstrapSeq) return;
+      try {
       const ta = el("dg_meta_preview");
       if (!x.ok) {
         if (ta) ta.value = JSON.stringify(x.json, null, 2);
@@ -1981,7 +2030,8 @@
             orgContextRoot: ((window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "") + "/audit"),
             onOrganizationChange: function () {
               if (el("dg_base_case")) el("dg_base_case").value = "";
-              loadDraftBootstrap();
+              _dgBaseCaseUserTouched = false;
+              loadDraftBootstrap({ fullOverlay: false });
             },
           });
         }
@@ -2058,10 +2108,14 @@
       );
       applyTemplateCheckboxFilter();
       if (maybeApplyPage2PrefillAfterBootstrap(b)) {
-        return loadDraftBootstrap();
+        return loadDraftBootstrap({ fullOverlay: false, keepAuthorRoleTouch: true });
       }
       applyAuthorRoleSuggestionAfterBootstrap(b);
       updateDefaultFilledBadges(b, getPage2Prefill());
+      } catch (err) {
+        console.error("loadDraftBootstrap apply:", err);
+        showMsg("加载生成选项失败：" + (err && err.message ? err.message : String(err)), true);
+      }
     })
       .catch(function () {
         showMsg("加载生成选项失败（网络或服务异常），请稍后重试或点击「刷新列表」。", true);
@@ -2096,8 +2150,10 @@
       if (d.allowedProviders && d.allowedProviders.length) {
         rebuildProviderSelect(d.allowedProviders);
       }
-      el("dg_provider").value = d.provider || "deepseek";
-      var pvUse = el("dg_provider").value || "deepseek";
+      var provEl = el("dg_provider");
+      if (!provEl) return;
+      provEl.value = d.provider || "deepseek";
+      var pvUse = provEl.value || "deepseek";
       applyLlmExtrasFromMaps(pvUse);
       lastLlmProviderSelection = pvUse;
       showInteropInfo(d);
@@ -2108,7 +2164,7 @@
       }
       syncLlmProviderUi();
       if (d.hasEncryptedBlobByProvider && d.keyDecryptOkByProvider) {
-        var provWarn = el("dg_provider").value || "deepseek";
+        var provWarn = provEl.value || "deepseek";
         var hasBlob = !!d.hasEncryptedBlobByProvider[provWarn];
         var decryptOk = !!d.keyDecryptOkByProvider[provWarn];
         if (hasBlob && !decryptOk) {
@@ -2617,6 +2673,18 @@
         return r.blob();
       })
       .then(function (blob) {
+        if (!blob || blob.size < 4) {
+          throw new Error("下载失败：ZIP 为空");
+        }
+        return blob.slice(0, 2).arrayBuffer().then(function (head) {
+          var u8 = new Uint8Array(head);
+          if (u8[0] !== 0x50 || u8[1] !== 0x4b) {
+            throw new Error("下载失败：返回内容不是 ZIP 文件");
+          }
+          return blob;
+        });
+      })
+      .then(function (blob) {
         var a = document.createElement("a");
         var objUrl = URL.createObjectURL(blob);
         a.href = objUrl;
@@ -2631,15 +2699,33 @@
   }
 
   function warmDraftZipCache(localId) {
-    if (!localId) return Promise.resolve();
+    if (!localId) return Promise.resolve(false);
     var url = root + "/draft-gen/api/jobs/" + encodeURIComponent(localId) + "/download";
     return fetch(url, { method: "GET", credentials: "same-origin" })
       .then(function (r) {
-        if (!r.ok) return r.text().then(function () { return false; });
-        return r.blob().then(function () { return true; });
+        if (!r.ok) {
+          return r.text().then(function (text) {
+            var msg = "预缓存 ZIP 失败（HTTP " + r.status + "）";
+            try {
+              var j = JSON.parse(text);
+              if (j && j.message) msg = j.message;
+            } catch (e) { /* ignore */ }
+            return { ok: false, msg: msg };
+          });
+        }
+        return r.blob().then(function (b) { return { ok: true, blob: b }; });
       })
-      .catch(function () { return false; })
-      .then(function () { loadJobList(); });
+      .catch(function (e) {
+        return { ok: false, msg: String((e && e.message) || e) };
+      })
+      .then(function (res) {
+        loadJobList();
+        if (res && res.ok) return true;
+        if (res && res.msg) {
+          showMsg(res.msg + " 仍可点击「下载 ZIP」重试。", true);
+        }
+        return false;
+      });
   }
 
   function downloadZip() {
@@ -2799,7 +2885,15 @@
     });
   }
 
-  function initDraftGenPage() {
+  var _dgUiWired = false;
+  var _dgDataBootstrapped = false;
+
+  function wireDraftGenUiOnce() {
+    if (_dgUiWired) return;
+    _dgUiWired = true;
+    try {
+      if (typeof window !== "undefined") window.__draftGenBooted = true;
+    } catch (_) {}
     var ar0 = el("dg_author_role");
     if (ar0) {
       ar0.addEventListener("change", function () {
@@ -2814,7 +2908,7 @@
     var b1t = el("dg_btn_test_llm");
     if (b1t) b1t.addEventListener("click", testLlmSettings);
     var b2 = el("dg_btn_refresh_bootstrap");
-    if (b2) b2.addEventListener("click", function () { loadDraftBootstrap(); });
+    if (b2) b2.addEventListener("click", function () { loadDraftBootstrap({ fullOverlay: false }); });
     var ts = el("dg_template_scope");
     if (ts) ts.addEventListener("change", syncTemplateFilesUiDisabled);
     var inpl = el("dg_inplace");
@@ -2840,7 +2934,10 @@
       loadJobList();
     });
     var c1 = el("dg_base_case");
-    if (c1) c1.addEventListener("change", loadDraftBootstrap);
+    if (c1) c1.addEventListener("change", function () {
+      _dgBaseCaseUserTouched = true;
+      loadDraftBootstrap({ fullOverlay: false, keepAuthorRoleTouch: true });
+    });
     var pm = el("dg_project_mode");
     if (pm) {
       pm.addEventListener("change", function () {
@@ -2906,19 +3003,34 @@
       });
     }
     updateTemplateSelectionSummary();
+  }
+
+  function loadDraftGenData() {
     return Promise.all([loadLlmSettings(), loadJobList(), loadDraftBootstrap()]);
   }
 
-  function runDraftGenInit() {
+  function bootDraftGenPage() {
     if (!el("dg_meta_preview") && !el("dg_job_rows")) return;
-    return initDraftGenPage();
+    wireDraftGenUiOnce();
+    if (_dgDataBootstrapped) return;
+    _dgDataBootstrapped = true;
+    void loadDraftGenData().catch(function (err) {
+      console.error("loadDraftGenData:", err);
+      showMsg("加载数据失败，请点「刷新列表」或检查文档服务配置。", true);
+      endDraftBootstrapLoading();
+    });
+  }
+
+  function runDraftGenInit() {
+    bootDraftGenPage();
   }
 
   if (typeof registerPageInit === "function") {
     registerPageInit(runDraftGenInit);
-  } else if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", runDraftGenInit);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootDraftGenPage);
   } else {
-    runDraftGenInit();
+    bootDraftGenPage();
   }
 })();

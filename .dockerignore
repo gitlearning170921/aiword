@@ -23,6 +23,12 @@ dist/
 deploy/backup/
 deploy/.env
 deploy/dist/
+# deploy/ 仅宿主机打包用，运行时容器不需要（含 ollama-docker.tar 等离线包）
+deploy/
+# 勿将本地迁移/备份压缩包打进镜像
+*.tar.gz
+*.tar
+*.zip
 server.log
 server.pid
 *.md

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from pathlib import Path
@@ -94,6 +95,58 @@ _DRAFT_LLM_MODEL_ATTR: dict[str, str] = {
     "cursor": "model_cursor",
     "tongyi": "model_tongyi",
 }
+
+
+def _draft_zip_output_dir() -> Path:
+    """初稿 ZIP 本地缓存目录；OUTPUT_FOLDER 不可写时回退 /app/outputs。"""
+    root = Path(
+        current_app.config.get("AIWORD_PROJECT_ROOT")
+        or current_app.root_path
+        or "."
+    ).resolve()
+    raw = (current_app.config.get("OUTPUT_FOLDER") or "outputs").strip() or "outputs"
+    base = Path(raw)
+    if not base.is_absolute():
+        base = (root / base).resolve()
+    for out in (base / "draft_zips", Path("/app/outputs/draft_zips")):
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            probe = out / ".write_probe"
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+            return out
+        except OSError:
+            continue
+    return base / "draft_zips"
+
+
+def _send_draft_zip_bytes(content: bytes, local_id: str):
+    if not content or len(content) < 4 or content[:2] != b"PK":
+        return jsonify({"message": user_facing_text("ZIP 无效或为空", "下载失败：文件无效")}), 502
+    return send_file(
+        io.BytesIO(content),
+        as_attachment=True,
+        download_name=f"draft_{local_id}.zip",
+        mimetype="application/zip",
+        max_age=0,
+    )
+
+
+def _send_draft_zip_path(path: Path, local_id: str):
+    try:
+        return send_file(
+            str(path),
+            as_attachment=True,
+            download_name=f"draft_{local_id}.zip",
+            mimetype="application/zip",
+            max_age=0,
+        )
+    except OSError as e:
+        current_app.logger.warning("send_file draft zip failed %s: %s", path, e)
+        try:
+            return _send_draft_zip_bytes(path.read_bytes(), local_id)
+        except OSError as e2:
+            return jsonify({"message": user_facing_text(f"读取 ZIP 失败：{e2}", "下载失败")}), 500
 
 
 def _base_url_for_provider(row: Optional[UserLlmCredential], provider: str) -> str:
@@ -2139,13 +2192,8 @@ def api_job_download(local_id: str):
 
         if job.local_zip_path:
             p = Path(job.local_zip_path)
-            if p.is_file():
-                return send_file(
-                    str(p),
-                    as_attachment=True,
-                    download_name=f"draft_{local_id}.zip",
-                    mimetype="application/zip",
-                )
+            if p.is_file() and p.stat().st_size > 0:
+                return _send_draft_zip_path(p, local_id)
 
         base = _draft_api_base()
         if not base:
@@ -2166,7 +2214,6 @@ def api_job_download(local_id: str):
                 url,
                 headers=hdr,
                 timeout=_draft_requests_timeout(read_seconds=_draft_timeout()),
-                stream=True,
             )
         except requests.RequestException as e:
             return jsonify({"message": str(e)}), 503
@@ -2175,41 +2222,54 @@ def api_job_download(local_id: str):
                 detail = r.json()
             except Exception:
                 detail = {"raw": (r.text or "")[:2000]}
-            return jsonify({"message": "下载失败", "upstream": detail}), 502
+            hint = ""
+            if r.status_code == 404:
+                hint = user_facing_text(
+                    "上游任务已过期（服务重启后内存任务丢失）。若本机未缓存 ZIP，请重新生成。",
+                    "任务已过期，请重新提交生成。",
+                )
+            return jsonify({"message": hint or "下载失败", "upstream": detail}), 502
 
-        out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "draft_zips"
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+        body = r.content or b""
+        if len(body) < 4 or body[:2] != b"PK":
+            return jsonify(
+                {
+                    "message": user_facing_text(
+                        "上游返回的不是有效 ZIP",
+                        "下载失败：文件格式异常",
+                    ),
+                    "upstreamBytes": len(body),
+                }
+            ), 502
+
+        out_dir = _draft_zip_output_dir()
         out_path = out_dir / f"{local_id}.zip"
         try:
-            with open(out_path, "wb") as fh:
-                for chunk in r.iter_content(65536):
-                    if chunk:
-                        fh.write(chunk)
+            out_path.write_bytes(body)
+            job.local_zip_path = str(out_path.resolve())
+            db.session.commit()
+            return _send_draft_zip_path(out_path, local_id)
         except OSError as e:
-            return jsonify({"message": f"保存 ZIP 失败: {e}"}), 500
-
-        job.local_zip_path = str(out_path.resolve())
-        db.session.commit()
-        return send_file(
-            str(out_path),
-            as_attachment=True,
-            download_name=f"draft_{local_id}.zip",
-            mimetype="application/zip",
-        )
+            current_app.logger.warning(
+                "draft job %s: cache zip to disk failed (%s), stream from memory",
+                local_id,
+                e,
+            )
+            try:
+                job.local_zip_path = str(out_path.resolve())
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            return _send_draft_zip_bytes(body, local_id)
     except Exception as e:
         current_app.logger.exception("draft job download failed: %s", local_id)
         if job and getattr(job, "local_zip_path", None):
             p = Path(job.local_zip_path)
-            if p.is_file():
-                return send_file(
-                    str(p),
-                    as_attachment=True,
-                    download_name=f"draft_{local_id}.zip",
-                    mimetype="application/zip",
-                )
+            if p.is_file() and p.stat().st_size > 0:
+                try:
+                    return _send_draft_zip_path(p, local_id)
+                except Exception:
+                    pass
         return jsonify(
             {
                 "message": user_facing_text(

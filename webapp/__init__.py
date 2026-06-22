@@ -1584,14 +1584,13 @@ def create_app() -> Flask:
         from flask import request
 
         p = (request.path or "").replace("\\", "/")
-        # 仅业务 JS/CSS 强制 no-store（改完即时生效）；vendor 文件（bootstrap 等）走 url_for v=static_version 缓存破坏
-        if (
-            p.endswith("/static/js/app.js")
-            or p.endswith("/static/js/company_registry.js")
-            or p.endswith("/static/js/exam_center.js")
-            or p.endswith("/static/js/draft_gen.js")
-            or p.endswith("/static/css/app.css")
-        ):
+        # 业务 static/js 强制 no-store（升级后避免浏览器长期缓存旧脚本）；vendor 走 url_for v=static_version
+        _biz_js = (
+            p.startswith("/static/js/")
+            and p.endswith(".js")
+            and "/vendor/" not in p
+        )
+        if _biz_js or p.endswith("/static/css/app.css"):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"

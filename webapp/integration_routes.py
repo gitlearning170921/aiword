@@ -34,7 +34,34 @@ def _check_integration_secret(f):
 
 @bp.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "aiword"})
+    payload = {"status": "ok", "service": "aiword"}
+    probe = str(request.args.get("upstream") or "").strip().lower()
+    if probe in ("1", "true", "yes"):
+        import requests as _rq
+
+        from ._integration_common import integration_api_base, integration_requests_timeout
+
+        base = integration_api_base()
+        if not base:
+            payload["upstream"] = {"ok": False, "error": "QUIZ_API_BASE_URL 未配置"}
+        else:
+            try:
+                resp = _rq.get(
+                    f"{base.rstrip('/')}/health",
+                    timeout=integration_requests_timeout(read_seconds=8),
+                )
+                payload["upstream"] = {
+                    "ok": resp.status_code == 200,
+                    "base": base,
+                    "statusCode": resp.status_code,
+                }
+            except Exception as exc:
+                payload["upstream"] = {
+                    "ok": False,
+                    "base": base,
+                    "error": str(exc)[:500],
+                }
+    return jsonify(payload)
 
 
 @bp.get("/projects")

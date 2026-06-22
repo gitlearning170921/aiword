@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-rem 仅构建 aiword + aicheckword（日常升级用，不 pull/tag chroma）
+rem Build aiword + aicheckword only (skip chroma)
 
 set "VER=%~1"
 if "%VER%"=="" (
@@ -29,6 +29,14 @@ set "DOCKER_BUILDKIT=1"
 set "PLATFORM=linux/amd64"
 set "PROGRESS=%DOCKER_PROGRESS%"
 if "%PROGRESS%"=="" set "PROGRESS=plain"
+
+echo ==^> release gate (JS orphan / template parity / py_compile)...
+python "%AIWORD_ROOT%\scripts\validate_release_gate.py"
+if errorlevel 1 exit /b 1
+
+echo ==^> JS syntax check (node:20-alpine)...
+docker run --rm -v "%AIWORD_ROOT%:/app:ro" -w /app node:20-alpine node scripts/check_js_syntax.js
+if errorlevel 1 exit /b 1
 
 echo ==^> build aiword:%VER% platform=%PLATFORM%
 docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%"

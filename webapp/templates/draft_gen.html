@@ -365,4 +365,17 @@
 {% block body_extra %}
 <script src="{{ url_for('static', filename='js/_integration_prefill.js', v=static_version) }}"></script>
 <script src="{{ url_for('static', filename='js/draft_gen.js', v=static_version) }}"></script>
+<script>
+(function () {
+  window.setTimeout(function () {
+    if (window.__draftGenBooted) return;
+    var box = document.getElementById("dg_msg");
+    if (!box) return;
+    box.textContent =
+      "页面脚本未正确加载（多为浏览器或 nginx 缓存了升级前的旧 JS）。请 Ctrl+F5 强刷；仍无效请联系管理员检查 /static/js/draft_gen.js 是否 200。";
+    box.className = "alert alert-danger";
+    box.classList.remove("d-none");
+  }, 4000);
+})();
+</script>
 {% endblock %}

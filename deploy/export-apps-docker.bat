@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-rem 仅导出 aiword + aicheckword tar.gz（日常升级用）
+rem Export aiword + aicheckword only (daily upgrade; no chroma)
 
 if "%~1"=="" (
   echo Usage: export-apps-docker.bat ^<version^>
@@ -33,10 +33,15 @@ if "%USE_GZIP%"=="1" (
   echo EXPORT OK: dist\aiword-%VER%.tar.gz dist\aicheckword-%VER%.tar.gz
 ) else (
   echo WARN: gzip not found, exporting uncompressed .tar
+  echo ==^> save aiword:%VER%
   docker save -o "%~dp0dist\aiword-%VER%.tar" aiword:%VER%
   if errorlevel 1 exit /b 1
+
+  echo ==^> save aicheckword:%VER%
   docker save -o "%~dp0dist\aicheckword-%VER%.tar" aicheckword:%VER%
   if errorlevel 1 exit /b 1
+
   echo EXPORT OK: dist\aiword-%VER%.tar dist\aicheckword-%VER%.tar
+  echo NOTE: server-load-apps-only.sh accepts .tar or .tar.gz
 )
 exit /b 0
