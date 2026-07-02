@@ -2738,24 +2738,45 @@ function collectUserFeaturePermissions(container) {
     return has ? out : null;
 }
 
-function renderBatchUserFeaturePermissionFields(container) {
+function renderBatchUserFeaturePermissionFields(container, role) {
     if (!container) return;
+    const groups = userFeaturePermGroupsForRole(role || "none");
     _renderUserFeaturePermSelects(
         container,
         {},
         "user-feature-perm-batch",
-        _userFeaturePermGroupsAll(),
+        groups,
         "batch"
     );
 }
 
-function collectBatchUserFeaturePermissionPatches(container) {
+function _batchFeaturePermRoleLabels() {
+    return { none: "普通用户", project: "项目管理员", company: "公司管理员" };
+}
+
+/** 已勾选账号的分级角色：一致则返回 role，否则 null。 */
+function resolveBatchFeaturePermRole() {
+    const tbody = document.getElementById("usersTableBody");
+    if (!tbody) return null;
+    const roles = new Set();
+    tbody.querySelectorAll(".user-row-checkbox:checked").forEach((cb) => {
+        const role = (cb.dataset.adminRole || "none").trim() || "none";
+        roles.add(role);
+    });
+    if (roles.size !== 1) return null;
+    return [...roles][0];
+}
+
+function collectBatchUserFeaturePermissionPatches(container, role) {
     if (!container) return null;
+    const allowedKeys = new Set(
+        userFeaturePermGroupsForRole(role || "none").flatMap((g) => g.defs.map((d) => d.key))
+    );
     const out = {};
     let has = false;
     container.querySelectorAll("select.user-feature-perm-batch").forEach((sel) => {
         const key = sel.getAttribute("data-key");
-        if (!key || sel.value === "skip") return;
+        if (!key || sel.value === "skip" || !allowedKeys.has(key)) return;
         out[key] = sel.value;
         has = true;
     });
@@ -2773,8 +2794,18 @@ function selectedUserRowIds() {
 function updateBatchUsersFeatureBtnState() {
     const btn = document.getElementById("btnBatchUserFeaturePerms");
     if (!btn) return;
-    const n = selectedUserRowIds().length;
-    btn.disabled = n === 0;
+    const ids = selectedUserRowIds();
+    const n = ids.length;
+    const role = resolveBatchFeaturePermRole();
+    const mixed = n > 1 && role === null;
+    btn.disabled = n === 0 || mixed;
+    if (mixed) {
+        btn.title = "所选账号分级角色不一致，请仅勾选同一角色后再批量设置功能权限";
+    } else if (n === 0) {
+        btn.title = "请先勾选账号";
+    } else {
+        btn.title = "";
+    }
 }
 
 function initBatchUserFeaturePermissions() {
@@ -2786,8 +2817,6 @@ function initBatchUserFeaturePermissions() {
     const selectAll = document.getElementById("usersSelectAll");
     if (!openBtn || !modalEl || !saveBtn || !container) return;
 
-    renderBatchUserFeaturePermissionFields(container);
-
     selectAll?.addEventListener("change", () => {
         const checked = !!selectAll.checked;
         document.querySelectorAll("#usersTableBody .user-row-checkbox").forEach((cb) => {
@@ -2796,14 +2825,26 @@ function initBatchUserFeaturePermissions() {
         updateBatchUsersFeatureBtnState();
     });
 
-    openBtn.addEventListener("click", () => {
+    openBtn.addEventListener("click", async () => {
         const ids = selectedUserRowIds();
         if (!ids.length) {
             App.notify("请先勾选账号", "warning");
             return;
         }
-        if (hint) hint.textContent = `已选 ${ids.length} 个账号`;
-        renderBatchUserFeaturePermissionFields(container);
+        const role = resolveBatchFeaturePermRole();
+        if (!role) {
+            App.notify(
+                "所选账号分级角色不一致，请仅勾选同一角色（普通用户 / 项目管理员 / 公司管理员）后再批量设置功能权限",
+                "warning"
+            );
+            return;
+        }
+        await ensureUserFeaturePermSchema();
+        const roleLabel = _batchFeaturePermRoleLabels()[role] || role;
+        if (hint) {
+            hint.textContent = `已选 ${ids.length} 个账号 · 分级角色：${roleLabel}（仅显示该角色可用的功能项）`;
+        }
+        renderBatchUserFeaturePermissionFields(container, role);
         new bootstrap.Modal(modalEl).show();
     });
 
@@ -2813,7 +2854,15 @@ function initBatchUserFeaturePermissions() {
             App.notify("请先勾选账号", "warning");
             return;
         }
-        const patches = collectBatchUserFeaturePermissionPatches(container);
+        const role = resolveBatchFeaturePermRole();
+        if (!role) {
+            App.notify(
+                "所选账号分级角色不一致，请仅勾选同一角色后再批量设置功能权限",
+                "warning"
+            );
+            return;
+        }
+        const patches = collectBatchUserFeaturePermissionPatches(container, role);
         if (!patches) {
             App.notify("请至少选择一项要修改的功能权限", "warning");
             return;
@@ -4485,7 +4534,7 @@ function renderUsersList() {
             ? _escUserCell((u.registeredCountries || []).join("、"))
             : '<span class="text-muted">—</span>';
         tr.innerHTML = `
-            <td><input type="checkbox" class="form-check-input user-row-checkbox" data-id="${_escUserCell(u.id)}"></td>
+            <td><input type="checkbox" class="form-check-input user-row-checkbox" data-id="${_escUserCell(u.id)}" data-admin-role="${_escUserCell(role)}"></td>
             <td>${_escUserCell(u.username)}</td>
             <td>${_escUserCell(displayName)}</td>
             <td class="user-mobile-cell">${_escUserCell(u.mobile || "-")}</td>
@@ -5097,10 +5146,8 @@ function initLoginPage() {
     const form = document.getElementById("loginForm");
     if (!form) return;
 
-    if (window.location.search) {
-        window.location.replace(_appPath("/login"));
-        return;
-    }
+    const params = new URLSearchParams(window.location.search);
+    const nextUrl = (params.get("next") || "").trim();
 
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -5108,13 +5155,16 @@ function initLoginPage() {
             username: document.getElementById("loginUsername").value.trim(),
             password: document.getElementById("loginPassword").value,
         };
+        if (nextUrl && nextUrl.startsWith("/")) {
+            payload.next = nextUrl;
+        }
         try {
             const res = await App.request("/api/login", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-            const dest = _appPath(res?.homeUrl || res?.redirectUrl || "/generate");
+            const dest = _appPath(res?.redirectUrl || res?.homeUrl || nextUrl || "/generate");
             window.location.href = dest;
         } catch (error) {
             App.notify(error.message, "danger");
@@ -7643,8 +7693,29 @@ function initAdminPage() {
     /* 已并入 DOMContentLoaded → App.onPageInit；保留空壳避免旧引用报错 */
 }
 
+async function loadAdminDeployVersionBar() {
+    const el = document.getElementById("adminDeployVersionBar");
+    if (!el) return;
+    try {
+        const v = await App.request("/api/system/deploy-version");
+        const aw = (v && v.aiword) ? String(v.aiword).trim() : "—";
+        const ac = (v && v.aicheckword) ? String(v.aicheckword).trim() : "—";
+        el.textContent = `系统版本：aiword ${aw} · aicheckword ${ac}`;
+    } catch (e) {
+        el.textContent = "系统版本：读取失败";
+        console.warn("loadAdminDeployVersionBar:", e);
+    }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     App.onPageInit(async () => {
+        if (
+            !document.getElementById("recordsTableBody") &&
+            !document.getElementById("projectBlocksContainer") &&
+            !document.getElementById("myTasksBody")
+        ) {
+            return;
+        }
         await loadCompletionStatuses().catch((e) => {
             console.warn("loadCompletionStatuses:", e);
         });
@@ -7669,6 +7740,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     App.onPageInit(async () => {
         if (!document.getElementById("adminPageRoot")) return;
+        loadAdminDeployVersionBar();
         initOrganizationsAdmin();
         initCreateUserModal();
         initUsersListFilter();

@@ -36,7 +36,7 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("CHATBOT_DINGTALK_SECRET", "体系记录机器人·加签 Secret（与上方 Webhook 配对）", True),
     (
         "CHATBOT_LLM_PROVIDER",
-        "钉钉机器人/联调调用 aicheckword 的 LLM 提供方（deepseek / tongyi / ollama / openai / lingyi；"
+        "钉钉机器人/联调调用 aicheckword 的 LLM 提供方（deepseek / tongyi / ollama / openai / lingyi / claude；"
         "留空=deepseek）。若当前浏览器会话已登录页面2并配置个人 Key，将优先透传个人凭据。",
         False,
     ),

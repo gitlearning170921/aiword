@@ -190,6 +190,64 @@ def _normalize_next_path(next_url: str | None) -> str:
     return s
 
 
+def _path_matches_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
+    for prefix in prefixes:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+_INTEGRATION_PAGE_PREFIXES: tuple[str, ...] = (
+    "/draft-gen",
+    "/audit-modify",
+    "/audit",
+    "/translate",
+)
+
+
+def _integration_feature_keys_for_path(path: str) -> tuple[str, ...]:
+    """集成页路径 → 任一开即放行的功能开关键（页面0/1/2）。"""
+    p = _normalize_next_path(path)
+    if p.startswith("/draft-gen"):
+        return (
+            "FEATURE_PAGE0_DRAFT_GEN",
+            "FEATURE_PAGE1_DRAFT_GEN",
+            "FEATURE_PAGE2_DRAFT_GEN",
+        )
+    if p.startswith("/audit-modify"):
+        return (
+            "FEATURE_PAGE0_AUDIT_MODIFY",
+            "FEATURE_PAGE1_AUDIT_MODIFY",
+            "FEATURE_PAGE2_AUDIT_MODIFY",
+        )
+    if p.startswith("/audit"):
+        return ("FEATURE_PAGE0_AUDIT", "FEATURE_PAGE1_AUDIT")
+    if p.startswith("/translate"):
+        return (
+            "FEATURE_PAGE0_TRANSLATE",
+            "FEATURE_PAGE1_TRANSLATE",
+            "FEATURE_PAGE2_TRANSLATE",
+        )
+    return ()
+
+
+def company_admin_integration_path_allowed(path: str) -> bool:
+    """公司管理员：页面0 集成能力已开启时可访问初稿/审核/翻译等路径（含其 API）。"""
+    if not company_registry_enabled():
+        return False
+    p = _normalize_next_path(path)
+    if not _path_matches_prefixes(p, _INTEGRATION_PAGE_PREFIXES):
+        return False
+    keys = _integration_feature_keys_for_path(p)
+    if not keys:
+        return False
+    try:
+        from .app_settings import is_effective_feature_enabled
+    except Exception:
+        return False
+    return any(is_effective_feature_enabled(k) for k in keys)
+
+
 def path_allowed_for_current_user(path: str) -> bool:
     """登录后 next 跳转：仅允许进入与当前角色匹配的页面。"""
     p = _normalize_next_path(path)
@@ -201,18 +259,36 @@ def path_allowed_for_current_user(path: str) -> bool:
         return False
     role = current_admin_role()
     if role == ADMIN_ROLE_COMPANY:
-        return p == "/company" or p.startswith("/company/")
+        if p == "/company" or p.startswith("/company/"):
+            return True
+        return company_admin_integration_path_allowed(p)
     if role in (ADMIN_ROLE_PROJECT, ADMIN_ROLE_NONE):
         if company_registry_enabled() and not user_team_ids():
             return False
     if role == ADMIN_ROLE_PROJECT:
-        return (
-            p in ("/upload", "/dashboard", "/exam-center")
-            or p.startswith("/upload/")
-            or p.startswith("/dashboard/")
-            or p.startswith("/exam-center")
+        return _path_matches_prefixes(
+            p,
+            (
+                "/upload",
+                "/dashboard",
+                "/exam-center",
+                "/draft-gen",
+                "/audit",
+                "/translate",
+                "/audit-modify",
+            ),
         )
-    return p == "/generate" or p.startswith("/generate/")
+    return _path_matches_prefixes(
+        p,
+        (
+            "/generate",
+            "/draft-gen",
+            "/audit",
+            "/translate",
+            "/audit-modify",
+            "/exam-center",
+        ),
+    )
 
 
 def resolve_login_redirect(next_url: str | None = None) -> str:
@@ -287,8 +363,19 @@ def super_admin_password_gate_response(
     )
 
 
+def unauthenticated_login_response(*, for_api: bool | None = None):
+    """未登录且非超管：一律跳转账号登录（访问密码门仅 /admin 使用）。"""
+    is_api = for_api if for_api is not None else _is_api_request()
+    if is_api:
+        return jsonify({"message": "请先登录", "needsLogin": True}), 401
+    next_url = gate_next_url()
+    if next_url and next_url not in ("/", "/login"):
+        return redirect(url_for("pages.login_page", next=next_url))
+    return redirect(url_for("pages.login_page"))
+
+
 def block_until_super_admin_or_user_id(*, for_api: bool | None = None):
-    """已验证访问密码或已登录 → None；否则密码门 / 登录 / API 401。"""
+    """已验证访问密码或已登录 → None；否则登录页 / API 401（非 /admin 不展示访问密码门）。"""
     is_api = for_api if for_api is not None else _is_api_request()
     if is_page13_super_admin():
         return None
@@ -297,21 +384,7 @@ def block_until_super_admin_or_user_id(*, for_api: bool | None = None):
         if blocked is not None:
             return blocked
         return None
-    if page13_password_configured():
-        if is_api:
-            return (
-                jsonify(
-                    {
-                        "message": "需要输入访问密码",
-                        "needsPage13Auth": True,
-                    }
-                ),
-                401,
-            )
-        return super_admin_password_gate_response()
-    if is_api:
-        return jsonify({"message": "请先登录", "needsLogin": True}), 401
-    return redirect(url_for("pages.login_page"))
+    return unauthenticated_login_response(for_api=is_api)
 
 
 def super_admin_required(fn: Callable):
@@ -773,7 +846,9 @@ def upload_record_mutable_by_current_user(rec: Any) -> bool:
         return False
     if is_normal_user():
         if rbac_enforced() and user_team_ids():
-            return upload_in_scope(rec)
+            proj = resolve_project_for_upload(rec)
+            if proj is not None:
+                return _project_visible_for_team(proj, set(user_team_ids()))
         return True
     if is_project_admin() and rbac_enforced():
         if not user_team_ids():

@@ -305,6 +305,8 @@ def run_exam_team_scope_regression(app, c) -> None:
         stu_b_id = str(stu_b.id)
         pa_username = pa_a.username
         pa_display = pa_a.display_name or pa_a.username
+        stu_a_username = stu_a.username
+        stu_a_display = stu_a.display_name or stu_a.username
         team_a_id = str(team_a.id)
         team_b_id = str(team_b.id)
         user_ids = [pa_a_id, stu_a_id, stu_b_id]
@@ -354,6 +356,35 @@ def run_exam_team_scope_regression(app, c) -> None:
         }
         assert stu_a_id in assign_ids, assign_ids
         assert stu_b_id not in assign_ids, assign_ids
+
+        r3a = c.get("/api/exam-center/teacher/author-roles?collection=regulations")
+        assert r3a.status_code == 200, r3a.get_json()
+        teacher_roles = ((r3a.get_json() or {}).get("data") or {}).get("author_roles") or []
+        assert isinstance(teacher_roles, list) and len(teacher_roles) >= 1, teacher_roles
+
+        with c.session_transaction() as s:
+            s.pop("page13_authenticated", None)
+            s["user_id"] = stu_a_id
+            s["username"] = stu_a_username
+            s["display_name"] = stu_a_display
+            s["admin_role"] = ADMIN_ROLE_NONE
+            s["active_organization_id"] = org_id
+            s["organization_ids"] = [org_id]
+            s["team_ids"] = [team_a_id]
+
+        r3b = c.get("/api/exam-center/student/author-roles?collection=regulations")
+        assert r3b.status_code == 200, r3b.get_json()
+        student_roles = ((r3b.get_json() or {}).get("data") or {}).get("author_roles") or []
+        assert isinstance(student_roles, list) and len(student_roles) >= 1, student_roles
+
+        with c.session_transaction() as s:
+            s["user_id"] = pa_a_id
+            s["username"] = pa_username
+            s["display_name"] = pa_display
+            s["admin_role"] = ADMIN_ROLE_PROJECT
+            s["active_organization_id"] = org_id
+            s["organization_ids"] = [org_id]
+            s["team_ids"] = [team_a_id]
 
         r4 = c.get("/api/exam-center/stats/overview")
         assert r4.status_code == 200, r4.get_json()

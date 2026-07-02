@@ -30,7 +30,7 @@ globs:
 ## 角色可见性
 
 - 新建/编辑：按 `USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS` 过滤分组。
-- 批量功能权限：展示 **全部分组**（管理员可跨角色批量 patch；未选字段保持各账号原值）。
+- 批量功能权限：须勾选**同一分级角色**；弹窗仅展示该角色可用分组（与新建/编辑一致）；服务端 `validate_homogeneous_batch_users` + `filter_batch_patch_for_role` 校验。
 
 ## 自检
 

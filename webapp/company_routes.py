@@ -12,7 +12,8 @@ from flask import Blueprint, current_app, jsonify, render_template, request, ses
 from sqlalchemy import or_
 
 from . import db
-from ._integration_common import integration_api_base, integration_requests_timeout, upstream_headers, user_facing_text, user_facing_upstream_error
+from ._integration_common import integration_api_base, integration_requests_timeout, msg_upstream_not_configured_env, upstream_headers, user_facing_text, user_facing_upstream_error
+from .user_facing import api_debug_fields
 from .app_settings import is_multi_tenant_enabled
 from .authz import (
     company_admin_write_required,
@@ -804,7 +805,7 @@ def api_company_training_checklist_generate():
             "collection": collection,
             "checklist": checklist or [],
             "totalPoints": upstream.get("total_points") if isinstance(upstream, dict) else len(checklist or []),
-            "upstream": upstream,
+            **api_debug_fields(upstream=upstream),
         }
     )
 
@@ -848,7 +849,7 @@ def api_company_training_checklist_train():
             "message": f"审核点已入库（新增 {chunks or 0} 块）",
             "organizationId": organization_id,
             "collection": collection,
-            "upstream": upstream,
+            **api_debug_fields(upstream=upstream),
         }
     )
 
@@ -907,7 +908,9 @@ def api_company_training_directory():
             "message": "目录训练请求已完成",
             "organizationId": organization_id,
             "collection": collection,
-            "upstream": payload.get("upstream") if isinstance(payload, dict) else payload,
+            **api_debug_fields(
+                upstream=payload.get("upstream") if isinstance(payload, dict) else payload
+            ),
         }
     )
 
@@ -923,7 +926,7 @@ def api_company_training_upload():
     organization_id, collection = resolve_organization_context(explicit_organization_id=explicit_org)
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 503
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
     upstream_url = f"{base.rstrip('/')}/train/upload"
     form_files: list[tuple[str, tuple[str, bytes, str]]] = []
     raw_items: list[tuple[str, bytes]] = []
@@ -955,13 +958,13 @@ def api_company_training_upload():
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": user_facing_upstream_error(f"上游训练失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游训练失败（HTTP {resp.status_code}）"), **api_debug_fields(upstream=body)}), resp.status_code
     return jsonify(
         {
             "message": "训练请求已完成",
             "organizationId": organization_id,
             "collection": collection,
-            "upstream": body,
+            **api_debug_fields(upstream=body),
         }
     )
 
@@ -977,7 +980,7 @@ def api_company_training_project_case_create():
         return jsonify({"message": "caseName 不能为空"}), 400
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 503
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
     try:
         resp = requests.post(
             f"{base.rstrip('/')}/train/project-cases/create",
@@ -1008,13 +1011,13 @@ def api_company_training_project_case_create():
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": user_facing_upstream_error(f"上游创建案例失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游创建案例失败（HTTP {resp.status_code}）"), **api_debug_fields(upstream=body)}), resp.status_code
     return jsonify(
         {
             "message": "项目案例已创建",
             "organizationId": organization_id,
             "collection": collection,
-            "upstream": body,
+            **api_debug_fields(upstream=body),
         }
     )
 
@@ -1032,7 +1035,7 @@ def api_company_training_project_case_upload():
     organization_id, collection = resolve_organization_context(explicit_organization_id=explicit_org)
     base = integration_api_base()
     if not base:
-        return jsonify({"message": "未配置 AICHECKWORD_DRAFT_API_BASE / QUIZ_API_BASE_URL"}), 503
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
     form_files: list[tuple[str, tuple[str, bytes, str]]] = []
     for f in files:
         if f is None:
@@ -1067,14 +1070,14 @@ def api_company_training_project_case_upload():
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": user_facing_upstream_error(f"上游案例训练失败（HTTP {resp.status_code}）"), "upstream": body}), resp.status_code
+        return jsonify({"message": user_facing_upstream_error(f"上游案例训练失败（HTTP {resp.status_code}）"), **api_debug_fields(upstream=body)}), resp.status_code
     return jsonify(
         {
             "message": "案例文档训练完成",
             "organizationId": organization_id,
             "collection": collection,
             "caseId": case_id_raw,
-            "upstream": body,
+            **api_debug_fields(upstream=body),
         }
     )
 

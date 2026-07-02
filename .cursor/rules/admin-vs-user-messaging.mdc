@@ -1,0 +1,88 @@
+---
+description: 调试/集成提示仅超管可见；普通账号只看使用说明与业务友好错误
+alwaysApply: true
+---
+
+# 超管 vs 普通用户：提示文案分层
+
+任何**调试、集成、部署、联调**相关提示，**仅超级管理员**可见；其余账号（公司管理员、项目管理员、普通用户）只看到**使用说明**与**可操作的友好错误**。
+
+## 1. 超级管理员判定（唯一口径）
+
+| 层 | 判定方式 |
+|----|----------|
+| 后端 | `webapp/authz.is_page13_super_admin()` → `session["page13_authenticated"]`（页面4 访问密码验证通过） |
+| 前端 | `window.__PAGE13_SUPER_ADMIN__`（`base.html` 注入 `is_page13_super_admin`） |
+
+**禁止**用 `is_company_admin` / `is_project_admin` 代替「调试可见」开关；公司/项目管理员仍属普通用户侧文案。
+
+## 2. 两类文案
+
+### 仅超管（admin / debug）
+
+- 上游服务名、`aicheckword`、HTTP 状态码、环境变量名（如 `AICHECKWORD_DRAFT_API_BASE`、`QUIZ_API_BASE_URL`）
+- 页面编号（页面0/1/2/4）、`interop-config`、白名单键名（如 `draft_interop_allowed_providers`）
+- `SECRET_KEY`、Key 解密诊断、`hasEncryptedBlob` / `keyDecryptOk` 等技术字段
+- 集成未对齐、提供方交集、代理/网络排查、重启服务、查看日志等运维指引
+- API 响应中的 `adminNotes`、`interopSyncWarnings` 及同类调试字段
+
+### 所有用户（user / usage）
+
+- 下一步操作（选项目、上传文件、保存 Key、提交任务）
+- 业务校验失败（缺项目编号、Base 来源冲突、格式不对）
+- 友好错误（「文档服务未配置，请联系管理员」「提交失败，请稍后重试」）
+- 隐藏内部组件名：用「系统」「文档服务」「任务列表」「我的任务」「系统管理」等替代
+
+## 3. 后端写法（必须复用）
+
+- **统一入口**：`webapp/user_facing.py`
+  - `user_facing_text(admin_text, user_text)` — 双文案按角色择一
+  - `user_facing_upstream_error(admin_text, user_text=None)` — 集成错误；普通用户侧可省略 `user_text` 由内置替换表脱敏
+  - `api_debug_fields(**kwargs)` — `detail` / `upstream` / `diagnostics` 等仅超管写入 JSON
+  - `integration_error_message(msg)` — 内部错误串按角色脱敏
+- **集成常量**：`webapp/_integration_common.py` 的 `msg_upstream_*` 等，内部已调用 `user_facing_text`
+- **JSON API**：调试字段**不要**默认下发给所有用户。示例（初稿 LLM 设置）：
+  - 超管可返回：`adminNotes`、`interopSyncWarnings`、`hasEncryptedBlobByProvider`、`keyDecryptOkByProvider`、`storedKeyLengthByProvider`
+  - 普通用户：省略上述字段或返回空值；`message` 字段须经 `user_facing_*` 处理
+- **新增路由/异常**：禁止把 `str(e)`、traceback、上游 URL 直接作为非超管的 `message`
+
+## 4. 前端写法（必须复用）
+
+- **全局**：`window.ufText(adminText, userText)`（`base.html` 定义，与后端语义一致）
+- **页面内**：`dgUserText`（初稿）、`ufText` 局部封装（公司注册、考试中心等）— 优先委托 `window.ufText`
+- **调试 UI**：`adminNotes`、`interopSyncWarnings`、集成诊断条、SECRET_KEY 相关告警 — 渲染前判断 `window.__PAGE13_SUPER_ADMIN__`（或 `dgIsSuperAdmin()`）
+- **标签/按钮 title**：含 `aicheckword`、页面编号的文案须走 `ufText` / `dgUserText`
+
+## 5. 禁止行为
+
+- 在模板或 JS 中硬编码仅超管应看的集成说明，且不包 `ufText`
+- 向所有用户展示 `interopSyncWarnings`、未脱敏的上游错误、环境变量名
+- 为「省事」只写一段文案让普通用户看到 `上游 HTTP 502` 或 `aicheckword 未集成 openai`
+- 用 `console.log` 替代用户可见调试信息（用户仍可能在生产环境打开控制台）；用户可见层必须按角色分流
+
+## 6. 已覆盖页面（改文案时须自检）
+
+| 区域 | 文件 |
+|------|------|
+| 全局 | `webapp/templates/base.html`（`ufText` / `__PAGE13_SUPER_ADMIN__`） |
+| 页面0 公司总览 | `company_registry.js`、`company_routes.py` |
+| 页面1/2/3 | `app.js`、`scope_bar.js` |
+| 初稿 | `draft_gen.html`、`draft_gen.js`、`draft_generation_routes.py` |
+| 审核 / 翻译 / 审核后修改 | `audit.html`、`translate.html`、`audit_modify.html`、对应 `*_routes.py`、`*_prefill.js` |
+| 考试中心 | `exam_center.html`、`exam_center.js`、`routes.py`（`_quiz_api_call`） |
+| 聊天机器人 | `routes.py`（`_chatbot_call_aicheckword`）、`chatbot_test.html` |
+| 报告编辑 | `audit_report_edit.html` |
+
+API 调试字段统一用 `api_debug_fields(detail=..., upstream=...)`；前端调试面板用 `{% if is_page13_super_admin %}` 或 `ecIsSuperAdmin()` / `dgIsSuperAdmin()` 门控。
+
+## 7. 改完自检
+
+```bash
+# 粗查未分流的内部用语（需人工判断上下文）
+rg -n "上游|aicheckword|SECRET_KEY|interop-config|AICHECKWORD_" webapp web/static/js web/templates webapp/templates \
+  | rg -v "user_facing|ufText|dgUserText|admin_text|adminNotes|interopSyncWarnings|__PAGE13_SUPER_ADMIN__"
+```
+
+- 打开初稿页：普通账号不应出现 `dg_interop_info` 集成警告条
+- 普通账号 API 错误不含 `上游` / `aicheckword` 字样
+- 超管账号仍能看到完整联调提示，便于排障

@@ -13,6 +13,7 @@ import uuid
 import socket
 import time as pytime
 from datetime import date, datetime, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
@@ -406,7 +407,10 @@ def _chatbot_call_aicheckword(
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     base = _chatbot_api_base()
     if not base:
-        return None, "未配置 aicheckword 地址：请填写 QUIZ_API_BASE_URL 或 AICHECKWORD_CHAT_API_BASE"
+        return None, user_facing_text(
+            "未配置 aicheckword 地址：请填写 QUIZ_API_BASE_URL 或 AICHECKWORD_CHAT_API_BASE",
+            "未配置文档服务地址，请联系管理员",
+        )
     eff_provider, _prov_note = _chatbot_normalize_provider(provider)
     url = f"{base}/api/chat/reply/generate"
     headers = {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"}
@@ -436,21 +440,27 @@ def _chatbot_call_aicheckword(
         sec = _chatbot_api_timeout_seconds()
         return (
             None,
-            f"调用 aicheckword 超时（已等待约 {sec} 秒）：{e}。"
-            f"可在系统配置调大 AICHECKWORD_CHAT_TIMEOUT_SECONDS（建议 120～300），"
-            f"并确认 aicheckword 已启动且 LLM 可连通。",
+            user_facing_text(
+                f"调用 aicheckword 超时（已等待约 {sec} 秒）：{e}。"
+                f"可在系统配置调大 AICHECKWORD_CHAT_TIMEOUT_SECONDS（建议 120～300），"
+                f"并确认 aicheckword 已启动且 LLM 可连通。",
+                f"文档服务响应超时（已等待约 {sec} 秒），请稍后重试或联系管理员。",
+            ),
         )
     except requests.RequestException as e:
-        return None, f"调用 aicheckword 失败: {e}"
+        return None, user_facing_upstream_error(f"调用 aicheckword 失败: {e}", f"调用文档服务失败: {e}")
     if r.status_code != 200:
         txt = (r.text or "")[:300]
-        return None, f"aicheckword HTTP {r.status_code}: {txt}"
+        return None, user_facing_upstream_error(
+            f"aicheckword HTTP {r.status_code}: {txt}",
+            f"文档服务请求失败（HTTP {r.status_code}）",
+        )
     try:
         data = r.json()
     except Exception:
-        return None, "aicheckword 返回非 JSON"
+        return None, user_facing_text("aicheckword 返回非 JSON", "文档服务响应异常")
     if not isinstance(data, dict):
-        return None, "aicheckword 返回格式异常"
+        return None, user_facing_text("aicheckword 返回格式异常", "文档服务响应格式异常")
     return data, None
 
 
@@ -490,6 +500,25 @@ def _quiz_api_timeout_seconds() -> int:
 def _stats_upstream_quick_timeout_seconds() -> int:
     """带本地兜底（quiz/stats/*）的 GET：限制上游阻塞，默认最多 8s，仍可被较大 QUIZ_API_TIMEOUT_SECONDS 压低。"""
     return max(3, min(8, _quiz_api_timeout_seconds()))
+
+
+def _requirement_upstream_quick_timeout_seconds() -> int:
+    """达标/身份覆盖检测：单次上游计数请求读超时（并行发起，单次不宜过长但也不宜过短误判）。"""
+    return max(8, min(30, _quiz_api_timeout_seconds()))
+
+
+def _role_coverage_upstream_timeout_seconds() -> int:
+    """身份覆盖统计会扫描题库，需明显长于普通 stats 请求。"""
+    return min(120, max(60, _quiz_api_timeout_seconds()))
+
+
+def _quiz_generate_timeout_seconds() -> int:
+    """组卷/练习卷：题库不足时会走上游 LLM 现出，默认 20s 易误判超时。"""
+    return min(600, max(_quiz_api_timeout_seconds(), 120))
+
+
+_bank_total_cache: dict[str, tuple[float, int]] = {}
+_BANK_TOTAL_CACHE_TTL_SEC = 90.0
 
 
 def _quiz_attempt_answers_quick_timeout_seconds() -> int:
@@ -1012,9 +1041,16 @@ def _quiz_api_call(
             "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
         }
     except URLError as e:
+        base_hint = _quiz_api_base_url()
+        port_typo = ""
+        if re.search(r"127\.0\.0\.1/\d+", base_hint or request_url):
+            port_typo = " 端口请用冒号：http://127.0.0.1:8000（勿写 http://127.0.0.1/8000）。"
         return 503, {
             "code": "QUIZ_API_NETWORK_ERROR",
-            "message": f"无法连接考试训练中心后端：{e.reason}",
+            "message": user_facing_text(
+                f"无法连接考试训练中心后端：{e.reason}。请检查 QUIZ_API_BASE_URL 是否为 http://127.0.0.1:8000（冒号端口）且 aicheckword 已启动。{port_typo}",
+                "无法连接文档服务，请联系管理员检查服务地址与运行状态。",
+            ),
             "data": None,
             "trace_id": trace_id,
             "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
@@ -1022,12 +1058,15 @@ def _quiz_api_call(
     except socket.timeout:
         return 504, {
             "code": "QUIZ_API_TIMEOUT",
-            "message": (
-                "考试训练中心后端响应超时。"
-                "请检查 QUIZ_API_BASE_URL 是否正确、aicheckword 服务是否在运行，"
-                "或在系统配置中调大 QUIZ_API_TIMEOUT_SECONDS（如 180；法规提示等 LLM 接口上限 600）。"
+            "message": user_facing_text(
+                "考试训练中心后端响应超时（"
+                f"本次等待上限 {_timeout}s）。"
+                "请确认 aicheckword 已启动且 QUIZ_API_BASE_URL 可达；"
+                "组卷/法规提示等会调用模型，请在系统配置调大 QUIZ_API_TIMEOUT_SECONDS（建议 180）。"
+                f" 请求：{request_url}",
+                "文档服务响应超时，请稍后重试或联系管理员。",
             ),
-            "data": {"timeoutSeconds": _timeout},
+            "data": {"timeoutSeconds": _timeout, "requestUrl": request_url},
             "trace_id": trace_id,
             "request": {"url": request_url, "method": req_method, "upstreamPath": upstream_path},
         }
@@ -1048,6 +1087,7 @@ def _quiz_try_paths(
     payload: Optional[dict[str, Any]] = None,
     query: Optional[dict[str, Any]] = None,
     organization_id: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> tuple[int, dict[str, Any], list[str]]:
     """依次尝试多个上游路径（新旧路由不一致时兼容）。"""
     tried: list[str] = []
@@ -1069,6 +1109,7 @@ def _quiz_try_paths(
             payload=payload,
             query=query,
             organization_id=organization_id,
+            timeout_seconds=timeout_seconds,
         )
         last_status, last_payload = int(st), pl if isinstance(pl, dict) else {"data": pl}
         if 200 <= last_status < 300:
@@ -2029,6 +2070,276 @@ def _expand_quiz_request_body(body: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
+# 与 aicheckword draft_integration_ui_meta 对齐；上游不可用时作考试中心身份下拉兜底
+_EXAM_AUTHOR_ROLE_OPTIONS: list[dict[str, str]] = [
+    {"value": "pm", "label": "产品经理"},
+    {"value": "pjm", "label": "项目经理"},
+    {"value": "rm", "label": "风险经理"},
+    {"value": "rdm", "label": "研发经理"},
+    {"value": "ui", "label": "UI设计师"},
+    {"value": "qa", "label": "测试工程师"},
+    {"value": "cm", "label": "配置管理员"},
+    {"value": "ra", "label": "注册工程师"},
+    {"value": "prod", "label": "生产专员"},
+]
+_EXAM_AUTHOR_ROLE_CACHE_TTL_SEC = 300.0
+_exam_author_role_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_EXAM_COMMON_AUTHOR_ROLE_KEY = "common"
+_EXAM_COMMON_AUTHOR_ROLE_LABEL = "通用（各身份必考）"
+_EXAM_PROD_WEAK_KEYWORDS = {"发布", "软件发布", "上市"}
+_EXAM_PROD_CONTEXT_HINTS = {
+    "生产",
+    "放行",
+    "批放行",
+    "批记录",
+    "gmp",
+    "生产质量管理",
+    "生产质量管理规范",
+    "委托生产",
+    "受托生产",
+}
+_EXAM_AUTHOR_ROLE_KEYWORDS: dict[str, list[str]] = {
+    "pm": [
+        "需求", "requirement", "urs", "srs", "产品", "product", "规格", "specification", "用户故事",
+        "功能需求", "非功能", "适用范围", "预期用途", "prd",
+    ],
+    "pjm": [
+        "项目计划", "project plan", "项目", "project", "里程碑", "进度", "wbs", "计划",
+        "变更", "需求", "requirement", "srs", "设计", "验证", "测试",
+        "研发", "开发", "架构", "代码", "风险", "risk", "追溯", "trace", "版本", "配置",
+        "sdd", "详细设计", "交付", "资源", "干系人", "结项", "立项", "sdp", "软件计划", "项目报告",
+        "设计开发", "设计控制", "核查指南", "法规", "指导原则",
+        "可追溯", "软件生存周期", "生命周期", "确认",
+    ],
+    "rm": [
+        "风险", "hazard", "fmea", "风险分析", "风险控制", "残余风险",
+        "14971", "iso 14971", "风险管理", "风险可接受", "受益", "安全", "核查指南", "法规", "指导原则",
+        "不良事件", "临床", "危害",
+    ],
+    "rdm": [
+        "研发", "开发", "设计", "架构", "sdd", "设计说明", "需求", "代码", "验证",
+        "设计开发", "软件生存周期", "软件生命周期", "医疗器械软件", "独立软件",
+        "现成软件", "soup", "确认", "可追溯", "设计变更", "设计控制", "核查指南", "法规", "指导原则",
+    ],
+    "ui": ["ui", "界面", "交互", "可用性", "视觉", "原型"],
+    "qa": [
+        "测试", "test", "验证", "v&v", "缺陷", "验证报告", "测试用例", "确认", "单元测试", "集成测试", "系统测试",
+        "设计验证", "设计确认", "确认与验证", "核查指南", "法规", "指导原则",
+        "审核", "可追溯", "医疗器械软件", "独立软件",
+    ],
+    "cm": ["配置", "cm", "baseline", "基线", "版本", "发布", "变更", "追溯"],
+    "ra": [
+        "注册", "法规", "标准", "指导原则", "合规", "申报",
+        "条例", "办法", "通告", "公告", "mdr", "ivdr", "510k",
+        "分类", "界定", "审查", "审评", "受理", "ce", "临床评价",
+        "同品种", "比对", "13485", "iso", "现场核查", "监督检查", "质量体系",
+    ],
+    "prod": [
+        "生产",
+        "工艺",
+        "制造",
+        "gmp",
+        "批记录",
+        "检验",
+        "放行",
+        "sop",
+        "批生产",
+        "物料",
+        "生产工艺",
+        "发布",
+        "软件发布",
+        "生产质量管理",
+        "生产质量管理规范",
+        "委托生产",
+        "受托生产",
+        "批放行",
+        "制造过程",
+        "生产过程",
+        "生产环境",
+        "生产现场",
+        "独立软件",
+        "转换",
+        "体考",
+        "现场核查",
+        "核查指南",
+        "法规",
+        "指导原则",
+        "监督管理",
+        "质量管理规范",
+        "上市",
+    ],
+}
+
+
+def _role_keyword_hits_text(text: str, keywords: list[str]) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return False
+    for kw in keywords or []:
+        k = str(kw or "").strip().lower()
+        if k and k in low:
+            return True
+    return False
+
+
+def _bank_question_search_text(question: dict[str, Any]) -> str:
+    """与 aicheckword quiz.service._question_search_text 口径一致。"""
+    parts: list[str] = [
+        str(question.get("stem") or ""),
+        str(question.get("explanation") or ""),
+        str(question.get("category") or ""),
+    ]
+    ev = question.get("evidence")
+    if isinstance(ev, list):
+        for item in ev:
+            if isinstance(item, dict):
+                parts.append(str(item.get("source_file") or ""))
+                parts.append(str(item.get("file_name") or ""))
+                parts.append(str(item.get("content_snippet") or item.get("content") or ""))
+                md = item.get("metadata")
+                if isinstance(md, dict):
+                    parts.append(str(md.get("source_file") or ""))
+                    parts.append(str(md.get("category") or ""))
+    ej = question.get("evidence_json")
+    if ej is not None and not isinstance(ev, list):
+        parts.append(str(ej))
+    return " ".join(parts).lower()
+
+
+def _bank_question_evidence_blob(question: dict[str, Any]) -> str:
+    return _bank_question_search_text(question)
+
+
+def _exam_all_author_role_keyword_scope() -> dict[str, list[str]]:
+    return {k: list(v) for k, v in _EXAM_AUTHOR_ROLE_KEYWORDS.items()}
+
+
+def _exam_role_file_keyword_scope(author_roles: list[str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for role in author_roles or []:
+        kws = [str(x).strip().lower() for x in (_EXAM_AUTHOR_ROLE_KEYWORDS.get(role) or []) if str(x).strip()]
+        if kws:
+            out[role] = kws
+    return out
+
+
+def _exam_question_role_hits(question: dict[str, Any], role_keywords: dict[str, list[str]]) -> set[str]:
+    hits: set[str] = set()
+    if not role_keywords:
+        return hits
+    blob = _bank_question_search_text(question)
+    sfiles: list[str] = []
+    ev = question.get("evidence")
+    if isinstance(ev, list):
+        for item in ev:
+            if isinstance(item, dict):
+                sf = str(item.get("source_file") or "").strip()
+                if sf:
+                    sfiles.append(sf.lower())
+    for role, kws in role_keywords.items():
+        if not kws:
+            continue
+        kws_set = {str(x).strip().lower() for x in kws if str(x).strip()}
+        if not kws_set:
+            continue
+        matched = any(kw in blob for kw in kws_set if kw)
+        if not matched:
+            matched = any(any(kw in sf for kw in kws_set if kw) for sf in sfiles)
+        if role == "prod" and matched:
+            weak_hit = any((kw in blob) and (kw in _EXAM_PROD_WEAK_KEYWORDS) for kw in kws_set) or any(
+                any(kw in sf for kw in _EXAM_PROD_WEAK_KEYWORDS) for sf in sfiles
+            )
+            if weak_hit:
+                has_prod_context = any(ctx in blob for ctx in _EXAM_PROD_CONTEXT_HINTS) or any(
+                    any(ctx in sf for ctx in _EXAM_PROD_CONTEXT_HINTS) for sf in sfiles
+                )
+                has_strong = any((kw in blob) and (kw not in _EXAM_PROD_WEAK_KEYWORDS) for kw in kws_set)
+                if not has_strong and not has_prod_context:
+                    matched = False
+        if matched:
+            hits.add(role)
+    return hits
+
+
+def _exam_question_is_universal_common(question: dict[str, Any]) -> bool:
+    return not _exam_question_role_hits(question, _exam_all_author_role_keyword_scope())
+
+
+def _exam_question_eligible_for_roles(question: dict[str, Any], selected_scope: dict[str, list[str]]) -> bool:
+    if not selected_scope:
+        return True
+    if _exam_question_role_hits(question, selected_scope):
+        return True
+    return _exam_question_is_universal_common(question)
+
+
+def _normalize_author_roles_input(raw: Any, *, allowed_values: set[str] | None = None) -> list[str]:
+    vals: list[str] = []
+    if isinstance(raw, list):
+        vals = [str(x).strip().lower() for x in raw]
+    elif raw is not None:
+        s = str(raw).strip()
+        if s:
+            vals = [seg.strip().lower() for seg in s.split(",")]
+    allowed = allowed_values or {str(x.get("value") or "").strip().lower() for x in _EXAM_AUTHOR_ROLE_OPTIONS}
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in vals:
+        if not v or v in seen or v not in allowed:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
+
+
+def _parse_author_roles_from_bootstrap(data: dict[str, Any] | None) -> list[dict[str, str]]:
+    roles_raw = (data or {}).get("authorRoles") if isinstance(data, dict) else None
+    out: list[dict[str, str]] = []
+    if isinstance(roles_raw, list):
+        for row in roles_raw:
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("value") or "").strip().lower()
+            label = str(row.get("label") or "").strip()
+            if not value:
+                continue
+            out.append({"value": value, "label": label or value})
+    return out
+
+
+def _fetch_exam_author_roles(collection: str, organization_id: str = "") -> tuple[list[dict[str, str]], str]:
+    coll = (collection or "regulations").strip() or "regulations"
+    org = (organization_id or "").strip()
+    key = f"{coll}|{org}"
+    now = float(pytime.time())
+    hit = _exam_author_role_cache.get(key)
+    if hit and now - float(hit[0]) <= _EXAM_AUTHOR_ROLE_CACHE_TTL_SEC:
+        return list(hit[1] or []), ""
+
+    from ._integration_common import fetch_draft_page_bootstrap
+
+    data, err, _raw = fetch_draft_page_bootstrap(coll, read_timeout_seconds=20, organization_id=org or None)
+    out = _parse_author_roles_from_bootstrap(data if isinstance(data, dict) else None)
+    if not out:
+        out = list(_EXAM_AUTHOR_ROLE_OPTIONS)
+    _exam_author_role_cache[key] = (now, out)
+    if err and out == list(_EXAM_AUTHOR_ROLE_OPTIONS):
+        return out, ""
+    return out, str(err or "")
+
+
+def _effective_exam_author_roles(collection: str, organization_id: str, selected_roles: list[str] | None = None) -> tuple[list[dict[str, str]], str]:
+    rows, err = _fetch_exam_author_roles(collection, organization_id=organization_id)
+    if not rows:
+        rows = list(_EXAM_AUTHOR_ROLE_OPTIONS)
+    selected = _normalize_author_roles_input(selected_roles or [])
+    if not selected:
+        return rows, err
+    keep = set(selected)
+    picked = [r for r in rows if str((r or {}).get("value") or "").strip().lower() in keep]
+    return picked or rows, err
+
+
 def _expand_exam_track_and_difficulty_aliases(body: dict[str, Any]) -> dict[str, Any]:
     """体考类型、难度与页面设置对齐：写入多种常见键名，避免上游只认 camelCase 或其它字段。"""
     out = dict(body or {})
@@ -2366,25 +2677,302 @@ def _extract_total_from_bank_payload(payload: dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _query_bank_total_for_track(track: str, keyword: str | None = None) -> int:
+def _query_bank_total_for_track(
+    track: str,
+    keyword: str | None = None,
+    *,
+    collection: str = "regulations",
+    organization_id: str = "",
+    timeout_seconds: Optional[int] = None,
+    use_cache: bool = True,
+) -> int:
+    coll = (collection or "regulations").strip() or "regulations"
+    org = (organization_id or "").strip()
+    kw = (keyword or "").strip()
+    cache_key = f"v2|{track}|{coll}|{org}|{kw.lower()}"
+    if use_cache:
+        hit = _bank_total_cache.get(cache_key)
+        now = float(pytime.time())
+        if hit and now - float(hit[0]) <= _BANK_TOTAL_CACHE_TTL_SEC:
+            return int(hit[1])
     q: dict[str, Any] = {
         "limit": "1",
         "offset": "0",
+        "collection": coll,
         "exam_track": track,
         "examTrack": track,
         "track": track,
     }
-    if keyword:
-        q["q"] = keyword
+    if kw:
+        q["q"] = kw
     st, pl, _ = _quiz_try_paths(
         ["quiz/bank/questions", "quiz/questions", "quiz/bank/question-list"],
         method="GET",
         query=q,
+        organization_id=org or None,
+        timeout_seconds=timeout_seconds,
+    )
+    ok_upstream = 200 <= int(st) < 300 and isinstance(pl, dict)
+    if not ok_upstream:
+        return 0
+    n = max(0, int(_extract_total_from_bank_payload(pl) or 0))
+    if use_cache:
+        _bank_total_cache[cache_key] = (float(pytime.time()), n)
+    return n
+
+
+def _fetch_bank_author_role_coverage_upstream(
+    track: str,
+    role_values: list[str],
+    *,
+    collection: str = "regulations",
+    organization_id: str = "",
+    timeout_seconds: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], Optional[float], dict[str, Any], str]:
+    """调用 aicheckword 身份覆盖统计（evidence 文件名 + 题干，与组卷口径一致）。"""
+    roles = [str(x).strip().lower() for x in (role_values or []) if str(x).strip()]
+    if not roles:
+        return [], None, {}, ""
+    coll = (collection or "regulations").strip() or "regulations"
+    org = (organization_id or "").strip()
+    q: dict[str, Any] = {
+        "collection": coll,
+        "exam_track": track,
+        "examTrack": track,
+        "track": track,
+        "author_roles": ",".join(roles),
+        "authorRoles": ",".join(roles),
+    }
+    st, pl, _ = _quiz_try_paths(
+        ["quiz/bank/author-role-coverage"],
+        method="GET",
+        query=q,
+        organization_id=org or None,
+        timeout_seconds=timeout_seconds,
     )
     if not (200 <= int(st) < 300 and isinstance(pl, dict)):
-        return 0
-    n = _extract_total_from_bank_payload(pl)
-    return max(0, int(n or 0))
+        if int(st) in (404, 405):
+            return [], None, {}, "upstream_role_coverage_api_missing"
+        if int(st) == 504 or (isinstance(pl, dict) and pl.get("code") == "QUIZ_API_TIMEOUT"):
+            return [], None, {}, "upstream_role_coverage_timeout"
+        return [], None, {}, str((pl or {}).get("message") or "upstream_role_coverage_failed")
+    root = _unwrap_quiz_api_success_data(pl)
+    if not isinstance(root, dict):
+        return [], None, {}, "upstream_role_coverage_bad_payload"
+    inner = root.get("data") if isinstance(root.get("data"), dict) else root
+    checks = inner.get("role_checks") if isinstance(inner.get("role_checks"), list) else []
+    diagnostics = inner.get("role_diagnostics") if isinstance(inner.get("role_diagnostics"), dict) else {}
+    rate_raw = inner.get("role_coverage_rate")
+    rate = float(rate_raw) if rate_raw is not None else None
+    return [x for x in checks if isinstance(x, dict)], rate, diagnostics, ""
+
+
+def _role_checks_evidence_local(
+    track: str,
+    role_rows: list[dict[str, Any]],
+    *,
+    collection: str,
+    organization_id: str,
+    timeout_seconds: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """本地统计身份覆盖：所选身份专属 + 通用基线并集（与 aicheckword bank_author_role_coverage 一致）。"""
+    coll = (collection or "regulations").strip() or "regulations"
+    org = (organization_id or "").strip()
+    all_items: list[dict[str, Any]] = []
+    offset = 0
+    limit = 200
+    total_upstream: Optional[int] = None
+    for _page in range(20):
+        q: dict[str, Any] = {
+            "limit": str(limit),
+            "offset": str(offset),
+            "collection": coll,
+            "exam_track": track,
+            "examTrack": track,
+            "track": track,
+        }
+        st, pl, _ = _quiz_try_paths(
+            ["quiz/bank/questions", "quiz/questions"],
+            method="GET",
+            query=q,
+            organization_id=org or None,
+            timeout_seconds=timeout_seconds,
+        )
+        if not (200 <= int(st) < 300 and isinstance(pl, dict)):
+            break
+        root = _unwrap_quiz_api_success_data(pl)
+        items = _extract_bank_items_from_list_root(root if isinstance(root, dict) else {})
+        if not items:
+            break
+        all_items.extend(items)
+        if total_upstream is None:
+            total_upstream = _extract_total_from_bank_payload(pl)
+        offset += len(items)
+        if len(items) < limit:
+            break
+        if total_upstream is not None and offset >= int(total_upstream):
+            break
+
+    role_values = [str(row.get("value") or "").strip().lower() for row in role_rows if str(row.get("value") or "").strip()]
+    selected_scope = _exam_role_file_keyword_scope(role_values)
+    role_counts: dict[str, int] = {r: 0 for r in role_values}
+    common_count = 0
+    diagnostics: dict[str, Any] = {
+        "eligible_total": 0,
+        "selected_primary_count": 0,
+        "selected_cross_focus_count": 0,
+        "leadership_cross_pool_count": 0,
+        "common_count": 0,
+    }
+    leadership_mode = any(x in ("pjm", "rdm") for x in role_values)
+    seen: set[str] = set()
+    for question in all_items:
+        qid = _question_id_from_bank_item(question) or str(id(question))
+        if qid in seen:
+            continue
+        seen.add(qid)
+        if leadership_mode:
+            all_hits = _exam_question_role_hits(question, _exam_all_author_role_keyword_scope())
+            sel_hits = _exam_question_role_hits(question, selected_scope)
+            if all_hits and (not sel_hits):
+                if any(r in ("pjm", "rdm", "rm", "qa", "prod") for r in all_hits):
+                    diagnostics["leadership_cross_pool_count"] = int(diagnostics["leadership_cross_pool_count"]) + 1
+        if not _exam_question_eligible_for_roles(question, selected_scope):
+            continue
+        diagnostics["eligible_total"] = int(diagnostics["eligible_total"]) + 1
+        hits = _exam_question_role_hits(question, selected_scope)
+        if hits:
+            all_hits = _exam_question_role_hits(question, _exam_all_author_role_keyword_scope())
+            other_hits = {x for x in all_hits if x not in hits and x in ("pjm", "rdm", "rm", "qa", "prod")}
+            if other_hits:
+                diagnostics["selected_cross_focus_count"] = int(diagnostics["selected_cross_focus_count"]) + 1
+            else:
+                diagnostics["selected_primary_count"] = int(diagnostics["selected_primary_count"]) + 1
+            for r in hits:
+                role_counts[r] = int(role_counts.get(r, 0)) + 1
+        elif _exam_question_is_universal_common(question):
+            common_count += 1
+            diagnostics["common_count"] = int(diagnostics["common_count"]) + 1
+
+    out: list[dict[str, Any]] = []
+    for row in role_rows:
+        rv = str(row.get("value") or "").strip().lower()
+        kws = [str(x).strip() for x in (_EXAM_AUTHOR_ROLE_KEYWORDS.get(rv) or []) if str(x).strip()]
+        hit_role = int(role_counts.get(rv, 0))
+        out.append(
+            {
+                "role": rv,
+                "label": str(row.get("label") or rv),
+                "keyword": kws[0] if kws else "",
+                "hit_count": hit_role,
+                "is_met": hit_role > 0,
+            }
+        )
+    out.append(
+        {
+            "role": _EXAM_COMMON_AUTHOR_ROLE_KEY,
+            "label": _EXAM_COMMON_AUTHOR_ROLE_LABEL,
+            "keyword": "",
+            "hit_count": int(common_count),
+            "is_met": common_count > 0,
+        }
+    )
+    return out, diagnostics
+
+
+def _role_checks_stem_fallback(
+    track: str,
+    role_rows: list[dict[str, Any]],
+    *,
+    collection: str,
+    organization_id: str,
+    timeout_seconds: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """旧版兜底：仅按题干首关键词检索（上游未部署 author-role-coverage 时）。"""
+    role_keywords: list[str | None] = []
+    for row in role_rows:
+        rv = str(row.get("value") or "").strip().lower()
+        kws = [str(x).strip() for x in (_EXAM_AUTHOR_ROLE_KEYWORDS.get(rv) or []) if str(x).strip()]
+        role_keywords.append(kws[0] if kws else None)
+    role_hits = _query_bank_totals_parallel(
+        track,
+        role_keywords,
+        collection=collection,
+        organization_id=organization_id,
+        timeout_seconds=timeout_seconds,
+    )
+    out: list[dict[str, Any]] = []
+    for i, row in enumerate(role_rows):
+        rv = str(row.get("value") or "").strip().lower()
+        kws = [str(x).strip() for x in (_EXAM_AUTHOR_ROLE_KEYWORDS.get(rv) or []) if str(x).strip()]
+        k0 = kws[0] if kws else ""
+        hit_role = int(role_hits[i]) if i < len(role_hits) else 0
+        out.append(
+            {
+                "role": rv,
+                "label": str(row.get("label") or rv),
+                "keyword": k0,
+                "hit_count": hit_role,
+                "is_met": hit_role > 0,
+            }
+        )
+    return out
+
+
+def _query_bank_totals_parallel(
+    track: str,
+    keywords: list[str | None],
+    *,
+    collection: str = "regulations",
+    organization_id: str = "",
+    timeout_seconds: Optional[int] = None,
+) -> list[int]:
+    """并行查询多个关键词命中数；keywords 中 None 表示不限关键词的总题量。"""
+    if not keywords:
+        return []
+
+    def _count_one(kw: str | None) -> int:
+        return _query_bank_total_for_track(
+            track,
+            kw,
+            collection=collection,
+            organization_id=organization_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    if len(keywords) == 1:
+        return [_count_one(keywords[0])]
+
+    # 子线程内无 Flask 上下文时读不到 app_configs 中的 QUIZ_API_BASE_URL，会导致全部命中为 0。
+    app_obj = None
+    try:
+        from flask import current_app, has_app_context
+
+        if has_app_context():
+            app_obj = current_app._get_current_object()
+    except RuntimeError:
+        app_obj = None
+
+    if app_obj is None:
+        return [_count_one(kw) for kw in keywords]
+
+    out: list[int] = [0] * len(keywords)
+    max_workers = min(8, len(keywords))
+
+    def _one(idx_kw: tuple[int, str | None]) -> tuple[int, int]:
+        idx, kw = idx_kw
+        with app_obj.app_context():
+            return idx, _count_one(kw)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_one, (i, kw)) for i, kw in enumerate(keywords)]
+        for fut in as_completed(futures):
+            try:
+                idx, cnt = fut.result()
+                out[idx] = int(cnt)
+            except Exception:
+                pass
+    return out
 
 
 def _collect_exam_knowledge_markers(track: str) -> dict[str, Optional[datetime]]:
@@ -2429,21 +3017,136 @@ def _collect_exam_knowledge_markers(track: str) -> dict[str, Optional[datetime]]
     return marker
 
 
-def _build_exam_bank_requirement_status(track_raw: Any) -> dict[str, Any]:
+def _build_exam_bank_requirement_status(
+    track_raw: Any,
+    *,
+    author_roles: list[str] | None = None,
+    collection: str = "regulations",
+    organization_id: str = "",
+    roles_only: bool = False,
+) -> dict[str, Any]:
     track = _normalize_exam_track(track_raw)
     prof = _EXAM_TRACK_REQUIREMENT_PROFILES.get(track) or _EXAM_TRACK_REQUIREMENT_PROFILES["cn"]
-    total = _query_bank_total_for_track(track, keyword=None)
+    coll = (collection or "regulations").strip() or "regulations"
+    org = (organization_id or "").strip()
+    quick_t = _requirement_upstream_quick_timeout_seconds()
+    role_cov_t = _role_coverage_upstream_timeout_seconds()
+
+    role_rows, role_err = _effective_exam_author_roles(
+        coll,
+        org,
+        selected_roles=author_roles,
+    )
+    allowed_role_vals = {str((r or {}).get("value") or "").strip().lower() for r in role_rows}
+    selected_norm = _normalize_author_roles_input(author_roles or [], allowed_values=allowed_role_vals)
+    if selected_norm:
+        keep = set(selected_norm)
+        role_rows = [r for r in role_rows if str((r or {}).get("value") or "").strip().lower() in keep] or role_rows
+
+    topic_groups = [] if roles_only else list(prof.get("topic_groups") or [])
+    topic_keywords: list[str | None] = []
+    topic_meta: list[dict[str, Any]] = []
+    for g in topic_groups:
+        kws = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
+        k0 = kws[0] if kws else ""
+        topic_keywords.append(k0 or None)
+        topic_meta.append({"topic": g.get("topic") or k0, "keyword": k0})
+
+    count_keywords: list[str | None] = [None] + topic_keywords
+    if roles_only:
+        total = 0
+        topic_hits: list[int] = []
+    else:
+        counts = _query_bank_totals_parallel(
+            track,
+            count_keywords,
+            collection=coll,
+            organization_id=org,
+            timeout_seconds=quick_t,
+        )
+        total = counts[0] if counts else 0
+        topic_hits = counts[1 : 1 + len(topic_keywords)]
+
+    role_value_list = [str((r or {}).get("value") or "").strip().lower() for r in role_rows if str((r or {}).get("value") or "").strip()]
+    upstream_checks, upstream_rate, upstream_diag, upstream_role_err = _fetch_bank_author_role_coverage_upstream(
+        track,
+        role_value_list,
+        collection=coll,
+        organization_id=org,
+        timeout_seconds=role_cov_t,
+    )
+    role_diagnostics: dict[str, Any] = dict(upstream_diag or {})
+    label_by_role = {str((r or {}).get("value") or "").strip().lower(): str((r or {}).get("label") or "") for r in role_rows}
+    if upstream_checks:
+        role_checks = []
+        for row in upstream_checks:
+            rv = str(row.get("role") or "").strip().lower()
+            hit_role = int(row.get("hit_count") or 0)
+            role_checks.append(
+                {
+                    "role": rv,
+                    "label": str(row.get("label") or label_by_role.get(rv) or rv),
+                    "keyword": str(row.get("keyword") or ""),
+                    "hit_count": hit_role,
+                    "is_met": row.get("is_met") is True or hit_role > 0,
+                }
+            )
+        role_cov_rate = float(upstream_rate) if upstream_rate is not None else (
+            (
+                len([x for x in role_checks if x.get("is_met") is True and x.get("role") != _EXAM_COMMON_AUTHOR_ROLE_KEY])
+                / len(selected_norm)
+            )
+            if selected_norm
+            else 1.0
+        )
+    else:
+        if upstream_role_err in ("upstream_role_coverage_api_missing", "upstream_role_coverage_timeout"):
+            role_checks, role_diagnostics = _role_checks_evidence_local(
+                track,
+                role_rows,
+                collection=coll,
+                organization_id=org,
+                timeout_seconds=role_cov_t,
+            )
+        else:
+            role_checks = _role_checks_stem_fallback(
+                track,
+                role_rows,
+                collection=coll,
+                organization_id=org,
+                timeout_seconds=quick_t,
+            )
+            role_diagnostics = {}
+        role_cov_rate = (
+            (
+                len([x for x in role_checks if x.get("is_met") is True and x.get("role") != _EXAM_COMMON_AUTHOR_ROLE_KEY])
+                / len(selected_norm)
+            )
+            if selected_norm
+            else 1.0
+        )
+        if upstream_role_err and upstream_role_err not in (
+            "upstream_role_coverage_api_missing",
+            "upstream_role_coverage_timeout",
+        ):
+            role_err = (str(role_err or "") + "；" + upstream_role_err).strip("；")
+
     topic_checks: list[dict[str, Any]] = []
     missing_topics: list[str] = []
-    for g in prof.get("topic_groups") or []:
-        kws = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
-        # 每个主题只取第 1 关键词做轻量检索，避免单次检查请求过多。
-        k0 = kws[0] if kws else ""
-        hit = _query_bank_total_for_track(track, keyword=k0) if k0 else 0
+    for i, meta in enumerate(topic_meta):
+        hit = int(topic_hits[i]) if i < len(topic_hits) else 0
         ok = hit > 0
-        topic_checks.append({"topic": g.get("topic") or k0, "keyword": k0, "hit_count": hit, "is_met": ok})
+        topic_checks.append(
+            {"topic": meta.get("topic"), "keyword": meta.get("keyword"), "hit_count": hit, "is_met": ok}
+        )
         if not ok:
-            missing_topics.append(str(g.get("topic") or k0))
+            missing_topics.append(str(meta.get("topic") or meta.get("keyword") or ""))
+
+    missing_roles: list[str] = []
+    for row in role_checks:
+        if row.get("is_met") is True:
+            continue
+        missing_roles.append(str(row.get("label") or row.get("role") or ""))
 
     min_total = int(prof.get("min_total_questions") or 0)
     missing_cnt = max(0, min_total - total)
@@ -2481,8 +3184,12 @@ def _build_exam_bank_requirement_status(track_raw: Any) -> dict[str, Any]:
     reasons: list[str] = []
     if missing_cnt > 0:
         reasons.append(f"当前题量 {total}，低于达标题量 {min_total}。")
-    if missing_topics:
+    if not roles_only and missing_topics:
         reasons.append("主题覆盖不足：" + "、".join(missing_topics) + "。")
+    if role_checks and missing_roles:
+        reasons.append("身份覆盖不足：" + "、".join(missing_roles) + "。")
+    if role_err:
+        reasons.append("身份覆盖检查失败：" + str(role_err))
     if not base:
         reasons.append("尚未建立“达标基线”，请补全后点击“设为当前达标基线”。")
     if changed_flags.get("policy_version"):
@@ -2502,6 +3209,11 @@ def _build_exam_bank_requirement_status(track_raw: Any) -> dict[str, Any]:
         "bank_total": total,
         "missing_total_count": missing_cnt,
         "topic_checks": topic_checks,
+        "role_checks": role_checks,
+        "role_coverage_rate": round(float(role_cov_rate), 4),
+        "role_diagnostics": role_diagnostics,
+        "selected_author_roles": [str((r or {}).get("value") or "") for r in role_rows],
+        "roles_only": bool(roles_only),
         "is_satisfied": is_satisfied,
         "reasons": reasons,
         "next_batch_target_count": _EXAM_BATCH_INGEST_SIZE,
@@ -3878,7 +4590,10 @@ def login_required(f):
         if blocked is not None:
             return blocked
         if is_company_admin():
-            return _company_admin_blocked_response()
+            from .authz import company_admin_integration_path_allowed
+
+            if not company_admin_integration_path_allowed(request.path):
+                return _company_admin_blocked_response()
         return f(*args, **kwargs)
     return decorated_function
 
@@ -3898,7 +4613,10 @@ def _page13_or_login_required(f):
             return f(*args, **kwargs)
         if session.get("user_id"):
             if is_company_admin():
-                return _company_admin_blocked_response()
+                from .authz import company_admin_integration_path_allowed
+
+                if not company_admin_integration_path_allowed(request.path):
+                    return _company_admin_blocked_response()
             blocked = block_until_super_admin_or_user_id()
             if blocked is not None:
                 return blocked
@@ -3946,7 +4664,10 @@ def page13_access_required(f):
         if is_page13_super_admin():
             return f(*args, **kwargs)
         if session.get("user_id") and is_company_admin():
-            return _company_admin_blocked_response()
+            from .authz import company_admin_integration_path_allowed
+
+            if not company_admin_integration_path_allowed(request.path):
+                return _company_admin_blocked_response()
         if session.get("user_id") and is_project_admin():
             blocked = block_until_super_admin_or_user_id()
             if blocked is not None:
@@ -4523,6 +5244,14 @@ def api_logout():
     return jsonify({"message": "已退出登录"})
 
 
+@bp.get("/api/system/deploy-version")
+def api_system_deploy_version():
+    """当前部署镜像版本（与 .env IMAGE_VERSION / 镜像 tag 一致）。"""
+    from .deploy_version import deploy_version_payload
+
+    return jsonify(deploy_version_payload())
+
+
 @bp.get("/api/me")
 def api_me():
     from .authz import is_page13_super_admin, role_home_url
@@ -4759,7 +5488,12 @@ def _extract_set_id_from_quiz_proxy_payload(payload: Any) -> str:
 @page13_access_required
 def api_exam_teacher_generate_set():
     body = _expand_quiz_request_body(_json_payload())
-    status, payload = _quiz_api_call("quiz/sets/generate", method="POST", payload=body)
+    status, payload = _quiz_api_call(
+        "quiz/sets/generate",
+        method="POST",
+        payload=body,
+        timeout_seconds=_quiz_generate_timeout_seconds(),
+    )
     return jsonify(payload), status
 
 
@@ -4779,6 +5513,104 @@ def api_exam_student_project_cases():
     coll = (request.args.get("collection") or "regulations").strip() or "regulations"
     status, payload = _quiz_api_call("quiz/tools/project-cases", method="GET", query={"collection": coll})
     return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/author-roles")
+@login_required
+def api_exam_student_author_roles():
+    """学生端身份选项：优先 aicheckword page-bootstrap，失败时用本地兜底列表。"""
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(request.args.get("organization_id") or "").strip(),
+        project_id="",
+    )
+    rows, err = _fetch_exam_author_roles(coll, organization_id=org_id)
+    if not rows:
+        return jsonify(
+            {
+                "code": "UPSTREAM_ERROR",
+                "message": user_facing_upstream_error(err or "无法加载身份选项"),
+                "data": {"author_roles": []},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 502
+    return jsonify({"code": 0, "message": "ok", "data": {"author_roles": rows, "collection": coll}}), 200
+
+
+@bp.get("/api/exam-center/student/author-roles/coverage-preview")
+@login_required
+def api_exam_student_author_roles_coverage_preview():
+    """学生端：按已选身份预览题库覆盖情况（与老师端检测同源）。"""
+    track = _normalize_exam_track(
+        request.args.get("exam_track")
+        or request.args.get("examTrack")
+        or request.args.get("track")
+        or "cn"
+    )
+    roles_raw: list[str] = []
+    roles_raw.extend(request.args.getlist("author_roles"))
+    roles_raw.extend(request.args.getlist("authorRoles"))
+    if not roles_raw:
+        one = str(request.args.get("author_roles") or request.args.get("authorRoles") or "").strip()
+        if one:
+            roles_raw.extend([seg.strip() for seg in one.split(",") if seg.strip()])
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(request.args.get("organization_id") or "").strip(),
+        project_id="",
+    )
+    role_rows, _role_err = _effective_exam_author_roles(coll, org_id, selected_roles=roles_raw)
+    roles = [str((r or {}).get("value") or "").strip().lower() for r in role_rows if str((r or {}).get("value") or "").strip()]
+    if not roles:
+        return jsonify(
+            {
+                "code": "BAD_REQUEST",
+                "message": "请至少选择一个有效身份后再查看覆盖情况",
+                "data": None,
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 400
+    snap = _build_exam_bank_requirement_status(
+        track,
+        author_roles=roles,
+        collection=coll,
+        organization_id=org_id,
+        roles_only=True,
+    )
+    return jsonify(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "role_checks": snap.get("role_checks") or [],
+                "role_coverage_rate": snap.get("role_coverage_rate"),
+                "role_diagnostics": snap.get("role_diagnostics") or {},
+                "selected_author_roles": snap.get("selected_author_roles") or roles,
+            },
+            "trace_id": uuid.uuid4().hex,
+        }
+    ), 200
+
+
+@bp.get("/api/exam-center/teacher/author-roles")
+@page13_access_required
+def api_exam_teacher_author_roles():
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(request.args.get("organization_id") or "").strip(),
+        project_id="",
+    )
+    rows, err = _fetch_exam_author_roles(coll, organization_id=org_id)
+    if not rows:
+        return jsonify(
+            {
+                "code": "UPSTREAM_ERROR",
+                "message": user_facing_upstream_error(err or "无法加载身份选项"),
+                "data": {"author_roles": []},
+                "trace_id": uuid.uuid4().hex,
+            }
+        ), 502
+    return jsonify({"code": 0, "message": "ok", "data": {"author_roles": rows, "collection": coll}}), 200
 
 
 @bp.post("/api/exam-center/teacher/bank/ingest-by-ai")
@@ -4876,7 +5708,29 @@ def api_exam_teacher_bank_requirements_check():
         or request.args.get("track")
         or "cn"
     )
-    data = _build_exam_bank_requirement_status(track)
+    roles_raw: list[str] = []
+    roles_raw.extend(request.args.getlist("author_roles"))
+    roles_raw.extend(request.args.getlist("authorRoles"))
+    if not roles_raw:
+        one = str(request.args.get("author_roles") or request.args.get("authorRoles") or "").strip()
+        if one:
+            roles_raw.extend([seg.strip() for seg in one.split(",") if seg.strip()])
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(request.args.get("organization_id") or "").strip(),
+        project_id="",
+    )
+    roles_only_raw = str(
+        request.args.get("roles_only") or request.args.get("rolesOnly") or ""
+    ).strip().lower()
+    roles_only = roles_only_raw in {"1", "true", "yes", "on"} or bool(roles_raw)
+    data = _build_exam_bank_requirement_status(
+        track,
+        author_roles=roles_raw,
+        collection=coll,
+        organization_id=org_id,
+        roles_only=roles_only,
+    )
     msg = "当前题库已满足体考要求。仍可继续录题以增强覆盖。" if data.get("is_satisfied") else "当前题库尚未满足体考要求。"
     return jsonify({"code": 0, "message": msg, "data": data, "trace_id": uuid.uuid4().hex}), 200
 
@@ -6625,11 +7479,50 @@ def api_exam_student_generate_practice_set():
     if not exam_student_mutation_allowed():
         return observer_mutation_blocked_response()
     body = _expand_quiz_request_body(_json_payload())
+    author_roles = _normalize_author_roles_input(body.get("author_roles") or body.get("authorRoles"))
+    if author_roles:
+        coll = str(body.get("collection") or "regulations").strip() or "regulations"
+        org_id = _resolve_exam_organization_id(
+            explicit_org_id=str(body.get("organization_id") or body.get("organizationId") or "").strip(),
+            project_id=str(body.get("project_id") or body.get("projectId") or "").strip(),
+        )
+        allowed_rows, err = _fetch_exam_author_roles(coll, organization_id=org_id)
+        if not allowed_rows:
+            return jsonify(
+                {
+                    "code": "UPSTREAM_ERROR",
+                    "message": user_facing_upstream_error(err or "无法校验身份选项"),
+                    "data": None,
+                    "trace_id": uuid.uuid4().hex,
+                }
+            ), 502
+        allowed = {str(x.get("value") or "").strip().lower() for x in allowed_rows if isinstance(x, dict)}
+        bad = [x for x in author_roles if x not in allowed]
+        if bad:
+            return jsonify(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": f"身份选项无效：{', '.join(bad)}",
+                    "data": {"invalid_author_roles": bad, "allowed_author_roles": sorted(allowed)},
+                    "trace_id": uuid.uuid4().hex,
+                }
+            ), 400
+        body["author_roles"] = author_roles
+        body["authorRoles"] = author_roles
+        cov = str(body.get("author_role_coverage") or body.get("authorRoleCoverage") or "balanced_union").strip().lower()
+        cov = "balanced_union" if cov == "balanced_union" else "union"
+        body["author_role_coverage"] = cov
+        body["authorRoleCoverage"] = cov
     uid = str(session.get("user_id") or "").strip()
     if uid:
         body["user_id"] = uid
         body["userId"] = uid
-    status, payload = _quiz_api_call("quiz/practice/generate-set", method="POST", payload=body)
+    status, payload = _quiz_api_call(
+        "quiz/practice/generate-set",
+        method="POST",
+        payload=body,
+        timeout_seconds=_quiz_generate_timeout_seconds(),
+    )
     return jsonify(payload), status
 
 

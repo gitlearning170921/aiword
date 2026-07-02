@@ -35,11 +35,13 @@
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">群 ID（可选）</label>
-                    <input type="text" id="cbGroup" class="form-control" placeholder="__test__">
+                    <input type="text" id="cbGroup" class="form-control" placeholder="默认来自 CHATBOT_ENABLED_GROUPS">
+                    <div id="cbGroupHint" class="form-text"></div>
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">sessionWebhook（可选）</label>
-                    <input type="text" id="cbSessionWebhook" class="form-control" placeholder="勾选发送时使用">
+                    <input type="text" id="cbSessionWebhook" class="form-control" placeholder="默认来自 CHATBOT_DINGTALK_WEBHOOK">
+                    <div id="cbWebhookHint" class="form-text"></div>
                 </div>
             </div>
             <div class="form-check mb-3">
@@ -98,6 +100,8 @@
     const elProviderHint = document.getElementById("cbProviderHint");
     const elGroup = document.getElementById("cbGroup");
     const elSendWebhook = document.getElementById("cbSessionWebhook");
+    const elGroupHint = document.getElementById("cbGroupHint");
+    const elWebhookHint = document.getElementById("cbWebhookHint");
     const elSend = document.getElementById("cbSend");
     const elStatus = document.getElementById("cbStatus");
     const elMeta = document.getElementById("cbMeta");
@@ -153,6 +157,32 @@
             hint = (hint ? hint + " " : "") + "检测到页面2个人 API Key，将优先透传。";
         }
         elProviderHint.textContent = hint || "钉钉真实回调固定使用系统配置中的 CHATBOT_LLM_PROVIDER。";
+    }
+
+    function fillTestDefaults(data) {
+        const gid = (data.defaultGroupId || "__test__").trim();
+        const wh = (data.defaultWebhook || "").trim();
+        if (elGroup && !(elGroup.value || "").trim()) {
+            elGroup.value = gid;
+        }
+        if (elSendWebhook && !(elSendWebhook.value || "").trim()) {
+            elSendWebhook.value = wh;
+        }
+        if (elGroupHint) {
+            const groups = Array.isArray(data.enabledGroups) ? data.enabledGroups : [];
+            if (groups.length > 1) {
+                elGroupHint.textContent = "已带入 CHATBOT_ENABLED_GROUPS 首项；共 " + groups.length + " 个群。";
+            } else if (groups.length === 1) {
+                elGroupHint.textContent = "已带入 CHATBOT_ENABLED_GROUPS。";
+            } else {
+                elGroupHint.textContent = "未配置群白名单，默认 __test__。";
+            }
+        }
+        if (elWebhookHint) {
+            elWebhookHint.textContent = wh
+                ? "已带入 CHATBOT_DINGTALK_WEBHOOK（勾选「同时发送」时使用）。"
+                : "未配置 CHATBOT_DINGTALK_WEBHOOK；勾选发送时需手填 sessionWebhook。";
+        }
     }
 
     async function _safeJson(r) {
@@ -239,6 +269,7 @@
             const data = await _safeJson(r);
             if (!r.ok) throw new Error(data.message || ("HTTP " + r.status));
             fillProviderOptions(data);
+            fillTestDefaults(data);
         } catch (e) {
             elProvider.innerHTML = '<option value="">deepseek（加载选项失败，仍可使用）</option>';
             elProviderHint.textContent = String(e);

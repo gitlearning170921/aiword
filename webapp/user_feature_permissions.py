@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from .models import User
+from .models import (
+    ADMIN_ROLE_COMPANY,
+    ADMIN_ROLE_NONE,
+    ADMIN_ROLE_PROJECT,
+    ADMIN_ROLES,
+    User,
+)
 
 # 页面0：公司总览 · 文档工具（手动上传）
 USER_PAGE0_FEATURE_KEYS: tuple[str, ...] = (
@@ -60,11 +66,17 @@ USER_FEATURE_PERM_GROUP_DEFS: tuple[dict[str, Any], ...] = (
     },
 )
 
-# 分级角色在账号管理中可见的分组（批量功能权限展示全部分组）
+# 分级角色在账号管理中可见的分组（新建/编辑/批量均按所选角色过滤）
 USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS: dict[str, tuple[str, ...]] = {
     "company": ("page0",),
     "project": ("page1", "page2"),
     "none": ("page2",),
+}
+
+ADMIN_ROLE_LABELS_FOR_BATCH: dict[str, str] = {
+    "none": "普通用户",
+    "project": "项目管理员",
+    "company": "公司管理员",
 }
 
 USER_FEATURE_LABELS: dict[str, str] = {
@@ -287,3 +299,44 @@ def parse_batch_feature_permission_patch(data: dict[str, Any]) -> dict[str, str]
             raise ValueError(f"功能权限 {key} 的值无效")
         out[key] = act
     return out
+
+
+def normalize_admin_role_for_feature_perms(role: str | None) -> str:
+    r = (role or ADMIN_ROLE_NONE).strip()
+    return r if r in ADMIN_ROLES else ADMIN_ROLE_NONE
+
+
+def feature_permission_group_ids_for_role(role: str | None) -> tuple[str, ...]:
+    r = normalize_admin_role_for_feature_perms(role)
+    return USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS.get(
+        r, USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS[ADMIN_ROLE_NONE]
+    )
+
+
+def feature_permission_keys_for_role(role: str | None) -> frozenset[str]:
+    allowed_ids = set(feature_permission_group_ids_for_role(role))
+    keys: list[str] = []
+    for group in USER_FEATURE_PERM_GROUP_DEFS:
+        if group["id"] in allowed_ids:
+            keys.extend(group["keys"])
+    return frozenset(keys)
+
+
+def filter_batch_patch_for_role(role: str | None, patch: dict[str, str]) -> dict[str, str]:
+    allowed = feature_permission_keys_for_role(role)
+    return {k: v for k, v in patch.items() if k in allowed}
+
+
+def validate_homogeneous_batch_users(users: list[User]) -> tuple[str | None, str | None]:
+    """批量功能权限：所选账号须同一分级角色。返回 (role, error_message)。"""
+    if not users:
+        return None, "请至少选择一个账号"
+    roles = {
+        normalize_admin_role_for_feature_perms(getattr(u, "admin_role", None)) for u in users
+    }
+    if len(roles) > 1:
+        return None, (
+            "所选账号分级角色不一致，请仅勾选同一角色"
+            "（普通用户 / 项目管理员 / 公司管理员）后再批量设置功能权限"
+        )
+    return next(iter(roles)), None

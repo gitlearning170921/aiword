@@ -20,6 +20,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     AIWORD_PROJECT_ROOT=/app
 
+ARG APP_VERSION=dev
+ENV AIWORD_APP_VERSION=${APP_VERSION}
+
 WORKDIR /app
 
 RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \

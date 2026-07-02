@@ -120,6 +120,8 @@ def _serialize(row: UserFeedback, *, include_admin_fields: bool = False) -> dict
         "screenshotUploadError": row.screenshot_upload_error,
         "resolution": row.resolution,
         "resolvedAt": row.resolved_at.isoformat(sep=" ", timespec="seconds") if row.resolved_at else None,
+        "aiwordVersion": getattr(row, "aiword_version", None),
+        "aicheckwordVersion": getattr(row, "aicheckword_version", None),
         "createdAt": row.created_at.isoformat(sep=" ", timespec="seconds") if row.created_at else None,
         "updatedAt": row.updated_at.isoformat(sep=" ", timespec="seconds") if row.updated_at else None,
         "canResubmit": row.status in _TERMINAL_STATUSES,
@@ -149,11 +151,14 @@ def _login_user_required():
 
 @feedback_bp.get("/api/feedback/meta")
 def feedback_meta():
+    from .deploy_version import deploy_version_payload
+
     return jsonify(
         {
             "featureModules": [{"key": k, "label": v} for k, v in FEEDBACK_FEATURE_MODULES],
             "priorities": [{"key": k, "label": v} for k, v in FEEDBACK_PRIORITIES],
             "statuses": [{"key": k, "label": v} for k, v in FEEDBACK_STATUSES],
+            "deployVersions": deploy_version_payload(),
         }
     )
 
@@ -177,6 +182,10 @@ def create_feedback():
     if priority not in _PRIORITY_KEYS:
         return jsonify({"message": "请选择有效的优先级"}), 400
 
+    from .deploy_version import current_feedback_versions
+
+    aiword_ver, aicheckword_ver = current_feedback_versions()
+
     row = UserFeedback(
         user_id=user.id,
         submitter_username=user.username,
@@ -185,6 +194,8 @@ def create_feedback():
         description=description,
         priority=priority,
         status="pending",
+        aiword_version=aiword_ver,
+        aicheckword_version=aicheckword_ver,
     )
     db.session.add(row)
     db.session.flush()

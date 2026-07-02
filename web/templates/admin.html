@@ -8,6 +8,7 @@
             <p class="mb-0 small text-muted">超级管理员入口：业务字典（注册国家/项目组/任务类型等）、账号、系统参数与钉钉联调。须已通过页面4 访问密码验证。</p>
         </div>
         <div class="text-end">
+            <div class="small text-muted mb-1" id="adminDeployVersionBar">系统版本：加载中…</div>
             <span class="badge bg-warning text-dark">超级管理员</span>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="adminLogoutPage13Btn">退出超级管理员</button>
         </div>
@@ -383,6 +384,7 @@
                                     <th>提交时间</th>
                                     <th>提交人</th>
                                     <th>功能模块</th>
+                                    <th>系统版本</th>
                                     <th>优先级</th>
                                     <th>问题描述</th>
                                     <th>截图</th>
@@ -392,7 +394,7 @@
                                 </tr>
                             </thead>
                             <tbody id="adminFeedbackTableBody">
-                                <tr><td colspan="9" class="text-muted text-center small py-3">切换到本 Tab 后加载…</td></tr>
+                                <tr><td colspan="10" class="text-muted text-center small py-3">切换到本 Tab 后加载…</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -551,7 +553,7 @@
             </div>
             <div class="modal-body">
                 <p class="small text-muted mb-2" id="batchUserFeaturePermsHint">已选 0 个账号</p>
-                <p class="form-text small mb-2">字段与新建/编辑账号中的功能权限一致（含页面0/1/2 分组）。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。须先在「系统配置」对应分区开启全局开关。</p>
+                <p class="form-text small mb-2">字段与新建/编辑账号中「功能权限」一致，且<strong>仅展示所选账号分级角色可用的分组</strong>（普通用户仅页面2；项目管理员为页面1/2；公司管理员为页面0）。须勾选<strong>同一分级角色</strong>的账号方可批量设置。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。</p>
                 <div id="batchUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
             </div>
             <div class="modal-footer">

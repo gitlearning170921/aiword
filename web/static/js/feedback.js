@@ -120,6 +120,15 @@
         descEl.focus();
     }
 
+    function formatDeployVersions(item) {
+        const aw = (item && item.aiwordVersion) ? String(item.aiwordVersion).trim() : "";
+        const ac = (item && item.aicheckwordVersion) ? String(item.aicheckwordVersion).trim() : "";
+        if (!aw && !ac) return "—";
+        if (aw && ac) return `aiword ${escapeHtml(aw)} · aicheckword ${escapeHtml(ac)}`;
+        if (aw) return `aiword ${escapeHtml(aw)}`;
+        return `aicheckword ${escapeHtml(ac)}`;
+    }
+
     function renderMineItem(item) {
         const shot = item.hasScreenshot
             ? `<div class="mt-2"><a href="${appPath("/api/feedback/" + encodeURIComponent(item.id) + "/screenshot")}" target="_blank" rel="noopener">查看截图</a></div>`
@@ -146,6 +155,7 @@
                     <div class="text-muted">${escapeHtml(item.createdAt || "")}</div>
                 </div>
                 <div class="mt-2">${escapeHtml(item.description)}</div>
+                <div class="mt-1 small text-muted">提交时系统版本：${formatDeployVersions(item)}</div>
                 ${resolution}
                 ${resolvedAt}
                 ${shot}
@@ -375,6 +385,7 @@
                 <td class="small text-muted">${escapeHtml(item.createdAt || "")}</td>
                 <td class="small">${escapeHtml(item.submitterLabel || item.submitterDisplayName || item.submitterUsername || "—")}</td>
                 <td class="small">${escapeHtml(item.featureModuleLabel)}</td>
+                <td class="small text-muted">${formatDeployVersions(item)}</td>
                 <td class="small"><span class="badge bg-light text-dark border">${escapeHtml(item.priorityLabel)}</span></td>
                 <td class="small" title="${escapeHtml(item.description)}">${descShort}</td>
                 <td class="small">${shot}</td>
@@ -399,19 +410,19 @@
     async function loadAdminFeedbackList() {
         const tbody = document.getElementById("adminFeedbackTableBody");
         if (!tbody) return;
-        tbody.innerHTML = '<tr><td colspan="9" class="text-muted text-center small py-3">加载中…</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-muted text-center small py-3">加载中…</td></tr>';
         try {
             const statusFilter = document.getElementById("adminFeedbackStatusFilter")?.value || "";
             const qs = statusFilter ? `?status=${encodeURIComponent(statusFilter)}` : "";
             const data = await apiRequest("/api/feedback" + qs);
             const items = data.items || [];
             if (!items.length) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-muted text-center small py-3">暂无反馈</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="text-muted text-center small py-3">暂无反馈</td></tr>';
                 return;
             }
             tbody.innerHTML = items.map(renderAdminRow).join("");
         } catch (e) {
-            tbody.innerHTML = `<tr><td colspan="9" class="text-danger text-center small py-3">${escapeHtml(e.message || "加载失败")}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="10" class="text-danger text-center small py-3">${escapeHtml(e.message || "加载失败")}</td></tr>`;
         }
     }
 

@@ -3,6 +3,10 @@
         return (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
     }
 
+    function ecIsSuperAdmin() {
+        return !!window.__PAGE13_SUPER_ADMIN__;
+    }
+
     function ecUf(adminText, userText) {
         return typeof window.ufText === "function"
             ? window.ufText(adminText, userText)
@@ -198,7 +202,10 @@
         if (payload.error) {
             parts.push('<div class="alert alert-danger py-2 small mb-0">' + escExam(String(payload.error)) + "</div>");
         }
-        return parts.length ? parts.join("") : '<p class="text-muted mb-0">暂无清单条目，可展开下方「接口调试」查看原始响应。</p>';
+        return parts.length ? parts.join("") : '<p class="text-muted mb-0">' + ecUf(
+            "暂无清单条目，可展开下方「接口调试」查看原始响应。",
+            "暂无清单条目。"
+        ) + "</p>";
     }
 
     /**
@@ -414,6 +421,8 @@
         });
         var apiCard = document.getElementById("examApiResultCard");
         if (apiCard) apiCard.classList.toggle("d-none", role === "student");
+        var apiDetails = document.getElementById("examApiResultDetails");
+        if (apiDetails) apiDetails.classList.toggle("d-none", !ecIsSuperAdmin());
         var btnH = document.getElementById("btnExamHealth");
         if (btnH) btnH.classList.toggle("d-none", role === "student");
         var px = document.getElementById("examChromeProxyHint");
@@ -540,12 +549,14 @@
         var resultBox = document.getElementById("examApiResult");
         var fb = document.getElementById("examApiCompactFeedback");
         return function (payload) {
-            if (resultBox) {
+            if (resultBox && ecIsSuperAdmin()) {
                 try {
                     resultBox.textContent = JSON.stringify(payload, null, 2);
                 } catch (e) {
                     resultBox.textContent = String(payload);
                 }
+            } else if (resultBox) {
+                resultBox.textContent = "";
             }
             if (!fb) return;
             var role = getExamRole();
@@ -568,7 +579,12 @@
             var msg = String(payload.message != null ? payload.message : "").trim();
             if (danger) {
                 fb.className = "alert alert-danger py-2 small mb-2";
-                if (!msg && payload.__http_status) msg = "请求失败（HTTP " + payload.__http_status + "）";
+                if (!msg && payload.__http_status) {
+                    msg = ecUf(
+                        "请求失败（HTTP " + payload.__http_status + "）",
+                        "请求失败，请稍后重试"
+                    );
+                }
                 if (!msg) msg = "请求失败";
                 if (msg.length > 600) msg = msg.slice(0, 600) + "…";
                 fb.textContent = msg;
@@ -592,7 +608,10 @@
                     fb.className = "alert alert-success py-2 small mb-2";
                     var outMsg = msg && msg !== "undefined" ? msg : "";
                     if (outMsg.length > 260) outMsg = outMsg.slice(0, 260) + "…";
-                    fb.textContent = outMsg || "操作已完成（详情见下方「接口调试」JSON）";
+                    fb.textContent = outMsg || ecUf(
+                        "操作已完成（详情见下方「接口调试」JSON）",
+                        "操作已完成"
+                    );
                     fb.classList.remove("d-none");
                 } else {
                     fb.classList.add("d-none");
@@ -654,6 +673,7 @@
         if (typeof window.__examLoadTeacherSets === "function") window.__examLoadTeacherSets();
         if (typeof window.__examLoadTeacherBankQuestions === "function") window.__examLoadTeacherBankQuestions();
         if (typeof window.__examLoadTeacherIssuedAssignments === "function") window.__examLoadTeacherIssuedAssignments();
+        if (typeof window.__examLoadTeacherAuthorRoles === "function") window.__examLoadTeacherAuthorRoles();
         if (typeof window.__examLoadStatsOverview === "function") window.__examLoadStatsOverview();
         if (typeof window.__examLoadStatsRecentActivity === "function") window.__examLoadStatsRecentActivity();
         if (typeof window.__examLoadStudentBoardTable === "function") window.__examLoadStudentBoardTable();
@@ -662,6 +682,7 @@
         if (typeof window.__examLoadStatsOptions === "function") window.__examLoadStatsOptions();
         if (typeof window.__examLoadStudentHistory === "function") window.__examLoadStudentHistory(false);
         if (typeof window.__examLoadStudentAssignments === "function") window.__examLoadStudentAssignments();
+        loadStudentAuthorRoleOptions();
     }
 
     function postExamActiveOrganization(orgId) {
@@ -883,6 +904,280 @@
         return Number.isFinite(n) && n > 0 ? n : 0;
     }
 
+    function readAuthorRoleCheckboxes(containerId) {
+        var box = document.getElementById(containerId);
+        if (!box) return [];
+        var out = [];
+        var seen = {};
+        box.querySelectorAll('input[type="checkbox"][data-author-role]:checked').forEach(function (cb) {
+            var v = String(cb.getAttribute("data-author-role") || cb.value || "").trim().toLowerCase();
+            if (!v || seen[v]) return;
+            seen[v] = true;
+            out.push(v);
+        });
+        return out;
+    }
+
+    function readStudentAuthorRoles() {
+        return readAuthorRoleCheckboxes("studentAuthorRolesList");
+    }
+
+    function readTeacherRequirementRoles() {
+        return readAuthorRoleCheckboxes("teacherRequirementAuthorRolesList");
+    }
+
+    function renderAuthorRoleCheckboxes(containerId, rows, prevSelected, onChange) {
+        var box = document.getElementById(containerId);
+        if (!box) return;
+        box.innerHTML = "";
+        if (!rows || !rows.length) {
+            box.innerHTML = '<div class="text-muted">（暂无可用身份）</div>';
+            return;
+        }
+        var prev = {};
+        (prevSelected || []).forEach(function (v) {
+            prev[String(v || "").trim().toLowerCase()] = true;
+        });
+        rows.forEach(function (r, idx) {
+            if (!r || typeof r !== "object") return;
+            var val = String(r.value || "").trim().toLowerCase();
+            if (!val) return;
+            var wrap = document.createElement("div");
+            wrap.className = "form-check";
+            var cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.className = "form-check-input";
+            cb.id = containerId + "_role_" + idx;
+            cb.value = val;
+            cb.setAttribute("data-author-role", val);
+            if (prev[val]) cb.checked = true;
+            var lbl = document.createElement("label");
+            lbl.className = "form-check-label";
+            lbl.setAttribute("for", cb.id);
+            lbl.textContent = String(r.label || val).trim();
+            wrap.appendChild(cb);
+            wrap.appendChild(lbl);
+            box.appendChild(wrap);
+        });
+        if (typeof onChange === "function") {
+            box.querySelectorAll('input[type="checkbox"][data-author-role]').forEach(function (cb) {
+                cb.addEventListener("change", onChange);
+            });
+        }
+    }
+
+    function renderRoleCoveragePanelHtml(rows, rate, opts) {
+        opts = opts || {};
+        var mode = String(opts.mode || "bank").toLowerCase();
+        if (!Array.isArray(rows) || !rows.length) {
+            return '<div class="text-muted">请先勾选身份以查看覆盖情况。</div>';
+        }
+        var r = Number(rate);
+        if (!Number.isFinite(r) || r < 0) r = 0;
+        var roleOnlyRows = rows.filter(function (x) {
+            return x && String(x.role || "").toLowerCase() !== "common";
+        });
+        var metCnt = 0;
+        roleOnlyRows.forEach(function (x) {
+            if (x && x.is_met === true) metCnt += 1;
+        });
+        if (!roleOnlyRows.length) {
+            rows.forEach(function (x) {
+                if (x && x.is_met === true) metCnt += 1;
+            });
+            roleOnlyRows = rows;
+        }
+        if (Number.isFinite(Number(opts.rate))) {
+            r = Number(opts.rate);
+        } else if (roleOnlyRows.length) {
+            r = metCnt / roleOnlyRows.length;
+        }
+        var title = mode === "practice" ? "本次练习身份覆盖" : "身份覆盖";
+        var head =
+            '<div class="mb-1"><strong>' +
+            escExam(title) +
+            "</strong>：" +
+            escExam(String(metCnt)) +
+            "/" +
+            escExam(String(roleOnlyRows.length || rows.length)) +
+            "（" +
+            escExam(String(Math.round(r * 100))) +
+            "%）</div>";
+        var tbl =
+            '<table class="table table-sm table-bordered mb-0 bg-white"><thead><tr>' +
+            (mode === "practice"
+                ? "<th>身份</th><th>出题数</th><th>状态</th>"
+                : "<th>身份</th><th>匹配关键词</th><th>题库命中</th><th>状态</th>") +
+            "</tr></thead><tbody>";
+        rows.forEach(function (x) {
+            if (!x || typeof x !== "object") return;
+            var ok = x.is_met === true;
+            var stCls = ok ? "text-success" : "text-danger";
+            var stTxt = ok ? (mode === "practice" ? "已分配" : "已覆盖") : "不足";
+            if (mode === "practice") {
+                tbl +=
+                    "<tr><td>" +
+                    escExam(String(x.label || x.role || "—")) +
+                    "</td><td>" +
+                    escExam(String(x.hit_count != null ? x.hit_count : "—")) +
+                    '</td><td class="' +
+                    stCls +
+                    '">' +
+                    escExam(stTxt) +
+                    "</td></tr>";
+            } else {
+                tbl +=
+                    "<tr><td>" +
+                    escExam(String(x.label || x.role || "—")) +
+                    "</td><td>" +
+                    escExam(String(x.keyword || "—")) +
+                    "</td><td>" +
+                    escExam(String(x.hit_count != null ? x.hit_count : "—")) +
+                    '</td><td class="' +
+                    stCls +
+                    '">' +
+                    escExam(stTxt) +
+                    "</td></tr>";
+            }
+        });
+        tbl += "</tbody></table>";
+        if (opts.hint) {
+            tbl += '<div class="small text-muted mt-1">' + escExam(String(opts.hint)) + "</div>";
+        }
+        return head + tbl;
+    }
+
+    function renderRoleDiagnosticsHtml(diag) {
+        if (!diag || typeof diag !== "object") return "";
+        var eligible = Number(diag.eligible_total || 0);
+        var primary = Number(diag.selected_primary_count || 0);
+        var cross = Number(diag.selected_cross_focus_count || 0);
+        var common = Number(diag.common_count || 0);
+        var leadershipPool = Number(diag.leadership_cross_pool_count || 0);
+        if (!Number.isFinite(eligible)) eligible = 0;
+        if (!Number.isFinite(primary)) primary = 0;
+        if (!Number.isFinite(cross)) cross = 0;
+        if (!Number.isFinite(common)) common = 0;
+        if (!Number.isFinite(leadershipPool)) leadershipPool = 0;
+        return (
+            '<div class="mt-2 p-2 border rounded bg-light">' +
+            '<div class="fw-semibold small mb-1">身份相关度诊断</div>' +
+            '<div class="small text-muted mb-1">专属命中越高，相关度越好；交叉命中/通用命中偏高说明题目更泛。</div>' +
+            '<div class="d-flex flex-wrap gap-2 small">' +
+            '<span class="badge text-bg-success">专属命中 ' + escExam(String(primary)) + "</span>" +
+            '<span class="badge text-bg-warning">交叉命中 ' + escExam(String(cross)) + "</span>" +
+            '<span class="badge text-bg-secondary">通用命中 ' + escExam(String(common)) + "</span>" +
+            '<span class="badge text-bg-primary">可用总量 ' + escExam(String(eligible)) + "</span>" +
+            (leadershipPool > 0
+                ? '<span class="badge text-bg-info">管理岗跨身份候选 ' + escExam(String(leadershipPool)) + "</span>"
+                : "") +
+            "</div></div>"
+        );
+    }
+
+    var _studentAuthorRolePreviewTimer = null;
+    var _studentAuthorRolePreviewSeq = 0;
+
+    function authorRolesSignature(roles) {
+        return (roles || [])
+            .map(function (v) {
+                return String(v || "").trim().toLowerCase();
+            })
+            .filter(Boolean)
+            .sort()
+            .join(",");
+    }
+
+    async function loadStudentAuthorRoleCoveragePreview() {
+        var panel = document.getElementById("studentAuthorRoleCoverage");
+        if (!panel) return;
+        var roles = readStudentAuthorRoles();
+        if (!roles.length) {
+            panel.classList.add("d-none");
+            panel.innerHTML = "";
+            return;
+        }
+        var seq = ++_studentAuthorRolePreviewSeq;
+        var sig = authorRolesSignature(roles);
+        panel.classList.remove("d-none");
+        panel.innerHTML =
+            '<span class="text-muted">正在检查身份覆盖（已选 ' +
+            escExam(String(roles.length)) +
+            " 项）…</span>";
+        try {
+            var coll = readStudentQuizCollection();
+            var track = readValue("studentExamTrack") || "cn";
+            var qs =
+                "/api/exam-center/student/author-roles/coverage-preview?collection=" +
+                encodeURIComponent(coll) +
+                "&exam_track=" +
+                encodeURIComponent(track) +
+                "&roles_only=1";
+            roles.forEach(function (rv) {
+                qs += "&author_roles=" + encodeURIComponent(rv);
+            });
+            var d = await apiRequest(qs, "GET", null);
+            if (seq !== _studentAuthorRolePreviewSeq) return;
+            if (authorRolesSignature(readStudentAuthorRoles()) !== sig) return;
+            if (d && d.__ok === false) {
+                panel.innerHTML =
+                    '<span class="text-danger">覆盖检查失败：' + escExam(d.message || "请求失败") + "</span>";
+                return;
+            }
+            var x = d && d.data && typeof d.data === "object" ? d.data : {};
+            panel.innerHTML = renderRoleCoveragePanelHtml(
+                x.role_checks || [],
+                x.role_coverage_rate,
+                { hint: "按 evidence 来源文件名与题干关键词统计，与练习组卷身份匹配口径一致。" }
+            );
+        } catch (ePrev) {
+            if (seq !== _studentAuthorRolePreviewSeq) return;
+            panel.innerHTML =
+                '<span class="text-danger">覆盖检查异常：' + escExam(ePrev.message || String(ePrev)) + "</span>";
+        }
+    }
+
+    function scheduleStudentAuthorRoleCoveragePreview() {
+        if (_studentAuthorRolePreviewTimer) clearTimeout(_studentAuthorRolePreviewTimer);
+        _studentAuthorRolePreviewTimer = setTimeout(function () {
+            _studentAuthorRolePreviewTimer = null;
+            loadStudentAuthorRoleCoveragePreview();
+        }, 280);
+    }
+
+    function renderPracticeRoleCoverageSummary(inner) {
+        var cov =
+            (inner && (inner.role_coverage_summary || inner.roleCoverageSummary)) ||
+            (inner && inner.data && (inner.data.role_coverage_summary || inner.data.roleCoverageSummary));
+        if (!cov || typeof cov !== "object") return null;
+        var rows = [];
+        Object.keys(cov).forEach(function (k) {
+            rows.push({ role: k, label: authorRoleLabelForKey(k), hit_count: cov[k], is_met: Number(cov[k]) > 0 });
+        });
+        if (!rows.length) return null;
+        var roleRows = rows.filter(function (r) {
+            return String(r.role || "").toLowerCase() !== "common";
+        });
+        var met = 0;
+        roleRows.forEach(function (r) {
+            if (Number(r.hit_count) > 0) met += 1;
+        });
+        return {
+            rows: rows,
+            rate: roleRows.length ? met / roleRows.length : 1,
+            hint: "以下为本次练习卷各身份实际出题数量；「通用」为各身份均需掌握的基线题。",
+        };
+    }
+
+    function showStudentPracticeRoleCoverage(inner) {
+        var panel = document.getElementById("studentAuthorRoleCoverage");
+        if (!panel) return;
+        var pack = renderPracticeRoleCoverageSummary(inner);
+        if (!pack) return;
+        panel.classList.remove("d-none");
+        panel.innerHTML = renderRoleCoveragePanelHtml(pack.rows, pack.rate, { hint: pack.hint, mode: "practice" });
+    }
+
     function requireProjectCaseSelection(which, renderFn) {
         if (readExamCategory(which) !== "project_case") return true;
         if (readProjectCaseId(which) > 0) return true;
@@ -902,6 +1197,115 @@
             }
         }
         return payload;
+    }
+
+    function attachStudentAuthorRolePayload(payload) {
+        var roles = readStudentAuthorRoles();
+        if (roles.length) {
+            payload.author_roles = roles;
+            payload.authorRoles = roles;
+            payload.author_role_coverage = "balanced_union";
+            payload.authorRoleCoverage = "balanced_union";
+        }
+        return payload;
+    }
+
+    var EXAM_AUTHOR_ROLE_FALLBACK = [
+        { value: "pm", label: "产品经理" },
+        { value: "pjm", label: "项目经理" },
+        { value: "rm", label: "风险经理" },
+        { value: "rdm", label: "研发经理" },
+        { value: "ui", label: "UI设计师" },
+        { value: "qa", label: "测试工程师" },
+        { value: "cm", label: "配置管理员" },
+        { value: "ra", label: "注册工程师" },
+        { value: "prod", label: "生产专员" },
+    ];
+
+    function authorRoleLabelForKey(key) {
+        var k = String(key || "").trim().toLowerCase();
+        if (!k) return "";
+        if (k === "common") return "通用（各身份必考）";
+        for (var i = 0; i < EXAM_AUTHOR_ROLE_FALLBACK.length; i++) {
+            if (EXAM_AUTHOR_ROLE_FALLBACK[i].value === k) return EXAM_AUTHOR_ROLE_FALLBACK[i].label;
+        }
+        return k;
+    }
+
+    function questionApplicableRolesHtml(it) {
+        if (!it || typeof it !== "object") return "";
+        var labels = it.author_role_labels || it.authorRoleLabels;
+        if ((!labels || !labels.length) && it.question && typeof it.question === "object") {
+            labels = it.question.author_role_labels || it.question.authorRoleLabels;
+        }
+        if (!Array.isArray(labels) || !labels.length) {
+            var hits = it.author_role_hits || it.authorRoleHits;
+            if ((!hits || !hits.length) && it.question && typeof it.question === "object") {
+                hits = it.question.author_role_hits || it.question.authorRoleHits;
+            }
+            if (Array.isArray(hits) && hits.length) {
+                labels = hits.map(authorRoleLabelForKey).filter(Boolean);
+            }
+        }
+        if (!Array.isArray(labels) || !labels.length) return "";
+        return (
+            '<div class="small mb-2"><span class="badge text-bg-light border text-dark fw-normal me-1">适用于 ' +
+            labels.map(function (lb) {
+                return escExam(String(lb));
+            }).join("、") +
+            "</span></div>"
+        );
+    }
+    /** 旧版 aiword 无 author-roles 路由时跳过重复 404 请求 */
+    var _teacherAuthorRolesApiMissing = false;
+
+    function fillAuthorRoleSelect(sel, rows, prevSelected) {
+        if (!sel) return;
+        sel.innerHTML = "";
+        if (!rows || !rows.length) {
+            sel.innerHTML = '<option value="">（暂无可用身份）</option>';
+            sel.disabled = true;
+            return;
+        }
+        rows.forEach(function (r) {
+            if (!r || typeof r !== "object") return;
+            var val = String(r.value || "").trim();
+            if (!val) return;
+            var opt = document.createElement("option");
+            opt.value = val;
+            opt.textContent = String(r.label || val).trim();
+            if (prevSelected && prevSelected.indexOf(val) >= 0) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        sel.disabled = sel.options.length <= 0;
+    }
+
+    async function loadStudentAuthorRoleOptions() {
+        var boxId = "studentAuthorRolesList";
+        var box = document.getElementById(boxId);
+        if (!box) return;
+        var prev = readStudentAuthorRoles();
+        box.innerHTML = '<div class="text-muted">加载中…</div>';
+        try {
+            var coll = readStudentQuizCollection();
+            var path = "/api/exam-center/student/author-roles?collection=" + encodeURIComponent(coll);
+            var resp = await apiRequest(path, "GET", null);
+            var rows =
+                (resp && resp.data && (resp.data.author_roles || resp.data.authorRoles)) || [];
+            if ((!rows || !rows.length) && resp && resp.__ok === false) {
+                rows = EXAM_AUTHOR_ROLE_FALLBACK.slice();
+            }
+            renderAuthorRoleCheckboxes(boxId, rows, prev, scheduleStudentAuthorRoleCoveragePreview);
+            scheduleStudentAuthorRoleCoveragePreview();
+        } catch (eRole) {
+            renderAuthorRoleCheckboxes(
+                boxId,
+                EXAM_AUTHOR_ROLE_FALLBACK.slice(),
+                prev,
+                scheduleStudentAuthorRoleCoveragePreview
+            );
+            scheduleStudentAuthorRoleCoveragePreview();
+        }
     }
 
     function extractQuizNestedCases(resp) {
@@ -1418,6 +1822,8 @@
         var selTeacherDifficulty = document.getElementById("teacherDifficulty");
         var inputPolicyVersion = document.getElementById("teacherRegPolicyVersion");
         var btnSavePolicyVersion = document.getElementById("btnTeacherSavePolicyVersion");
+        var selRequirementRolesList = document.getElementById("teacherRequirementAuthorRolesList");
+        var _teacherRequirementStatusSeq = 0;
         if (btnSetDetailReview) {
             btnSetDetailReview.title = ecUf(
                 "套题级 AI 复审：调用上游按 set_id 批量处理本套全部题目。逐题编辑推荐下方题库「修改」。",
@@ -1497,6 +1903,57 @@
             return bad.length ? ("缺失：" + bad.join("、")) : "已覆盖";
         }
 
+        function requirementRoleText(rows) {
+            if (!Array.isArray(rows) || !rows.length) return "—";
+            var bad = [];
+            rows.forEach(function (r) {
+                if (!r || r.is_met === true) return;
+                bad.push(String(r.label || r.role || "未知身份"));
+            });
+            return bad.length ? ("缺失：" + bad.join("、")) : "已覆盖";
+        }
+
+        function readTeacherRequirementRolesLocal() {
+            return readTeacherRequirementRoles();
+        }
+
+        async function loadTeacherAuthorRoleOptions() {
+            var boxId = "teacherRequirementAuthorRolesList";
+            var box = document.getElementById(boxId);
+            if (!box) return;
+            var prev = readTeacherRequirementRolesLocal();
+            if (_teacherAuthorRolesApiMissing) {
+                renderAuthorRoleCheckboxes(boxId, EXAM_AUTHOR_ROLE_FALLBACK.slice(), prev, function () {
+                    loadTeacherRequirementStatus({ rolesOnly: true });
+                });
+                return;
+            }
+            box.innerHTML = '<div class="text-muted">加载中…</div>';
+            try {
+                var coll = readTeacherQuizCollection();
+                var path = "/api/exam-center/teacher/author-roles?collection=" + encodeURIComponent(coll);
+                var resp = await apiRequest(path, "GET", null);
+                if (resp && resp.__http_status === 404) {
+                    _teacherAuthorRolesApiMissing = true;
+                    renderAuthorRoleCheckboxes(boxId, EXAM_AUTHOR_ROLE_FALLBACK.slice(), prev, function () {
+                        loadTeacherRequirementStatus({ rolesOnly: true });
+                    });
+                    return;
+                }
+                var rows = (resp && resp.data && (resp.data.author_roles || resp.data.authorRoles)) || [];
+                if ((!rows || !rows.length) && resp && resp.__ok === false) {
+                    rows = EXAM_AUTHOR_ROLE_FALLBACK.slice();
+                }
+                renderAuthorRoleCheckboxes(boxId, rows, prev, function () {
+                    loadTeacherRequirementStatus({ rolesOnly: true });
+                });
+            } catch (eLoadRole) {
+                renderAuthorRoleCheckboxes(boxId, EXAM_AUTHOR_ROLE_FALLBACK.slice(), prev, function () {
+                    loadTeacherRequirementStatus({ rolesOnly: true });
+                });
+            }
+        }
+
         async function loadTeacherPolicyVersion() {
             if (!inputPolicyVersion) return;
             var track = normalizeTrackKey(readValue("teacherExamTrack") || "cn");
@@ -1529,18 +1986,45 @@
             return d;
         }
 
-        async function loadTeacherRequirementStatus() {
+        async function loadTeacherRequirementStatus(opts) {
+            opts = opts || {};
             if (!requirementBox) return;
             var track = normalizeTrackKey(readValue("teacherExamTrack") || "cn");
-            requirementBox.innerHTML = '<span class="text-muted">检查中…</span>';
+            var pickedRoles = readTeacherRequirementRolesLocal();
+            var sig = authorRolesSignature(pickedRoles);
+            var seq = ++_teacherRequirementStatusSeq;
+            var rolesOnly = !!opts.rolesOnly || pickedRoles.length > 0;
+            var fullCheck = !!opts.fullCheck;
+            if (fullCheck) rolesOnly = false;
+            requirementBox.innerHTML =
+                '<span class="text-muted">检查中' +
+                (pickedRoles.length ? "（已选身份 " + escHtml(String(pickedRoles.length)) + " 项）" : "") +
+                "…</span>";
             try {
-                var d = await apiRequest(
-                    "/api/exam-center/teacher/bank/requirements-check?exam_track=" + encodeURIComponent(track),
-                    "GET"
-                );
+                var coll = readTeacherQuizCollection();
+                var reqQs =
+                    "/api/exam-center/teacher/bank/requirements-check?exam_track=" +
+                    encodeURIComponent(track) +
+                    "&collection=" +
+                    encodeURIComponent(coll);
+                if (rolesOnly) reqQs += "&roles_only=1";
+                if (pickedRoles.length) {
+                    pickedRoles.forEach(function (rv) {
+                        reqQs += "&author_roles=" + encodeURIComponent(rv);
+                    });
+                }
+                var d = await apiRequest(reqQs, "GET");
+                if (seq !== _teacherRequirementStatusSeq) return;
+                if (authorRolesSignature(readTeacherRequirementRolesLocal()) !== sig) return;
                 render(d);
                 if (d && d.__ok === false) {
-                    requirementBox.innerHTML = '<span class="text-danger">检查失败：' + escHtml(d.message || "请求失败") + "</span>";
+                    requirementBox.innerHTML =
+                        '<span class="text-danger">检查失败：' +
+                        escHtml(d.message || "请求失败") +
+                        (pickedRoles.length
+                            ? '<div class="mt-1 small">当前勾选身份：' + escHtml(pickedRoles.join("、")) + "</div>"
+                            : "") +
+                        "</span>";
                     return;
                 }
                 var x = d && d.data && typeof d.data === "object" ? d.data : {};
@@ -1548,7 +2032,26 @@
                 var title = escHtml(String(x.track_label || track));
                 var total = Number(x.bank_total || 0);
                 var target = Number(x.required_min_total || 0);
-                var topicTxt = requirementTopicText(x.topic_checks || []);
+                var topicTxt = x.roles_only ? "（本次仅检身份）" : requirementTopicText(x.topic_checks || []);
+                var roleChecks = Array.isArray(x.role_checks) ? x.role_checks : [];
+                var selectedRoles = Array.isArray(x.selected_author_roles) ? x.selected_author_roles : pickedRoles;
+                var roleRate = Number(x.role_coverage_rate || 0);
+                var roleDiag = x.role_diagnostics && typeof x.role_diagnostics === "object" ? x.role_diagnostics : null;
+                if (!Number.isFinite(roleRate) || roleRate < 0) roleRate = 0;
+                var rolePanel =
+                    roleChecks.length || pickedRoles.length
+                        ? '<div class="mt-2">' +
+                          renderRoleCoveragePanelHtml(roleChecks, roleRate, {
+                              hint:
+                                  pickedRoles.length > 0
+                                      ? "已检身份：" +
+                                        escExam(selectedRoles.join("、")) +
+                                        "；按 evidence 文件名与题干关键词统计（与组卷一致）。"
+                                      : "未勾选身份时按全部身份检测。",
+                          }) +
+                          renderRoleDiagnosticsHtml(roleDiag) +
+                          "</div>"
+                        : "";
                 var km = x.knowledge_markers && typeof x.knowledge_markers === "object" ? x.knowledge_markers : {};
                 var effectivePv = km.current_policy_version ? escHtml(String(km.current_policy_version)) : "未设置";
                 var autoPv = km.auto_policy_version ? escHtml(String(km.auto_policy_version)) : "未识别";
@@ -1574,6 +2077,7 @@
                     '<span class="' + style + '">' + (met ? "已满足体考要求" : "尚未满足体考要求") + "</span>" +
                     "；题量 " + escHtml(String(total)) + "/" + escHtml(String(target)) +
                     "；主题覆盖：" + escHtml(topicTxt) +
+                    rolePanel +
                     "；法规版本（生效）：" + effectivePv + "（来源：" + escHtml(sourceZh) + "）" +
                     "；自动识别：" + autoPv + "；兜底配置：" + fallbackPv +
                     "；识别置信度：" + policyConf +
@@ -1593,7 +2097,7 @@
                 if (requirementBox) requirementBox.innerHTML = '<span class="text-danger">设置基线失败：' + escHtml(d.message || "请求失败") + "</span>";
                 return;
             }
-            await loadTeacherRequirementStatus();
+            await loadTeacherRequirementStatus({ fullCheck: true });
         }
 
         function safeJson(v) {
@@ -3066,7 +3570,10 @@
                 await loadTeacherIngestJobs();
 
                 if (startResp && startResp.__ok === false) {
-                    setIngestProgress(true, "创建任务失败（HTTP " + (startResp.__http_status || "?") + "），请查看接口响应里的 message/request.url/trace_id。");
+                    setIngestProgress(true, ecUf(
+                        "创建任务失败（HTTP " + (startResp.__http_status || "?") + "），请查看接口响应里的 message/request.url/trace_id。",
+                        "创建任务失败（HTTP " + (startResp.__http_status || "?") + "），请稍后重试或联系管理员。"
+                    ));
                     return;
                 }
 
@@ -3079,7 +3586,10 @@
                     return;
                 }
                 ingestState.jobId = jobId;
-                setIngestProgress(true, "任务已创建，job_id=" + jobId + "，开始轮询进度…");
+                setIngestProgress(true, ecUf(
+                    "任务已创建，job_id=" + jobId + "，开始轮询进度…",
+                    "任务已创建，任务编号 " + jobId + "，开始轮询进度…"
+                ));
                 setButtonLoading(btnIngest, true, "录题进行中…");
 
                 var maxMs = 10 * 60 * 1000; // 10 分钟上限，避免无限轮询
@@ -3087,7 +3597,10 @@
                 var pollMs = 1200;
                 while (true) {
                     if (ingestState.stop) {
-                        setIngestProgress(true, "已停止轮询（job_id=" + jobId + "）。");
+                        setIngestProgress(true, ecUf(
+                            "已停止轮询（job_id=" + jobId + "）。",
+                            "已停止轮询（任务编号 " + jobId + "）。"
+                        ));
                         break;
                     }
                     if (Date.now() - startTs > maxMs) {
@@ -3115,7 +3628,7 @@
                     if (st) setIngestProgress(true, "当前状态：" + st + "（job_id=" + jobId + "）");
                     if (st === "done" || st === "success" || st === "completed") {
                         setIngestProgress(true, "已完成（job_id=" + jobId + "）");
-                        await loadTeacherRequirementStatus();
+                        await loadTeacherRequirementStatus({ fullCheck: true });
                         break;
                     }
                     if (st === "failed" || st === "error") {
@@ -3344,7 +3857,7 @@
             });
         btnCheckReq &&
             btnCheckReq.addEventListener("click", function () {
-                loadTeacherRequirementStatus();
+                loadTeacherRequirementStatus({ fullCheck: true });
             });
         btnMarkReqBase &&
             btnMarkReqBase.addEventListener("click", async function () {
@@ -3359,8 +3872,15 @@
         selTrack &&
             selTrack.addEventListener("change", function () {
                 applyTeacherTrackDefaults();
+                loadTeacherAuthorRoleOptions();
                 loadTeacherPolicyVersion();
-                loadTeacherRequirementStatus();
+                loadTeacherRequirementStatus({ rolesOnly: readTeacherRequirementRolesLocal().length > 0 });
+            });
+        selRequirementRolesList &&
+            selRequirementRolesList.addEventListener("change", function (ev) {
+                if (ev && ev.target && ev.target.matches && ev.target.matches('input[type="checkbox"][data-author-role]')) {
+                    loadTeacherRequirementStatus({ rolesOnly: readTeacherRequirementRolesLocal().length > 0 });
+                }
             });
         var selTeacherExamCat = document.getElementById("teacherExamCategory");
         selTeacherExamCat &&
@@ -3378,7 +3898,7 @@
                 try {
                     var r = await saveTeacherPolicyVersion();
                     if (!(r && r.__ok === false)) {
-                        await loadTeacherRequirementStatus();
+                        await loadTeacherRequirementStatus({ fullCheck: true });
                     }
                 } finally {
                     setButtonLoading(btnSavePolicyVersion, false);
@@ -3387,10 +3907,11 @@
         applyTeacherTrackDefaults();
         // 学生端进入页面时不要触发老师端初始化请求，否则会 401 needsPage13Auth → 重载 → 死循环刷新
         if (getExamRole() === "teacher") {
+            loadTeacherAuthorRoleOptions();
             loadTeacherPolicyVersion();
-            loadTeacherRequirementStatus();
             syncProjectCaseExamUi();
         } else {
+            loadTeacherAuthorRoleOptions();
             syncProjectCaseExamUi();
         }
 
@@ -3401,6 +3922,7 @@
         window.__examLoadTeacherBankQuestions = loadTeacherBankQuestions;
         window.__examLoadTeacherIssuedAssignments = loadTeacherIssuedAssignments;
         window.__examLoadTeacherRequirementStatus = loadTeacherRequirementStatus;
+        window.__examLoadTeacherAuthorRoles = loadTeacherAuthorRoleOptions;
 
         applyBankSetFilterFromUrl();
         if (inputBankSetId && String(inputBankSetId.value || "").trim() && bankSectionEl) {
@@ -3608,6 +4130,23 @@
         /** 题干 innerHTML：先转义再仅注入 &lt;br&gt;，保留换行且防 XSS */
         function stemToHtml(s) {
             return escSt(s).replace(/\r\n|\n|\r/g, "<br>");
+        }
+
+        /** 去掉录题/模型用 evidence 提示，避免学生端可见 */
+        function sanitizeStudentStem(s) {
+            var t = String(s == null ? "" : s);
+            var literals = [
+                "（具体摘录在本题 evidence 中，勿在题干中整段复述。）",
+                "（摘录见本题 evidence。）",
+                "（更长原文见本题 evidence。）",
+                "（背景摘录在本题 evidence 中；勿把整段原文当作题干复述抄写。）",
+                "（完整上下文见本题 evidence）",
+            ];
+            literals.forEach(function (lit) {
+                t = t.split(lit).join("");
+            });
+            t = t.replace(/（[^）]{0,160}evidence[^）]{0,160}）/gi, "");
+            return t.replace(/\s{2,}/g, " ").trim();
         }
 
         function applyStudentTrackDefaults() {
@@ -4656,9 +5195,11 @@
         function renderQuestionCard(it, idx) {
             var qid = qidFromItem(it, idx);
             var qt = questionTypeFromItem(it);
-            var stem = String(it.stem || it.title || it.question || "题目").trim();
+            var stem = sanitizeStudentStem(
+                String(it.stem || it.title || it.question || "题目").trim()
+            );
             if (typeof it.question === "object" && it.question) {
-                stem = String(it.question.stem || it.question.title || stem).trim();
+                stem = sanitizeStudentStem(String(it.question.stem || it.question.title || stem).trim());
             }
             var opts = qt === "case_analysis" ? [] : optionsFromItem(it);
             var nm = "stq-" + safeInputNamePart(qid);
@@ -4745,6 +5286,7 @@
                 ". " +
                 stemToHtml(stem) +
                 "</div>" +
+                questionApplicableRolesHtml(it) +
                 body +
                 "</div></div>"
             );
@@ -4770,12 +5312,18 @@
                 titleIx.textContent = mode === "exam" ? "考试作答中" : "练习作答中";
             }
             if (metaIx) {
-                metaIx.textContent =
-                    "题目数=" +
-                    sessionState.questions.length +
-                    (sessionState.setId ? "，set=" + sessionState.setId : "") +
-                    (sessionState.sessionId ? "，session=" + sessionState.sessionId : "") +
-                    (sessionState.attemptId ? "，attempt=" + sessionState.attemptId : "");
+                var metaParts = ["题目数=" + sessionState.questions.length];
+                if (sessionState.setId) metaParts.push("set=" + sessionState.setId);
+                if (sessionState.sessionId) metaParts.push("session=" + sessionState.sessionId);
+                if (sessionState.attemptId) metaParts.push("attempt=" + sessionState.attemptId);
+                if (mode === "practice") {
+                    var pickedLabels = readStudentAuthorRoles().map(authorRoleLabelForKey).filter(Boolean);
+                    if (pickedLabels.length) {
+                        metaParts.unshift("已选身份：" + pickedLabels.join("、"));
+                    }
+                    metaParts.push("每题适用身份见题目标签");
+                }
+                metaIx.textContent = metaParts.join("，");
             }
             loadDraftAnswers();
             var groups = {
@@ -5321,6 +5869,11 @@
         btnSet &&
             btnSet.addEventListener("click", async function () {
                 if (btnSet && btnSet.disabled) return;
+                var pickedRoles = readStudentAuthorRoles();
+                if (!pickedRoles.length) {
+                    studentShowFeedback("请至少选择一个考试人员身份后再生成练习卷。", "danger");
+                    return;
+                }
                 if (readExamCategory("student") === "project_case" && readProjectCaseId("student") <= 0) {
                     studentShowFeedback("项目案例练习请先在下拉中选择已训练入库的项目案例。", "danger");
                     return;
@@ -5338,6 +5891,7 @@
                         collection: readStudentQuizCollection(),
                     };
                     attachProjectCasePayload(payS, "student");
+                    attachStudentAuthorRolePayload(payS);
                     var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", payS);
                     if (data && data.__ok === false) {
                         showInteractionError("无法开始练习", data.message || "请求失败");
@@ -5360,7 +5914,20 @@
                             });
                         }
                     } else if (sessionState.mode === "practice") {
-                        studentShowFeedback("练习题卷已就绪，请在下方作答后提交。", "success");
+                        var innerP = unwrapStudentUpstream(data);
+                        var covWarn =
+                            (innerP && (innerP.coverage_warning || innerP.coverageWarning)) ||
+                            (data && data.data && (data.data.coverage_warning || data.data.coverageWarning)) ||
+                            "";
+                        showStudentPracticeRoleCoverage(innerP || data);
+                        if (covWarn) {
+                            studentShowFeedback(String(covWarn), "warning");
+                        } else {
+                            studentShowFeedback(
+                                "练习题卷已就绪；每题上方已标注适用身份，请在下方作答后提交。",
+                                "success"
+                            );
+                        }
                     }
                 } catch (e) {
                     showInteractionError("练习卷生成中断", e.message || "网络或服务异常");
@@ -5376,8 +5943,10 @@
         selStudentTrack &&
             selStudentTrack.addEventListener("change", function () {
                 applyStudentTrackDefaults();
+                scheduleStudentAuthorRoleCoveragePreview();
             });
         applyStudentTrackDefaults();
+        loadStudentAuthorRoleOptions();
 
         btnSubmitIx &&
             btnSubmitIx.addEventListener("click", async function () {
@@ -6023,9 +6592,10 @@
                                             if (stL === "graded") {
                                                 window.alert("阅卷已完成，成绩已写回列表与活动明细。");
                                             } else {
-                                                window.alert(
-                                                    "上游判分任务失败，请查看页底「接口调试」或日志；可再次尝试重新阅卷。"
-                                                );
+                                                window.alert(ecUf(
+                                                    "上游判分任务失败，请查看页底「接口调试」或日志；可再次尝试重新阅卷。",
+                                                    "判分任务失败，请稍后重试或联系管理员。"
+                                                ));
                                             }
                                             terminal = true;
                                             break;
@@ -6484,6 +7054,7 @@
                     "__examLoadTeacherBankQuestions",
                     "__examLoadTeacherIssuedAssignments",
                     "__examLoadTeacherRequirementStatus",
+                    "__examLoadTeacherAuthorRoles",
                 ].forEach(function (key) {
                     if (typeof window[key] === "function") tasks.push(window[key]());
                 });

@@ -39,12 +39,12 @@ docker run --rm -v "%AIWORD_ROOT%:/app:ro" -w /app node:20-alpine node scripts/c
 if errorlevel 1 exit /b 1
 
 echo ==^> build aiword:%VER% platform=%PLATFORM%
-docker build --progress=%PROGRESS% --platform %PLATFORM% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%"
+docker build --progress=%PROGRESS% --platform %PLATFORM% --build-arg APP_VERSION=%VER% -t aiword:%VER% -f "%AIWORD_ROOT%\Dockerfile" "%AIWORD_ROOT%"
 if errorlevel 1 exit /b 1
 
 echo.
 echo ==^> build aicheckword:%VER% platform=%PLATFORM%
-docker build --progress=%PROGRESS% --platform %PLATFORM% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%"
+docker build --progress=%PROGRESS% --platform %PLATFORM% --build-arg APP_VERSION=%VER% -t aicheckword:%VER% -f "%AICHECKWORD_ROOT%\Dockerfile" "%AICHECKWORD_ROOT%"
 if errorlevel 1 exit /b 1
 
 docker tag aiword:%VER% aiword:local

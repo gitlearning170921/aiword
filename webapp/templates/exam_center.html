@@ -40,6 +40,28 @@
         overflow-wrap: anywhere;
         line-height: 1.45;
     }
+    .exam-author-role-checks {
+        max-height: 168px;
+        overflow-y: auto;
+        border: 1px solid #dee2e6;
+        border-radius: 0.375rem;
+        padding: 0.45rem 0.55rem;
+        background: #fff;
+    }
+    .exam-author-role-checks .form-check {
+        margin-bottom: 0.2rem;
+        min-height: 1.25rem;
+    }
+    .exam-author-role-checks .form-check-label {
+        cursor: pointer;
+        user-select: none;
+    }
+    .exam-role-coverage-panel {
+        border: 1px solid #e9ecef;
+        border-radius: 0.375rem;
+        padding: 0.45rem 0.55rem;
+        background: #f8f9fa;
+    }
 </style>
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
@@ -203,7 +225,7 @@
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTeacherRegulatoryHintClose" aria-label="收起">收起</button>
                     </div>
                     <div class="card-body small" id="teacherRegulatoryHintBody"></div>
-                    <div class="card-footer py-2 bg-light">
+                    <div class="card-footer py-2 bg-light{% if not is_page13_super_admin %} d-none{% endif %}">
                         <details class="exam-collapse mb-0">
                             <summary class="small text-muted">接口调试（JSON）</summary>
                             <pre class="small mb-0 mt-2 exam-api-result" id="teacherRegulatoryHintDebug" style="max-height:220px;overflow:auto;">—</pre>
@@ -220,6 +242,13 @@
                 <button class="btn btn-sm btn-outline-primary" id="btnTeacherCheckRequirements" type="button">检查体考达标情况</button>
                 <button class="btn btn-sm btn-outline-success" id="btnTeacherMarkRequirementBaseline" type="button">设为当前达标基线</button>
                 <span class="small text-muted">录题按批次执行：每批题量见配置；达标后可继续录题或停止录题。</span>
+            </div>
+            <div class="mt-2" style="max-width: 520px;">
+                <label class="form-label small mb-1">身份覆盖检测（可多选）</label>
+                <div id="teacherRequirementAuthorRolesList" class="exam-author-role-checks small">
+                    <div class="text-muted">加载中…</div>
+                </div>
+                <div class="small text-muted mt-1">勾选要检测的身份；变更后自动刷新下方覆盖结果。</div>
             </div>
             <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
                 <label class="small text-muted mb-0" for="teacherRegPolicyVersion">法规版本兜底标识</label>
@@ -630,6 +659,14 @@
                             <option value="">请选择…</option>
                         </select>
                     </div>
+                    <div class="mt-2 pt-2 border-top">
+                        <label class="form-label mb-1">考试人员身份（可多选）</label>
+                        <div class="small text-muted mb-1">与 aicheckword 编写人员身份一致；项目案例出题会按身份匹配对应文件范围。</div>
+                        <div id="studentAuthorRolesList" class="exam-author-role-checks small">
+                            <div class="text-muted">加载中…</div>
+                        </div>
+                        <div id="studentAuthorRoleCoverage" class="exam-role-coverage-panel small mt-2 d-none"></div>
+                    </div>
                 </div>
             </div>
             <div class="col-lg-2 col-md-4">
@@ -944,8 +981,13 @@
 
 <div class="card{% if exam_role == 'student' %} d-none{% endif %}" id="examApiResultCard">
     <div class="card-body">
+        {% if is_page13_super_admin %}
         <p class="small text-muted mb-2 mb-md-1">老师端 / 统计端：以下为最近一次操作的<strong>可读摘要</strong>；展开「接口调试」查看完整 JSON。</p>
+        {% else %}
+        <p class="small text-muted mb-2 mb-md-1">老师端 / 统计端：以下为最近一次操作的提示信息。</p>
+        {% endif %}
         <div id="examApiCompactFeedback" class="d-none" role="status" aria-live="polite"></div>
+        {% if is_page13_super_admin %}
         <details class="exam-collapse" id="examApiResultDetails">
             <summary class="d-flex justify-content-between align-items-center mb-0">
                 <span class="fw-bold">接口调试（JSON）</span>
@@ -953,6 +995,9 @@
             </summary>
             <pre id="examApiResult" class="exam-api-result mb-0 mt-2">等待操作...</pre>
         </details>
+        {% else %}
+        <pre id="examApiResult" class="d-none" aria-hidden="true">等待操作...</pre>
+        {% endif %}
     </div>
 </div>
 

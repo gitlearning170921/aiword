@@ -35,6 +35,11 @@ def normalize_llm_base_url(provider: str, base: str) -> str:
         rest = path[1] if len(path) > 1 else ""
         if not rest.startswith("v1"):
             return b + "/v1"
+    if p == "openai" and "openai.com" in b.lower():
+        path = b.split("://", 1)[-1].split("/", 1)
+        rest = path[1] if len(path) > 1 else ""
+        if not rest.startswith("v1"):
+            return b + "/v1"
     return b
 
 

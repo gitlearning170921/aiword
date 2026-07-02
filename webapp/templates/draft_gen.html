@@ -45,6 +45,8 @@
               <option value="deepseek">DeepSeek</option>
               <option value="cursor">Cursor</option>
               <option value="tongyi">通义千问（DashScope）</option>
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude (Anthropic)</option>
             </select>
           </div>
           <div class="col-12" id="dg_api_key_block">
@@ -137,7 +139,7 @@
           </select>
         </div>
         <div class="col-md-6" id="dg_page1_project_wrap" style="display:none">
-          <label class="form-label">{% if is_page13_super_admin %}选择页面1已有项目{% else %}选择任务列表中的项目{% endif %}</label>
+          <label class="form-label" id="dg_page1_project_label">{% if is_page13_super_admin %}选择页面1已有项目{% else %}选择任务列表中的项目{% endif %}</label>
           <input type="search" id="dg_page1_project_filter" class="form-control form-control-sm mb-1" placeholder="筛选项目…" autocomplete="off"/>
           <select id="dg_page1_project_id" class="form-select">
             <option value="">（加载中…）</option>
@@ -363,6 +365,9 @@
 </div>
 {% endblock %}
 {% block body_extra %}
+<script>
+  window.__DG_FORCE_PAGE0_SCOPE__ = {{ (is_company_admin or manual_upload_only|default(false))|tojson }};
+</script>
 <script src="{{ url_for('static', filename='js/_integration_prefill.js', v=static_version) }}"></script>
 <script src="{{ url_for('static', filename='js/draft_gen.js', v=static_version) }}"></script>
 <script>

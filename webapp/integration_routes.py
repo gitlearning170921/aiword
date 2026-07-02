@@ -34,7 +34,9 @@ def _check_integration_secret(f):
 
 @bp.get("/health")
 def health():
-    payload = {"status": "ok", "service": "aiword"}
+    from .deploy_version import deploy_version_payload
+
+    payload = {"status": "ok", "service": "aiword", **deploy_version_payload()}
     probe = str(request.args.get("upstream") or "").strip().lower()
     if probe in ("1", "true", "yes"):
         import requests as _rq

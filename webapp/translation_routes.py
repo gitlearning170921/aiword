@@ -30,6 +30,7 @@ from flask import (
 from sqlalchemy import desc
 
 from . import db
+from .user_facing import api_debug_fields
 from ._integration_common import (
     apply_upstream_job_fields,
     build_integration_bootstrap_payload,
@@ -423,7 +424,7 @@ def api_translate_create_job():
         local_job.message = f"上游 HTTP {r.status_code}"
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), **api_debug_fields(detail=r.text[:2000])}), 502
     try:
         upstream = r.json()
     except Exception:
@@ -436,7 +437,7 @@ def api_translate_create_job():
         local_job.status = "failed"
         local_job.message = "上游未返回 job_id"
         db.session.commit()
-        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), **api_debug_fields(detail=upstream)}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -580,7 +581,7 @@ def api_translate_download(local_id: str):
     except requests.RequestException as e:
         return jsonify({"message": f"代理下载失败：{e}"}), 502
     if r.status_code != 200:
-        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:1000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), **api_debug_fields(detail=r.text[:1000])}), 502
     out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "translation_zips"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -841,7 +842,7 @@ def api_translate_correct_create_job():
         local_job.message = f"上游 HTTP {r.status_code}"
         local_job.error_summary = safe_truncate(r.text, 4000)
         db.session.commit()
-        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:2000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), **api_debug_fields(detail=r.text[:2000])}), 502
     try:
         upstream = r.json()
     except Exception:
@@ -854,7 +855,7 @@ def api_translate_correct_create_job():
         local_job.status = "failed"
         local_job.message = "上游未返回 job_id"
         db.session.commit()
-        return jsonify({"message": msg_upstream_no_job_id(), "detail": upstream}), 502
+        return jsonify({"message": msg_upstream_no_job_id(), **api_debug_fields(detail=upstream)}), 502
 
     local_job.upstream_job_id = upstream_id
     local_job.status = (upstream.get("status") or "queued").strip().lower() or "queued"
@@ -909,7 +910,7 @@ def api_translate_correct_download(local_id: str):
     except requests.RequestException as e:
         return jsonify({"message": f"代理下载失败：{e}"}), 502
     if r.status_code != 200:
-        return jsonify({"message": msg_upstream_http(r.status_code), "detail": r.text[:1000]}), 502
+        return jsonify({"message": msg_upstream_http(r.status_code), **api_debug_fields(detail=r.text[:1000])}), 502
     out_dir = Path(current_app.config.get("OUTPUT_FOLDER") or "outputs") / "translation_zips"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,30 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+
+def user_sees_debug_messaging() -> bool:
+    """是否展示调试/集成类提示（等同页面4 超管访问密码）。"""
+    from .authz import is_page13_super_admin
+
+    return is_page13_super_admin()
+
+
+def api_debug_fields(**fields: Any) -> dict[str, Any]:
+    """API 响应中的 detail/upstream/diagnostics 等调试字段，仅超管下发。"""
+    if not user_sees_debug_messaging():
+        return {}
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def integration_error_message(msg: str | None) -> str:
+    """内部集成错误串 → 按角色脱敏（超管保留原文）。"""
+    m = (msg or "").strip() or "操作失败"
+    if user_sees_debug_messaging():
+        return m
+    return user_facing_upstream_error(m)
+
 
 def user_facing_text(admin_text: str, user_text: str) -> str:
     """超级管理员看 admin 文案，其余角色看 user 文案。"""

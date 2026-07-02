@@ -2,17 +2,65 @@
   const root = (typeof window.__SCRIPT_ROOT__ === "string" ? window.__SCRIPT_ROOT__ : "") || "";
   let lastHasLlmKey = false;
   let lastPersonalKeysOnly = true;
+  var DRAFT_LLM_PROVIDER_IDS = ["deepseek", "cursor", "tongyi", "openai", "claude"];
+  function emptyProviderMap(defaultVal) {
+    var o = {};
+    DRAFT_LLM_PROVIDER_IDS.forEach(function (k) {
+      o[k] = defaultVal != null ? defaultVal : "";
+    });
+    return o;
+  }
+  function emptyProviderBoolMap() {
+    var o = {};
+    DRAFT_LLM_PROVIDER_IDS.forEach(function (k) {
+      o[k] = false;
+    });
+    return o;
+  }
+  var PROVIDER_UI_META = {
+    deepseek: {
+      keyLabel: "DeepSeek API Key",
+      systemName: "DeepSeek",
+      subPersonal: "本账号个人 Key；API Base / 模型可空则用系统默认。",
+      subOptional: "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先。API Base / 模型可空。",
+    },
+    openai: {
+      keyLabel: "OpenAI API Key",
+      systemName: "OpenAI",
+      subPersonal: "本账号个人 Key；Base URL 可填官方或中转，模型可空（如 gpt-4o-mini）。",
+      subOptional: "未配置个人 Key 时使用系统 Key；Base URL / 模型可空。",
+    },
+    claude: {
+      keyLabel: "Anthropic API Key",
+      systemName: "Claude",
+      subPersonal: "本账号个人 Anthropic Key；Base URL 可空（默认 api.anthropic.com），模型可空。",
+      subOptional: "未配置个人 Key 时使用系统 Key；Base URL / 模型可空。",
+    },
+    cursor: {
+      keyLabel: "Cursor API Key",
+      systemName: "Cursor",
+      subPersonal: "须已保存 Key；GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。",
+      subOptional: "未配置个人 Key 时使用系统 Cursor Key；仓库/ref 由管理员配置。",
+    },
+    tongyi: {
+      keyLabel: "DashScope API Key",
+      systemName: "通义",
+      subPersonal: "模型名可空（系统默认）；API Base 对通义通常留空。",
+      subOptional: "未配置个人 Key 时使用系统通义 Key；模型名可空。",
+    },
+  };
   /** @type {Record<string, boolean>} */
-  var lastHasApiKeyByProvider = { deepseek: false, cursor: false, tongyi: false };
+  var lastHasApiKeyByProvider = emptyProviderBoolMap();
   /** @type {Record<string, string>} */
-  var lastApiBaseByProvider = { deepseek: "", cursor: "", tongyi: "" };
+  var lastApiBaseByProvider = emptyProviderMap("");
   /** @type {Record<string, string>} */
-  var lastLlmModelByProvider = { deepseek: "", cursor: "", tongyi: "" };
+  var lastLlmModelByProvider = emptyProviderMap("");
   var lastLlmProviderSelection = "deepseek";
   /** @type {any} */
   let lastBootstrap = null;
 
   function dgIntegrationScopeFromLocation() {
+    if (window.__DG_FORCE_PAGE0_SCOPE__) return "page0";
     try {
       var q = new URLSearchParams(window.location.search || "");
       var scope = (q.get("scope") || "").trim().toLowerCase();
@@ -21,6 +69,10 @@
       if (manual === "1" || manual === "true" || manual === "yes" || manual === "on") return "page0";
     } catch (e) { /* ignore */ }
     return "workflow";
+  }
+
+  function dgIsPage0Scope() {
+    return dgIntegrationScopeFromLocation() === "page0";
   }
 
   function dgIntegrationScopeQuery() {
@@ -44,8 +96,10 @@
   var _dgFilePickersWired = false;
   /** 页面2带入的任务 upload_id，提交时写入 payload.base_upload_id */
   var _dgBaseUploadId = "";
-  /** 页面1 → aicheckword 新建后关联的项目 id */
+  /** 页面1 / 页面0 → aicheckword 新建后关联的项目 id（项目模式为 new 时暂存） */
   var _dgLinkedAcwProjectId = 0;
+  /** 新建专属项目后待选中的 upstream project_id */
+  var _dgPendingSelectProjectId = 0;
   /** @type {any[]} */
   var _dgPage1ProjectsCache = [];
   /** @type {any} */
@@ -977,9 +1031,10 @@
             status: 0,
             json: {
               message:
-                "请求超时（" +
-                Math.round(timeoutMs / 1000) +
-                "s），请检查网络或文档服务（aicheckword）配置。",
+                dgUserText(
+                  "请求超时（" + Math.round(timeoutMs / 1000) + "s），请检查网络或文档服务（aicheckword）配置。",
+                  "请求超时（" + Math.round(timeoutMs / 1000) + "s），请检查网络或联系管理员。"
+                ),
             },
           };
         }
@@ -1108,12 +1163,36 @@
     if (pol) pol.textContent = pollLine || "";
   }
 
+  function normalizeProviderRows(rows) {
+    if (!Array.isArray(rows)) return [];
+    var out = [];
+    rows.forEach(function (r) {
+      if (typeof r === "string") {
+        var sid = String(r || "").trim().toLowerCase();
+        if (!sid) return;
+        var metaS = PROVIDER_UI_META[sid];
+        out.push({ id: sid, label: metaS ? metaS.systemName : sid });
+        return;
+      }
+      if (!r || typeof r !== "object") return;
+      var id = String(r.id || r.value || "").trim().toLowerCase();
+      if (!id) return;
+      var meta = PROVIDER_UI_META[id];
+      out.push({
+        id: id,
+        label: String(r.label || (meta && meta.systemName) || id),
+      });
+    });
+    return out;
+  }
+
   function rebuildProviderSelect(rows) {
     const sel = el("dg_provider");
-    if (!sel || !Array.isArray(rows) || !rows.length) return;
+    const normalized = normalizeProviderRows(rows);
+    if (!sel || !normalized.length) return;
     const cur = (sel.value || "deepseek").trim();
     sel.innerHTML = "";
-    rows.forEach(function (r) {
+    normalized.forEach(function (r) {
       const id = (r.id || "").trim();
       if (!id) return;
       const opt = document.createElement("option");
@@ -1121,7 +1200,7 @@
       opt.textContent = r.label || id;
       sel.appendChild(opt);
     });
-    const ids = rows.map(function (r) { return (r.id || "").trim(); }).filter(Boolean);
+    const ids = normalized.map(function (r) { return (r.id || "").trim(); }).filter(Boolean);
     if (ids.indexOf(cur) >= 0) sel.value = cur;
     else sel.selectedIndex = 0;
   }
@@ -1129,6 +1208,11 @@
   function showInteropInfo(d) {
     const box = el("dg_interop_info");
     if (!box) return;
+    if (!dgIsSuperAdmin()) {
+      box.classList.add("d-none");
+      box.textContent = "";
+      return;
+    }
     const parts = [];
     if (d && d.adminNotes) parts.push(String(d.adminNotes));
     if (d && Array.isArray(d.interopSyncWarnings) && d.interopSyncWarnings.length) {
@@ -1153,82 +1237,37 @@
     var hasThis = Object.prototype.hasOwnProperty.call(pmap, prov) ? !!pmap[prov] : !!lastHasLlmKey;
     var reqPersonal = !!lastPersonalKeysOnly;
     var keyRequired = reqPersonal;
-    if (prov === "cursor") {
-      if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = keyRequired ? "Cursor API Key（必填）" : "Cursor API Key（可选）";
-      if (hint) {
-        hint.textContent = hasThis
-          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
-          : keyRequired
-            ? "当前账号尚未保存 Key，须填写并保存"
-            : dgUserText(
-                "未保存时将使用 aicheckword 系统 Cursor Key",
-                "未保存时将使用系统 Cursor Key"
-              );
-      }
-      if (sub) {
-        sub.textContent = reqPersonal
-          ? dgUserText(
-              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。",
-              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选提供方（须已保存 Key）。GitHub 仓库与 ref 由管理员配置。"
-            )
+    var meta = PROVIDER_UI_META[prov] || PROVIDER_UI_META.deepseek;
+    if (keyInp) keyInp.disabled = false;
+    if (klab) {
+      klab.textContent = keyRequired
+        ? meta.keyLabel + "（必填）"
+        : meta.keyLabel + "（可选）";
+    }
+    if (hint) {
+      hint.textContent = hasThis
+        ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
+        : keyRequired
+          ? "当前账号尚未保存 Key，须填写并保存"
           : dgUserText(
-              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员在 aicheckword 配 cursor_*。",
-              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。GitHub 仓库与 ref 由管理员配置。"
+              "未保存时将使用 aicheckword 系统 " + meta.systemName + " Key",
+              "未保存时将使用系统 " + meta.systemName + " Key"
             );
-      }
-    } else if (prov === "tongyi") {
-      if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = keyRequired ? "DashScope API Key（必填）" : "DashScope API Key（可选）";
-      if (hint) {
-        hint.textContent = hasThis
-          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
-          : keyRequired
-            ? "当前账号尚未保存 Key，须填写并保存"
-            : dgUserText(
-                "未保存时将使用 aicheckword 系统通义 Key",
-                "未保存时将使用系统通义 Key"
-              );
-      }
-      if (sub) {
-        sub.textContent = reqPersonal
-          ? "本账号个人 Key，他人不可共用；模型名可空（系统默认）。API Base 对通义通常留空（官方端点）。"
-          : dgUserText(
-              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。模型名可空。",
-              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。模型名可空。"
-            );
-      }
-    } else {
-      if (keyInp) keyInp.disabled = false;
-      if (klab) klab.textContent = keyRequired ? "DeepSeek API Key（必填）" : "DeepSeek API Key（可选）";
-      if (hint) {
-        hint.textContent = hasThis
-          ? "已加密落库（仅本账号），重启后仍有效；输入框不留存明文（留空则不修改）"
-          : keyRequired
-            ? "当前账号尚未保存 Key，须填写并保存"
-            : dgUserText(
-                "未保存时将使用 aicheckword 系统 DeepSeek Key",
-                "未保存时将使用系统 DeepSeek Key"
-              );
-      }
-      if (sub) {
-        sub.textContent = reqPersonal
-          ? dgUserText(
-              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用系统默认。",
-              "本账号个人 Key，他人不可共用；生成任务使用当前下拉所选 DeepSeek（须已保存 Key）。API Base / 模型可空则用系统默认。"
-            )
-          : dgUserText(
-              "未配置个人 Key 时使用 aicheckword 系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。",
-              "未配置个人 Key 时使用系统 Key；已保存个人 Key 则优先使用。API Base / 模型可空。"
-            );
-      }
+    }
+    if (sub) {
+      sub.textContent = reqPersonal
+        ? dgUserText(
+            meta.subPersonal,
+            meta.subPersonal.replace(/aicheckword/g, "系统")
+          )
+        : dgUserText(meta.subOptional, meta.subOptional.replace(/aicheckword/g, "系统"));
     }
   }
 
   function mergeProviderStringMap(src) {
-    var o = { deepseek: "", cursor: "", tongyi: "" };
+    var o = emptyProviderMap("");
     if (src && typeof src === "object") {
-      ["deepseek", "cursor", "tongyi"].forEach(function (k) {
+      DRAFT_LLM_PROVIDER_IDS.forEach(function (k) {
         if (Object.prototype.hasOwnProperty.call(src, k) && src[k] != null) {
           o[k] = String(src[k]);
         }
@@ -1655,12 +1694,23 @@
   function applyProjectModeLabels() {
     var pm = el("dg_project_mode");
     if (!pm) return;
+    var page0 = dgIsPage0Scope();
     for (var i = 0; i < pm.options.length; i++) {
       if (pm.options[i].value === "new") {
-        pm.options[i].text = dgUserText("从页面1已有项目新建", "从任务列表已有项目新建");
+        pm.options[i].text = dgUserText(
+          page0 ? "从公司总览项目新建" : "从页面1已有项目新建",
+          page0 ? "从公司总览项目新建" : "从任务列表已有项目新建"
+        );
       } else if (pm.options[i].value === "existing") {
         pm.options[i].text = dgUserText("使用已有项目（aicheckword，不新建）", "使用已有项目（不新建）");
       }
+    }
+    var p1lab = el("dg_page1_project_label");
+    if (p1lab) {
+      p1lab.textContent = dgUserText(
+        page0 ? "选择公司总览项目" : "选择页面1已有项目",
+        page0 ? "选择公司总览项目" : "选择任务列表中的项目"
+      );
     }
   }
 
@@ -1759,6 +1809,40 @@
     });
   }
 
+  function loadCompanyProjectsForDraft() {
+    var sel = el("dg_page1_project_id");
+    if (!sel) return Promise.resolve();
+    var orgEl = el("dg_organization");
+    var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+    var url = "/api/company/projects";
+    if (orgId) url += "?organizationId=" + encodeURIComponent(orgId);
+    return api(url, { method: "GET" }).then(function (x) {
+      if (!x.ok) {
+        sel.innerHTML = '<option value="">（加载失败）</option>';
+        return;
+      }
+      var rows = (x.json && Array.isArray(x.json.projects)) ? x.json.projects : [];
+      _dgPage1ProjectsCache = rows;
+      sel.innerHTML = '<option value="">（请选择公司总览项目）</option>';
+      rows.forEach(function (p) {
+        var id = String(p.id || "").trim();
+        if (!id) return;
+        var o = document.createElement("option");
+        o.value = id;
+        var label = (p.name || id) + (p.registeredCountry ? " · " + p.registeredCountry : "");
+        o.textContent = label;
+        sel.appendChild(o);
+      });
+      applySelectSearchFilter("dg_page1_project_id");
+      updatePage1CreateBtnState();
+    });
+  }
+
+  function loadSourceProjectsForDraft() {
+    if (dgIsPage0Scope()) return loadCompanyProjectsForDraft();
+    return loadPage1ProjectsForDraft();
+  }
+
   function showAcwModalMsg(text, isErr) {
     var box = el("dg_acw_modal_msg");
     if (!box) return;
@@ -1773,9 +1857,15 @@
   }
 
   function openAcwProjectModal() {
-    var page1Id = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
-    if (!page1Id) {
-      showMsg(dgUserText("请先选择页面1已有项目", "请先选择任务列表中的项目"), true);
+    var sourceId = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
+    if (!sourceId) {
+      showMsg(
+        dgUserText(
+          dgIsPage0Scope() ? "请先选择公司总览项目" : "请先选择页面1已有项目",
+          dgIsPage0Scope() ? "请先选择公司总览项目" : "请先选择任务列表中的项目"
+        ),
+        true
+      );
       return;
     }
     showAcwModalMsg("", false);
@@ -1783,9 +1873,12 @@
     var orgEl = el("dg_organization");
     var coll = (collEl && collEl.value ? collEl.value.trim() : "") || "regulations";
     var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+    var prefillBase = dgIsPage0Scope()
+      ? "/draft-gen/api/company-projects/"
+      : "/draft-gen/api/page1-projects/";
     var prefillUrl =
-      "/draft-gen/api/page1-projects/" +
-      encodeURIComponent(page1Id) +
+      prefillBase +
+      encodeURIComponent(sourceId) +
       "/aicheckword-prefill?collection=" +
       encodeURIComponent(coll);
     if (orgId) prefillUrl += "&organizationId=" + encodeURIComponent(orgId);
@@ -1797,10 +1890,22 @@
       var pre = parts[1];
       if (!pre.ok || !pre.json || !pre.json.data) {
         var em = (pre.json && pre.json.message) || "加载预填失败";
+        var dupId = parseInt(String((pre.json && pre.json.duplicateProjectId) || 0), 10) || 0;
+        if (dupId > 0) {
+          showMsg(em + " 已自动选中已有专属项目。", false);
+          return applyAcwProjectAfterCreate(dupId);
+        }
         showMsg(em, true);
         return;
       }
       var d = pre.json.data;
+      var nameEl = el("dg_acw_name");
+      if (nameEl) {
+        var locked = !!d.nameLocked;
+        nameEl.readOnly = locked;
+        nameEl.classList.toggle("bg-light", locked);
+        nameEl.tabIndex = locked ? -1 : 0;
+      }
       if (el("dg_acw_name")) el("dg_acw_name").value = d.name || "";
       if (el("dg_acw_project_code")) el("dg_acw_project_code").value = d.project_code || "";
       if (el("dg_acw_name_en")) el("dg_acw_name_en").value = d.name_en || "";
@@ -1848,11 +1953,10 @@
   }
 
   function collectAcwModalBody() {
-    var page1Id = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
+    var sourceId = String((el("dg_page1_project_id") && el("dg_page1_project_id").value) || "").trim();
     var collEl = el("dg_collection");
     var orgEl = el("dg_organization");
-    return {
-      page1ProjectId: page1Id,
+    var body = {
       collection: (collEl && collEl.value ? collEl.value.trim() : "") || "regulations",
       organizationId: orgEl && orgEl.value ? String(orgEl.value).trim() : null,
       name: String((el("dg_acw_name") && el("dg_acw_name").value) || "").trim(),
@@ -1869,6 +1973,9 @@
       project_form: String((el("dg_acw_project_form") && el("dg_acw_project_form").value) || "").trim(),
       scope_of_application: String((el("dg_acw_scope") && el("dg_acw_scope").value) || "").trim(),
     };
+    if (dgIsPage0Scope()) body.companyProjectId = sourceId;
+    else body.page1ProjectId = sourceId;
+    return body;
   }
 
   var ACW_MODAL_REQUIRED_FIELDS = [
@@ -1906,6 +2013,38 @@
     );
   }
 
+  function applyAcwProjectAfterCreate(pid) {
+    var projectId = parseInt(String(pid || 0), 10) || 0;
+    if (projectId <= 0) return Promise.resolve();
+    _dgLinkedAcwProjectId = 0;
+    updatePage1AcwLinkedLabel();
+    _dgPendingSelectProjectId = projectId;
+    var pm = el("dg_project_mode");
+    if (pm) pm.value = "existing";
+    syncProjectUi();
+    return loadDraftBootstrap({ fullOverlay: false }).then(function () {
+      var pending = _dgPendingSelectProjectId;
+      _dgPendingSelectProjectId = 0;
+      if (pending <= 0) return;
+      var pidSel = el("dg_project_id");
+      if (!pidSel) return;
+      var s = String(pending);
+      var found = false;
+      for (var i = 0; i < pidSel.options.length; i++) {
+        if (pidSel.options[i].value === s) {
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        pidSel.value = s;
+        setPrefillBadge("project", true);
+        applySelectSearchFilter("dg_project_id");
+        pidSel.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+  }
+
   function saveAcwProjectFromModal() {
     var body = collectAcwModalBody();
     var valErr = validateAcwModalBody(body);
@@ -1914,7 +2053,17 @@
       return;
     }
     if (!body.name) {
-      showAcwModalMsg(dgUserText("该页面1 项目尚未填写项目编号，请先到页面1 任务列表中填写后再试。", "该项目尚未填写项目编号，请先在任务列表中填写后再试。"), true);
+      showAcwModalMsg(
+        dgUserText(
+          dgIsPage0Scope()
+            ? "请填写项目名称（项目编号），或先在公司总览中维护项目信息。"
+            : "该页面1 项目尚未填写项目编号，请先到页面1 任务列表中填写后再试。",
+          dgIsPage0Scope()
+            ? "请填写项目名称（项目编号），或先在公司总览中维护项目信息。"
+            : "该项目尚未填写项目编号，请先在任务列表中填写后再试。"
+        ),
+        true
+      );
       return;
     }
     var btn = el("dg_btn_save_acw_project");
@@ -1927,6 +2076,13 @@
     }).then(function (x) {
       if (btn) btn.disabled = false;
       if (!x.ok || !x.json || !x.json.ok) {
+        var dupId = parseInt(String((x.json && x.json.duplicateProjectId) || 0), 10) || 0;
+        if (dupId > 0) {
+          showAcwModalMsg((x.json && x.json.message) || "项目已存在，将自动选中已有项目。", false);
+          if (_dgAcwModalInstance) _dgAcwModalInstance.hide();
+          showMsg("已选中已有专属项目（ID " + dupId + "）。", false);
+          return applyAcwProjectAfterCreate(dupId);
+        }
         showAcwModalMsg((x.json && x.json.message) || "保存失败", true);
         return;
       }
@@ -1935,8 +2091,6 @@
         showAcwModalMsg(dgUserText("上游未返回 projectId", "保存失败：未返回项目编号"), true);
         return;
       }
-      _dgLinkedAcwProjectId = pid;
-      updatePage1AcwLinkedLabel();
       showAcwModalMsg(
         dgUserText("已创建 aicheckword 专属项目 ID：" + pid, "已创建专属项目 ID：" + pid),
         false
@@ -1944,12 +2098,12 @@
       if (_dgAcwModalInstance) _dgAcwModalInstance.hide();
       showMsg(
         dgUserText(
-          "已在 aicheckword 创建专属项目（ID " + pid + "），提交初稿时将使用该 project_id。",
-          "已创建专属项目（ID " + pid + "），提交初稿时将自动关联该项目。"
+          "已创建专属项目（ID " + pid + "），已自动选中该项目，可直接提交初稿。",
+          "已创建专属项目（ID " + pid + "），已自动选中该项目，可直接提交初稿。"
         ),
         false
       );
-      return loadDraftBootstrap({ fullOverlay: false });
+      return applyAcwProjectAfterCreate(pid);
     });
   }
 
@@ -1963,7 +2117,7 @@
     if (wrap) wrap.style.display = isExisting ? "" : "none";
     if (wrapPage1) wrapPage1.style.display = isNewFromPage1 ? "" : "none";
     if (isNewFromPage1) {
-      loadPage1ProjectsForDraft();
+      loadSourceProjectsForDraft();
     }
     var defSave = pm.value === "new";
     fillYesNo("dg_save_case", defSave);
@@ -2080,6 +2234,19 @@
       fillSelect("dg_project_mode", b.projectModes || [], "value", "label", null);
       applyProjectModeLabels();
       fillSelectThenCache("dg_project_id", b.projects || [], "id", "label", { value: "", label: "（不指定具体项目编号）" });
+      if (_dgPendingSelectProjectId > 0) {
+        var pendSel = el("dg_project_id");
+        var pendId = String(_dgPendingSelectProjectId);
+        if (pendSel) {
+          for (var pi = 0; pi < pendSel.options.length; pi++) {
+            if (pendSel.options[pi].value === pendId) {
+              pendSel.value = pendId;
+              setPrefillBadge("project", true);
+              break;
+            }
+          }
+        }
+      }
 
       applyBooleanOptionLabels(b.booleanOptions || []);
       var bools = b.booleanOptions || [];
@@ -2136,7 +2303,7 @@
       lastPersonalKeysOnly = d.personalKeysOnly !== false;
       lastHasApiKeyByProvider = d.hasApiKeyByProvider && typeof d.hasApiKeyByProvider === "object"
         ? d.hasApiKeyByProvider
-        : { deepseek: !!d.hasApiKey, cursor: false, tongyi: false };
+        : emptyProviderBoolMap();
       lastApiBaseByProvider = mergeProviderStringMap(d.apiBaseUrlByProvider);
       if (!d.apiBaseUrlByProvider && d.apiBaseUrl) {
         var pvb = d.provider || "deepseek";
@@ -2149,10 +2316,15 @@
       }
       if (d.allowedProviders && d.allowedProviders.length) {
         rebuildProviderSelect(d.allowedProviders);
+      } else if (d.allowedProviderIds && d.allowedProviderIds.length) {
+        rebuildProviderSelect(d.allowedProviderIds);
       }
       var provEl = el("dg_provider");
       if (!provEl) return;
-      provEl.value = d.provider || "deepseek";
+      var wantProv = String(d.provider || "deepseek").trim().toLowerCase();
+      var optIds = Array.prototype.map.call(provEl.options, function (o) { return String(o.value || "").trim().toLowerCase(); });
+      if (optIds.indexOf(wantProv) >= 0) provEl.value = wantProv;
+      else if (provEl.options.length) provEl.selectedIndex = 0;
       var pvUse = provEl.value || "deepseek";
       applyLlmExtrasFromMaps(pvUse);
       lastLlmProviderSelection = pvUse;
@@ -2163,13 +2335,16 @@
         else rq.classList.add("d-none");
       }
       syncLlmProviderUi();
-      if (d.hasEncryptedBlobByProvider && d.keyDecryptOkByProvider) {
+      if (dgIsSuperAdmin() && d.hasEncryptedBlobByProvider && d.keyDecryptOkByProvider) {
         var provWarn = provEl.value || "deepseek";
         var hasBlob = !!d.hasEncryptedBlobByProvider[provWarn];
         var decryptOk = !!d.keyDecryptOkByProvider[provWarn];
         if (hasBlob && !decryptOk) {
           showMsg(
-            "检测到已保存的 Key 无法解密（常见原因：系统 SECRET_KEY 曾变更）。请重新粘贴 Key 并保存。",
+            dgUserText(
+              "检测到已保存的 Key 无法解密（常见原因：系统 SECRET_KEY 曾变更）。请重新粘贴 Key 并保存。",
+              "已保存的 Key 无法读取，请重新粘贴 Key 并保存。"
+            ),
             true
           );
         }

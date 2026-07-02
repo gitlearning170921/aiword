@@ -674,7 +674,7 @@ class ExamGradingJob(db.Model):
 class UserLlmCredential(db.Model):
     """用户初稿 LLM 选择（与 aicheckword 集成联调范围一致）。
 
-    仅 ``deepseek`` / ``cursor`` / ``tongyi``（页面2个人初稿，与 aicheckword 系统管理员配置独立）。
+    ``deepseek`` / ``cursor`` / ``tongyi`` / ``openai`` / ``claude``（页面2个人初稿）。
     ``api_key_encrypted_*``：按提供方分别保存密文；旧版单列 ``api_key_encrypted`` 仅作迁移兼容。
     ``base_url_*`` / ``model_*``：各提供方独立的 API Base 与模型名；旧版 ``base_url`` / ``model`` 仅作迁移兼容。
     ``cursor_repository`` / ``cursor_ref`` 保留列，保存时清空。
@@ -695,12 +695,18 @@ class UserLlmCredential(db.Model):
     api_key_encrypted_deepseek: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
     api_key_encrypted_cursor: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
     api_key_encrypted_tongyi: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    api_key_encrypted_openai: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
+    api_key_encrypted_claude: Mapped[Optional[bytes]] = mapped_column(_BinaryMedium, nullable=True)
     base_url_deepseek: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
     base_url_cursor: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
     base_url_tongyi: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    base_url_openai: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    base_url_claude: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
     model_deepseek: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     model_cursor: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     model_tongyi: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    model_openai: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    model_claude: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 
@@ -813,6 +819,8 @@ class UserFeedback(db.Model):
     resolution: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
     resolved_by_label: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    aiword_version: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    aicheckword_version: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, index=True)
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime, default=now_local, onupdate=now_local

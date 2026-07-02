@@ -627,6 +627,42 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_tongyi VARCHAR(128)",
         ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_tongyi VARCHAR(128) NULL",
     )
+    ensure_column(
+        "user_llm_credentials",
+        "api_key_encrypted_openai",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_openai BLOB",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_openai MEDIUMBLOB NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "api_key_encrypted_claude",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_claude BLOB",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN api_key_encrypted_claude MEDIUMBLOB NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "base_url_openai",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN base_url_openai VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN base_url_openai VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "base_url_claude",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN base_url_claude VARCHAR(512)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN base_url_claude VARCHAR(512) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "model_openai",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_openai VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_openai VARCHAR(128) NULL",
+    )
+    ensure_column(
+        "user_llm_credentials",
+        "model_claude",
+        ddl_sqlite="ALTER TABLE user_llm_credentials ADD COLUMN model_claude VARCHAR(128)",
+        ddl_other="ALTER TABLE user_llm_credentials ADD COLUMN model_claude VARCHAR(128) NULL",
+    )
 
     def migrate_user_llm_legacy_keys_split():
         """将旧版单列 api_key_encrypted 按 provider 拷入分栏密文（幂等）。"""
@@ -640,6 +676,8 @@ def ensure_schema(app: Flask):
             ("deepseek", "api_key_encrypted_deepseek"),
             ("cursor", "api_key_encrypted_cursor"),
             ("tongyi", "api_key_encrypted_tongyi"),
+            ("openai", "api_key_encrypted_openai"),
+            ("claude", "api_key_encrypted_claude"),
         )
         with engine.connect() as conn:
             for prov, col in pairs:
@@ -685,6 +723,8 @@ def ensure_schema(app: Flask):
             ("deepseek", "base_url_deepseek", "model_deepseek"),
             ("cursor", "base_url_cursor", "model_cursor"),
             ("tongyi", "base_url_tongyi", "model_tongyi"),
+            ("openai", "base_url_openai", "model_openai"),
+            ("claude", "base_url_claude", "model_claude"),
         )
         with engine.connect() as conn:
             for prov, bcol, mcol in pairs:
@@ -967,6 +1007,18 @@ def ensure_schema(app: Flask):
         "feature_permissions_json",
         ddl_sqlite="ALTER TABLE users ADD COLUMN feature_permissions_json TEXT",
         ddl_other="ALTER TABLE users ADD COLUMN feature_permissions_json JSON NULL",
+    )
+    ensure_column(
+        "user_feedback",
+        "aiword_version",
+        ddl_sqlite="ALTER TABLE user_feedback ADD COLUMN aiword_version TEXT",
+        ddl_other="ALTER TABLE user_feedback ADD COLUMN aiword_version VARCHAR(32) NULL",
+    )
+    ensure_column(
+        "user_feedback",
+        "aicheckword_version",
+        ddl_sqlite="ALTER TABLE user_feedback ADD COLUMN aicheckword_version TEXT",
+        ddl_other="ALTER TABLE user_feedback ADD COLUMN aicheckword_version VARCHAR(32) NULL",
     )
 
     insp_rbac2 = inspect(engine)
@@ -1671,6 +1723,7 @@ def create_app() -> Flask:
         register_exam_center_feature_gate(app)
 
         db.create_all()
+        ensure_schema(app)
         init_default_configs()
         from .app_settings import (
             apply_system_settings_to_flask,

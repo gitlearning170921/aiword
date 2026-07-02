@@ -163,11 +163,41 @@ def _rewrite_localhost_upstream_for_docker(base: str) -> str:
     return rewritten
 
 
+def _fix_numeric_port_path_typo(base: str) -> str:
+    """常见笔误：http://127.0.0.1/8000 → http://127.0.0.1:8000（路径中的纯数字端口）。"""
+    try:
+        parsed = urlparse(base)
+    except Exception:
+        return base
+    if parsed.port is not None:
+        return base
+    segs = [s for s in (parsed.path or "").split("/") if s]
+    if len(segs) != 1 or not segs[0].isdigit():
+        return base
+    port = int(segs[0])
+    if port < 1 or port > 65535:
+        return base
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return base
+    return urlunparse(
+        (
+            parsed.scheme or "http",
+            f"{host}:{port}",
+            "",
+            "",
+            "",
+            "",
+        )
+    ).rstrip("/")
+
+
 def resolve_integration_api_base(raw: str) -> str:
     """解析 aicheckword 根地址；Docker 主机名在本机开发时自动回退 127.0.0.1。"""
     base = (raw or "").strip().rstrip("/")
     if not base:
         return ""
+    base = _fix_numeric_port_path_typo(base)
     base = _rewrite_localhost_upstream_for_docker(base)
     try:
         parsed = urlparse(base)
@@ -300,20 +330,14 @@ def integration_html_access_wall(
     *,
     gate_description: str = "请输入访问密码以进入该功能（超级管理员无需账号登录）。",
 ):
-    """集成页 HTML：超管密码或账号登录；否则密码门 / 登录跳转。"""
-    from flask import redirect, session, url_for
+    """集成页 HTML：超管密码或账号登录；未登录跳转登录页（非 /admin 不展示访问密码门）。"""
+    from flask import session
 
-    from .authz import (
-        is_page13_super_admin,
-        page13_password_configured,
-        super_admin_password_gate_response,
-    )
+    from .authz import is_page13_super_admin, unauthenticated_login_response
 
     if is_page13_super_admin() or session.get("user_id"):
         return None
-    if page13_password_configured():
-        return super_admin_password_gate_response(gate_description=gate_description)
-    return redirect(url_for("pages.login_page"))
+    return unauthenticated_login_response()
 
 
 def login_wall():
