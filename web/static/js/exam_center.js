@@ -3461,6 +3461,13 @@
                     collection: readTeacherQuizCollection(),
                 };
                 attachProjectCasePayload(payload, "teacher");
+                var teacherRoles = readTeacherRequirementRoles();
+                if (teacherRoles && teacherRoles.length) {
+                    payload.author_roles = teacherRoles;
+                    payload.authorRoles = teacherRoles;
+                    payload.author_role_coverage = "balanced_union";
+                    payload.authorRoleCoverage = "balanced_union";
+                }
                 // aicheckword：difficulty 须为 string；「默认」为空则不传难度字段（避免 422）
                 var diff = readValue("teacherDifficulty");
                 if (diff) {
@@ -4127,10 +4134,157 @@
                 .replace(/"/g, "&quot;");
         }
 
-        /** 题干 innerHTML：先转义再仅注入 &lt;br&gt;，保留换行且防 XSS */
-        function stemToHtml(s) {
-            return escSt(s).replace(/\r\n|\n|\r/g, "<br>");
+        /** 清理题干中残留/半截的开卷链接 HTML（历史脏数据或重复 linkify 产生） */
+        function stripBrokenOpenBookHtml(s) {
+            var t = String(s == null ? "" : s);
+            t = t.replace(/" title="开卷查阅：点击展开全文">/g, "");
+            t = t.replace(/\s*data-open-book-file="[^"]*"/gi, "");
+            t = t.replace(/\s*class="[^"]*exam-open-book-link[^"]*"/gi, "");
+            t = t.replace(/<button[^>]*exam-open-book-link[^>]*>([\s\S]*?)<\/button>/gi, function (_m, inner) {
+                return String(inner || "")
+                    .replace(/<[^>]+>/g, "")
+                    .replace(/^《|》$/g, "");
+            });
+            t = t.replace(/<\/?button[^>]*>/gi, "");
+            return t;
         }
+
+        /** 题干 innerHTML：先转义再仅注入 &lt;br&gt;，保留换行且防 XSS；支持开卷文件名链接 */
+        function stemToHtml(s, openBookRefs) {
+            var html = escSt(stripBrokenOpenBookHtml(s)).replace(/\r\n|\n|\r/g, "<br>");
+            return linkifyOpenBookFilenames(html, openBookRefs);
+        }
+
+        function openBookRefsFromItem(it) {
+            var refs =
+                (it && (it.open_book_refs || it.openBookRefs)) ||
+                (it && it.question && (it.question.open_book_refs || it.question.openBookRefs)) ||
+                [];
+            return Array.isArray(refs) ? refs : [];
+        }
+
+        function linkifyOpenBookFilenames(html, openBookRefs) {
+            var refs = openBookRefs || [];
+            var allowed = {};
+            refs.forEach(function (r) {
+                var sf = String((r && (r.source_file || r.sourceFile || r.title)) || "").trim();
+                if (sf) allowed[sf] = true;
+            });
+            function openBookBtn(name) {
+                return (
+                    '<button type="button" class="btn btn-link btn-sm p-0 align-baseline exam-open-book-link" data-open-book-file="' +
+                    escSt(name) +
+                    '" title="开卷查阅：点击展开全文">' +
+                    escSt(name) +
+                    "</button>"
+                );
+            }
+            function openBookBtnGuillemets(name) {
+                return (
+                    '<button type="button" class="btn btn-link btn-sm p-0 align-baseline exam-open-book-link" data-open-book-file="' +
+                    escSt(name) +
+                    '" title="开卷查阅：点击展开全文">《' +
+                    escSt(name) +
+                    "》</button>"
+                );
+            }
+            function shouldLinkFilename(name) {
+                return (
+                    !!allowed[name] ||
+                    name.indexOf("审核点清单") >= 0 ||
+                    /\.(doc|docx|pdf|xlsx?|txt)$/i.test(name)
+                );
+            }
+            function linkifyPlainSegment(seg) {
+                var out = seg.replace(/《([^》]{4,260})》/g, function (_m, fn) {
+                    var name = String(fn || "").trim();
+                    if (!name) return _m;
+                    if (shouldLinkFilename(name)) return openBookBtnGuillemets(name);
+                    return "《" + escSt(name) + "》";
+                });
+                out = out.replace(/(审核点清单:CP-[\w.\-]+)/gi, function (_m, fn) {
+                    var name = String(fn || "").trim();
+                    if (!name) return _m;
+                    return openBookBtn(name);
+                });
+                out = out.replace(/(审核点清单-[\w.\-]+)/g, function (_m, fn) {
+                    var name = String(fn || "").trim();
+                    if (!name) return _m;
+                    return openBookBtn(name);
+                });
+                return out;
+            }
+            // 仅在非 HTML 标签的文本段内 linkify，避免破坏已生成的 <button data-open-book-file="...">
+            var parts = String(html || "").split(/(<[^>]+>)/g);
+            for (var i = 0; i < parts.length; i++) {
+                if (!parts[i] || parts[i].charAt(0) === "<") continue;
+                parts[i] = linkifyPlainSegment(parts[i]);
+            }
+            return parts.join("");
+        }
+
+        function ensureExamOpenBookModal() {
+            var el = document.getElementById("examOpenBookModal");
+            if (el) return el;
+            el = document.createElement("div");
+            el.id = "examOpenBookModal";
+            el.className = "modal fade";
+            el.setAttribute("tabindex", "-1");
+            el.setAttribute("aria-hidden", "true");
+            el.innerHTML =
+                '<div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">' +
+                '<div class="modal-header py-2"><h6 class="modal-title" id="examOpenBookModalTitle">开卷查阅</h6>' +
+                '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div>' +
+                '<div class="modal-body"><pre id="examOpenBookModalBody" class="small mb-0" style="white-space:pre-wrap;word-break:break-word;"></pre></div>' +
+                '<div class="modal-footer py-2"><button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">关闭</button></div>' +
+                "</div></div>";
+            document.body.appendChild(el);
+            return el;
+        }
+
+        async function showOpenBookReference(sourceFile) {
+            var sf = String(sourceFile || "").trim();
+            if (!sf) return;
+            var modalEl = ensureExamOpenBookModal();
+            var titleEl = document.getElementById("examOpenBookModalTitle");
+            var bodyEl = document.getElementById("examOpenBookModalBody");
+            if (titleEl) titleEl.textContent = "开卷查阅：" + sf;
+            if (bodyEl) bodyEl.textContent = "正在加载…";
+            var modal =
+                window.bootstrap && window.bootstrap.Modal
+                    ? window.bootstrap.Modal.getOrCreateInstance(modalEl)
+                    : null;
+            if (modal) modal.show();
+            try {
+                var coll = readStudentQuizCollection();
+                var qs =
+                    "/api/exam-center/student/open-book-reference?collection=" +
+                    encodeURIComponent(coll) +
+                    "&source_file=" +
+                    encodeURIComponent(sf);
+                var d = await apiRequest(qs, "GET", null, { timeoutMs: 45000 });
+                if (d && d.__ok === false) {
+                    if (bodyEl) bodyEl.textContent = d.message || "加载失败";
+                    return;
+                }
+                var x = d && d.data && typeof d.data === "object" ? d.data : {};
+                var content = String(x.content || "").trim();
+                if (bodyEl) {
+                    bodyEl.textContent = content || "未找到该文件的入库全文，请联系管理员补充知识库。";
+                }
+            } catch (eOb) {
+                if (bodyEl) bodyEl.textContent = eOb.message || String(eOb);
+            }
+        }
+
+        document.addEventListener("click", function (ev) {
+            var t = ev.target;
+            if (!t || !t.closest) return;
+            var btn = t.closest(".exam-open-book-link");
+            if (!btn) return;
+            ev.preventDefault();
+            showOpenBookReference(btn.getAttribute("data-open-book-file") || "");
+        });
 
         /** 去掉录题/模型用 evidence 提示，避免学生端可见 */
         function sanitizeStudentStem(s) {
@@ -5280,12 +5434,18 @@
                     escSt(tv) +
                     "</textarea>";
             }
+            var openRefs = openBookRefsFromItem(it);
+            var openBookHint =
+                openRefs.length || /《[^》]+》/.test(stem) || /审核点清单[-:]/.test(stem)
+                    ? '<div class="small text-muted mb-1">提示：题干中带下划线的文件名可点击开卷查阅全文。</div>'
+                    : "";
             return (
                 '<div class="card exam-question-card mb-2"><div class="card-body py-2"><div class="exam-question-stem fw-semibold small mb-2">' +
                 (idx + 1) +
                 ". " +
-                stemToHtml(stem) +
+                stemToHtml(stem, openRefs) +
                 "</div>" +
+                openBookHint +
                 questionApplicableRolesHtml(it) +
                 body +
                 "</div></div>"
@@ -5892,7 +6052,10 @@
                     };
                     attachProjectCasePayload(payS, "student");
                     attachStudentAuthorRolePayload(payS);
-                    var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", payS);
+                    var setSize = readInt("studentSetSize", 10);
+                    var data = await apiRequest("/api/exam-center/student/practice/generate-set", "POST", payS, {
+                        timeoutMs: setSize >= 50 ? 420000 : 300000
+                    });
                     if (data && data.__ok === false) {
                         showInteractionError("无法开始练习", data.message || "请求失败");
                         if (getExamRole() !== "student") render(data);

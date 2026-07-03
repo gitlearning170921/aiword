@@ -124,7 +124,7 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ("QUIZ_API_SECRET", "考试训练中心后端集成密钥（X-Integration-Secret，可选）", True),
     (
         "QUIZ_API_TIMEOUT_SECONDS",
-        "考试训练中心后端超时时间（秒，默认 20；上限 600。法规/类 LLM 接口建议 ≥180）",
+        "考试训练中心后端超时时间（秒，默认 60；上限 600。组卷/法规/类 LLM 接口建议 ≥180）",
         False,
     ),
     ("EXAM_PASS_SCORE", "考试及格线（分，默认 80；统计端及格率与老师端「考试与录题配置」均可维护）", False),

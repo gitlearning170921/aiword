@@ -631,6 +631,31 @@ def _builtin_provider_rows() -> list[dict[str, Any]]:
     ]
 
 
+def _upstream_provider_ids_from_interop(interop: dict[str, Any] | None) -> set[str]:
+    """从 interop-config 提取 provider id（兼容 dict / 字符串 / allowedProviderIds）。"""
+    upstream_ids: set[str] = set()
+    if not isinstance(interop, dict):
+        return upstream_ids
+    ups = interop.get("allowedProviders") or []
+    if isinstance(ups, list):
+        for x in ups:
+            if isinstance(x, str):
+                pid = str(x).strip().lower()
+            elif isinstance(x, dict):
+                pid = str(x.get("id") or x.get("value") or x.get("provider") or "").strip().lower()
+            else:
+                continue
+            if pid:
+                upstream_ids.add(pid)
+    extra = interop.get("allowedProviderIds")
+    if isinstance(extra, list):
+        for x in extra:
+            pid = str(x or "").strip().lower()
+            if pid:
+                upstream_ids.add(pid)
+    return upstream_ids
+
+
 def _effective_allowed_provider_ids_ordered() -> list[str]:
     """与上游白名单求交后，保留 AIWORD 内置顺序。"""
     _refresh_upstream_interop_if_stale()
@@ -638,14 +663,7 @@ def _effective_allowed_provider_ids_ordered() -> list[str]:
     if not _interop_data:
         return base
     restrict = bool(_interop_data.get("restrictProviders"))
-    ups = _interop_data.get("allowedProviders") or []
-    upstream_ids: set[str] = set()
-    if isinstance(ups, list):
-        for x in ups:
-            if isinstance(x, dict):
-                pid = str(x.get("id") or "").strip().lower()
-                if pid:
-                    upstream_ids.add(pid)
+    upstream_ids = _upstream_provider_ids_from_interop(_interop_data)
     if upstream_ids:
         filtered = [p for p in base if p in upstream_ids]
         if filtered:
@@ -691,14 +709,7 @@ def _interop_sync_warnings() -> list[str]:
         w.append(f"未能同步上游联调策略（{_interop_err}），已使用本地默认可选提供方。")
     eff = _effective_allowed_provider_ids_ordered()
     if _interop_data:
-        ups = _interop_data.get("allowedProviders") or []
-        upstream_ids: set[str] = set()
-        if isinstance(ups, list):
-            for x in ups:
-                if isinstance(x, dict):
-                    pid = str(x.get("id") or "").strip().lower()
-                    if pid:
-                        upstream_ids.add(pid)
+        upstream_ids = _upstream_provider_ids_from_interop(_interop_data)
         unsupported = sorted(
             pid for pid in upstream_ids if pid not in AIWORD_DRAFT_LLM_PROVIDERS
         )
@@ -856,6 +867,11 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
         "interopSynced": bool(_interop_data and not _interop_err),
     }
     if is_page13_super_admin():
+        upstream_ids = (
+            sorted(_upstream_provider_ids_from_interop(_interop_data))
+            if _interop_data
+            else []
+        )
         payload.update(
             {
                 "hasEncryptedBlobByProvider": has_blob_by,
@@ -863,6 +879,7 @@ def _llm_settings_payload_for_user(uid: str, *, configured: bool) -> dict[str, A
                 "storedKeyLengthByProvider": stored_len_by,
                 "adminNotes": notes,
                 "interopSyncWarnings": warns,
+                "interopAllowedProviderIds": upstream_ids,
             }
         )
     return payload

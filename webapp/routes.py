@@ -481,14 +481,14 @@ def _quiz_api_timeout_seconds() -> int:
     raw = (
         get_setting(
             "QUIZ_API_TIMEOUT_SECONDS",
-            default=str(current_app.config.get("QUIZ_API_TIMEOUT_SECONDS") or "20"),
+            default=str(current_app.config.get("QUIZ_API_TIMEOUT_SECONDS") or "60"),
         )
-        or "20"
+        or "60"
     ).strip()
     try:
         val = int(raw)
     except ValueError:
-        val = 20
+        val = 60
     if val < 3:
         return 3
     # 与 _quiz_api_call 上限对齐：LLM 类接口（如法规更新提示）可能需要数分钟
@@ -509,16 +509,30 @@ def _requirement_upstream_quick_timeout_seconds() -> int:
 
 def _role_coverage_upstream_timeout_seconds() -> int:
     """身份覆盖统计会扫描题库，需明显长于普通 stats 请求。"""
-    return min(120, max(60, _quiz_api_timeout_seconds()))
+    return min(120, max(90, _quiz_api_timeout_seconds()))
 
 
-def _quiz_generate_timeout_seconds() -> int:
-    """组卷/练习卷：题库不足时会走上游 LLM 现出，默认 20s 易误判超时。"""
-    return min(600, max(_quiz_api_timeout_seconds(), 120))
+def _quiz_generate_timeout_seconds(question_count: int | None = None) -> int:
+    """组卷/练习卷：大题量 + 身份筛选 + 困难难度可能触发补题，需更长等待。"""
+    base = max(_quiz_api_timeout_seconds(), 180)
+    try:
+        qc = max(0, int(question_count or 0))
+    except (TypeError, ValueError):
+        qc = 0
+    if qc >= 50:
+        base = max(base, 360)
+    elif qc >= 40:
+        base = max(base, 300)
+    elif qc >= 25:
+        base = max(base, 240)
+    return min(600, base)
 
 
 _bank_total_cache: dict[str, tuple[float, int]] = {}
 _BANK_TOTAL_CACHE_TTL_SEC = 90.0
+_role_coverage_upstream_cache: dict[str, tuple[float, tuple[list[dict[str, Any]], Optional[float], dict[str, Any], str]]] = {}
+_ROLE_COVERAGE_UPSTREAM_CACHE_TTL_SEC = 120.0
+_ROLE_COVERAGE_UPSTREAM_STALE_TTL_SEC = 600.0
 
 
 def _quiz_attempt_answers_quick_timeout_seconds() -> int:
@@ -2127,7 +2141,22 @@ _EXAM_AUTHOR_ROLE_KEYWORDS: dict[str, list[str]] = {
         "设计验证", "设计确认", "确认与验证", "核查指南", "法规", "指导原则",
         "审核", "可追溯", "医疗器械软件", "独立软件",
     ],
-    "cm": ["配置", "cm", "baseline", "基线", "版本", "发布", "变更", "追溯"],
+    "cm": [
+        "配置管理计划",
+        "配置状态报告",
+        "配置审计",
+        "配置基线",
+        "配置控制",
+        "基线管理",
+        "配置",
+        "cm",
+        "baseline",
+        "版本",
+        "发布",
+        "变更",
+        "追溯",
+        "配置管理",
+    ],
     "ra": [
         "注册", "法规", "标准", "指导原则", "合规", "申报",
         "条例", "办法", "通告", "公告", "mdr", "ivdr", "510k",
@@ -2735,6 +2764,13 @@ def _fetch_bank_author_role_coverage_upstream(
         return [], None, {}, ""
     coll = (collection or "regulations").strip() or "regulations"
     org = (organization_id or "").strip()
+    cache_key = f"{coll}|{org}|{track}|{','.join(sorted(roles))}"
+    now = float(pytime.time())
+    cached = _role_coverage_upstream_cache.get(cache_key)
+    if cached and now - float(cached[0]) <= _ROLE_COVERAGE_UPSTREAM_CACHE_TTL_SEC:
+        checks, rate, diagnostics, err = cached[1]
+        return list(checks or []), rate, dict(diagnostics or {}), str(err or "")
+
     q: dict[str, Any] = {
         "collection": coll,
         "exam_track": track,
@@ -2754,6 +2790,9 @@ def _fetch_bank_author_role_coverage_upstream(
         if int(st) in (404, 405):
             return [], None, {}, "upstream_role_coverage_api_missing"
         if int(st) == 504 or (isinstance(pl, dict) and pl.get("code") == "QUIZ_API_TIMEOUT"):
+            if cached and now - float(cached[0]) <= _ROLE_COVERAGE_UPSTREAM_STALE_TTL_SEC:
+                checks, rate, diagnostics, _ = cached[1]
+                return list(checks or []), rate, dict(diagnostics or {}), "upstream_role_coverage_stale_cache"
             return [], None, {}, "upstream_role_coverage_timeout"
         return [], None, {}, str((pl or {}).get("message") or "upstream_role_coverage_failed")
     root = _unwrap_quiz_api_success_data(pl)
@@ -2764,7 +2803,12 @@ def _fetch_bank_author_role_coverage_upstream(
     diagnostics = inner.get("role_diagnostics") if isinstance(inner.get("role_diagnostics"), dict) else {}
     rate_raw = inner.get("role_coverage_rate")
     rate = float(rate_raw) if rate_raw is not None else None
-    return [x for x in checks if isinstance(x, dict)], rate, diagnostics, ""
+    out_checks = [x for x in checks if isinstance(x, dict)]
+    _role_coverage_upstream_cache[cache_key] = (
+        now,
+        (out_checks, rate, dict(diagnostics), ""),
+    )
+    return out_checks, rate, diagnostics, ""
 
 
 def _role_checks_evidence_local(
@@ -2774,6 +2818,7 @@ def _role_checks_evidence_local(
     collection: str,
     organization_id: str,
     timeout_seconds: Optional[int] = None,
+    max_pages: int = 20,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """本地统计身份覆盖：所选身份专属 + 通用基线并集（与 aicheckword bank_author_role_coverage 一致）。"""
     coll = (collection or "regulations").strip() or "regulations"
@@ -2782,7 +2827,8 @@ def _role_checks_evidence_local(
     offset = 0
     limit = 200
     total_upstream: Optional[int] = None
-    for _page in range(20):
+    page_cap = max(1, min(int(max_pages or 20), 20))
+    for _page in range(page_cap):
         q: dict[str, Any] = {
             "limit": str(limit),
             "offset": str(offset),
@@ -3100,14 +3146,24 @@ def _build_exam_bank_requirement_status(
             else 1.0
         )
     else:
-        if upstream_role_err in ("upstream_role_coverage_api_missing", "upstream_role_coverage_timeout"):
+        if upstream_role_err == "upstream_role_coverage_api_missing":
             role_checks, role_diagnostics = _role_checks_evidence_local(
                 track,
                 role_rows,
                 collection=coll,
                 organization_id=org,
-                timeout_seconds=role_cov_t,
+                timeout_seconds=quick_t,
+                max_pages=8,
             )
+        elif upstream_role_err in ("upstream_role_coverage_timeout", "upstream_role_coverage_stale_cache"):
+            role_checks = _role_checks_stem_fallback(
+                track,
+                role_rows,
+                collection=coll,
+                organization_id=org,
+                timeout_seconds=quick_t,
+            )
+            role_diagnostics = {}
         else:
             role_checks = _role_checks_stem_fallback(
                 track,
@@ -3128,6 +3184,7 @@ def _build_exam_bank_requirement_status(
         if upstream_role_err and upstream_role_err not in (
             "upstream_role_coverage_api_missing",
             "upstream_role_coverage_timeout",
+            "upstream_role_coverage_stale_cache",
         ):
             role_err = (str(role_err or "") + "；" + upstream_role_err).strip("；")
 
@@ -5488,11 +5545,45 @@ def _extract_set_id_from_quiz_proxy_payload(payload: Any) -> str:
 @page13_access_required
 def api_exam_teacher_generate_set():
     body = _expand_quiz_request_body(_json_payload())
+    author_roles = _normalize_author_roles_input(body.get("author_roles") or body.get("authorRoles"))
+    if author_roles:
+        coll = str(body.get("collection") or "regulations").strip() or "regulations"
+        org_id = _resolve_exam_organization_id(
+            explicit_org_id=str(body.get("organization_id") or body.get("organizationId") or "").strip(),
+            project_id=str(body.get("project_id") or body.get("projectId") or "").strip(),
+        )
+        allowed_rows, err = _fetch_exam_author_roles(coll, organization_id=org_id)
+        if not allowed_rows:
+            return jsonify(
+                {
+                    "code": "UPSTREAM_ERROR",
+                    "message": user_facing_upstream_error(err or "无法校验身份选项"),
+                    "data": None,
+                    "trace_id": uuid.uuid4().hex,
+                }
+            ), 502
+        allowed = {str(x.get("value") or "").strip().lower() for x in allowed_rows if isinstance(x, dict)}
+        bad = [x for x in author_roles if x not in allowed]
+        if bad:
+            return jsonify(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": f"身份选项无效：{', '.join(bad)}",
+                    "data": {"invalid_author_roles": bad, "allowed_author_roles": sorted(allowed)},
+                    "trace_id": uuid.uuid4().hex,
+                }
+            ), 400
+        body["author_roles"] = author_roles
+        body["authorRoles"] = author_roles
+        cov = str(body.get("author_role_coverage") or body.get("authorRoleCoverage") or "balanced_union").strip().lower()
+        cov = "balanced_union" if cov == "balanced_union" else "union"
+        body["author_role_coverage"] = cov
+        body["authorRoleCoverage"] = cov
     status, payload = _quiz_api_call(
         "quiz/sets/generate",
         method="POST",
         payload=body,
-        timeout_seconds=_quiz_generate_timeout_seconds(),
+        timeout_seconds=_quiz_generate_timeout_seconds(body.get("question_count") or body.get("questionCount")),
     )
     return jsonify(payload), status
 
@@ -7521,9 +7612,37 @@ def api_exam_student_generate_practice_set():
         "quiz/practice/generate-set",
         method="POST",
         payload=body,
-        timeout_seconds=_quiz_generate_timeout_seconds(),
+        timeout_seconds=_quiz_generate_timeout_seconds(body.get("question_count") or body.get("questionCount")),
     )
     return jsonify(payload), status
+
+
+@bp.get("/api/exam-center/student/open-book-reference")
+@login_required
+def api_exam_student_open_book_reference():
+    """学生端开卷查阅：按来源文件名拉取知识库全文（审核点清单等）。"""
+    coll = (request.args.get("collection") or "regulations").strip() or "regulations"
+    sf = (request.args.get("source_file") or request.args.get("sourceFile") or "").strip()
+    if not sf:
+        return jsonify(
+            {"code": "BAD_REQUEST", "message": "缺少 source_file", "data": None, "trace_id": uuid.uuid4().hex}
+        ), 400
+    org_id = _resolve_exam_organization_id(
+        explicit_org_id=str(request.args.get("organization_id") or "").strip(),
+        project_id="",
+    )
+    st, pl = _quiz_api_call(
+        "quiz/tools/open-book-reference",
+        method="GET",
+        query={"collection": coll, "source_file": sf, "sourceFile": sf},
+        organization_id=org_id or None,
+        timeout_seconds=max(15, min(45, _quiz_api_timeout_seconds())),
+    )
+    if 200 <= int(st) < 300 and isinstance(pl, dict):
+        root = _unwrap_quiz_api_success_data(pl)
+        inner = root.get("data") if isinstance(root, dict) and isinstance(root.get("data"), dict) else root
+        return jsonify({"code": 0, "message": "ok", "data": inner, "trace_id": pl.get("trace_id")}), 200
+    return jsonify(pl if isinstance(pl, dict) else {"code": "UPSTREAM_ERROR", "message": "查阅失败", "data": None}), st
 
 
 @bp.post("/api/exam-center/student/practice/submit")

@@ -1186,6 +1186,34 @@
     return out;
   }
 
+  function rowsForProviderSelect(d) {
+    d = d || {};
+    var rows = [];
+    if (d.allowedProviders && d.allowedProviders.length) {
+      rows = normalizeProviderRows(d.allowedProviders);
+    } else if (d.allowedProviderIds && d.allowedProviderIds.length) {
+      rows = normalizeProviderRows(d.allowedProviderIds);
+    }
+    var idList = [];
+    if (d.allowedProviderIds && d.allowedProviderIds.length) {
+      idList = d.allowedProviderIds.map(function (x) { return String(x || "").trim().toLowerCase(); }).filter(Boolean);
+    } else {
+      idList = rows.map(function (r) { return (r.id || "").trim().toLowerCase(); }).filter(Boolean);
+    }
+    var have = {};
+    rows.forEach(function (r) {
+      if (r && r.id) have[r.id] = true;
+    });
+    DRAFT_LLM_PROVIDER_IDS.forEach(function (pid) {
+      if (idList.indexOf(pid) >= 0 && !have[pid]) {
+        var meta = PROVIDER_UI_META[pid];
+        rows.push({ id: pid, label: meta ? meta.systemName : pid });
+        have[pid] = true;
+      }
+    });
+    return rows;
+  }
+
   function rebuildProviderSelect(rows) {
     const sel = el("dg_provider");
     const normalized = normalizeProviderRows(rows);
@@ -2315,9 +2343,9 @@
         lastLlmModelByProvider[pvm] = String(d.llmModel || "");
       }
       if (d.allowedProviders && d.allowedProviders.length) {
-        rebuildProviderSelect(d.allowedProviders);
+        rebuildProviderSelect(rowsForProviderSelect(d));
       } else if (d.allowedProviderIds && d.allowedProviderIds.length) {
-        rebuildProviderSelect(d.allowedProviderIds);
+        rebuildProviderSelect(rowsForProviderSelect(d));
       }
       var provEl = el("dg_provider");
       if (!provEl) return;
