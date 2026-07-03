@@ -62,6 +62,101 @@
         padding: 0.45rem 0.55rem;
         background: #f8f9fa;
     }
+    /* 条件联动：图例、区块色条、影响范围角标 */
+    .exam-linkage-legend {
+        font-size: 0.8125rem;
+        line-height: 1.45;
+        background: #fff;
+        border: 1px dashed #ced4da;
+        border-radius: 0.375rem;
+        padding: 0.55rem 0.75rem;
+    }
+    .exam-linkage-legend .exam-linkage-matrix {
+        display: grid;
+        grid-template-columns: minmax(5.5rem, auto) repeat(3, minmax(3.5rem, 1fr));
+        gap: 0.25rem 0.35rem;
+        align-items: center;
+        margin-top: 0.45rem;
+        max-width: 28rem;
+    }
+    .exam-linkage-legend .exam-linkage-matrix-head {
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: #6c757d;
+        text-align: center;
+    }
+    .exam-linkage-legend .exam-linkage-matrix-row {
+        font-size: 0.75rem;
+        color: #495057;
+    }
+    .exam-linkage-yes { color: #198754; font-weight: 700; text-align: center; }
+    .exam-linkage-no { color: #adb5bd; text-align: center; }
+    .exam-linkage-opt { color: #0d6efd; font-weight: 600; text-align: center; font-size: 0.72rem; }
+    .exam-affect-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.2rem;
+        margin-top: 0.2rem;
+        margin-bottom: 0.15rem;
+    }
+    .exam-affect-tag {
+        display: inline-block;
+        font-size: 0.65rem;
+        font-weight: 600;
+        line-height: 1.3;
+        padding: 0.05rem 0.4rem;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .exam-affect-tag--set { color: #084298; background: #cfe2ff; border-color: #9ec5fe; }
+    .exam-affect-tag--ingest { color: #0f5132; background: #d1e7dd; border-color: #a3cfbb; }
+    .exam-affect-tag--check { color: #664d03; background: #fff3cd; border-color: #ffda6a; }
+    .exam-affect-tag--wrong { color: #432874; background: #e2d9f3; border-color: #c5b3e6; }
+    .exam-affect-tag--only { color: #495057; background: #e9ecef; border-color: #ced4da; }
+    .exam-zone {
+        border-radius: 0.375rem;
+        padding: 0.85rem 0.95rem;
+        height: 100%;
+        background: #fff;
+        border: 1px solid #dee2e6;
+        border-left-width: 4px;
+    }
+    .exam-zone--shared { border-left-color: #6c757d; background: #f8f9fa; }
+    .exam-zone--generate { border-left-color: #0d6efd; background: #f8fbff; }
+    .exam-zone--ingest { border-left-color: #198754; background: #f7fbf9; }
+    .exam-zone--roles { border-left-color: #fd7e14; background: #fffaf5; }
+    .exam-zone--student-practice { border-left-color: #6f42c1; background: #faf8ff; }
+    .exam-zone-title {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35rem;
+        margin-bottom: 0.65rem;
+    }
+    .exam-zone-title .exam-quickops-section-title { margin-bottom: 0; }
+    .exam-zone-inherit {
+        font-size: 0.72rem;
+        color: #6c757d;
+        margin-bottom: 0.65rem;
+        padding: 0.35rem 0.5rem;
+        background: rgba(255, 255, 255, 0.7);
+        border-radius: 0.25rem;
+        border: 1px solid #e9ecef;
+    }
+    .exam-zone-divider {
+        border-top: 1px dashed #ced4da;
+        margin: 0.75rem 0;
+    }
+    .exam-not-linked-hint {
+        font-size: 0.75rem;
+        color: #856404;
+        background: #fff3cd;
+        border: 1px solid #ffecb5;
+        border-radius: 0.25rem;
+        padding: 0.4rem 0.55rem;
+        margin-top: 0.5rem;
+    }
 </style>
 <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
@@ -140,7 +235,7 @@
                 <a class="btn btn-sm btn-outline-secondary" href="#teacherBank">题库管理</a>
                 <a class="btn btn-sm btn-outline-secondary" href="#teacherJobs">任务记录</a>
                 <button type="button" class="btn btn-sm btn-primary" id="btnExamTeacherSystemSettings">考试与录题配置</button>
-                <span class="small text-muted ms-auto">体考类型为全局选项；题量/难度仅影响「来一套」。</span>
+                <span class="small text-muted ms-auto">左侧共用条件影响多个操作；各彩色区块角标标出实际生效范围。</span>
             </div>
         </div>
         <div id="teacherIngestProgress" class="alert alert-secondary py-2 d-none mb-3">
@@ -154,16 +249,49 @@
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2 d-none" id="btnTeacherReviewStop">停止轮询</button>
         </div>
         <div class="row g-3 align-items-stretch" id="teacherQuickOps">
+            <div class="col-12">
+                <div class="exam-linkage-legend">
+                    <strong>条件联动一览</strong>
+                    <span class="text-muted ms-1">— 同一选项在不同操作里是否生效</span>
+                    <div class="exam-linkage-matrix" role="table" aria-label="条件联动矩阵">
+                        <span class="exam-linkage-matrix-row"></span>
+                        <span class="exam-linkage-matrix-head">来一套</span>
+                        <span class="exam-linkage-matrix-head">录题</span>
+                        <span class="exam-linkage-matrix-head">达标检测</span>
+                        <span class="exam-linkage-matrix-row">体考 / 考试类型 / 案例</span>
+                        <span class="exam-linkage-yes">●</span><span class="exam-linkage-yes">●</span><span class="exam-linkage-yes">●</span>
+                        <span class="exam-linkage-matrix-row">题量 / 难度</span>
+                        <span class="exam-linkage-yes">●</span><span class="exam-linkage-no">—</span><span class="exam-linkage-no">—</span>
+                        <span class="exam-linkage-matrix-row">身份（可多选）</span>
+                        <span class="exam-linkage-opt">可选</span><span class="exam-linkage-no">—</span><span class="exam-linkage-yes">●</span>
+                    </div>
+                    <div class="mt-1 text-muted" style="font-size:0.72rem;">● 生效；可选＝不勾则按体考权重自动匹配；录题后身份可在「题库管理」手动标注。</div>
+                </div>
+            </div>
             <div class="col-lg-3 col-md-4">
-                <div class="exam-quickops-stack border rounded p-3 bg-light h-100 d-flex flex-column">
-                    <div class="exam-quickops-section-title">体考与考试类型（全局）</div>
+                <div class="exam-zone exam-zone--shared exam-quickops-stack h-100 d-flex flex-column">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">共用条件</div>
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--ingest">录题</span>
+                        <span class="exam-affect-tag exam-affect-tag--check">达标检测</span>
+                    </div>
                     <label class="form-label" for="teacherExamTrack">体考类型</label>
-                    <select class="form-select" id="teacherExamTrack" title="影响来一套与录题">
+                    <div class="exam-affect-tags">
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--ingest">录题</span>
+                        <span class="exam-affect-tag exam-affect-tag--check">达标检测</span>
+                    </div>
+                    <select class="form-select" id="teacherExamTrack" title="影响来一套、录题与达标检测">
                         <option value="cn">国内体考</option>
                         <option value="iso13485">13485体考</option>
                         <option value="mdsap">MDSAP体考</option>
                     </select>
                     <label class="form-label mt-2" for="teacherExamCategory">考试类型</label>
+                    <div class="exam-affect-tags">
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--ingest">录题</span>
+                    </div>
                     <select class="form-select" id="teacherExamCategory" title="与体考类型正交：日常考试为历史默认；新标发布侧重法规/标准/指南修订与变化导向录题；项目案例为模拟核查提问（须选已训练案例）">
                         <option value="daily" selected>日常考试</option>
                         <option value="new_standard">新标发布</option>
@@ -171,6 +299,10 @@
                     </select>
                     <div id="teacherProjectCaseRow" class="mt-2 pt-2 border-top d-none">
                         <label class="form-label mb-1" for="teacherProjectCaseId">项目案例</label>
+                        <div class="exam-affect-tags">
+                            <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                            <span class="exam-affect-tag exam-affect-tag--ingest">录题</span>
+                        </div>
                         <div class="small text-muted mb-1">{% if is_page13_super_admin %}与「题库管理」当前 collection 一致；{% endif %}选项含注册国家/类别</div>
                         <select class="form-select exam-project-case-select" id="teacherProjectCaseId" disabled title="{% if is_page13_super_admin %}须先在「题库管理」选择 collection，且案例已在 aicheckword 训练入库{% else %}须先选择题库，且案例已训练入库{% endif %}">
                             <option value="">请选择…</option>
@@ -180,19 +312,26 @@
                         <button type="button" class="btn btn-outline-secondary btn-sm w-100" id="btnTeacherRegulatoryHint">
                             检查法规/标准更新提示
                         </button>
+                        <div class="small text-muted mt-1 mb-0">仅辅助备考选题，不参与组卷/录题。</div>
                     </div>
                 </div>
             </div>
             <div class="col-lg-5 col-md-8">
-                <div class="border rounded p-3 bg-light exam-quickops-right-card">
-                    <div class="exam-quickops-section-title">来一套（仅影响考试草稿）</div>
+                <div class="exam-zone exam-zone--generate exam-quickops-right-card">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">来一套（考试草稿）</div>
+                        <span class="exam-affect-tag exam-affect-tag--set">仅本操作</span>
+                    </div>
+                    <div class="exam-zone-inherit">继承左侧：<strong>体考 · 考试类型 · 项目案例</strong></div>
                     <div class="row g-2 align-items-end">
                         <div class="col-sm-4">
                             <label class="form-label mb-1 small" for="teacherQuestionCount">题量</label>
+                            <div class="exam-affect-tags"><span class="exam-affect-tag exam-affect-tag--only">仅来一套</span></div>
                             <input class="form-control" id="teacherQuestionCount" type="number" min="1" value="20">
                         </div>
                         <div class="col-sm-4">
                             <label class="form-label mb-1 small" for="teacherDifficulty">难度</label>
+                            <div class="exam-affect-tags"><span class="exam-affect-tag exam-affect-tag--only">仅来一套</span></div>
                             <select class="form-select" id="teacherDifficulty">
                                 <option value="">默认</option>
                                 <option value="easy">简单</option>
@@ -204,15 +343,30 @@
                             <button class="btn btn-primary" id="btnTeacherGenerateSet" type="button">来一套（考试草稿）</button>
                         </div>
                     </div>
-                    <div class="small text-muted mt-2 mb-0">体考类型切换会联动题量/难度推荐值。</div>
+                    <div class="exam-zone-divider"></div>
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title mb-0" style="font-size:0.7rem;">身份筛选（可选）</div>
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--check">达标检测</span>
+                    </div>
+                    <div class="small text-muted mb-1">勾选后「来一套」严格按身份筛题；不勾则按体考权重自动匹配。下方达标检测共用本勾选。</div>
+                    <div id="teacherRequirementAuthorRolesList" class="exam-author-role-checks small">
+                        <div class="text-muted">加载中…</div>
+                    </div>
+                    <div class="exam-not-linked-hint mb-0 mt-2"><strong>不影响录题。</strong> 录题入库后可在「题库管理」手动改「关联身份」。</div>
                 </div>
             </div>
             <div class="col-lg-4 col-md-12">
-                <div class="border rounded p-3 h-100">
-                    <div class="exam-quickops-section-title">AI 批量录入题库</div>
-                    <button class="btn btn-outline-primary" id="btnTeacherIngestBank" type="button">开始录题</button>
+                <div class="exam-zone exam-zone--ingest h-100">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">AI 批量录入题库</div>
+                        <span class="exam-affect-tag exam-affect-tag--ingest">仅本操作</span>
+                    </div>
+                    <div class="exam-zone-inherit">继承左侧：<strong>体考 · 考试类型 · 项目案例</strong></div>
+                    <div class="exam-not-linked-hint"><strong>不使用</strong>右侧「身份筛选」与「题量/难度」。</div>
+                    <button class="btn btn-outline-primary mt-2" id="btnTeacherIngestBank" type="button">开始录题</button>
                     <div class="small text-muted mt-2 mb-0">
-                        录题配比、每批题量、近似重复上限与考试及格线由「考试与录题配置」维护（默认：知识来源 30/30/20/20；题型 30/10/10/50；每批 50；重复≤10%；及格 80 分）。
+                        录题配比、每批题量、近似重复上限与及格线由「考试与录题配置」维护（默认：知识来源 30/30/20/20；题型 30/10/10/50；每批 50；重复≤10%；及格 80 分）。
                     </div>
                 </div>
             </div>
@@ -234,28 +388,24 @@
                 </div>
             </div>
         </div>
-        <div class="mt-2 small text-muted">
-            <div><strong>说明：</strong>体考类型为全局选项；录题占比与批大小以「考试与录题配置」为准。</div>
-        </div>
-        <div class="mt-2 p-2 border rounded bg-light">
+        <div class="mt-2 p-2 border rounded bg-light exam-zone exam-zone--check" style="border-left-color:#ffc107;background:#fffdf5;">
+            <div class="exam-zone-title">
+                <div class="exam-quickops-section-title mb-0">体考达标检测</div>
+                <span class="exam-affect-tag exam-affect-tag--check">达标检测</span>
+            </div>
+            <div class="exam-zone-inherit mb-2">继承：<strong>左侧共用条件</strong> ＋ <strong>上方「身份筛选」勾选</strong>（与「来一套」共用，<strong>不影响录题</strong>）</div>
             <div class="d-flex gap-2 align-items-center flex-wrap">
                 <button class="btn btn-sm btn-outline-primary" id="btnTeacherCheckRequirements" type="button">检查体考达标情况</button>
                 <button class="btn btn-sm btn-outline-success" id="btnTeacherMarkRequirementBaseline" type="button">设为当前达标基线</button>
-                <span class="small text-muted">录题按批次执行：每批题量见配置；达标后可继续录题或停止录题。</span>
-            </div>
-            <div class="mt-2" style="max-width: 520px;">
-                <label class="form-label small mb-1">身份覆盖检测（可多选）</label>
-                <div id="teacherRequirementAuthorRolesList" class="exam-author-role-checks small">
-                    <div class="text-muted">加载中…</div>
-                </div>
-                <div class="small text-muted mt-1">勾选要检测的身份；变更后自动刷新下方覆盖结果。</div>
+                <span class="small text-muted">录题按批次执行；达标后可继续录题或停止录题。</span>
             </div>
             <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
                 <label class="small text-muted mb-0" for="teacherRegPolicyVersion">法规版本兜底标识</label>
                 <input class="form-control form-control-sm" id="teacherRegPolicyVersion" style="width: 280px;" placeholder="自动识别失败时使用；例如：CN-GMP+核查指南-2026Q2">
                 <button class="btn btn-sm btn-outline-secondary" id="btnTeacherSavePolicyVersion" type="button">保存兜底版本</button>
+                <span class="exam-affect-tag exam-affect-tag--check">达标检测</span>
             </div>
-            <div id="teacherRequirementStatus" class="small text-muted mt-2">待检查：请选择体考类型后点击“检查体考达标情况”。</div>
+            <div id="teacherRequirementStatus" class="small text-muted mt-2">待检查：请选择体考类型后点击「检查体考达标情况」。</div>
         </div>
         <details class="exam-collapse mt-4 pt-3 border-top" id="teacherJobs">
             <summary class="fw-bold">任务记录（录题 / 复审）</summary>
@@ -433,6 +583,7 @@
                         <th style="width: 36px"><input type="checkbox" id="teacherBankCheckAll"></th>
                         <th style="width: 120px">ID</th>
                         <th>题干</th>
+                        <th style="width: 160px">关联身份</th>
                         <th style="width: 120px">体考</th>
                         <th style="width: 110px">类型</th>
                         <th style="width: 90px">难度</th>
@@ -441,7 +592,7 @@
                     </tr>
                     </thead>
                     <tbody id="teacherBankBody">
-                    <tr><td colspan="8" class="text-muted small">加载中…</td></tr>
+                    <tr><td colspan="9" class="text-muted small">加载中…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -504,6 +655,16 @@
                             <div class="col-md-4">
                                 <label class="form-label">difficulty</label>
                                 <input class="form-control" id="teacherBankEditDifficulty">
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label">关联身份</label>
+                                <div class="small text-muted mb-1">默认按题干自动推断；选「通用（无身份）」表示各身份通用题，标签留空。</div>
+                                <select class="form-select form-select-sm mb-2" id="teacherBankEditAuthorRolesMode" style="max-width: 280px;">
+                                    <option value="auto">自动推断</option>
+                                    <option value="manual">手动指定</option>
+                                    <option value="universal">通用（无身份）</option>
+                                </select>
+                                <div id="teacherBankEditAuthorRolesList"></div>
                             </div>
                             <div class="col-md-8">
                                 <label class="form-label">answer（JSON/字符串；需勾选 answer_present 才会更新）</label>
@@ -637,9 +798,31 @@
         <h5 class="card-title">{% if is_page13_super_admin %}页面2能力：{% endif %}来一套练习/考试作答</h5>
         <div id="studentOperationFeedback" class="mb-3 d-none" role="status" aria-live="polite"></div>
         <div class="row g-3 align-items-stretch student-write-only">
-            <div class="col-lg-3 col-md-4">
-                <div class="exam-quickops-stack border rounded p-3 bg-light h-100 d-flex flex-column">
-                    <div class="exam-quickops-section-title">体考与考试类型</div>
+            <div class="col-12">
+                <div class="exam-linkage-legend">
+                    <strong>练习卷条件联动</strong>
+                    <div class="exam-linkage-matrix" role="table" aria-label="学生练习条件联动">
+                        <span class="exam-linkage-matrix-row"></span>
+                        <span class="exam-linkage-matrix-head">来一套</span>
+                        <span class="exam-linkage-matrix-head">错题优先</span>
+                        <span class="exam-linkage-matrix-head">覆盖预览</span>
+                        <span class="exam-linkage-matrix-row">体考 / 考试类型 / 案例</span>
+                        <span class="exam-linkage-yes">●</span><span class="exam-linkage-yes">●</span><span class="exam-linkage-yes">●</span>
+                        <span class="exam-linkage-matrix-row">题量 / 难度</span>
+                        <span class="exam-linkage-yes">●</span><span class="exam-linkage-no">—</span><span class="exam-linkage-no">—</span>
+                        <span class="exam-linkage-matrix-row">身份（必选）</span>
+                        <span class="exam-linkage-yes">●</span><span class="exam-linkage-opt">匹配</span><span class="exam-linkage-yes">●</span>
+                    </div>
+                    <div class="mt-1 text-muted" style="font-size:0.72rem;">错题优先：仅纳入<strong>符合当前身份</strong>的错题/未练题，不足部分再从题库补题。</div>
+                </div>
+            </div>
+            <div class="col-lg-4 col-md-5">
+                <div class="exam-zone exam-zone--shared exam-quickops-stack h-100 d-flex flex-column mb-2 mb-md-0">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">共用条件</div>
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--wrong">错题优先</span>
+                    </div>
                     <label class="form-label" for="studentExamTrack">体考类型</label>
                     <select class="form-select" id="studentExamTrack">
                         <option value="cn">国内体考</option>
@@ -659,26 +842,29 @@
                             <option value="">请选择…</option>
                         </select>
                     </div>
-                    <div class="mt-2 pt-2 border-top">
-                        <label class="form-label mb-1">考试人员身份（可多选）</label>
-                        <div class="small text-muted mb-1">与 aicheckword 编写人员身份一致；项目案例出题会按身份匹配对应文件范围。</div>
-                        <div id="studentAuthorRolesList" class="exam-author-role-checks small">
-                            <div class="text-muted">加载中…</div>
-                        </div>
-                        <div id="studentAuthorRoleCoverage" class="exam-role-coverage-panel small mt-2 d-none"></div>
+                </div>
+                <div class="exam-zone exam-zone--roles mt-2">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title mb-0">身份（必选）</div>
+                        <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
+                        <span class="exam-affect-tag exam-affect-tag--wrong">错题优先</span>
+                        <span class="exam-affect-tag exam-affect-tag--check">覆盖预览</span>
                     </div>
+                    <div class="small text-muted mb-1">与编写人员身份一致；项目案例练习会按身份匹配对应文件范围。</div>
+                    <div id="studentAuthorRolesList" class="exam-author-role-checks small">
+                        <div class="text-muted">加载中…</div>
+                    </div>
+                    <div id="studentAuthorRoleCoverage" class="exam-role-coverage-panel small mt-2 d-none"></div>
                 </div>
             </div>
-            <div class="col-lg-2 col-md-4">
-                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
-                    <div class="exam-quickops-section-title">题量</div>
+            <div class="col-lg-2 col-md-3">
+                <div class="exam-zone exam-zone--generate h-100 exam-quickops-right-card">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">卷面参数</div>
+                        <span class="exam-affect-tag exam-affect-tag--only">仅来一套</span>
+                    </div>
                     <label class="form-label" for="studentSetSize">练习题量</label>
-                    <input class="form-control" id="studentSetSize" type="number" min="1" value="10">
-                </div>
-            </div>
-            <div class="col-lg-2 col-md-4">
-                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
-                    <div class="exam-quickops-section-title">难度</div>
+                    <input class="form-control mb-2" id="studentSetSize" type="number" min="1" value="10">
                     <label class="form-label" for="studentDifficulty">难度</label>
                     <select class="form-select" id="studentDifficulty">
                         <option value="easy">简单</option>
@@ -687,14 +873,18 @@
                     </select>
                 </div>
             </div>
-            <div class="col-lg-5 col-md-12">
-                <div class="border rounded p-3 h-100 exam-quickops-right-card bg-light">
-                    <div class="exam-quickops-section-title">操作</div>
+            <div class="col-lg-6 col-md-4">
+                <div class="exam-zone exam-zone--student-practice h-100 exam-quickops-right-card">
+                    <div class="exam-zone-title">
+                        <div class="exam-quickops-section-title">操作</div>
+                    </div>
+                    <div class="exam-zone-inherit mb-2">「来一套」= 左侧共用条件 ＋ 身份 ＋ 题量/难度；错题本题目须<strong>匹配当前身份</strong>才会优先出现。</div>
                     <div class="d-flex flex-wrap gap-2 align-items-start mt-1">
                         <button class="btn btn-primary" id="btnStudentGenerateSet" type="button">来一套（练习）</button>
                         <button class="btn btn-outline-secondary" id="btnStudentWrongbook" type="button">查看错题本</button>
                         <button class="btn btn-outline-secondary" id="btnStudentTracks" type="button">未练题量</button>
                     </div>
+                    <div class="small text-muted mt-2 mb-0">老师下发的「考试任务」使用套题内题目，不受本页身份勾选影响。</div>
                 </div>
             </div>
         </div>

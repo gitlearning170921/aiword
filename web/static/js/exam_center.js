@@ -21,6 +21,10 @@
             .replace(/"/g, "&quot;");
     }
 
+    function escHtml(s) {
+        return escExam(s);
+    }
+
     function examEmptyRow(colspan, contextKey, extraLines) {
         if (window.ScopeBar && ScopeBar.emptyTableRow) {
             return ScopeBar.emptyTableRow(colspan, contextKey, extraLines);
@@ -926,6 +930,84 @@
         return readAuthorRoleCheckboxes("teacherRequirementAuthorRolesList");
     }
 
+    function bankAuthorRoleModeFromItem(it) {
+        if (!it || typeof it !== "object") return "auto";
+        if (it.author_roles_manual === true || it.authorRolesManual === true) {
+            var hits = it.author_role_hits || it.authorRoleHits || [];
+            if (!Array.isArray(hits) || !hits.length) return "universal";
+            return "manual";
+        }
+        return "auto";
+    }
+
+    function renderBankAuthorRolesCellHtml(it) {
+        var labels = (it && (it.author_role_labels || it.authorRoleLabels)) || [];
+        var manual = it && (it.author_roles_manual === true || it.authorRolesManual === true);
+        if (!Array.isArray(labels) || !labels.length) {
+            return '<span class="text-muted">—</span>';
+        }
+        var html = labels
+            .map(function (lbl) {
+                return '<span class="badge bg-secondary me-1 mb-1">' + escHtml(String(lbl || "").trim()) + "</span>";
+            })
+            .join("");
+        if (manual) {
+            html += ' <span class="text-muted small" title="手动指定">*</span>';
+        }
+        return html || '<span class="text-muted">—</span>';
+    }
+
+    function syncTeacherBankEditAuthorRolesModeUi() {
+        var modeEl = document.getElementById("teacherBankEditAuthorRolesMode");
+        var box = document.getElementById("teacherBankEditAuthorRolesList");
+        if (!box) return;
+        var mode = modeEl ? String(modeEl.value || "auto").trim() : "auto";
+        box.style.display = mode === "manual" ? "" : "none";
+    }
+
+    async function fillTeacherBankEditAuthorRoles(it) {
+        var modeEl = document.getElementById("teacherBankEditAuthorRolesMode");
+        var listId = "teacherBankEditAuthorRolesList";
+        var box = document.getElementById(listId);
+        if (modeEl) modeEl.value = bankAuthorRoleModeFromItem(it);
+        if (box) box.innerHTML = '<div class="text-muted">加载身份选项…</div>';
+        syncTeacherBankEditAuthorRolesModeUi();
+        var prev =
+            bankAuthorRoleModeFromItem(it) === "manual"
+                ? (it.author_role_hits || it.authorRoleHits || []).slice()
+                : [];
+        var rows = EXAM_AUTHOR_ROLE_FALLBACK.slice();
+        try {
+            var collFn = typeof readTeacherQuizCollection === "function" ? readTeacherQuizCollection : null;
+            var coll = collFn ? collFn() : "regulations";
+            var resp = await apiRequest(
+                "/api/exam-center/teacher/author-roles?collection=" + encodeURIComponent(coll),
+                "GET",
+                null
+            );
+            var apiRows = resp && resp.data && (resp.data.author_roles || resp.data.authorRoles);
+            if (Array.isArray(apiRows) && apiRows.length) rows = apiRows;
+        } catch (eRoleOpt) {
+            /* fallback */
+        }
+        renderAuthorRoleCheckboxes(listId, rows, prev, null);
+        syncTeacherBankEditAuthorRolesModeUi();
+    }
+
+    function readTeacherBankEditAuthorRolesPayload() {
+        var modeEl = document.getElementById("teacherBankEditAuthorRolesMode");
+        var mode = modeEl ? String(modeEl.value || "auto").trim() : "auto";
+        var payload = { author_roles_present: true };
+        if (mode === "auto") {
+            payload.author_roles = null;
+        } else if (mode === "universal") {
+            payload.author_roles = [];
+        } else {
+            payload.author_roles = readAuthorRoleCheckboxes("teacherBankEditAuthorRolesList");
+        }
+        return payload;
+    }
+
     function renderAuthorRoleCheckboxes(containerId, rows, prevSelected, onChange) {
         var box = document.getElementById(containerId);
         if (!box) return;
@@ -1673,6 +1755,25 @@
         }
         if (resp.job_id) return String(resp.job_id);
         if (resp.jobId) return String(resp.jobId);
+        return "";
+    }
+
+    function pickJobMessage(jobResp) {
+        if (!jobResp || typeof jobResp !== "object") return "";
+        var d = jobResp.data;
+        if (d && typeof d === "object") {
+            if (d.job_record && typeof d.job_record === "object" && d.job_record.message) {
+                return String(d.job_record.message);
+            }
+            if (d.jobRecord && typeof d.jobRecord === "object" && d.jobRecord.message) {
+                return String(d.jobRecord.message);
+            }
+            if (d.message) return String(d.message);
+            if (d.data && typeof d.data === "object" && d.data.message) {
+                return String(d.data.message);
+            }
+        }
+        if (jobResp.message) return String(jobResp.message);
         return "";
     }
 
@@ -2717,13 +2818,13 @@
                     return encodeURIComponent(k) + "=" + encodeURIComponent(String(q[k]));
                 })
                 .join("&");
-            bankBody.innerHTML = '<tr><td colspan="8" class="text-muted small">加载中…</td></tr>';
+            bankBody.innerHTML = '<tr><td colspan="9" class="text-muted small">加载中…</td></tr>';
             try {
                 var resp = await apiRequest("/api/exam-center/teacher/bank/questions" + (qs ? "?" + qs : ""), "GET");
                 render(resp);
                 if (resp && resp.__ok === false) {
                     bankBody.innerHTML =
-                        '<tr><td colspan="8" class="text-danger small">' +
+                        '<tr><td colspan="9" class="text-danger small">' +
                         escHtml(resp.message || "题库列表请求失败") +
                         "（HTTP " +
                         escHtml(String(resp.__http_status || "?")) +
@@ -2754,7 +2855,7 @@
                     bankMeta.textContent = metaLine;
                 }
                 if (!Array.isArray(items) || items.length === 0) {
-                    bankBody.innerHTML = '<tr><td colspan="8" class="text-muted small">无数据</td></tr>';
+                    bankBody.innerHTML = '<tr><td colspan="9" class="text-muted small">无数据</td></tr>';
                     return;
                 }
                 bankBody.innerHTML = "";
@@ -2780,6 +2881,7 @@
                         escHtml(stem.slice(0, 120)) +
                         (stem.length > 120 ? "…" : "") +
                         "</td>" +
+                        '<td class="small" data-bank-roles="1"></td>' +
                         '<td class="small">' +
                         escHtml(examTrack) +
                         "</td>" +
@@ -2794,6 +2896,8 @@
                         '</td><td class="small"><div class="d-flex gap-1 flex-wrap" data-op="1"></div></td>';
                     var c = tr.querySelector('input[type="checkbox"][data-qid]');
                     c.dataset.qid = qid;
+                    var roleCell = tr.querySelector("[data-bank-roles]");
+                    if (roleCell) roleCell.innerHTML = renderBankAuthorRolesCellHtml(it);
                     bankBody.appendChild(tr);
                     var op = tr.querySelector("[data-op]");
                     if (!op) return;
@@ -2801,7 +2905,7 @@
                     bEdit.type = "button";
                     bEdit.className = "btn btn-sm btn-outline-primary";
                     bEdit.textContent = "修改";
-                    bEdit.addEventListener("click", function () {
+                    bEdit.addEventListener("click", async function () {
                         function setVal(id, v) {
                             var el = document.getElementById(id);
                             if (el) el.value = v == null ? "" : String(v);
@@ -2821,6 +2925,7 @@
                         setVal("teacherBankEditAnswer", it.answer != null ? JSON.stringify(it.answer, null, 2) : "");
                         var ap = document.getElementById("teacherBankEditAnswerPresent");
                         if (ap) ap.checked = false;
+                        await fillTeacherBankEditAuthorRoles(it);
                         if (modalBankEl && window.bootstrap && window.bootstrap.Modal) {
                             window.__bankModal = window.__bankModal || new window.bootstrap.Modal(modalBankEl);
                             window.__bankModal.show();
@@ -2866,7 +2971,7 @@
                 });
             } catch (e) {
                 bankBody.innerHTML =
-                    '<tr><td colspan="8" class="text-danger small">加载失败：' + escHtml(e.message) + "</td></tr>";
+                    '<tr><td colspan="9" class="text-danger small">加载失败：' + escHtml(e.message) + "</td></tr>";
             }
         }
 
@@ -3262,6 +3367,9 @@
                     var ansRaw = readValue("teacherBankEditAnswer");
                     payload.answer = ansRaw ? jsonTryParseOrString(ansRaw) : null;
                 }
+                var rolePayload = readTeacherBankEditAuthorRolesPayload();
+                payload.author_roles_present = rolePayload.author_roles_present;
+                payload.author_roles = rolePayload.author_roles;
                 var resp = await apiRequest(
                     "/api/exam-center/teacher/bank/questions/" + encodeURIComponent(qid) + "?" + qs,
                     "PATCH",
@@ -3272,6 +3380,11 @@
                     window.__bankModal.hide();
                 }
                 await loadTeacherBankQuestions();
+            });
+        var bankEditAuthorRolesMode = document.getElementById("teacherBankEditAuthorRolesMode");
+        bankEditAuthorRolesMode &&
+            bankEditAuthorRolesMode.addEventListener("change", function () {
+                syncTeacherBankEditAuthorRolesModeUi();
             });
         chkSetsAll &&
             chkSetsAll.addEventListener("change", function () {
@@ -3468,6 +3581,15 @@
                     payload.author_role_coverage = "balanced_union";
                     payload.authorRoleCoverage = "balanced_union";
                 }
+                var trackLabel = track;
+                var ecatLabel = ecat;
+                var roleHint =
+                    teacherRoles && teacherRoles.length
+                        ? "，身份：" + teacherRoles.join("、")
+                        : "（未勾选身份，按体考权重自动匹配）";
+                setIngestProgress(true, "正在按体考 " + trackLabel + " / " + ecatLabel + roleHint + " 组卷…", {
+                    showStop: false
+                });
                 // aicheckword：difficulty 须为 string；「默认」为空则不传难度字段（避免 422）
                 var diff = readValue("teacherDifficulty");
                 if (diff) {
@@ -3479,10 +3601,12 @@
 
                 var data = await apiRequest("/api/exam-center/teacher/sets/generate", "POST", payload);
                 render(data);
+                setIngestProgress(false, "");
                 // 与录题一致：上游 data.data 内含 set_id / id（aicheckword load_set），自动填入套题 ID 便于复审/发布
                 maybeAutofillSetIdFromAnyResp(data);
             } catch (e) {
                 render({ code: "UI_ERROR", message: e.message, data: null });
+                setIngestProgress(false, "");
             } finally {
                 setButtonLoading(btnGenerate, false);
             }
@@ -3594,8 +3718,8 @@
                 }
                 ingestState.jobId = jobId;
                 setIngestProgress(true, ecUf(
-                    "任务已创建，job_id=" + jobId + "，开始轮询进度…",
-                    "任务已创建，任务编号 " + jobId + "，开始轮询进度…"
+                    "任务已创建（job_id=" + jobId + "）。AI 在文档服务后台生成题目，浏览器不会看到大模型请求；开始轮询…",
+                    "任务已创建（任务编号 " + jobId + "）。AI 在后台生成题目，开始轮询…"
                 ));
                 setButtonLoading(btnIngest, true, "录题进行中…");
 
@@ -3632,14 +3756,20 @@
                     }
 
                     var st = pickJobStatus(jobResp);
-                    if (st) setIngestProgress(true, "当前状态：" + st + "（job_id=" + jobId + "）");
+                    var jobMsg = pickJobMessage(jobResp);
+                    if (st) {
+                        var progText = jobMsg
+                            ? ("当前状态：" + st + " — " + jobMsg + "（job_id=" + jobId + "）")
+                            : ("当前状态：" + st + "（job_id=" + jobId + "）");
+                        setIngestProgress(true, progText);
+                    }
                     if (st === "done" || st === "success" || st === "completed") {
-                        setIngestProgress(true, "已完成（job_id=" + jobId + "）");
+                        setIngestProgress(true, jobMsg || ("已完成（job_id=" + jobId + "）"));
                         await loadTeacherRequirementStatus({ fullCheck: true });
                         break;
                     }
                     if (st === "failed" || st === "error") {
-                        setIngestProgress(true, "已失败（job_id=" + jobId + "），请查看返回 data/trace_id");
+                        setIngestProgress(true, jobMsg || ("已失败（job_id=" + jobId + "），请查看返回 data/trace_id"));
                         break;
                     }
                     pollMs = Math.max(1200, Math.min(1800, pollMs - 200));
@@ -3893,11 +4023,15 @@
         selTeacherExamCat &&
             selTeacherExamCat.addEventListener("change", function () {
                 syncProjectCaseExamUi();
+                loadTeacherRequirementStatus({
+                    rolesOnly: readTeacherRequirementRolesLocal().length > 0
+                });
             });
         var selStudentExamCat = document.getElementById("studentExamCategory");
         selStudentExamCat &&
             selStudentExamCat.addEventListener("change", function () {
                 syncProjectCaseExamUi();
+                scheduleStudentAuthorRoleCoveragePreview();
             });
         btnSavePolicyVersion &&
             btnSavePolicyVersion.addEventListener("click", async function () {
@@ -3917,6 +4051,7 @@
             loadTeacherAuthorRoleOptions();
             loadTeacherPolicyVersion();
             syncProjectCaseExamUi();
+            loadTeacherRequirementStatus({ rolesOnly: false });
         } else {
             loadTeacherAuthorRoleOptions();
             syncProjectCaseExamUi();
@@ -4137,15 +4272,23 @@
         /** 清理题干中残留/半截的开卷链接 HTML（历史脏数据或重复 linkify 产生） */
         function stripBrokenOpenBookHtml(s) {
             var t = String(s == null ? "" : s);
-            t = t.replace(/" title="开卷查阅：点击展开全文">/g, "");
-            t = t.replace(/\s*data-open-book-file="[^"]*"/gi, "");
-            t = t.replace(/\s*class="[^"]*exam-open-book-link[^"]*"/gi, "");
+            // 1) 完整 button 标签对：保留内部纯文本
             t = t.replace(/<button[^>]*exam-open-book-link[^>]*>([\s\S]*?)<\/button>/gi, function (_m, inner) {
                 return String(inner || "")
                     .replace(/<[^>]+>/g, "")
                     .replace(/^《|》$/g, "");
             });
-            t = t.replace(/<\/?button[^>]*>/gi, "");
+            // 2) 残留的起始/结束标签
+            t = t.replace(/<button\b[^>]*>/gi, "");
+            t = t.replace(/<\/button\s*>/gi, "");
+            // 3) 游离属性碎片（前缀被截断只剩属性值的情况）
+            t = t.replace(/\s*data-open-book-file\s*=\s*"[^"]*"/gi, "");
+            t = t.replace(/\s*class\s*=\s*"[^"]*exam-open-book-link[^"]*"/gi, "");
+            t = t.replace(/\s*type\s*=\s*"button"/gi, "");
+            t = t.replace(/"?\s*title\s*=\s*"开卷查阅[:：]点击展开全文"\s*[>》]?/gi, "");
+            // 4) 折叠残留的「裸名《同名》」重复（仅审核点清单文件名）
+            t = t.replace(/(审核点清单[-:][\w.\-]+)\s*《\1》/g, "《$1》");
+            t = t.replace(/《(审核点清单[-:][\w.\-]+)》\s*\1(?![\w.\-])/g, "《$1》");
             return t;
         }
 
@@ -6039,9 +6182,17 @@
                     return;
                 }
                 setButtonLoading(btnSet, true, "生成中…");
-                openInteractionPending("正在生成练习卷…", "体考类型：" + escSt(readValue("studentExamTrack") || "cn"));
+                var stEcat = readExamCategory("student");
+                openInteractionPending(
+                    "正在生成练习卷…",
+                    "体考：" +
+                        escSt(readValue("studentExamTrack") || "cn") +
+                        "，类型：" +
+                        escSt(stEcat) +
+                        "，身份：" +
+                        escSt(pickedRoles.join("、"))
+                );
                 try {
-                    var stEcat = readExamCategory("student");
                     var payS = {
                         exam_track: readValue("studentExamTrack") || "cn",
                         exam_category: stEcat,
