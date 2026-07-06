@@ -82,7 +82,9 @@
           <input type="hidden" id="dg_collection" value="regulations"/>
         </div>
         <div class="col-md-6 d-flex align-items-end">
-          <button type="button" class="btn btn-outline-secondary" id="dg_btn_refresh_bootstrap">刷新列表（案例/模板/项目）</button>
+          <button type="button" class="btn btn-outline-secondary" id="dg_btn_refresh_bootstrap" aria-live="polite">
+            <span id="dg_refresh_bootstrap_label">刷新列表（案例/模板/项目）</span>
+          </button>
         </div>
         <div class="col-12">
           <label class="form-label" id="dg_lbl_base_case"><span class="dg-req" title="提交前必选">*</span><span class="dg-lbl-text">2) 选择模板项目案例（用于生成格式/法规部分）</span><span id="dg_pf_base_case" class="dg-prefill-tag d-none">已默认</span></label>
@@ -366,6 +368,7 @@
 {% endblock %}
 {% block body_extra %}
 <script>
+  window.__DG_USE_COMPANY_PROJECTS__ = {{ is_company_admin|tojson }};
   window.__DG_FORCE_PAGE0_SCOPE__ = {{ (is_company_admin or manual_upload_only|default(false))|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/_integration_prefill.js', v=static_version) }}"></script>

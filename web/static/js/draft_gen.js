@@ -59,6 +59,10 @@
   /** @type {any} */
   let lastBootstrap = null;
 
+  function dgUseCompanyRegistryProjects() {
+    return !!window.__DG_USE_COMPANY_PROJECTS__;
+  }
+
   function dgIntegrationScopeFromLocation() {
     if (window.__DG_FORCE_PAGE0_SCOPE__) return "page0";
     try {
@@ -69,10 +73,6 @@
       if (manual === "1" || manual === "true" || manual === "yes" || manual === "on") return "page0";
     } catch (e) { /* ignore */ }
     return "workflow";
-  }
-
-  function dgIsPage0Scope() {
-    return dgIntegrationScopeFromLocation() === "page0";
   }
 
   function dgIntegrationScopeQuery() {
@@ -124,6 +124,13 @@
   var _dgAuthorRoleAutoSig = "";
   var _dgAuthRoleTimer = null;
   var __page2DidTemplatePrefill = false;
+  var _dgBootstrapLoadingDefaultText = "";
+
+  function initBootstrapLoadingDefaultText() {
+    if (_dgBootstrapLoadingDefaultText) return;
+    var t = el("dg_bootstrap_loading_text");
+    _dgBootstrapLoadingDefaultText = (t && t.textContent) ? t.textContent : "正在加载…";
+  }
 
   function parsePage2PrefillFromLocation() {
     try {
@@ -1050,25 +1057,31 @@
   }
 
   function setDraftBootstrapLoadingVisible(on, optMsg) {
+    initBootstrapLoadingDefaultText();
     var w = el("dg_bootstrap_loading");
     if (!w) return;
     var t = el("dg_bootstrap_loading_text");
-    if (t && optMsg) t.textContent = String(optMsg);
+    if (t) {
+      if (on) t.textContent = optMsg ? String(optMsg) : _dgBootstrapLoadingDefaultText;
+    }
     if (on) {
       w.classList.remove("d-none");
       w.classList.add("d-flex");
       w.setAttribute("aria-hidden", "false");
+      w.setAttribute("aria-busy", "true");
     } else {
       w.classList.add("d-none");
       w.classList.remove("d-flex");
       w.setAttribute("aria-hidden", "true");
+      w.removeAttribute("aria-busy");
+      if (t) t.textContent = _dgBootstrapLoadingDefaultText;
     }
   }
 
-  function beginDraftBootstrapLoading(showOverlay) {
+  function beginDraftBootstrapLoading(showOverlay, loadingMessage) {
     __dgBootstrapLoadingDepth += 1;
     if (__dgBootstrapLoadingDepth === 1 && showOverlay !== false) {
-      setDraftBootstrapLoadingVisible(true);
+      setDraftBootstrapLoadingVisible(true, loadingMessage);
     }
   }
 
@@ -1722,12 +1735,12 @@
   function applyProjectModeLabels() {
     var pm = el("dg_project_mode");
     if (!pm) return;
-    var page0 = dgIsPage0Scope();
+    var useCompany = dgUseCompanyRegistryProjects();
     for (var i = 0; i < pm.options.length; i++) {
       if (pm.options[i].value === "new") {
         pm.options[i].text = dgUserText(
-          page0 ? "从公司总览项目新建" : "从页面1已有项目新建",
-          page0 ? "从公司总览项目新建" : "从任务列表已有项目新建"
+          useCompany ? "从公司总览项目新建" : "从页面1已有项目新建",
+          useCompany ? "从公司总览项目新建" : "从任务列表已有项目新建"
         );
       } else if (pm.options[i].value === "existing") {
         pm.options[i].text = dgUserText("使用已有项目（aicheckword，不新建）", "使用已有项目（不新建）");
@@ -1736,8 +1749,8 @@
     var p1lab = el("dg_page1_project_label");
     if (p1lab) {
       p1lab.textContent = dgUserText(
-        page0 ? "选择公司总览项目" : "选择页面1已有项目",
-        page0 ? "选择公司总览项目" : "选择任务列表中的项目"
+        useCompany ? "选择公司总览项目" : "选择页面1已有项目",
+        useCompany ? "选择公司总览项目" : "选择任务列表中的项目"
       );
     }
   }
@@ -1867,7 +1880,7 @@
   }
 
   function loadSourceProjectsForDraft() {
-    if (dgIsPage0Scope()) return loadCompanyProjectsForDraft();
+    if (dgUseCompanyRegistryProjects()) return loadCompanyProjectsForDraft();
     return loadPage1ProjectsForDraft();
   }
 
@@ -1889,8 +1902,8 @@
     if (!sourceId) {
       showMsg(
         dgUserText(
-          dgIsPage0Scope() ? "请先选择公司总览项目" : "请先选择页面1已有项目",
-          dgIsPage0Scope() ? "请先选择公司总览项目" : "请先选择任务列表中的项目"
+          dgUseCompanyRegistryProjects() ? "请先选择公司总览项目" : "请先选择页面1已有项目",
+          dgUseCompanyRegistryProjects() ? "请先选择公司总览项目" : "请先选择任务列表中的项目"
         ),
         true
       );
@@ -1901,7 +1914,7 @@
     var orgEl = el("dg_organization");
     var coll = (collEl && collEl.value ? collEl.value.trim() : "") || "regulations";
     var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
-    var prefillBase = dgIsPage0Scope()
+    var prefillBase = dgUseCompanyRegistryProjects()
       ? "/draft-gen/api/company-projects/"
       : "/draft-gen/api/page1-projects/";
     var prefillUrl =
@@ -2001,7 +2014,7 @@
       project_form: String((el("dg_acw_project_form") && el("dg_acw_project_form").value) || "").trim(),
       scope_of_application: String((el("dg_acw_scope") && el("dg_acw_scope").value) || "").trim(),
     };
-    if (dgIsPage0Scope()) body.companyProjectId = sourceId;
+    if (dgUseCompanyRegistryProjects()) body.companyProjectId = sourceId;
     else body.page1ProjectId = sourceId;
     return body;
   }
@@ -2083,10 +2096,10 @@
     if (!body.name) {
       showAcwModalMsg(
         dgUserText(
-          dgIsPage0Scope()
+          dgUseCompanyRegistryProjects()
             ? "请填写项目名称（项目编号），或先在公司总览中维护项目信息。"
             : "该页面1 项目尚未填写项目编号，请先到页面1 任务列表中填写后再试。",
-          dgIsPage0Scope()
+          dgUseCompanyRegistryProjects()
             ? "请填写项目名称（项目编号），或先在公司总览中维护项目信息。"
             : "该项目尚未填写项目编号，请先在任务列表中填写后再试。"
         ),
@@ -2151,11 +2164,57 @@
     fillYesNo("dg_save_case", defSave);
   }
 
+  /** 切换所属公司：同步知识库并刷新案例/模板/项目/任务历史 */
+  /** 用户主动刷新（按钮/切换公司）：全屏 loading + 禁用相关控件 */
+  function userRefreshDraftBootstrap(loadingMessage) {
+    var btn = el("dg_btn_refresh_bootstrap");
+    var orgSel = el("dg_organization");
+    var btnLabel = el("dg_refresh_bootstrap_label");
+    var btnBusy = "刷新中…";
+    if (btn) {
+      btn.disabled = true;
+      btn.setAttribute("aria-busy", "true");
+    }
+    if (orgSel) orgSel.disabled = true;
+    if (btnLabel) btnLabel.textContent = btnBusy;
+    return loadDraftBootstrap({
+      fullOverlay: true,
+      loadingMessage: loadingMessage || "正在刷新案例、模板与项目列表…",
+    }).finally(function () {
+      if (btn) {
+        btn.disabled = false;
+        btn.removeAttribute("aria-busy");
+      }
+      if (orgSel) orgSel.disabled = false;
+      if (btnLabel) btnLabel.textContent = "刷新列表（案例/模板/项目）";
+    });
+  }
+
+  function onDraftOrganizationChanged() {
+    var IP = window.IntegrationPrefill;
+    var orgEl = el("dg_organization");
+    var orgId = orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+    if (IP && IP.syncCollectionFromOrganization) {
+      IP.syncCollectionFromOrganization("dg", orgId, window.__integrationOrgs_dg || []);
+    }
+    if (el("dg_base_case")) el("dg_base_case").value = "";
+    if (el("dg_project_id")) el("dg_project_id").value = "";
+    if (el("dg_page1_project_id")) el("dg_page1_project_id").value = "";
+    _dgBaseCaseUserTouched = false;
+    _dgLinkedAcwProjectId = 0;
+    _dgPendingSelectProjectId = 0;
+    updatePage1AcwLinkedLabel();
+    updatePage1CreateBtnState();
+    return userRefreshDraftBootstrap("正在切换所属公司并刷新列表…").then(function () {
+      return loadJobList();
+    });
+  }
+
   function loadDraftBootstrap(opts) {
     opts = opts || {};
     var showOverlay = opts.fullOverlay !== false;
     var seq = ++_dgBootstrapSeq;
-    beginDraftBootstrapLoading(showOverlay);
+    beginDraftBootstrapLoading(showOverlay, opts.loadingMessage);
     clearAllPrefillBadges();
     if (!opts.keepAuthorRoleTouch) _dgAuthorRoleUserTouched = false;
     __page2DidTemplatePrefill = false;
@@ -2211,9 +2270,7 @@
             root: (window.__SCRIPT_ROOT__ || "").replace(/\/+$/, ""),
             orgContextRoot: ((window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "") + "/audit"),
             onOrganizationChange: function () {
-              if (el("dg_base_case")) el("dg_base_case").value = "";
-              _dgBaseCaseUserTouched = false;
-              loadDraftBootstrap({ fullOverlay: false });
+              onDraftOrganizationChanged();
             },
           });
         }
@@ -3111,7 +3168,11 @@
     var b1t = el("dg_btn_test_llm");
     if (b1t) b1t.addEventListener("click", testLlmSettings);
     var b2 = el("dg_btn_refresh_bootstrap");
-    if (b2) b2.addEventListener("click", function () { loadDraftBootstrap({ fullOverlay: false }); });
+    if (b2) {
+      b2.addEventListener("click", function () {
+        userRefreshDraftBootstrap("正在刷新案例、模板与项目列表…");
+      });
+    }
     var ts = el("dg_template_scope");
     if (ts) ts.addEventListener("change", syncTemplateFilesUiDisabled);
     var inpl = el("dg_inplace");
