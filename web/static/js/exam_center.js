@@ -1314,30 +1314,6 @@
         return k;
     }
 
-    function questionApplicableRolesHtml(it) {
-        if (!it || typeof it !== "object") return "";
-        var labels = it.author_role_labels || it.authorRoleLabels;
-        if ((!labels || !labels.length) && it.question && typeof it.question === "object") {
-            labels = it.question.author_role_labels || it.question.authorRoleLabels;
-        }
-        if (!Array.isArray(labels) || !labels.length) {
-            var hits = it.author_role_hits || it.authorRoleHits;
-            if ((!hits || !hits.length) && it.question && typeof it.question === "object") {
-                hits = it.question.author_role_hits || it.question.authorRoleHits;
-            }
-            if (Array.isArray(hits) && hits.length) {
-                labels = hits.map(authorRoleLabelForKey).filter(Boolean);
-            }
-        }
-        if (!Array.isArray(labels) || !labels.length) return "";
-        return (
-            '<div class="small mb-2"><span class="badge text-bg-light border text-dark fw-normal me-1">适用于 ' +
-            labels.map(function (lb) {
-                return escExam(String(lb));
-            }).join("、") +
-            "</span></div>"
-        );
-    }
     /** 旧版 aiword 无 author-roles 路由时跳过重复 404 请求 */
     var _teacherAuthorRolesApiMissing = false;
 
@@ -1497,13 +1473,12 @@
         var tSel = document.getElementById("teacherProjectCaseId");
         var tRow = document.getElementById("teacherProjectCaseRow");
         if (tSel && tRow) {
-            if (tCat === "project_case") {
-                tRow.classList.remove("d-none");
-                tSel.disabled = false;
+            var tActive = tCat === "project_case";
+            tRow.classList.toggle("exam-project-case-row--inactive", !tActive);
+            tSel.disabled = !tActive;
+            if (tActive) {
                 loadExamCenterProjectCaseOptions("teacher");
             } else {
-                tRow.classList.add("d-none");
-                tSel.disabled = true;
                 tSel.value = "";
             }
         }
@@ -1511,13 +1486,12 @@
         var sSel = document.getElementById("studentProjectCaseId");
         var sRow = document.getElementById("studentProjectCaseRow");
         if (sSel && sRow) {
-            if (sCat === "project_case") {
-                sRow.classList.remove("d-none");
-                sSel.disabled = false;
+            var sActive = sCat === "project_case";
+            sRow.classList.toggle("exam-project-case-row--inactive", !sActive);
+            sSel.disabled = !sActive;
+            if (sActive) {
                 loadExamCenterProjectCaseOptions("student");
             } else {
-                sRow.classList.add("d-none");
-                sSel.disabled = true;
                 sSel.value = "";
             }
         }
@@ -4272,21 +4246,47 @@
         /** 清理题干中残留/半截的开卷链接 HTML（历史脏数据或重复 linkify 产生） */
         function stripBrokenOpenBookHtml(s) {
             var t = String(s == null ? "" : s);
-            // 1) 完整 button 标签对：保留内部纯文本
-            t = t.replace(/<button[^>]*exam-open-book-link[^>]*>([\s\S]*?)<\/button>/gi, function (_m, inner) {
-                return String(inner || "")
+            function innerText(raw) {
+                return String(raw || "")
                     .replace(/<[^>]+>/g, "")
-                    .replace(/^《|》$/g, "");
+                    .trim();
+            }
+            function anchorRepl(_m, href, inner) {
+                var h = String(href || "").trim();
+                var inr = innerText(inner);
+                if (inr) return inr;
+                if (h && !/^(https?:|\/|#|javascript:)/i.test(h)) {
+                    var name = h.replace(/^《|》$/g, "");
+                    return name ? "《" + name + "》" : "";
+                }
+                return inr;
+            }
+            // 1) 完整 <a> 开卷链接
+            t = t.replace(
+                /<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
+                anchorRepl
+            );
+            t = t.replace(
+                /<a\b[^>]*title\s*=\s*["']开卷查阅[:：]点击展开全文["'][^>]*>([\s\S]*?)<\/a>/gi,
+                function (_m, inner) {
+                    return innerText(inner);
+                }
+            );
+            t = t.replace(/<a\b[^>]*>/gi, "");
+            t = t.replace(/<\/a\s*>/gi, "");
+            t = t.replace(/\s*href\s*=\s*["'][^"']*["']/gi, "");
+            // 2) 完整 button 标签对
+            t = t.replace(/<button[^>]*exam-open-book-link[^>]*>([\s\S]*?)<\/button>/gi, function (_m, inner) {
+                return innerText(inner).replace(/^《|》$/g, "");
             });
-            // 2) 残留的起始/结束标签
             t = t.replace(/<button\b[^>]*>/gi, "");
             t = t.replace(/<\/button\s*>/gi, "");
-            // 3) 游离属性碎片（前缀被截断只剩属性值的情况）
-            t = t.replace(/\s*data-open-book-file\s*=\s*"[^"]*"/gi, "");
-            t = t.replace(/\s*class\s*=\s*"[^"]*exam-open-book-link[^"]*"/gi, "");
-            t = t.replace(/\s*type\s*=\s*"button"/gi, "");
-            t = t.replace(/"?\s*title\s*=\s*"开卷查阅[:：]点击展开全文"\s*[>》]?/gi, "");
-            // 4) 折叠残留的「裸名《同名》」重复（仅审核点清单文件名）
+            // 3) 游离属性碎片
+            t = t.replace(/\s*data-open-book-file\s*=\s*["'][^"']*["']/gi, "");
+            t = t.replace(/\s*class\s*=\s*["'][^"']*exam-open-book-link[^"']*["']/gi, "");
+            t = t.replace(/\s*type\s*=\s*["']button["']/gi, "");
+            t = t.replace(/"?\s*title\s*=\s*["']开卷查阅[:：]点击展开全文["']\s*[>》]?/gi, "");
+            // 4) 折叠残留的「裸名《同名》」重复
             t = t.replace(/(审核点清单[-:][\w.\-]+)\s*《\1》/g, "《$1》");
             t = t.replace(/《(审核点清单[-:][\w.\-]+)》\s*\1(?![\w.\-])/g, "《$1》");
             return t;
@@ -4339,23 +4339,32 @@
                 );
             }
             function linkifyPlainSegment(seg) {
-                var out = seg.replace(/《([^》]{4,260})》/g, function (_m, fn) {
+                var raw = String(seg || "");
+                var out = raw.replace(/《([^》]{4,260})》/g, function (_m, fn) {
                     var name = String(fn || "").trim();
                     if (!name) return _m;
                     if (shouldLinkFilename(name)) return openBookBtnGuillemets(name);
                     return "《" + escSt(name) + "》";
                 });
-                out = out.replace(/(审核点清单:CP-[\w.\-]+)/gi, function (_m, fn) {
-                    var name = String(fn || "").trim();
-                    if (!name) return _m;
-                    return openBookBtn(name);
-                });
-                out = out.replace(/(审核点清单-[\w.\-]+)/g, function (_m, fn) {
-                    var name = String(fn || "").trim();
-                    if (!name) return _m;
-                    return openBookBtn(name);
-                });
-                return out;
+                // 书名号已处理时不再对裸「审核点清单-…」二次 linkify（会在 button 属性里误匹配）
+                if (/《/.test(raw)) {
+                    return out;
+                }
+                var chunks = out.split(/(<button\b[\s\S]*?<\/button>)/gi);
+                for (var ci = 0; ci < chunks.length; ci++) {
+                    if (/^<button\b/i.test(chunks[ci])) continue;
+                    chunks[ci] = chunks[ci].replace(/(审核点清单:CP-[\w.\-]+)/gi, function (_m, fn) {
+                        var name = String(fn || "").trim();
+                        if (!name) return _m;
+                        return openBookBtn(name);
+                    });
+                    chunks[ci] = chunks[ci].replace(/(审核点清单-[\w.\-]+)/g, function (_m, fn) {
+                        var name = String(fn || "").trim();
+                        if (!name) return _m;
+                        return openBookBtn(name);
+                    });
+                }
+                return chunks.join("");
             }
             // 仅在非 HTML 标签的文本段内 linkify，避免破坏已生成的 <button data-open-book-file="...">
             var parts = String(html || "").split(/(<[^>]+>)/g);
@@ -4431,7 +4440,7 @@
 
         /** 去掉录题/模型用 evidence 提示，避免学生端可见 */
         function sanitizeStudentStem(s) {
-            var t = String(s == null ? "" : s);
+            var t = stripBrokenOpenBookHtml(String(s == null ? "" : s));
             var literals = [
                 "（具体摘录在本题 evidence 中，勿在题干中整段复述。）",
                 "（摘录见本题 evidence。）",
@@ -5578,18 +5587,12 @@
                     "</textarea>";
             }
             var openRefs = openBookRefsFromItem(it);
-            var openBookHint =
-                openRefs.length || /《[^》]+》/.test(stem) || /审核点清单[-:]/.test(stem)
-                    ? '<div class="small text-muted mb-1">提示：题干中带下划线的文件名可点击开卷查阅全文。</div>'
-                    : "";
             return (
                 '<div class="card exam-question-card mb-2"><div class="card-body py-2"><div class="exam-question-stem fw-semibold small mb-2">' +
                 (idx + 1) +
                 ". " +
                 stemToHtml(stem, openRefs) +
                 "</div>" +
-                openBookHint +
-                questionApplicableRolesHtml(it) +
                 body +
                 "</div></div>"
             );

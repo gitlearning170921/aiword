@@ -117,10 +117,38 @@
     .exam-zone {
         border-radius: 0.375rem;
         padding: 0.85rem 0.95rem;
-        height: 100%;
         background: #fff;
         border: 1px solid #dee2e6;
         border-left-width: 4px;
+    }
+    /* 单列单区块时才拉满高度；左栏叠放多个 zone 时禁止 height:100% 以免挤出叠层 */
+    .exam-zone.exam-zone--fill,
+    .exam-quickops-right-card.exam-zone {
+        height: 100%;
+    }
+    #examRoleStudent .student-quickops-row {
+        align-items: flex-start;
+    }
+    #examRoleStudent .student-quickops-row > [class*="col-"] {
+        min-width: 0;
+    }
+    #examRoleTeacher .exam-zone--shared.exam-quickops-stack {
+        min-height: 100%;
+        height: auto;
+    }
+    .exam-project-case-row--inactive .exam-project-case-select {
+        background-color: #f8f9fa;
+        cursor: not-allowed;
+    }
+    .exam-project-case-row--inactive .exam-project-case-hint-active {
+        display: none;
+    }
+    .exam-project-case-row:not(.exam-project-case-row--inactive) .exam-project-case-hint-idle {
+        display: none;
+    }
+    #examRoleStudent .student-post-quickops {
+        clear: both;
+        width: 100%;
     }
     .exam-zone--shared { border-left-color: #6c757d; background: #f8f9fa; }
     .exam-zone--generate { border-left-color: #0d6efd; background: #f8fbff; }
@@ -269,7 +297,7 @@
                 </div>
             </div>
             <div class="col-lg-3 col-md-4">
-                <div class="exam-zone exam-zone--shared exam-quickops-stack h-100 d-flex flex-column">
+                <div class="exam-zone exam-zone--shared exam-quickops-stack d-flex flex-column">
                     <div class="exam-zone-title">
                         <div class="exam-quickops-section-title">共用条件</div>
                         <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
@@ -297,13 +325,14 @@
                         <option value="new_standard">新标发布</option>
                         <option value="project_case">项目案例</option>
                     </select>
-                    <div id="teacherProjectCaseRow" class="mt-2 pt-2 border-top d-none">
+                    <div id="teacherProjectCaseRow" class="mt-2 pt-2 border-top exam-project-case-row exam-project-case-row--inactive">
                         <label class="form-label mb-1" for="teacherProjectCaseId">项目案例</label>
                         <div class="exam-affect-tags">
                             <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
                             <span class="exam-affect-tag exam-affect-tag--ingest">录题</span>
                         </div>
-                        <div class="small text-muted mb-1">{% if is_page13_super_admin %}与「题库管理」当前 collection 一致；{% endif %}选项含注册国家/类别</div>
+                        <div class="small text-muted mb-1 exam-project-case-hint-idle">将「考试类型」选为「项目案例」后可选。</div>
+                        <div class="small text-muted mb-1 exam-project-case-hint-active">{% if is_page13_super_admin %}与「题库管理」当前 collection 一致；{% endif %}选项含注册国家/类别</div>
                         <select class="form-select exam-project-case-select" id="teacherProjectCaseId" disabled title="{% if is_page13_super_admin %}须先在「题库管理」选择 collection，且案例已在 aicheckword 训练入库{% else %}须先选择题库，且案例已训练入库{% endif %}">
                             <option value="">请选择…</option>
                         </select>
@@ -357,7 +386,7 @@
                 </div>
             </div>
             <div class="col-lg-4 col-md-12">
-                <div class="exam-zone exam-zone--ingest h-100">
+                <div class="exam-zone exam-zone--ingest exam-zone--fill">
                     <div class="exam-zone-title">
                         <div class="exam-quickops-section-title">AI 批量录入题库</div>
                         <span class="exam-affect-tag exam-affect-tag--ingest">仅本操作</span>
@@ -797,7 +826,7 @@
         </div>
         <h5 class="card-title">{% if is_page13_super_admin %}页面2能力：{% endif %}来一套练习/考试作答</h5>
         <div id="studentOperationFeedback" class="mb-3 d-none" role="status" aria-live="polite"></div>
-        <div class="row g-3 align-items-stretch student-write-only">
+        <div class="row g-3 align-items-stretch student-write-only student-quickops-row">
             <div class="col-12">
                 <div class="exam-linkage-legend">
                     <strong>练习卷条件联动</strong>
@@ -817,7 +846,7 @@
                 </div>
             </div>
             <div class="col-lg-4 col-md-5">
-                <div class="exam-zone exam-zone--shared exam-quickops-stack h-100 d-flex flex-column mb-2 mb-md-0">
+                <div class="exam-zone exam-zone--shared exam-quickops-stack d-flex flex-column mb-2 mb-md-0">
                     <div class="exam-zone-title">
                         <div class="exam-quickops-section-title">共用条件</div>
                         <span class="exam-affect-tag exam-affect-tag--set">来一套</span>
@@ -835,9 +864,10 @@
                         <option value="new_standard">新标发布</option>
                         <option value="project_case">项目案例</option>
                     </select>
-                    <div id="studentProjectCaseRow" class="mt-2 pt-2 border-top d-none">
+                    <div id="studentProjectCaseRow" class="mt-2 pt-2 border-top exam-project-case-row exam-project-case-row--inactive">
                         <label class="form-label mb-1" for="studentProjectCaseId">项目案例</label>
-                        <div class="small text-muted mb-1">选项含注册国家/类别{% if is_page13_super_admin %}（与 aicheckword 已训练案例一致）{% endif %}</div>
+                        <div class="small text-muted mb-1 exam-project-case-hint-idle">将「考试类型」选为「项目案例」后必选。</div>
+                        <div class="small text-muted mb-1 exam-project-case-hint-active">选项含注册国家/类别{% if is_page13_super_admin %}（与 aicheckword 已训练案例一致）{% endif %}</div>
                         <select class="form-select exam-project-case-select" id="studentProjectCaseId" disabled title="{% if is_page13_super_admin %}与 aicheckword 项目案例知识库一致{% else %}与项目案例知识库一致{% endif %}">
                             <option value="">请选择…</option>
                         </select>
@@ -858,7 +888,7 @@
                 </div>
             </div>
             <div class="col-lg-2 col-md-3">
-                <div class="exam-zone exam-zone--generate h-100 exam-quickops-right-card">
+                <div class="exam-zone exam-zone--generate exam-zone--fill exam-quickops-right-card">
                     <div class="exam-zone-title">
                         <div class="exam-quickops-section-title">卷面参数</div>
                         <span class="exam-affect-tag exam-affect-tag--only">仅来一套</span>
@@ -874,7 +904,7 @@
                 </div>
             </div>
             <div class="col-lg-6 col-md-4">
-                <div class="exam-zone exam-zone--student-practice h-100 exam-quickops-right-card">
+                <div class="exam-zone exam-zone--student-practice exam-zone--fill exam-quickops-right-card">
                     <div class="exam-zone-title">
                         <div class="exam-quickops-section-title">操作</div>
                     </div>
@@ -888,7 +918,7 @@
                 </div>
             </div>
         </div>
-        <div class="mt-3 pt-3 border-top student-write-only">
+        <div class="mt-3 pt-3 border-top student-write-only student-post-quickops">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="form-section-title mb-0">考试任务列表（老师下发）</h6>
                 <button type="button" class="btn btn-sm btn-outline-primary" id="btnStudentAssignmentsRefresh">刷新列表</button>
@@ -925,7 +955,7 @@
             </div>
         </div>
 
-        <div class="mt-4 pt-3 border-top">
+        <div class="mt-4 pt-3 border-top student-post-quickops">
             <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                 <h6 class="form-section-title mb-0">练习/考试记录（aiword 数据库）</h6>
                 <div class="d-flex flex-wrap gap-2 align-items-center">

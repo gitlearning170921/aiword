@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import html
 import io
 import json
@@ -544,7 +545,10 @@ def _items_from_activity_detail_snapshot(det: ExamCenterActivityDetail | None) -
     """从提交时落库的 upstream_payload 尝试恢复题目行，供上游不可用时降级展示。"""
     if not det or not det.upstream_payload or not isinstance(det.upstream_payload, dict):
         return []
-    pl = det.upstream_payload
+    from .exam_stem_sanitize import strip_open_book_html_in_tree
+
+    pl = copy.deepcopy(det.upstream_payload)
+    strip_open_book_html_in_tree(pl)
     for key in ("items", "questions", "details", "attempt_items"):
         v = pl.get(key)
         if isinstance(v, list) and len(v) > 0:
@@ -8300,16 +8304,19 @@ def _local_exam_attempt_items_payload(attempt_id_key: str, att: Optional[ExamAtt
     if not att_row:
         return None
     state_l = str(getattr(att_row, "state", None) or "").strip().lower()
+    from .exam_stem_sanitize import strip_broken_open_book_html
+
     rows = ExamAttemptItem.query.filter_by(attempt_id=aid).order_by(ExamAttemptItem.created_at.asc()).all()
     items: list[dict[str, Any]] = []
     for it in rows:
         ua = (it.user_answer or {}).get("value") if isinstance(it.user_answer, dict) else None
         ans = (it.answer_snapshot or {}).get("answer") if isinstance(it.answer_snapshot, dict) else None
         opts = it.options_snapshot if isinstance(it.options_snapshot, list) else []
+        stem_raw = str(it.stem_snapshot or "")
         entry: dict[str, Any] = {
             "question_id": it.question_id,
             "question_type": it.question_type,
-            "stem": it.stem_snapshot,
+            "stem": strip_broken_open_book_html(stem_raw) if stem_raw else it.stem_snapshot,
             "options": opts,
             "user_answer": ua,
             "answer": ans,
@@ -8656,6 +8663,10 @@ def api_exam_student_start_exam_local():
             qid = _question_id_from_set_item(it) or f"q-{ix}"
             qt = str(it.get("question_type") or it.get("type") or "").strip().lower() or None
             stem = str(it.get("stem") or it.get("title") or "").strip() or None
+            if stem:
+                from .exam_stem_sanitize import strip_broken_open_book_html
+
+                stem = strip_broken_open_book_html(stem) or None
             opts = it.get("options") if isinstance(it.get("options"), list) else None
             ans = it.get("answer") if "answer" in it else (it.get("correct_answer") if "correct_answer" in it else None)
             # 案例分析题：不展示选项，作答为文本；标准答案不按单选处理（快照置空，避免上游误带 options/answer）
