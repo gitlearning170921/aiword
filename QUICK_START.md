@@ -13,7 +13,7 @@ pip install -r requirements.txt
 ### 2. 启动服务
 
 **Windows 用户**：
-- 双击 `start_server.bat`
+- 双击 `dev\local-run\start_server.bat`
 
 **命令行用户**：
 ```bash

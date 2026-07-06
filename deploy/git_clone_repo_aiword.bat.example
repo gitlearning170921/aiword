@@ -1,0 +1,4 @@
+@echo off
+:: 打包机脚本模板 — 复制到打包机 d:\aicode\git_clone_repo_aiword.bat 后修改 URL
+:: 完整内容与 \\Yw00003131\d\aicode\git_clone_repo_aiword.bat 保持一致
+:: 详见 deploy\README.md 第 0.2 / 0.3 节

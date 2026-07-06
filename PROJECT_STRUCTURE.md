@@ -74,8 +74,8 @@ aiword/
 
 | 文件 | 说明 | 是否版本控制 |
 |------|------|------------|
-| `start_server.bat` | Windows 启动脚本 | ✅ 是 |
-| `stop_server.bat` | Windows 停止脚本 | ✅ 是 |
+| `dev/local-run/start_server.bat` | Windows 启动脚本 | ✅ 是 |
+| `dev/local-run/stop_server.bat` | Windows 停止脚本 | ✅ 是 |
 | `start_server_background.py` | 后台启动 Python 脚本 | ✅ 是 |
 | `stop_server.py` | 停止服务 Python 脚本 | ✅ 是 |
 
@@ -230,8 +230,9 @@ aiword/
 │
 ├── app.py                     # 应用入口
 ├── run_web.py                 # 启动脚本
-├── start_server.bat           # Windows 启动
-├── stop_server.bat            # Windows 停止
+├── dev/                       # git-no_tag / git-tag_release / local-run
+├── dev/local-run/start_server.bat
+├── dev/local-run/stop_server.bat
 ├── start_server_background.py # 后台启动
 ├── stop_server.py             # 停止服务
 ├── requirements.txt           # 依赖列表

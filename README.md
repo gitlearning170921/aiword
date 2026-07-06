@@ -148,8 +148,7 @@ aiword/
 │
 ├── app.py                     # 应用入口（导入 webapp）
 ├── run_web.py                 # Web 服务器启动脚本
-├── start_server.bat          # Windows 启动脚本
-├── stop_server.bat           # Windows 停止脚本
+├── dev/                      # 开发机 bat：git-no_tag / git-tag_release / local-run
 ├── start_server_background.py # 后台启动 Python 脚本
 ├── stop_server.py             # 停止服务 Python 脚本
 ├── requirements.txt           # Python 依赖
@@ -470,7 +469,7 @@ python run_web.py
 ```
 
 **方式2：后台运行（生产模式）**
-- 双击 `start_server.bat` 启动
+- 双击 `dev\local-run\start_server.bat` 启动（详见 `dev\README.md`）
 - 双击 `stop_server.bat` 停止
 
 **访问地址**：

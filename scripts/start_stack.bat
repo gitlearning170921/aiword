@@ -29,13 +29,13 @@ if not exist "%AIPRINT_ROOT%\.env" (
     echo [WARN] 缺少 %AIPRINT_ROOT%\.env，请先 copy .env.example .env
 )
 
-start "aicheckword-api" cmd /k "cd /d \"%AICHECK_ROOT%\" && call restart_api.bat --in-window"
+start "aicheckword-api" cmd /k "cd /d \"%AICHECK_ROOT%\" && call dev\local-run\start_api.bat --in-window"
 timeout /t 4 /nobreak >nul
 
 start "aiword" cmd /k "cd /d \"%AIWORD_ROOT%\" && python run_web.py"
 timeout /t 2 /nobreak >nul
 
-start "aiprintword" cmd /k "cd /d \"%AIPRINT_ROOT%\" && call start_server.bat"
+start "aiprintword" cmd /k "cd /d \"%AIPRINT_ROOT%\" && call dev\local-run\start_server.bat"
 
 echo [INFO] 已在三个窗口启动。仅 aiword 受 FEATURE_ENV_SEPARATION 影响；改 .env 后重启对应窗口。
 endlocal

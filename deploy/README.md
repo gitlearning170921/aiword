@@ -28,69 +28,197 @@ flowchart LR
 
 ### 0.1 开发机：发版（双仓库同名 tag）
 
-`F:\wzl\learning\python\aiword\release.bat` 会**同时处理 aiword 与同级的 aicheckword 两个仓库**：同步前端模板 → add → commit（无变更则跳过）→ push → 打 `v<version>` tag → push tag。aiprintword 不在打包链中，需要时单独跑该仓库 `commit_push.bat`。
+**目录**：`dev/git-tag_release/`（见 [`dev/README.md`](../dev/README.md)）
+
+`dev\git-tag_release\release.bat` 会**同时处理 aiword 与同级的 aicheckword 两个仓库**：同步前端模板 → add → commit（无变更则跳过）→ push → 打 `v<version>` tag → push tag。aiprintword 不在打包链中，用 `aiprintword\dev\git-no_tag\commit_push.bat`。
 
 ```cmd
 cd /d F:\wzl\learning\python\aiword
-release.bat 1.0.2
-release.bat 1.0.2 "fix audit pagination"
+dev\git-tag_release\release.bat 1.0.2
+dev\git-tag_release\release.bat 1.0.2 "fix audit pagination"
 ```
 
 ### 0.2 打包机：首次准备
 
-1. 装 Git for Windows + Docker Desktop（WSL2、Linux 容器），保持与开发机一致；
-2. 配置 GitHub 凭据（HTTPS PAT 或 SSH key，能 `git clone` 私有仓库即可）；
-3. 准备一个**独立的 driver 目录**，把 `aiword/deploy/server-build-from-git.bat` 和 `server-build.config.bat.example` 拷到这里。**注意**：driver 目录不能落在 `BUILD_ROOT` 里面（脚本会自检拦截），否则 `git clean` 会把自己清掉。
+#### 0.2.1 安装与目录规划
 
-   推荐布局：
-
-   ```
-   D:\aiword-build-driver\         ← driver 目录（独立，不在 BUILD_ROOT 内）
-     deploy\
-       server-build-from-git.bat
-       server-build.config.bat     ← 自己创建，填 GIT URL
-       build-images-docker.bat     ← 一并拷过来；或脚本会调用 BUILD_ROOT\aiword 里的（已存在）
-       ...
-   
-   %USERPROFILE%\aiword-build\     ← BUILD_ROOT（由脚本自动维护）
-     aiword\
-     aicheckword\
-   ```
-
-   实际上**最省事的做法**：先用 `git clone` 把 aiword 拉一份到 driver 目录（如 `D:\aiword-build-driver\aiword\`），进入 `deploy\` 编辑配置即可；这一份 driver clone 只为驱动脚本，后续 build 用的是 `BUILD_ROOT\aiword`。
-
-4. 复制配置模板：
+1. 安装 **Git for Windows** + **Docker Desktop**（WSL2、Linux 容器模式），与开发机保持一致；
+2. 确认命令可用：
 
 ```cmd
-cd D:\aiword-build-driver\aiword\deploy
+git --version
+docker version
+```
+
+3. 规划两个目录（**不要混用**）：
+
+   | 目录 | 作用 | 示例 |
+   |------|------|------|
+   | **driver 目录** | 放 `server-build-from-git.bat` 与 `server-build.config.bat`（含 GitHub 凭据配置），**不在 BUILD_ROOT 内** | `D:\aiword-build-driver\aiword\deploy\` |
+   | **BUILD_ROOT** | 脚本自动 clone / fetch 的**构建用源码**（aiword 与 aicheckword 同级） | `%USERPROFILE%\aiword-build\` |
+
+   ```
+   D:\aiword-build-driver\              ← driver（独立，勿放进 BUILD_ROOT）
+     aiword\                            ← 仅用于驱动脚本，可任意分支
+       deploy\
+         server-build-from-git.bat
+         server-build.config.bat        ← 本地创建，含 PAT/SSH 配置
+         server-build.config.bat.example
+
+   C:\Users\<你>\aiword-build\          ← BUILD_ROOT（脚本自动维护）
+     aiword\                            ← checkout 到 v<version>
+     aicheckword\                       ← checkout 到 v<version>
+   ```
+
+#### 0.2.2 配置 GitHub 凭据（必做，否则 clone/fetch 失败）
+
+任选一种方式，在打包机上先**手工验证能拉私有仓库**：
+
+**方式 A — SSH（推荐）**
+
+```cmd
+ssh-keygen -t ed25519 -C "build-pc" -f %USERPROFILE%\.ssh\id_ed25519_build
+type %USERPROFILE%\.ssh\id_ed25519_build.pub
+```
+
+将公钥添加到 GitHub → Settings → SSH and GPG keys。然后：
+
+```cmd
+ssh -T git@github.com
+git ls-remote git@github.com:YOUR-ORG/aiword.git HEAD
+git ls-remote git@github.com:YOUR-ORG/aicheckword.git HEAD
+```
+
+**方式 B — HTTPS + 凭据管理器**
+
+```cmd
+git config --global credential.helper manager
+git ls-remote https://github.com/YOUR-ORG/aiword.git HEAD
+```
+
+首次会弹出登录/PAT 窗口；PAT 需具备 `repo` 读权限。
+
+**方式 C — HTTPS URL 内嵌 PAT（仅本机 config，勿提交 Git）**
+
+在 `server-build.config.bat` 里写：
+
+```bat
+set "GIT_AIWORD_URL=https://<PAT>@github.com/YOUR-ORG/aiword.git"
+set "GIT_AICHECKWORD_URL=https://<PAT>@github.com/YOUR-ORG/aicheckword.git"
+```
+
+#### 0.2.3 初始化 driver 目录
+
+**推荐**：clone 一份 aiword 到 driver（只为拿到 deploy 脚本，后续构建仍用 BUILD_ROOT 里的代码）：
+
+```cmd
+mkdir D:\aiword-build-driver
+cd /d D:\aiword-build-driver
+git clone https://github.com/YOUR-ORG/aiword.git
+cd aiword\deploy
 copy server-build.config.bat.example server-build.config.bat
 notepad server-build.config.bat
 ```
 
-`server-build.config.bat` 必填：
+`server-build.config.bat` 必填（SSH 示例）：
 
 ```bat
-set "GIT_AIWORD_URL=https://github.com/YOUR-ORG/aiword.git"
-set "GIT_AICHECKWORD_URL=https://github.com/YOUR-ORG/aicheckword.git"
+set "GIT_AIWORD_URL=git@github.com:YOUR-ORG/aiword.git"
+set "GIT_AICHECKWORD_URL=git@github.com:YOUR-ORG/aicheckword.git"
 set "BUILD_ROOT=%USERPROFILE%\aiword-build"
 ```
 
 `server-build.config.bat` 已被 `deploy/.gitignore` 排除，**含 PAT 也不会被推**。
 
-### 0.3 打包机：一键打镜像
+> **注意**：driver 目录不能落在 `BUILD_ROOT` 里面（脚本会自检拦截），否则 `git clean` 可能清掉 driver 自身。
+
+#### 0.2.4 首次拉代码验证（可选，确认 tag 可见）
+
+开发机跑完 `release.bat 1.0.5` 后，在打包机 driver 目录执行：
 
 ```cmd
-cd D:\aiword-build-driver\aiword\deploy
-server-build-from-git.bat 1.0.2
+cd /d D:\aiword-build-driver\aiword\deploy
+call server-build.config.bat
+git ls-remote --tags "%GIT_AIWORD_URL%" v1.0.5
+git ls-remote --tags "%GIT_AICHECKWORD_URL%" v1.0.5
 ```
 
-脚本流程：
+两条都应返回 commit hash。若无输出，说明 tag 未 push 到远程，回开发机检查 `release.bat` 是否成功。
 
-1. clone 或 `git fetch --all --tags --prune` 两个仓库到 `BUILD_ROOT\aiword` 与 `BUILD_ROOT\aicheckword`；
-2. 校验远程是否有 tag `v1.0.2`，否则中止（提示先去开发机跑 `release.bat`）；
-3. `git checkout -f v1.0.2` + `git reset --hard` + `git clean -fdx`（aiword 保留 `deploy/dist`）；
-4. 调用现有 `build-all.bat 1.0.2`（build → export gzip → pack zip）；
-5. 产物：`BUILD_ROOT\aiword\deploy\dist\aiword-stack-1.0.2.zip`。
+---
+
+### 0.3 打包机：拉取代码并打镜像
+
+#### 0.3.1 一键（推荐）
+
+开发机已 `release.bat <version>` 且双仓库 tag 已 push 后：
+
+```cmd
+cd /d D:\aiword-build-driver\aiword\deploy
+server-build-from-git.bat 1.0.5
+```
+
+#### 0.3.2 脚本内部拉代码流程（与手工等价）
+
+`server-build-from-git.bat <version>` 对 **BUILD_ROOT** 下两个仓库依次执行：
+
+| 步骤 | 首次（无 `.git`） | 后续发版 |
+|------|-------------------|----------|
+| 1 | `git clone <URL>` → `BUILD_ROOT\aiword` 或 `\aicheckword` | `git fetch --all --tags --prune` |
+| 2 | — | 检查本地是否存在 tag `v<version>`，无则报错退出 |
+| 3 | `git checkout -f v<version>` | 同上 |
+| 4 | `git reset --hard v<version>` | 同上 |
+| 5 | `git clean -fd`（仅删 untracked，保留 ignored 如历史 `deploy/dist`） | 同上 |
+| 6 | 调用 `BUILD_ROOT\aiword\deploy\build-all.bat <version>` | 同上 |
+
+**手工拉代码对照**（仅同步、不构建时，版本号换成实际值）：
+
+```cmd
+set VER=1.0.5
+set TAG=v%VER%
+set BUILD_ROOT=%USERPROFILE%\aiword-build
+
+rem --- aiword ---
+if not exist "%BUILD_ROOT%\aiword\.git" (
+  mkdir "%BUILD_ROOT%"
+  cd /d "%BUILD_ROOT%"
+  git clone git@github.com:YOUR-ORG/aiword.git aiword
+) else (
+  cd /d "%BUILD_ROOT%\aiword"
+  git fetch --all --tags --prune
+)
+cd /d "%BUILD_ROOT%\aiword"
+git checkout -f %TAG%
+git reset --hard %TAG%
+git clean -fd
+
+rem --- aicheckword ---
+if not exist "%BUILD_ROOT%\aicheckword\.git" (
+  cd /d "%BUILD_ROOT%"
+  git clone git@github.com:YOUR-ORG/aicheckword.git aicheckword
+) else (
+  cd /d "%BUILD_ROOT%\aicheckword"
+  git fetch --all --tags --prune
+)
+cd /d "%BUILD_ROOT%\aicheckword"
+git checkout -f %TAG%
+git reset --hard %TAG%
+git clean -fd
+```
+
+拉完后可单独构建：
+
+```cmd
+cd /d %BUILD_ROOT%\aiword\deploy
+build-all.bat 1.0.5
+```
+
+#### 0.3.3 产物位置
+
+构建成功后：
+
+- 部署包：`BUILD_ROOT\aiword\deploy\dist\aiword-stack-<version>.zip`
+- 镜像：`aiword-<version>.tar.gz`、`aicheckword-<version>.tar.gz`（同目录）
 
 ### 0.4 生产：scp + 升级
 
@@ -101,7 +229,9 @@ server-build-from-git.bat 1.0.2
 | 现象 | 排查 |
 |------|------|
 | `aiword 仓库不存在 tag v1.0.2` | 开发机没跑 `release.bat <ver>`，或 tag 没 push 到远程；本地确认 `git ls-remote --tags origin v1.0.2` |
-| `git clone` 提示 403/401 | GitHub 凭据未生效；HTTPS 用 PAT、或改 SSH URL；私有仓库账户需有访问权 |
+| `git clone` / `fetch` 提示 403/401 | GitHub 凭据未生效；先 `git ls-remote <URL> HEAD` 单独测；HTTPS 用 PAT 或凭据管理器，或改 SSH URL |
+| `git ls-remote --tags` 无 v 版本 | 开发机未跑 `release.bat <ver>` 或 tag push 失败；开发机执行 `git ls-remote --tags origin v1.0.5` 对比 |
+| `checkout` 后代码不对 | 确认 tag 指向：`git show v1.0.5 --no-patch`；勿在 BUILD_ROOT 手改后忘记 reset |
 | `aicheckword push tag 失败 (远程已存在同名 tag)` | 同版本号已发过；要么换 `1.0.3`，要么手动 `git push -f origin v1.0.2`（**谨慎**） |
 | `build-all.bat` 在打包机上比开发机慢 | 第一次跑无 BuildKit 缓存属正常；后续重复同版本应秒级；不要清 `BUILD_ROOT` 里的 `node_modules/` 之类（实际不存在，仅作示例） |
 | 打包机 Docker Desktop 未启动 | 脚本会用 `docker version` 检测并中止；启动后重跑 |
