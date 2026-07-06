@@ -1,19 +1,13 @@
 @echo off
-chcp 65001 >nul
+chcp 65001 >nul 2>&1
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem ============================================================
-rem  release.bat  ：一键发布 aiword + aicheckword 双仓库
-rem  用法： release.bat <version> [commit-msg]
-rem    示例： release.bat 1.0.2
-rem           release.bat 1.0.2 "fix audit pagination"
-rem  行为：
-rem    1) aiword 仓库（当前目录）   : 同步前端 → add/commit → push → 打 tag v<ver> → push tag
-rem    2) aicheckword 仓库（同级）  : add/commit → push → 打 tag v<ver> → push tag
-rem  无新提交也会继续打 tag 并推送，确保打包服务器能按同名 tag 拉到。
-rem  aiprintword 不在打包链中，需要时请单独运行该仓库的 commit_push.bat。
-rem ============================================================
+:: release.bat - publish aiword + aicheckword (same tag)
+:: Usage: release.bat VERSION [commit-msg]
+:: Example: release.bat 1.0.2 "fix audit pagination"
+:: Steps - sync web templates, git push, tag vVERSION on both repos
+:: aiprintword is not in this pipeline; use its own commit_push.bat if needed
 
 if "%~1"=="" (
     echo Usage: release.bat ^<version^> [commit-msg]

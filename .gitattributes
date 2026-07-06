@@ -1,0 +1,2 @@
+# Windows batch/cmd 必须使用 CRLF，否则 cmd 会吞掉每行首字符
+*.bat text eol=crlf
