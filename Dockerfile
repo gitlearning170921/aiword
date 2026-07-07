@@ -11,8 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /w
 
 COPY requirements-docker.txt .
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --prefix=/install -r requirements-docker.txt "gunicorn>=22.0.0"
+RUN pip install --prefix=/install -r requirements-docker.txt "gunicorn>=22.0.0"
 
 FROM python:3.11-slim-bookworm AS runtime
 
@@ -25,11 +24,14 @@ ENV AIWORD_APP_VERSION=${APP_VERSION}
 
 WORKDIR /app
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
     && apt-get update \
     && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -u 1000 -s /bin/bash app
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 -s /bin/bash app
 
 COPY --from=builder /install /usr/local
 

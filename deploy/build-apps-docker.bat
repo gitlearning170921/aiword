@@ -31,6 +31,11 @@ if errorlevel 1 (
 )
 
 set "DOCKER_BUILDKIT=1"
+if defined DOCKER_MACHINE_NAME if "%DOCKER_LEGACY_BUILD%"=="" set "DOCKER_LEGACY_BUILD=1"
+if /I "%DOCKER_LEGACY_BUILD%"=="1" (
+  set "DOCKER_BUILDKIT=0"
+  echo [INFO] DOCKER_LEGACY_BUILD=1 ^(Docker Toolbox 兼容模式^)
+)
 set "PLATFORM=linux/amd64"
 set "PROGRESS=%DOCKER_PROGRESS%"
 if "%PROGRESS%"=="" set "PROGRESS=plain"
@@ -50,26 +55,8 @@ if /I "%SKIP_DOCKER_JS_CHECK%"=="1" (
   node "%AIWORD_ROOT%\scripts\check_js_syntax.js"
   if errorlevel 1 exit /b 1
 ) else (
-  docker image inspect node:20-alpine >nul 2>&1
-  if errorlevel 1 (
-    echo     pulling node:20-alpine ^(Docker Hub 慢时可设 SKIP_DOCKER_JS_CHECK=1 并用本机 node^)...
-  )
-  call :WinPathToDockerVol "%AIWORD_ROOT%" DOCKER_AIWORD_VOL
-  echo     volume %DOCKER_AIWORD_VOL%:/app:ro
-  docker run --rm -v "%DOCKER_AIWORD_VOL%:/app:ro" -w /app node:20-alpine node scripts/check_js_syntax.js
-  if errorlevel 1 (
-    where node >nul 2>&1
-    if not errorlevel 1 (
-      echo [WARN] docker JS check failed ^(Toolbox 下 D: 盘可能未共享给虚拟机^)，fallback to local node...
-      node "%AIWORD_ROOT%\scripts\check_js_syntax.js"
-      if errorlevel 1 exit /b 1
-    ) else (
-      echo ERROR: JS check failed.
-      echo   - Docker Toolbox: 代码放 C:\Users\你的用户名\aicode，或 VirtualBox 共享 D: 盘
-      echo   - 或安装 Node.js 后: set SKIP_DOCKER_JS_CHECK=1
-      exit /b 1
-    )
-  )
+  call :JsDockerCheck
+  if errorlevel 1 exit /b 1
 )
 
 echo ==^> build aiword:%VER% platform=%PLATFORM%
@@ -94,7 +81,33 @@ echo APPS BUILD OK version=%VER% ^(chroma skipped^)
 echo Next: .\export-apps-docker.bat %VER%
 exit /b 0
 
-rem Docker Toolbox 卷路径: d:\foo\bar -> /d/foo/bar （盘符须在 VirtualBox 中共享）
+:JsDockerCheck
+docker image inspect node:20-alpine >nul 2>&1
+if errorlevel 1 (
+  echo     pulling node:20-alpine ^(slow Hub: set SKIP_DOCKER_JS_CHECK=1 and use local node^)...
+)
+if /I "%DOCKER_LEGACY_BUILD%"=="1" (
+  call :WinPathToDockerVol "%AIWORD_ROOT%" DOCKER_JS_VOL
+) else (
+  set "DOCKER_JS_VOL=%AIWORD_ROOT%"
+)
+echo     volume %DOCKER_JS_VOL%:/app:ro
+docker run --rm -v "%DOCKER_JS_VOL%:/app:ro" -w /app node:20-alpine node scripts/check_js_syntax.js
+if errorlevel 1 (
+  where node >nul 2>&1
+  if not errorlevel 1 (
+    echo [WARN] docker JS check failed, fallback to local node...
+    node "%AIWORD_ROOT%\scripts\check_js_syntax.js"
+    if errorlevel 1 exit /b 1
+  ) else (
+    echo ERROR: JS check failed.
+    echo   - Install Node.js LTS and set SKIP_DOCKER_JS_CHECK=1 in build-machine.env.bat
+    exit /b 1
+  )
+)
+exit /b 0
+
+rem Docker Toolbox vol path: d:\foo\bar -^> /d/foo/bar
 :WinPathToDockerVol
 set "_WP=%~1"
 set "_WP=%_WP:\=/%"
