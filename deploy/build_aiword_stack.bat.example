@@ -1,0 +1,5 @@
+@echo off
+set "VER=%~1"
+if "%VER%"=="" ( echo Usage: build_aiword_stack.bat ^<version^> & pause & exit /b 1 )
+call "%~dp0git_clone_repo_aiword.bat" %VER% build
+exit /b %ERRORLEVEL%

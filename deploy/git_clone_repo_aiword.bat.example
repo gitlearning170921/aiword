@@ -1,4 +1,124 @@
 @echo off
-:: 打包机脚本模板 — 复制到打包机 d:\aicode\git_clone_repo_aiword.bat 后修改 URL
-:: 完整内容与 \\Yw00003131\d\aicode\git_clone_repo_aiword.bat 保持一致
-:: 详见 deploy\README.md 第 0.2 / 0.3 节
+chcp 65001 >nul 2>&1
+setlocal EnableExtensions EnableDelayedExpansion
+
+:: ============================================================
+::  git_clone_repo_aiword.bat - 打包机同步 aiword + aicheckword
+::  用法:
+::    git_clone_repo_aiword.bat <version>              仅拉代码到固定目录并 checkout v<version>
+::    git_clone_repo_aiword.bat <version> build        拉代码后执行 deploy\build-all.bat
+::    git_clone_repo_aiword.bat <version> build-apps   拉代码后仅打业务镜像 deploy\build-apps-all.bat
+::  示例:
+::    git_clone_repo_aiword.bat 1.0.5
+::    git_clone_repo_aiword.bat 1.0.5 build-apps
+::  部署: 复制本文件到打包机 d:\aicode\git_clone_repo_aiword.bat 后修改下方 URL
+:: ============================================================
+
+:: ---------- 配置（按需修改）----------
+set "LOCAL_DIR=d:\aicode"
+set "GIT_AIWORD_URL=https://github.com/gitlearning170921/aiword.git"
+set "GIT_AICHECKWORD_URL=https://github.com/gitlearning170921/aicheckword.git"
+
+set "AIWORD_DIR=aiword"
+set "AICHECKWORD_DIR=aicheckword"
+set "CLONE_TO_NEW_FOLDER=0"
+set "OVERWRITE_EXISTING=0"
+set "KILL_LOCKING_PROCESSES=1"
+set "RESTART_EXPLORER_IF_STILL_LOCKED=1"
+:: ------------------------------------
+
+set "VER=%~1"
+set "BUILD_MODE=%~2"
+if /I "%BUILD_MODE%"=="build-all" set "BUILD_MODE=build"
+if /I "%BUILD_MODE%"=="apps" set "BUILD_MODE=build-apps"
+
+if "%VER%"=="" (
+    echo.
+    echo Usage: %~nx0 ^<version^> [build^|build-apps]
+    echo   e.g. %~nx0 1.0.5
+    echo        %~nx0 1.0.5 build-apps
+    pause
+    exit /b 1
+)
+set "TAG=v%VER%"
+
+if not exist "%LOCAL_DIR%" mkdir "%LOCAL_DIR%" 2>nul
+
+where git >nul 2>&1
+if errorlevel 1 ( echo [ERROR] git not found & pause & exit /b 1 )
+
+if /I "%BUILD_MODE%"=="build" (
+    docker version >nul 2>&1
+    if errorlevel 1 ( echo [ERROR] Docker 未运行 & pause & exit /b 1 )
+)
+
+echo ============================================================
+echo  VERSION=%VER%  TAG=%TAG%  LOCAL_DIR=%LOCAL_DIR%
+echo ============================================================
+
+call :SyncRepoAtTag "%GIT_AIWORD_URL%" "%AIWORD_DIR%" "%TAG%"
+if errorlevel 1 goto :fail
+call :SyncRepoAtTag "%GIT_AICHECKWORD_URL%" "%AICHECKWORD_DIR%" "%TAG%"
+if errorlevel 1 goto :fail
+
+if /I "%BUILD_MODE%"=="build" (
+    pushd "%LOCAL_DIR%\%AIWORD_DIR%\deploy"
+    call build-all.bat %VER%
+    set "RC=!ERRORLEVEL!"
+    popd
+    if not "!RC!"=="0" goto :fail
+    goto :done_ok
+)
+
+if /I "%BUILD_MODE%"=="build-apps" (
+    pushd "%LOCAL_DIR%\%AIWORD_DIR%\deploy"
+    call build-apps-all.bat %VER%
+    set "RC=!ERRORLEVEL!"
+    popd
+    if not "!RC!"=="0" goto :fail
+    goto :done_ok
+)
+
+echo 下一步: cd /d %LOCAL_DIR%\%AIWORD_DIR%\deploy ^& build-apps-all.bat %VER%
+goto :done_ok
+
+:fail
+pause
+exit /b 1
+
+:done_ok
+pause
+exit /b 0
+
+:SyncRepoAtTag
+set "REPO_URL=%~1"
+set "FOLDER=%~2"
+set "WANT_TAG=%~3"
+set "TARGET=%LOCAL_DIR%\!FOLDER!"
+
+if not exist "!TARGET!\.git" (
+    echo [!FOLDER!] clone -^> !TARGET!
+    pushd "%LOCAL_DIR%"
+    git clone "!REPO_URL!" "!FOLDER!"
+    set "RC=!ERRORLEVEL!"
+    popd
+    if not "!RC!"=="0" exit /b !RC!
+) else (
+    pushd "!TARGET!"
+    git fetch --all --tags --prune
+    set "RC=!ERRORLEVEL!"
+    popd
+    if not "!RC!"=="0" exit /b !RC!
+)
+
+pushd "!TARGET!"
+git rev-parse -q --verify "refs/tags/!WANT_TAG!" >nul
+if errorlevel 1 (
+    echo [ERROR] !FOLDER! 无 tag !WANT_TAG!，请先在开发机 release.bat %VER%
+    popd & exit /b 1
+)
+git checkout -f "!WANT_TAG!"
+git reset --hard "!WANT_TAG!"
+git clean -fd
+popd
+exit /b 0
