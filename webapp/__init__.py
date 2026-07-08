@@ -376,6 +376,12 @@ def ensure_schema(app: Flask):
     )
     ensure_column(
         "upload_records",
+        "document_number",
+        "ALTER TABLE upload_records ADD COLUMN document_number TEXT",
+        "ALTER TABLE upload_records ADD COLUMN document_number VARCHAR(128)",
+    )
+    ensure_column(
+        "upload_records",
         "file_version",
         "ALTER TABLE upload_records ADD COLUMN file_version TEXT",
         "ALTER TABLE upload_records ADD COLUMN file_version VARCHAR(64)",
@@ -1008,6 +1014,144 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE users ADD COLUMN feature_permissions_json TEXT",
         ddl_other="ALTER TABLE users ADD COLUMN feature_permissions_json JSON NULL",
     )
+    insp_doc_control = inspect(engine)
+    doc_control_tables = insp_doc_control.get_table_names()
+    if "numbering_schemes" not in doc_control_tables:
+        from .models import NumberingScheme
+
+        NumberingScheme.__table__.create(bind=engine, checkfirst=True)
+    if "controlled_documents" not in doc_control_tables:
+        from .models import ControlledDocument
+
+        ControlledDocument.__table__.create(bind=engine, checkfirst=True)
+    if "number_allocations" not in doc_control_tables:
+        from .models import NumberAllocation
+
+        NumberAllocation.__table__.create(bind=engine, checkfirst=True)
+    try:
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents SET status='controlled' "
+                        "WHERE status IS NULL OR TRIM(status)='' OR status='active'"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents SET status='controlled' "
+                        "WHERE status IS NULL OR status='' OR status='active'"
+                    )
+                )
+    except Exception:
+        pass
+    ensure_column(
+        "controlled_documents",
+        "sheet_category",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN sheet_category VARCHAR(64)",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN sheet_category VARCHAR(64) NULL",
+    )
+    ensure_column(
+        "controlled_documents",
+        "project_name",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN project_name VARCHAR(255)",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN project_name VARCHAR(255) NULL",
+    )
+    ensure_column(
+        "controlled_documents",
+        "registered_country",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN registered_country VARCHAR(64)",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN registered_country VARCHAR(64) NULL",
+    )
+    ensure_column(
+        "controlled_documents",
+        "registration_submitted",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN registration_submitted INTEGER NOT NULL DEFAULT 0",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN registration_submitted TINYINT(1) NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        "controlled_documents",
+        "title_en",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN title_en VARCHAR(255)",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN title_en VARCHAR(255) NULL",
+    )
+    ensure_column(
+        "controlled_documents",
+        "excel_row_index",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN excel_row_index INTEGER",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN excel_row_index INT NULL",
+    )
+    if "document_control_import_logs" not in doc_control_tables:
+        from .models import DocumentControlImportLog
+
+        DocumentControlImportLog.__table__.create(bind=engine, checkfirst=True)
+    try:
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET excel_row_index = ("
+                        "  SELECT l.row_index FROM document_control_import_logs l "
+                        "  WHERE l.controlled_document_id = controlled_documents.id "
+                        "    AND l.row_index IS NOT NULL "
+                        "  ORDER BY l.created_at DESC LIMIT 1"
+                        ") "
+                        "WHERE excel_row_index IS NULL AND EXISTS ("
+                        "  SELECT 1 FROM document_control_import_logs l "
+                        "  WHERE l.controlled_document_id = controlled_documents.id "
+                        "    AND l.row_index IS NOT NULL"
+                        ")"
+                    )
+                )
+            elif engine.dialect.name == "mysql":
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents cd "
+                        "INNER JOIN ("
+                        "  SELECT l.controlled_document_id, l.row_index "
+                        "  FROM document_control_import_logs l "
+                        "  INNER JOIN ("
+                        "    SELECT controlled_document_id, MAX(created_at) AS mx "
+                        "    FROM document_control_import_logs "
+                        "    WHERE controlled_document_id IS NOT NULL "
+                        "      AND row_index IS NOT NULL "
+                        "    GROUP BY controlled_document_id"
+                        "  ) latest ON l.controlled_document_id = latest.controlled_document_id "
+                        "    AND l.created_at = latest.mx"
+                        ") src ON cd.id = src.controlled_document_id "
+                        "SET cd.excel_row_index = src.row_index "
+                        "WHERE cd.excel_row_index IS NULL"
+                    )
+                )
+    except Exception:
+        pass
+    try:
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(
+                    text("DROP INDEX IF EXISTS uq_controlled_document_org_norm_number")
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_controlled_doc_org_norm_controlled "
+                        "ON controlled_documents (organization_id, normalized_document_number) "
+                        "WHERE status = 'controlled'"
+                    )
+                )
+            elif engine.dialect.name == "mysql":
+                try:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE controlled_documents "
+                            "DROP INDEX uq_controlled_document_org_norm_number"
+                        )
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
     ensure_column(
         "user_feedback",
         "aiword_version",
@@ -1717,6 +1861,9 @@ def create_app() -> Flask:
         from .feedback_routes import register_feedback_blueprint
 
         register_feedback_blueprint(app)
+        from .document_control.routes import document_control_bp
+
+        app.register_blueprint(document_control_bp)
 
         from .app_settings import register_exam_center_feature_gate
 

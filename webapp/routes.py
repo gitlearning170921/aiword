@@ -4319,6 +4319,9 @@ def _build_aiprintword_handoff_context(upload_row: UploadRecord | None) -> dict[
     pcode = (getattr(upload_row, "project_code", None) or "").strip()
     if pcode:
         handoff_ctx["project_code"] = pcode
+    dnum = (getattr(upload_row, "document_number", None) or "").strip()
+    if dnum:
+        handoff_ctx["document_number"] = dnum
     return handoff_ctx
 
 
@@ -4590,6 +4593,7 @@ def _summary_payload():
             "product": u.product,
             "country": u.country,
             "projectCode": getattr(u, "project_code", None),
+            "documentNumber": getattr(u, "document_number", None),
             "projectPriority": int((proj_meta.get(u.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
             "fileVersion": getattr(u, "file_version", None),
             "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(u, "document_display_date", None)),
@@ -9811,6 +9815,7 @@ def api_upload():
     project_id = (request.form.get("projectId") or "").strip() or None
     project_name = request.form.get("projectName", "").strip()
     project_code = request.form.get("projectCode", "").strip() or None
+    document_number = request.form.get("documentNumber", "").strip() or None
     file_name = request.form.get("fileName", "").strip()
     task_type = request.form.get("taskType", "").strip() or None
     author = request.form.get("author", "").strip()
@@ -10009,6 +10014,8 @@ def api_upload():
             existing.country = country
         if _sent("projectCode"):
             existing.project_code = project_code
+        if _sent("documentNumber"):
+            existing.document_number = document_number
         if _sent("fileVersion"):
             existing.file_version = file_version
         if _sent("documentDisplayDate"):
@@ -10091,6 +10098,7 @@ def api_upload():
                     "businessSide": existing.business_side,
                     "product": existing.product,
                     "country": existing.country,
+                    "documentNumber": getattr(existing, "document_number", None),
                     "registeredProductName": getattr(existing, "registered_product_name", None),
                     "model": getattr(existing, "model", None),
                     "registrationVersion": getattr(existing, "registration_version", None),
@@ -10103,6 +10111,7 @@ def api_upload():
         organization_id=upload_org_id,
         project_name=project_name,
         project_code=project_code,
+        document_number=document_number,
         file_name=file_name,
         task_type=task_type,
         author=author,
@@ -10158,6 +10167,7 @@ def api_upload():
                 "businessSide": upload.business_side,
                 "product": upload.product,
                 "country": upload.country,
+                "documentNumber": getattr(upload, "document_number", None),
                 "registeredProductName": getattr(upload, "registered_product_name", None),
                 "model": getattr(upload, "model", None),
                 "registrationVersion": getattr(upload, "registration_version", None),
@@ -10678,6 +10688,7 @@ def api_uploads_list():
                 "product": r.product,
                 "country": r.country,
                 "projectCode": getattr(r, "project_code", None),
+                "documentNumber": getattr(r, "document_number", None),
                 "fileVersion": getattr(r, "file_version", None),
                 "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
                 "reviewer": getattr(r, "reviewer", None),
@@ -10750,6 +10761,7 @@ def api_upload_update(upload_id: str):
     country = (data.get("country") or "").strip() or None
     assignee_name = (data.get("assigneeName") or "").strip() or None
     project_code = (data.get("projectCode") or "").strip() or None
+    document_number = (data.get("documentNumber") or "").strip() or None
     file_version = (data.get("fileVersion") or "").strip() or None
     document_display_date_str = (data.get("documentDisplayDate") or "").strip() or None
     reviewer = (data.get("reviewer") or "").strip() or None
@@ -10811,6 +10823,8 @@ def api_upload_update(upload_id: str):
         upload.project_notes = project_notes
     if project_code is not None:
         upload.project_code = project_code
+    if document_number is not None:
+        upload.document_number = document_number
     if file_version is not None:
         upload.file_version = file_version
     if document_display_date_str is not None:
@@ -10985,6 +10999,7 @@ def api_my_tasks():
                 "product": r.product,
                 "country": r.country,
                 "projectCode": getattr(r, "project_code", None),
+                "documentNumber": getattr(r, "document_number", None),
                 "fileVersion": getattr(r, "file_version", None),
                 "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
                 "reviewer": getattr(r, "reviewer", None),

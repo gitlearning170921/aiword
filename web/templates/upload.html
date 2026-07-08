@@ -32,6 +32,9 @@
             {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
             <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
             {% endif %}
+            {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
+            <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -400,6 +403,7 @@
                         <th data-col="notes">下发任务备注</th>
                         <th data-col="executionNotes">执行任务备注</th>
                         <th class="th-sortable col-narrow" data-sort-key="projectCode" data-col="projectCode">项目编号 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="documentNumber" data-col="documentNumber">文件编号 <span class="sort-indicator"></span></th>
                         <th class="th-sortable col-narrow" data-sort-key="fileVersion" data-col="fileVersion">文件版本号 <span class="sort-indicator"></span></th>
                         <th class="th-sortable" data-sort-key="documentDisplayDate" data-col="docDisplayDate">文档体现日期 <span class="sort-indicator"></span></th>
                         <th data-col="reviewer">审核人员</th>
@@ -532,6 +536,10 @@
                                 <input type="text" class="form-control form-control-sm" id="editRecordProjectCode" placeholder="可选">
                             </div>
                             <div class="col-md-6">
+                                <label class="form-label small">文件编号</label>
+                                <input type="text" class="form-control form-control-sm" id="editRecordDocumentNumber" placeholder="可选">
+                            </div>
+                            <div class="col-md-6">
                                 <label class="form-label small">文件版本号</label>
                                 <input type="text" class="form-control form-control-sm" id="editRecordFileVersion" placeholder="可选">
                             </div>
@@ -658,6 +666,10 @@
                             <div class="col-md-6">
                                 <label class="form-label small">项目编号</label>
                                 <input type="text" class="form-control form-control-sm" id="batchEditProjectCode" placeholder="留空不修改">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small">文件编号</label>
+                                <input type="text" class="form-control form-control-sm" id="batchEditDocumentNumber" placeholder="留空不修改">
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small">文件版本号</label>

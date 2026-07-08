@@ -334,6 +334,119 @@ class ModuleCascadeReminder(db.Model):
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
+class NumberingScheme(db.Model):
+    """受控编号规则（公司维度）。"""
+    __tablename__ = "numbering_schemes"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "doc_type_code", name="uq_numbering_scheme_org_type"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    doc_type_code: Mapped[str] = mapped_column(db.String(32), nullable=False)
+    pattern_regex: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    render_template: Mapped[str] = mapped_column(
+        db.String(128), nullable=False, default="{prefix}-{type}-{seq:03d}"
+    )
+    prefix_source: Mapped[str] = mapped_column(db.String(32), nullable=False, default="fixed")
+    fixed_prefix: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    seq_scope: Mapped[str] = mapped_column(db.String(32), nullable=False, default="per_company")
+    seq_start: Mapped[int] = mapped_column(db.Integer, nullable=False, default=1)
+    seq_pad: Mapped[int] = mapped_column(db.Integer, nullable=False, default=3)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    kb_rule_excerpt: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
+class ControlledDocument(db.Model):
+    """受控文件台账。受控状态编号在公司内唯一；作废记录可与受控/作废编号重复。"""
+    __tablename__ = "controlled_documents"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    document_number: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    normalized_document_number: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    title: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    title_en: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
+    doc_type_code: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    project_name: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
+    registered_country: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    sheet_category: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
+    excel_row_index: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    registration_submitted: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="controlled")
+    source: Mapped[str] = mapped_column(db.String(32), nullable=False, default="manual")
+    extract_confidence: Mapped[Optional[float]] = mapped_column(db.Float, nullable=True)
+    storage_path: Mapped[Optional[str]] = mapped_column(db.String(768), nullable=True)
+    upload_record_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    import_batch_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    metadata_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
+class DocumentControlImportLog(db.Model):
+    """文控 Excel 导入操作日志（成功/跳过/失败/注册关联）。"""
+    __tablename__ = "document_control_import_logs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    import_batch_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(db.String(32), nullable=False)
+    document_number: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    normalized_document_number: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    row_index: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    row_payload_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    controlled_document_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class NumberAllocation(db.Model):
+    """编号预留与发放审计。"""
+    __tablename__ = "number_allocations"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "normalized_allocated_number",
+            "status",
+            name="uq_number_allocation_org_norm_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    scheme_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    requested_title: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
+    doc_type_code: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    allocated_number: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    normalized_allocated_number: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    allocated_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="reserved")
+    reserved_until: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    compliance_result_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    issued_document_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class UploadRecord(db.Model):
     """
     上传记录：支持文件上传或多行文档链接。
@@ -371,6 +484,7 @@ class UploadRecord(db.Model):
     model: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 型号
     registration_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)  # 注册版本号
     project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    document_number: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     file_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     document_display_date: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
     reviewer: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)

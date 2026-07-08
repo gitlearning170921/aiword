@@ -583,6 +583,16 @@ def api_audit_create_job():
     payload_obj["display_name_map"] = display_map
     if upload_id_map:
         payload_obj["aiword_upload_id_map"] = upload_id_map
+    # Phase 2：单文档审核时把台账文件编号透传给 aicheckword，做“台账编号 vs 文档内编号”一致性校验
+    if mode == "single" and len(upload_ids) == 1:
+        rec = UploadRecord.query.get(upload_ids[0])
+        doc_no = str(getattr(rec, "document_number", "") or "").strip() if rec else ""
+        if doc_no:
+            rc = payload_obj.get("review_context")
+            if not isinstance(rc, dict):
+                rc = {}
+            rc["document_number"] = doc_no
+            payload_obj["review_context"] = rc
     payload_obj["aiword_user_id"] = str(session.get("user_id") or "")
 
     from ._integration_common import enrich_audit_payload_from_upstream

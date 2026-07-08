@@ -733,6 +733,7 @@ function _copyPrevTaskRowFields(prevRow, newRowEl, newCatSelect) {
     const newModuleSelect = newRowEl.querySelector(".task-module-cell select");
     if (prevModuleSelect && newModuleSelect) newModuleSelect.value = prevModuleSelect.value || "";
     newRowEl.querySelector(".task-link").value = prevRow.querySelector(".task-link")?.value ?? "";
+    newRowEl.querySelector(".task-document-number").value = prevRow.querySelector(".task-document-number")?.value ?? "";
     newRowEl.querySelector(".task-file-version").value = prevRow.querySelector(".task-file-version")?.value ?? "";
     newRowEl.querySelector(".task-author").value = prevRow.querySelector(".task-author")?.value ?? "";
     newRowEl.querySelector(".task-duedate").value = prevRow.querySelector(".task-duedate")?.value ?? "";
@@ -987,12 +988,13 @@ function createProjectBlock() {
                             <th>编写人员 *</th>
                             <th>截止日期</th>
                             <th>任务备注</th>
-                            <th colspan="5" class="text-center">以下为文档通用及签审批信息</th>
+                            <th colspan="6" class="text-center">以下为文档通用及签审批信息</th>
                             <th style="width:50px">操作</th>
                         </tr>
                         <tr class="project-entry-head-row2">
                             <th class="task-row-select-col"></th>
                             <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                            <th>文件编号</th>
                             <th>文件版本号</th>
                             <th>文档体现日期</th>
                             <th>审核人员</th>
@@ -1077,6 +1079,12 @@ function createTaskRowUnderProject(projectBlock) {
             </div>
             <div class="task-note-files-list small mt-1"></div>
         </td>
+        <td>
+            <div class="input-group input-group-sm">
+                <input type="text" class="form-control task-document-number" placeholder="文件编号">
+                <button type="button" class="btn btn-outline-secondary task-document-number-pick" title="从文控中心带入，未命中则自动建议">带入/生成</button>
+            </div>
+        </td>
         <td><input type="text" class="form-control form-control-sm task-file-version" placeholder="版本号"></td>
         <td><input type="date" class="form-control form-control-sm task-doc-display-date" placeholder="文档体现日期"></td>
         <td><input type="text" class="form-control form-control-sm task-reviewer" placeholder="审核人员"></td>
@@ -1128,6 +1136,53 @@ function createTaskRowUnderProject(projectBlock) {
             noteFilesList.appendChild(tag);
         } catch (e) {
             App.notify(e.message || "上传失败", "danger");
+        }
+    });
+    tr.querySelector(".task-document-number-pick")?.addEventListener("click", async () => {
+        if (!_page1Feature("FEATURE_DOCUMENT_CONTROL")) {
+            App.notify("文控中心功能未开启", "warning");
+            return;
+        }
+        const fileName = (tr.querySelector(".task-filename")?.value || "").trim();
+        const projectCode = (projectBlock?.querySelector(".project-code")?.value || "").trim();
+        const docInput = tr.querySelector(".task-document-number");
+        try {
+            const q = new URLSearchParams();
+            if (fileName) q.set("keyword", fileName);
+            if (projectCode) q.set("projectCode", projectCode);
+            const searchRes = await App.request(`/api/document-control/search?${q.toString()}`);
+            const first = (searchRes.items || [])[0];
+            if (first && first.documentNumber) {
+                docInput.value = first.documentNumber;
+                if (!tr.querySelector(".task-file-version")?.value && first.version) {
+                    tr.querySelector(".task-file-version").value = first.version;
+                }
+                if (!tr.querySelector(".task-filename")?.value && first.title) {
+                    tr.querySelector(".task-filename").value = first.title;
+                }
+                App.notify("已从文控台账带入文件编号", "success");
+                return;
+            }
+            const bsRes = await App.request("/api/document-control/bootstrap");
+            const firstScheme = (bsRes.schemes || [])[0];
+            if (!firstScheme || !firstScheme.id) {
+                App.notify("未找到可用编号规则，请先在文控中心配置", "warning");
+                return;
+            }
+            const preview = await App.request("/api/document-control/allocate/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ schemeId: firstScheme.id, projectCode: projectCode || null }),
+            });
+            const suggested = preview?.item?.document_number || "";
+            if (!suggested) {
+                App.notify("未获取到建议编号", "warning");
+                return;
+            }
+            docInput.value = suggested;
+            App.notify("已自动生成建议编号，可手工修改", "info");
+        } catch (e) {
+            App.notify(e.message || "文控编号带入失败", "danger");
         }
     });
     tr.querySelector(".btn-remove-row").addEventListener("click", () => {
@@ -1446,6 +1501,7 @@ async function initUploadPage() {
                             <option value="ended" ${st === "ended" ? "selected" : ""}>已结束</option>
                         </select></td>
                     <td class="p1-actions-cell text-end">
+                        <button type="button" class="btn btn-sm btn-outline-secondary btn-project-doc-control me-1" data-id="${esc(p.id)}" data-code="${esc(p.projectCode || "")}" data-name="${esc(p.name || "")}">文控中心</button>
                         <button type="button" class="btn btn-sm btn-outline-primary btn-save-project" data-id="${esc(p.id)}">保存</button>
                         <button type="button" class="btn btn-sm btn-outline-danger btn-delete-project" data-id="${esc(p.id)}">删除</button>
                     </td>
@@ -1552,6 +1608,22 @@ async function initUploadPage() {
                         }
                         App.notify(e && e.message ? e.message : "删除失败", "danger");
                     }
+                });
+            });
+            projectsManageBody.querySelectorAll(".btn-project-doc-control").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    if (!_page1Feature("FEATURE_DOCUMENT_CONTROL")) {
+                        App.notify("文控中心功能未开启", "warning");
+                        return;
+                    }
+                    const projectId = String(btn.dataset.id || "").trim();
+                    const projectCode = String(btn.dataset.code || "").trim();
+                    const projectName = String(btn.dataset.name || "").trim();
+                    const q = new URLSearchParams();
+                    if (projectId) q.set("projectId", projectId);
+                    if (projectCode) q.set("projectCode", projectCode);
+                    if (projectName) q.set("keyword", projectName);
+                    window.location.href = _appPath(`/document-control?${q.toString()}`);
                 });
             });
             // 同步刷新“任务录入”里的项目下拉（只展示进行中项目）
@@ -2005,6 +2077,7 @@ async function initUploadPage() {
                     const author = (row.querySelector(".task-author")?.value || "").trim();
                     const dueDate = (row.querySelector(".task-duedate")?.value || "").trim();
                     const notes = (row.querySelector(".task-notes")?.value || "").trim() || "";
+                    const documentNumber = (row.querySelector(".task-document-number")?.value || "").trim() || "";
                     const fileVersion = (row.querySelector(".task-file-version")?.value || "").trim() || "";
                     const docDisplayDate = (row.querySelector(".task-doc-display-date")?.value || "").trim() || "";
                     const reviewer = (row.querySelector(".task-reviewer")?.value || "").trim() || "";
@@ -2049,6 +2122,7 @@ async function initUploadPage() {
                     if (registeredProductName) formData.append("registeredProductName", registeredProductName);
                     if (model) formData.append("model", model);
                     if (registrationVersion) formData.append("registrationVersion", registrationVersion);
+                    if (documentNumber) formData.append("documentNumber", documentNumber);
                     if (fileVersion) formData.append("fileVersion", fileVersion);
                     if (docDisplayDate) formData.append("documentDisplayDate", docDisplayDate);
                     if (reviewer) formData.append("reviewer", reviewer);
@@ -2111,6 +2185,7 @@ async function initUploadPage() {
                             if (registeredProductName) formDataReplace.append("registeredProductName", registeredProductName);
                             if (model) formDataReplace.append("model", model);
                             if (registrationVersion) formDataReplace.append("registrationVersion", registrationVersion);
+                            if (documentNumber) formDataReplace.append("documentNumber", documentNumber);
                             if (fileVersion) formDataReplace.append("fileVersion", fileVersion);
                             if (docDisplayDate) formDataReplace.append("documentDisplayDate", docDisplayDate);
                             if (reviewer) formDataReplace.append("reviewer", reviewer);
@@ -3023,6 +3098,8 @@ async function openEditRecordModal(r) {
     }
     const projectNotesEl = document.getElementById("editRecordProjectNotes");
     if (projectNotesEl) projectNotesEl.value = r.projectNotes || "";
+    const documentNumberEl = document.getElementById("editRecordDocumentNumber");
+    if (documentNumberEl) documentNumberEl.value = r.documentNumber || "";
     const fileVersionEl = document.getElementById("editRecordFileVersion");
     if (fileVersionEl) fileVersionEl.value = r.fileVersion || "";
     const docDisplayDateEl = document.getElementById("editRecordDocDisplayDate");
@@ -3175,6 +3252,8 @@ function initEditRecordModal() {
         };
         const projectCodeEl = document.getElementById("editRecordProjectCode");
         if (projectCodeEl) payload.projectCode = projectCodeEl.value.trim() || null;
+        const documentNumberEl = document.getElementById("editRecordDocumentNumber");
+        if (documentNumberEl) payload.documentNumber = documentNumberEl.value.trim() || null;
         const fileVersionEl = document.getElementById("editRecordFileVersion");
         if (fileVersionEl) payload.fileVersion = fileVersionEl.value.trim() || null;
         const docDisplayDateEl = document.getElementById("editRecordDocDisplayDate");
@@ -3220,6 +3299,7 @@ function initEditRecordModal() {
                 fd.append("model", payload.model || "");
                 fd.append("registrationVersion", payload.registrationVersion || "");
                 if (projectCodeEl) fd.append("projectCode", projectCodeEl.value.trim());
+                if (documentNumberEl) fd.append("documentNumber", documentNumberEl.value.trim());
                 if (fileVersionEl) fd.append("fileVersion", fileVersionEl.value.trim());
                 if (docDisplayDateEl) fd.append("documentDisplayDate", docDisplayDateEl.value || "");
                 if (reviewerEl) fd.append("reviewer", reviewerEl.value.trim());
@@ -3374,6 +3454,7 @@ function initBatchEditRecords() {
         const productVal = first ? (first.product || "").trim() : "";
         const countryVal = first ? (first.country || "").trim() : "";
         const projectNotesVal = first ? (first.projectNotes || "").trim() : "";
+        const documentNumberVal = first ? (first.documentNumber || "").trim() : "";
         const fileVersionVal = first ? (first.fileVersion || "").trim() : "";
         const documentDisplayDateVal = first ? (first.documentDisplayDate || "").trim() : "";
         const reviewerVal = first ? (first.reviewer || "").trim() : "";
@@ -3388,6 +3469,7 @@ function initBatchEditRecords() {
         const sameProduct = productVal !== "" && records.every((r) => ((r.product || "").trim()) === productVal);
         const sameCountry = countryVal !== "" && records.every((r) => ((r.country || "").trim()) === countryVal);
         const sameProjectNotes = projectNotesVal !== "" && records.every((r) => ((r.projectNotes || "").trim()) === projectNotesVal);
+        const sameDocumentNumber = documentNumberVal !== "" && records.every((r) => ((r.documentNumber || "").trim()) === documentNumberVal);
         const sameFileVersion = fileVersionVal !== "" && records.every((r) => ((r.fileVersion || "").trim()) === fileVersionVal);
         const sameBelongingModule = belongingModuleVal !== "" && records.every((r) => ((r.belongingModule || "").trim()) === belongingModuleVal);
         const sameDocumentDisplayDate = documentDisplayDateVal !== "" && records.every((r) => ((r.documentDisplayDate || "").trim()) === documentDisplayDateVal);
@@ -3466,6 +3548,8 @@ function initBatchEditRecords() {
         if (batchEditRegVerEl) batchEditRegVerEl.value = sameRegVer ? registrationVersionVal : "";
         const batchEditProjectNotesEl = document.getElementById("batchEditProjectNotes");
         if (batchEditProjectNotesEl) batchEditProjectNotesEl.value = sameProjectNotes ? projectNotesVal : "";
+        const batchEditDocumentNumberEl = document.getElementById("batchEditDocumentNumber");
+        if (batchEditDocumentNumberEl) batchEditDocumentNumberEl.value = sameDocumentNumber ? documentNumberVal : "";
         const batchEditFileVersionEl = document.getElementById("batchEditFileVersion");
         if (batchEditFileVersionEl) batchEditFileVersionEl.value = sameFileVersion ? fileVersionVal : "";
         const batchEditBelongingModuleEl = document.getElementById("batchEditBelongingModule");
@@ -3573,6 +3657,7 @@ function initBatchEditRecords() {
         const model = (document.getElementById("batchEditModel")?.value || "").trim();
         const registrationVersion = (document.getElementById("batchEditRegistrationVersion")?.value || "").trim();
         const projectNotes = (document.getElementById("batchEditProjectNotes")?.value || "").trim();
+        const documentNumber = (document.getElementById("batchEditDocumentNumber")?.value || "").trim();
         const fileVersion = (document.getElementById("batchEditFileVersion")?.value || "").trim();
         const belongingModule = (document.getElementById("batchEditBelongingModule")?.value || "").trim();
         const documentDisplayDate = (document.getElementById("batchEditDocumentDisplayDate")?.value || "").trim();
@@ -3596,6 +3681,7 @@ function initBatchEditRecords() {
         if (model !== "") payload.model = model;
         if (registrationVersion !== "") payload.registrationVersion = registrationVersion;
         if (projectNotes !== "") payload.projectNotes = projectNotes;
+        if (documentNumber !== "") payload.documentNumber = documentNumber;
         if (fileVersion !== "") payload.fileVersion = fileVersion;
         if (documentDisplayDate !== "") payload.documentDisplayDate = documentDisplayDate;
         if (reviewer !== "") payload.reviewer = reviewer;
@@ -3974,7 +4060,7 @@ function renderRecordsTable(records) {
     } catch (e) {
         console.error("renderRecordsTable:", e);
         tbody.innerHTML =
-            '<tr><td colspan="27" class="text-danger small">任务列表渲染失败：' +
+            '<tr><td colspan="28" class="text-danger small">任务列表渲染失败：' +
             _escTitle(e && e.message ? e.message : String(e)) +
             "。请刷新页面或查看浏览器控制台。</td></tr>";
     }
@@ -4005,6 +4091,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
                 : '<span class="badge bg-warning text-dark">待办</span>');
         const auditStatusText = (r.auditStatus != null && r.auditStatus !== "") ? r.auditStatus : "-";
         const projectCode = (r.projectCode != null && r.projectCode !== "") ? r.projectCode : "-";
+        const documentNumber = (r.documentNumber != null && r.documentNumber !== "") ? r.documentNumber : "-";
         const fileVersion = (r.fileVersion != null && r.fileVersion !== "") ? r.fileVersion : "-";
         const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
@@ -4043,6 +4130,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             <td data-wrap style="max-width:180px" title="${_escTitle(r.notes)}">${_renderNotesHtml(r.notes)}</td>
             <td title="${_escTitle(r.executionNotes)}">${(r.executionNotes != null && r.executionNotes !== "") ? r.executionNotes : "-"}</td>
             <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
+            <td title="${_escTitle(r.documentNumber)}">${documentNumber}</td>
             <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
             <td title="${_escTitle(r.documentDisplayDate)}">${documentDisplayDate}</td>
             <td title="${_escTitle(r.reviewer)}">${reviewer}</td>
@@ -4067,8 +4155,8 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
     if (!lastRenderedRecords.length) {
         const emptyRow =
             window.ScopeBar && ScopeBar.emptyTableRow
-                ? ScopeBar.emptyTableRow(27, "page1_records")
-                : '<tr><td colspan="27" class="text-muted small text-center py-4">暂无任务记录</td></tr>';
+                ? ScopeBar.emptyTableRow(28, "page1_records")
+                : '<tr><td colspan="28" class="text-muted small text-center py-4">暂无任务记录</td></tr>';
         tbody.insertAdjacentHTML("beforeend", emptyRow);
         return;
     }
@@ -4099,7 +4187,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             header1.dataset.groupKey = key1;
             header1.dataset.groupLevel = "1";
             header1.dataset.groupIndex = String(groupIndexL1++);
-            header1.innerHTML = `<td colspan="27" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
+            header1.innerHTML = `<td colspan="28" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
             header1.style.cursor = "pointer";
             tbody.appendChild(header1);
             authorMap.forEach((arr, authorName) => {
@@ -4110,7 +4198,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
                 header2.dataset.groupKey = key2;
                 header2.dataset.groupLevel = "2";
                 header2.dataset.groupIndex = String(groupIndexL2);
-                header2.innerHTML = `<td colspan="27" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
+                header2.innerHTML = `<td colspan="28" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
                 header2.style.cursor = "pointer";
                 tbody.appendChild(header2);
                 const rowHidden = collapsed1 || collapsed2;
@@ -4168,7 +4256,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="27" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="28" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             tbody.appendChild(headerTr);
             arr.forEach((r) => {
@@ -5229,7 +5317,7 @@ function syncPage2TableHeader() {
 }
 
 function page2TableColSpan() {
-    let span = 25;
+    let span = 26;
     if (page2ObserverMode && page2ViewMode === "super_admin_readonly") span += 1;
     if (page2ObserverMode) span += 1;
     return span;
@@ -5609,6 +5697,7 @@ function renderMyTasksTable(records) {
             ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>`
             : (r.dueDate || "-");
         const projectCode = (r.projectCode != null && r.projectCode !== "") ? r.projectCode : "-";
+        const documentNumber = (r.documentNumber != null && r.documentNumber !== "") ? r.documentNumber : "-";
         const fileVersion = (r.fileVersion != null && r.fileVersion !== "") ? r.fileVersion : "-";
         const documentDisplayDate = (r.documentDisplayDate != null && r.documentDisplayDate !== "") ? r.documentDisplayDate : "-";
         const reviewer = (r.reviewer != null && r.reviewer !== "") ? r.reviewer : "-";
@@ -5652,6 +5741,7 @@ function renderMyTasksTable(records) {
             <td>${execNotesCell}</td>
             <td class="completion-status-cell"></td>
             <td title="${_escTitle(r.projectCode)}">${projectCode}</td>
+            <td title="${_escTitle(r.documentNumber)}">${documentNumber}</td>
             <td title="${_escTitle(r.fileVersion)}">${fileVersion}</td>
             <td title="${_escTitle(r.documentDisplayDate)}">${documentDisplayDate}</td>
             <td title="${_escTitle(r.reviewer)}">${reviewer}</td>
@@ -6793,6 +6883,7 @@ async function _initDashboardPageInner() {
             const dueDateStyle = getDueDateStyle(row.dueDate, !!row.isCompleted);
             const dueDateHtml = dueDateStyle.class ? `<span class="badge ${dueDateStyle.class}" title="${dueDateStyle.title || ''}">${dueDateStyle.text}</span>` : (dueDateStyle.text || "-");
             const projectCode = (row.projectCode != null && row.projectCode !== "") ? row.projectCode : "-";
+            const documentNumber = (row.documentNumber != null && row.documentNumber !== "") ? row.documentNumber : "-";
             const fileVersion = (row.fileVersion != null && row.fileVersion !== "") ? row.fileVersion : "-";
             const documentDisplayDate = (row.documentDisplayDate != null && row.documentDisplayDate !== "") ? row.documentDisplayDate : "-";
             const reviewer = (row.reviewer != null && row.reviewer !== "") ? row.reviewer : "-";
@@ -6813,6 +6904,7 @@ async function _initDashboardPageInner() {
                 <td title="${_escTitle(row.executionNotes)}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
                 <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
                 <td title="${_escTitle(row.projectCode)}">${projectCode}</td>
+                <td title="${_escTitle(row.documentNumber)}">${documentNumber}</td>
                 <td title="${_escTitle(row.fileVersion)}">${fileVersion}</td>
                 <td title="${_escTitle(row.documentDisplayDate)}">${documentDisplayDate}</td>
                 <td title="${_escTitle(row.reviewer)}">${reviewer}</td>
@@ -6913,7 +7005,7 @@ async function _initDashboardPageInner() {
                 headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
                 headerTr.dataset.groupKey = key;
                 headerTr.dataset.groupIndex = String(gidx);
-                headerTr.innerHTML = `<td colspan="24" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+                headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
                 headerTr.style.cursor = "pointer";
                 tableBody.appendChild(headerTr);
                 arr.forEach((row) => addDetailRow(row, key, gidx, collapsed));
@@ -7243,6 +7335,7 @@ function renderFilteredDetailTable(rows) {
             <td title="${_escTitle(row.executionNotes)}">${(row.executionNotes != null && row.executionNotes !== "") ? row.executionNotes : "-"}</td>
             <td>${row.docLink ? `<a href="${row.docLink}" target="_blank" rel="noopener">打开</a>` : "-"}</td>
             <td title="${_escTitle(row.projectCode)}">${(row.projectCode != null && row.projectCode !== "") ? row.projectCode : "-"}</td>
+            <td title="${_escTitle(row.documentNumber)}">${(row.documentNumber != null && row.documentNumber !== "") ? row.documentNumber : "-"}</td>
             <td title="${_escTitle(row.fileVersion)}">${(row.fileVersion != null && row.fileVersion !== "") ? row.fileVersion : "-"}</td>
             <td title="${_escTitle(row.documentDisplayDate)}">${(row.documentDisplayDate != null && row.documentDisplayDate !== "") ? row.documentDisplayDate : "-"}</td>
             <td title="${_escTitle(row.reviewer)}">${(row.reviewer != null && row.reviewer !== "") ? row.reviewer : "-"}</td>
@@ -7392,7 +7485,7 @@ function initColumnToggle(btnId, menuId, tableId) {
         seq: "序号", observerTeam: "项目组", observerPerson: "负责人",
         projectName: "项目名称", projectCode: "项目编号",
         fileName: "文件名称", taskType: "任务类型", belongingModule: "所属模块",
-        source: "来源", fileVersion: "文件版本号", author: "编写人员",
+        source: "来源", documentNumber: "文件编号", fileVersion: "文件版本号", author: "编写人员",
         dueDate: "截止日期", docDisplayDate: "文档体现日期", businessSide: "影响业务方",
         product: "影响产品", country: "国家", taskStatus: "状态", auditStatus: "审核状态",
         reviewer: "审核人员", approver: "批准人员", displayedAuthor: "体现编写人员",
@@ -7400,7 +7493,7 @@ function initColumnToggle(btnId, menuId, tableId) {
         registeredProductName: "注册产品名称", model: "型号", registrationVersion: "注册版本号",
         op: "操作", docLink: "文档链接/地址", completionStatus: "完成状态",
     };
-    const defaultHiddenCols = ["projectCode", "fileVersion", "docDisplayDate", "reviewer", "approver", "displayedAuthor", "projectNotes", "registeredProductName", "model", "registrationVersion"];
+    const defaultHiddenCols = ["projectCode", "documentNumber", "fileVersion", "docDisplayDate", "reviewer", "approver", "displayedAuthor", "projectNotes", "registeredProductName", "model", "registrationVersion"];
     const defaultHidden = new Set(defaultHiddenCols);
 
     function getDefaultVisible(col) {

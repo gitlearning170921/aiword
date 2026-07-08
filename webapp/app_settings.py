@@ -174,6 +174,11 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         False,
     ),
     (
+        "FEATURE_DOCUMENT_CONTROL",
+        "受控编号管理（文控中心）开关（1=开启；空或0=关闭）",
+        False,
+    ),
+    (
         "FEATURE_ENV_SEPARATION",
         "环境分离开关（1=启用后 AIWORD_ENV=test|prod 隔离 aiword 库与目录；空或0=关闭，与改前一致。须在 .env 同步并重启生效）",
         False,
@@ -210,6 +215,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_EXAM_CENTER",
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
+    "FEATURE_DOCUMENT_CONTROL",
     "FEATURE_ENV_SEPARATION",
     "FEATURE_PAGE0_AUDIT_TODO",
 )
@@ -264,6 +270,7 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
+            "FEATURE_DOCUMENT_CONTROL",
             "FEATURE_ENV_SEPARATION",
             "FEATURE_PAGE0_AUDIT_TODO",
             "FEATURE_PAGE1_AUDIT_TODO",
