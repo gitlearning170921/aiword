@@ -736,6 +736,13 @@ tr.cp-row-starred > td {
 .admin-system-panel.d-flex.flex-column .admin-system-panel-body {
     max-height: calc(min(72vh, 780px) - 96px);
 }
+/* 页面4 · 钉钉与催办：独立卡片平铺 */
+.admin-dingtalk-layout .admin-dingtalk-card {
+    border-radius: 12px;
+}
+.admin-notify-template-list .admin-notify-template-item:last-child {
+    margin-bottom: 0 !important;
+}
 .admin-dingtalk-section {
     border: 1px solid rgba(15, 23, 42, 0.08);
     border-radius: 10px;

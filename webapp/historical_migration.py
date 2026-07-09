@@ -8,6 +8,24 @@ from sqlalchemy import text
 
 HISTORICAL_MIGRATION_KEY = "HISTORICAL_ORG_TEAM_MIGRATION_V1"
 EXAM_ORG_BACKFILL_KEY = "EXAM_ORG_BACKFILL_V1"
+DOC_CONTROL_NORM_BACKFILL_KEY = "DOC_CONTROL_NORMALIZED_NUMBER_BACKFILL_V1"
+TEAM_JUNCTION_BACKFILL_KEY = "TEAM_ORG_JUNCTION_BACKFILL_V1"
+EXAM_HISTORICAL_STARTUP_REPAIR_KEY = "EXAM_HISTORICAL_STARTUP_REPAIR_V1"
+
+
+def is_startup_maintenance_done(key: str) -> bool:
+    from .models import AppConfig
+
+    row = AppConfig.query.filter_by(config_key=key).first()
+    return bool(row and (row.config_value or "").strip() == "1")
+
+
+def mark_startup_maintenance_done(key: str) -> None:
+    from . import db
+    from .app_settings import _upsert_config
+
+    _upsert_config(key, "1")
+    db.session.commit()
 
 _TEST_TEAM_NAME_RE = re.compile(
     r"^(exam_smoke_|regress_scope_|regress_test_|smoke_test_)",
@@ -483,3 +501,35 @@ def run_exam_organization_backfill_if_pending() -> None:
     except Exception:
         db.session.rollback()
         raise
+
+
+def run_exam_historical_repair_if_pending() -> None:
+    """启动时一次性考试历史修复；完成后写入 app_configs，不再重复全库扫描。"""
+    if is_startup_maintenance_done(EXAM_HISTORICAL_STARTUP_REPAIR_KEY):
+        return
+    repair_exam_historical_data()
+    mark_startup_maintenance_done(EXAM_HISTORICAL_STARTUP_REPAIR_KEY)
+
+
+def run_team_junction_backfill_if_pending() -> int:
+    """项目组-公司 junction 回填：无新增可写记录后标记完成。"""
+    if is_startup_maintenance_done(TEAM_JUNCTION_BACKFILL_KEY):
+        return 0
+    from .team_organizations import backfill_junction_from_legacy
+
+    n = int(backfill_junction_from_legacy() or 0)
+    if n <= 0:
+        mark_startup_maintenance_done(TEAM_JUNCTION_BACKFILL_KEY)
+    return n
+
+
+def run_doc_control_norm_backfill_if_pending() -> int:
+    """文控 normalized_document_number 回填：全部对齐后标记完成。"""
+    if is_startup_maintenance_done(DOC_CONTROL_NORM_BACKFILL_KEY):
+        return 0
+    from webapp.document_control.numbering_engine import backfill_normalized_document_numbers
+
+    n = int(backfill_normalized_document_numbers() or 0)
+    if n <= 0:
+        mark_startup_maintenance_done(DOC_CONTROL_NORM_BACKFILL_KEY)
+    return n

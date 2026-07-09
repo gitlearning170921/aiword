@@ -1784,6 +1784,7 @@ def create_app() -> Flask:
         v = 0
         for rel in (
             "js/app.js",
+            "js/document_control.js",
             "js/exam_center.js",
             "js/draft_gen.js",
             "css/app.css",
@@ -1982,17 +1983,20 @@ def create_app() -> Flask:
         run_startup_local_maintenance(app, project_root)
         try:
             from .historical_migration import (
-                repair_exam_historical_data,
+                run_doc_control_norm_backfill_if_pending,
+                run_exam_historical_repair_if_pending,
                 run_exam_organization_backfill_if_pending,
                 run_team_data_migration_if_pending,
+                run_team_junction_backfill_if_pending,
             )
 
             run_team_data_migration_if_pending()
             run_exam_organization_backfill_if_pending()
-            repair_exam_historical_data()
-            from .team_organizations import backfill_junction_from_legacy
-
-            backfill_junction_from_legacy()
+            run_exam_historical_repair_if_pending()
+            run_team_junction_backfill_if_pending()
+            n = run_doc_control_norm_backfill_if_pending()
+            if n:
+                app.logger.info("document_control: backfilled normalized_document_number on %s rows", n)
         except Exception:
             db.session.rollback()
             app.logger.exception("historical_migration failed")

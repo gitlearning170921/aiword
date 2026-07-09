@@ -25,7 +25,10 @@
             <button class="nav-link" id="tab-users-btn" data-bs-toggle="tab" data-bs-target="#tab-users" type="button" role="tab">账号管理</button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="tab-system-btn" data-bs-toggle="tab" data-bs-target="#tab-system" type="button" role="tab">系统与钉钉</button>
+            <button class="nav-link" id="tab-system-btn" data-bs-toggle="tab" data-bs-target="#tab-system" type="button" role="tab">系统配置</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-dingtalk-btn" data-bs-toggle="tab" data-bs-target="#tab-dingtalk" type="button" role="tab">钉钉与催办</button>
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="tab-scope-btn" data-bs-toggle="tab" data-bs-target="#tab-scope" type="button" role="tab">作用域诊断</button>
@@ -225,121 +228,120 @@
         </div>
 
         <div class="tab-pane fade" id="tab-system" role="tabpanel">
-            <p class="small text-muted mb-3">左侧为钉钉催办与机器人快捷配置；右侧为系统参数（功能开关、数据库、Session 等）。催办通知与体系记录机器人为<strong>两套独立配置</strong>，可填不同 Webhook。</p>
-            <div class="row g-3 admin-system-split">
-                <div class="col-lg-6">
-                    <div class="card admin-system-panel h-100">
+            <p class="small text-muted mb-3">功能开关、数据库、访问密码及全局参数等。敏感项留空表示不修改；修改数据库连接后需重启服务。钉钉相关 Webhook 请在「钉钉与催办」Tab 配置。</p>
+            <div class="card admin-system-panel">
+                <div class="card-header py-2">
+                    <span class="small fw-bold">系统配置</span>
+                </div>
+                <div class="card-body admin-system-panel-body p-2 p-md-3">
+                    <div id="systemSettingsForm" class="sys-cfg-form sys-cfg-form--inline"></div>
+                </div>
+                <div class="card-footer py-2 bg-white border-top">
+                    <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="tab-dingtalk" role="tabpanel">
+            <p class="small text-muted mb-3">各区块独立保存。催办通知与体系记录机器人为<strong>两套独立配置</strong>，可填不同 Webhook。回调 URL 依赖「系统配置」中的 <code>BASE_URL</code>。</p>
+            <div class="row g-3 admin-dingtalk-layout">
+                <div class="col-12">
+                    <div class="card admin-dingtalk-card">
                         <div class="card-header py-2">
-                            <span class="small fw-bold">钉钉与催办</span>
+                            <span class="small fw-bold">自动通知时间</span>
                         </div>
-                        <div class="card-body admin-system-panel-body p-2 p-md-3">
-                            <details class="admin-dingtalk-section" open>
-                                <summary class="admin-dingtalk-section-summary">
-                                    <span>自动通知时间</span>
-                                    <span class="admin-dingtalk-section-tag">定时</span>
-                                </summary>
-                                <div class="admin-dingtalk-section-body">
-                                    <div class="row g-2 align-items-end">
-                                        <div class="col-md-6">
-                                            <label class="form-label small mb-0">每周任务完成提醒</label>
-                                            <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00">
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label class="form-label small mb-0">逾期前一日催告</label>
-                                            <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00">
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label class="form-label small mb-0">每两天项目统计</label>
-                                            <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30">
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label class="form-label small mb-0">模块级联延迟（分钟）</label>
-                                            <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5">
-                                        </div>
-                                        <div class="col-12">
-                                            <button type="button" class="btn btn-sm btn-primary" id="saveScheduleConfigBtn">保存定时</button>
-                                        </div>
-                                    </div>
-                                    <p class="small text-muted mb-2 mt-2">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30。</p>
-                                    <div id="scheduleInfo" class="d-flex flex-wrap gap-2 small mb-2"></div>
-                                    <div class="border-top pt-2 mt-2">
-                                        <div class="small fw-semibold mb-1">测试自动催办</div>
-                                        <p class="small text-muted mb-2">按定时任务相同逻辑立即发送（全部分项目组）。</p>
-                                        <div class="d-flex flex-wrap gap-1">
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
-                                        </div>
-                                    </div>
+                        <div class="card-body">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-6 col-lg-3">
+                                    <label class="form-label small mb-0">每周任务完成提醒</label>
+                                    <input type="text" class="form-control form-control-sm" id="scheduleWeekly" placeholder="如 thu 16:00">
                                 </div>
-                            </details>
-                            <details class="admin-dingtalk-section">
-                                <summary class="admin-dingtalk-section-summary">
-                                    <span>项目组钉钉</span>
-                                    <span class="admin-dingtalk-section-tag">Webhook</span>
-                                </summary>
-                                <div class="admin-dingtalk-section-body">
-                                    <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；留空时回退全局催办 Webhook。</p>
-                                    <div class="row g-2 align-items-end">
-                                        <div class="col-12">
-                                            <label class="form-label small mb-0">项目组</label>
-                                            <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
-                                        </div>
-                                        <div class="col-12">
-                                            <label class="form-label small mb-0">Webhook</label>
-                                            <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
-                                            <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
-                                        </div>
-                                        <div class="col-md-8">
-                                            <label class="form-label small mb-0">Secret（留空不改）</label>
-                                            <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="保持不变请留空">
-                                        </div>
-                                        <div class="col-md-4">
-                                            <button type="button" class="btn btn-sm btn-outline-primary w-100" id="saveTeamDingtalkBtn">保存</button>
-                                        </div>
-                                    </div>
+                                <div class="col-md-6 col-lg-3">
+                                    <label class="form-label small mb-0">逾期前一日催告</label>
+                                    <input type="text" class="form-control form-control-sm" id="scheduleOverdue" placeholder="如 15:00">
                                 </div>
-                            </details>
-                            <details class="admin-dingtalk-section">
-                                <summary class="admin-dingtalk-section-summary">
-                                    <span>通知文案</span>
-                                    <span class="admin-dingtalk-section-tag">模板</span>
-                                </summary>
-                                <div class="admin-dingtalk-section-body">
-                                    <p class="small text-muted mb-2">手动催办与模板消息 Markdown；定时任务正文在代码中生成。</p>
-                                    <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#notifyTemplateModal">
-                                        编辑通知文案
-                                    </button>
+                                <div class="col-md-6 col-lg-3">
+                                    <label class="form-label small mb-0">每两天项目统计</label>
+                                    <input type="text" class="form-control form-control-sm" id="scheduleProject" placeholder="如 mon,wed,fri 9:30">
                                 </div>
-                            </details>
-                            <details class="admin-dingtalk-section">
-                                <summary class="admin-dingtalk-section-summary">
-                                    <span>体系记录机器人</span>
-                                    <span class="admin-dingtalk-section-tag">回调</span>
-                                </summary>
-                                <div class="admin-dingtalk-section-body">
-                                    <p class="small text-muted mb-2">HTTP 回调接收 @机器人 / 关键词消息。回调 URL 由右侧系统配置中的 <code>BASE_URL</code> 自动生成。</p>
-                                    <div id="adminChatbotCallbackUrlPanel" class="mb-2">
-                                        <div class="small text-muted">加载回调 URL…</div>
-                                    </div>
-                                    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
+                                <div class="col-md-6 col-lg-3">
+                                    <label class="form-label small mb-0">模块级联延迟（分钟）</label>
+                                    <input type="number" class="form-control form-control-sm" id="scheduleModuleCascadeDelay" min="1" max="1440" placeholder="5">
                                 </div>
-                            </details>
+                            </div>
+                            <p class="small text-muted mb-2 mt-2">格式：仅时间如 15:00；星期+时间如 thu 16:00；多日+时间如 mon,wed,fri 9:30。</p>
+                            <div id="scheduleInfo" class="d-flex flex-wrap gap-2 small mb-3"></div>
+                            <div class="border-top pt-3">
+                                <div class="small fw-semibold mb-1">测试自动催办</div>
+                                <p class="small text-muted mb-2">按定时任务相同逻辑立即发送（全部分项目组）。</p>
+                                <div class="d-flex flex-wrap gap-1">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyThu" title="每周任务完成提醒">周四提醒</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyOverdue" title="逾期前一日催告">逾期前一日</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyProject" title="每两天项目完成情况统计">项目统计</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="testAutoNotifyModuleCascade" title="产品完成→催办开发；开发完成→催办测试">模块级联</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-2 bg-white">
+                            <button type="button" class="btn btn-sm btn-primary" id="saveScheduleConfigBtn">保存定时</button>
                         </div>
                     </div>
                 </div>
-                <div class="col-lg-6">
-                    <div class="card admin-system-panel h-100 d-flex flex-column">
+                <div class="col-12">
+                    <div class="card admin-dingtalk-card">
                         <div class="card-header py-2">
-                            <span class="small fw-bold">系统配置</span>
+                            <span class="small fw-bold">项目组钉钉 Webhook</span>
                         </div>
-                        <div class="card-body admin-system-panel-body flex-grow-1 p-2 p-md-3">
-                            <p class="small text-muted mb-2">功能开关、数据库、访问密码及钉钉全局参数等。敏感项留空表示不修改；修改数据库连接后需重启服务。</p>
-                            <div id="systemSettingsForm" class="sys-cfg-form sys-cfg-form--inline"></div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">按项目组设置催办专用 Webhook/Secret；留空时回退全局催办 Webhook（在系统配置中）。</p>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-6 col-lg-4">
+                                    <label class="form-label small mb-0">项目组</label>
+                                    <select class="form-select form-select-sm" id="teamDingtalkTeamId"></select>
+                                </div>
+                                <div class="col-12 col-lg-8">
+                                    <label class="form-label small mb-0">Webhook</label>
+                                    <input type="text" class="form-control form-control-sm" id="teamDingtalkWebhook" placeholder="留空则使用全局催办 Webhook">
+                                    <div id="teamDingtalkWebhookHint" class="form-text small text-muted mb-0"></div>
+                                </div>
+                                <div class="col-md-8 col-lg-6">
+                                    <label class="form-label small mb-0">Secret（留空不改）</label>
+                                    <input type="password" class="form-control form-control-sm" id="teamDingtalkSecret" placeholder="保持不变请留空">
+                                </div>
+                            </div>
                         </div>
-                        <div class="card-footer py-2 bg-white border-top">
-                            <button type="button" class="btn btn-sm btn-primary" id="saveSystemSettingsBtn">保存系统配置</button>
+                        <div class="card-footer py-2 bg-white">
+                            <button type="button" class="btn btn-sm btn-primary" id="saveTeamDingtalkBtn">保存本项目组</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="card admin-dingtalk-card">
+                        <div class="card-header py-2">
+                            <span class="small fw-bold">通知文案</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-3">手动催办与模板消息 Markdown；定时任务正文在代码中生成。修改后点下方「保存文案」。</p>
+                            <div id="notifyTemplateList" class="admin-notify-template-list">
+                                <div class="small text-muted">切换到本 Tab 后加载…</div>
+                            </div>
+                        </div>
+                        <div class="card-footer py-2 bg-white">
+                            <button type="button" class="btn btn-sm btn-primary" id="saveNotifyTemplatesBtn">保存文案</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="card admin-dingtalk-card">
+                        <div class="card-header py-2">
+                            <span class="small fw-bold">体系记录机器人</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">HTTP 回调接收 @机器人 / 关键词消息。回调 URL 由系统配置中的 <code>BASE_URL</code> 自动生成。</p>
+                            <div id="adminChatbotCallbackUrlPanel" class="mb-3">
+                                <div class="small text-muted">加载回调 URL…</div>
+                            </div>
+                            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pages.chatbot_test_page') }}" target="_blank" rel="noopener">钉钉机器人联调</a>
                         </div>
                     </div>
                 </div>
@@ -559,24 +561,6 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary btn-sm" id="saveBatchUserFeaturePermsBtn">应用到所选账号</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="modal fade" id="notifyTemplateModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">通知文案配置</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="notifyTemplateList"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary btn-sm" id="saveNotifyTemplatesBtn">保存</button>
             </div>
         </div>
     </div>

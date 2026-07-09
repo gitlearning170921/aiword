@@ -1244,6 +1244,11 @@ def save_system_settings(
             _upsert_config(key, val)
             written.append(key)
             continue
+        # 留空表示使用项目默认 uploads/outputs（迁机后清掉无效旧盘符路径）
+        if key in ("UPLOAD_FOLDER", "OUTPUT_FOLDER"):
+            _upsert_config(key, val)
+            written.append(key)
+            continue
         # 功能开关 / 功能入口 CSV：允许清空以关闭功能（默认即关闭）
         if key in FEATURE_FLAG_KEYS or key in FEATURE_TOOLS_CSV_KEYS:
             _upsert_config(key, val)

@@ -6538,7 +6538,7 @@ async function _initDashboardPageInner() {
         }
     };
 
-    // 系统配置：内嵌于「系统与钉钉」标签页右栏，切换至该标签时加载
+    // 系统配置：切换至「系统配置」标签时加载
     let systemSettingsLoaded = false;
 
     const ensureSystemSettingsLoaded = async () => {
@@ -6551,16 +6551,22 @@ async function _initDashboardPageInner() {
 
     const loadAdminSystemTabData = () => {
         ensureSystemSettingsLoaded().catch(() => {});
+    };
+
+    const loadAdminDingtalkTabData = () => {
         loadTeamDingtalkSettings();
         refreshAdminChatbotCallbackUrlPanel().catch(() => {});
+        loadNotifyTemplatesPanel().catch(() => {});
     };
 
     document.getElementById("tab-system-btn")?.addEventListener("shown.bs.tab", loadAdminSystemTabData);
+    document.getElementById("tab-dingtalk-btn")?.addEventListener("shown.bs.tab", loadAdminDingtalkTabData);
     if (document.getElementById("tab-system")?.classList.contains("active")) {
         loadAdminSystemTabData();
     }
-
-    loadTeamDingtalkSettings();
+    if (document.getElementById("tab-dingtalk")?.classList.contains("active")) {
+        loadAdminDingtalkTabData();
+    }
 
     document.getElementById("saveSystemSettingsBtn")?.addEventListener("click", async () => {
         const container = document.getElementById("systemSettingsForm");
@@ -7370,50 +7376,60 @@ function renderFilteredDetailTable(rows) {
     });
 }
 
-function initNotifyTemplateModal() {
+async function loadNotifyTemplatesPanel() {
     const notifyTemplateList = document.getElementById("notifyTemplateList");
-    const saveBtn = document.getElementById("saveNotifyTemplatesBtn");
-    const modal = document.getElementById("notifyTemplateModal");
-    
-    if (!notifyTemplateList || !modal) return;
-    
-    modal.addEventListener("show.bs.modal", async () => {
-        try {
-            const templates = await App.request("/api/configs/notify-templates");
-            notifyTemplateList.innerHTML = "";
-            
-            templates.forEach(t => {
-                const div = document.createElement("div");
-                div.className = "mb-3 p-3 border rounded";
-                div.innerHTML = `
-                    <label class="form-label fw-bold">${t.name}</label>
-                    <small class="text-muted d-block mb-2">模板KEY: ${t.key}</small>
+    if (!notifyTemplateList) return;
+    notifyTemplateList.innerHTML = '<div class="small text-muted">加载中…</div>';
+    try {
+        const templates = await App.request("/api/configs/notify-templates");
+        notifyTemplateList.innerHTML = "";
+        if (!templates.length) {
+            notifyTemplateList.innerHTML = '<div class="small text-muted">暂无通知文案模板</div>';
+            return;
+        }
+        templates.forEach((t) => {
+            const div = document.createElement("div");
+            div.className = "admin-notify-template-item mb-3 p-3 border rounded bg-light-subtle";
+            div.innerHTML = `
+                    <label class="form-label fw-bold mb-1">${t.name}</label>
+                    <small class="text-muted d-block mb-2">模板 KEY：<code>${t.key}</code></small>
                     <textarea class="form-control template-content" data-id="${t.id}" rows="4">${t.content}</textarea>
                     <small class="text-muted mt-1 d-block">可用变量: {project_name}, {project_code}, {project_notes}, {file_name}, {task_type}, {due_date}, {author}, {pending_count}, {assignees}, {task_list}, {task_list_with_links}, {doc_link}, {business_side}, {product}, {country}, {file_version}, {document_display_date}, {reviewer}, {approver}</small>
                 `;
-                notifyTemplateList.appendChild(div);
-            });
-        } catch (e) {
-            App.notify(e.message, "danger");
-        }
-    });
-    
-    saveBtn?.addEventListener("click", async () => {
+            notifyTemplateList.appendChild(div);
+        });
+    } catch (e) {
+        notifyTemplateList.innerHTML = `<div class="small text-danger">加载失败：${(e && e.message) || String(e)}</div>`;
+    }
+}
+
+function initNotifyTemplatesPanel() {
+    const notifyTemplateList = document.getElementById("notifyTemplateList");
+    const saveBtn = document.getElementById("saveNotifyTemplatesBtn");
+    if (!notifyTemplateList || !saveBtn || saveBtn.dataset.wired === "1") return;
+    saveBtn.dataset.wired = "1";
+
+    saveBtn.addEventListener("click", async () => {
         const textareas = notifyTemplateList.querySelectorAll(".template-content");
-        for (const textarea of textareas) {
-            try {
+        if (!textareas.length) {
+            App.notify("暂无可保存的文案", "warning");
+            return;
+        }
+        try {
+            _setButtonBusy(saveBtn, true, "保存中…");
+            for (const textarea of textareas) {
                 await App.request(`/api/configs/notify-templates/${textarea.dataset.id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ content: textarea.value }),
                 });
-            } catch (e) {
-                App.notify(`保存失败: ${e.message}`, "danger");
-                return;
             }
+            App.notify("通知文案保存成功", "success");
+        } catch (e) {
+            App.notify(`保存失败: ${e.message}`, "danger");
+        } finally {
+            _setButtonBusy(saveBtn, false);
         }
-        App.notify("通知文案保存成功");
-        bootstrap.Modal.getInstance(modal)?.hide();
     });
 }
 
@@ -7851,7 +7867,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }).catch(() => {});
         await loadUsersList();
         bindTestAutoNotifyButtons();
-        initNotifyTemplateModal();
+        initNotifyTemplatesPanel();
     });
     setTimeout(flushPageInitHandlers, 0);
 

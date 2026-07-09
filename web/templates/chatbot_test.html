@@ -188,9 +188,15 @@
                 const fn = esc(it.file_name || "未知");
                 const kw = it.match_keyword || (Array.isArray(it.match_keywords) ? it.match_keywords[0] : "") || "";
                 const para = normText(it.match_paragraph || it.matched_excerpt || it.match_sentence || "");
+                const score = typeof it.match_score === "number"
+                    ? it.match_score.toFixed(2)
+                    : (parseFloat(it.match_score || "0") || 0).toFixed(2);
                 return (
                     '<div class="cb-detail-item border rounded p-3 mb-2 bg-light">' +
+                    '<div class="d-flex justify-content-between align-items-start gap-2">' +
                     '<div class="cb-ref-name">' + (it.index || (idx + 1)) + ". " + fn + "</div>" +
+                    '<span class="badge bg-primary-subtle text-primary-emphasis border flex-shrink-0">匹配度 ' + esc(score) + "</span>" +
+                    "</div>" +
                     (kw ? '<div class="small text-muted mt-1">匹配关键词：「' + esc(kw) + "」</div>" : "") +
                     '<div class="cb-ref-snippet mt-2">' + esc(para) + "</div>" +
                     '<button type="button" class="btn btn-sm btn-outline-primary mt-2 cb-view-full" data-idx="' + idx + '">查看更多</button>' +
@@ -293,7 +299,7 @@
         if (Array.isArray(data.detail_items) && data.detail_items.length) {
             elDetail.insertAdjacentHTML(
                 "afterbegin",
-                '<p class="small text-muted mb-2">共 ' + data.detail_items.length + " 份文件；每条展示含关键词的整段内容，序号与简化版一致。</p>"
+                '<p class="small text-muted mb-2">共 ' + data.detail_items.length + " 份文件；按匹配度从高到低排列，序号与简化版一致。</p>"
             );
         }
         elDelivered.textContent = delivered || "（无）";

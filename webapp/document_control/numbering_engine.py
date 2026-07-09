@@ -10,8 +10,10 @@ from webapp import db
 from webapp.models import ControlledDocument, NumberAllocation, NumberingScheme, now_local
 
 
-_SEP_RE = re.compile(r"[\s_]+")
 _DASH_RE = re.compile(r"-{2,}")
+# 判重时去掉空格及不可见字符（不换为连字符，避免 QR-SMP 7.3 与 QR-SMP7.3 被拆成不同编号）
+_WS_INVISIBLE_RE = re.compile(r"[\s\u00a0\u2000-\u200d\u202f\u205f\u3000\ufeff]+")
+_UNDERSCORE_RE = re.compile(r"_+")
 DOC_STATUS_CONTROLLED = "controlled"
 DOC_STATUS_VOIDED = "voided"
 
@@ -21,6 +23,23 @@ def is_controlled_document_status(status: Optional[str]) -> bool:
     if s in (DOC_STATUS_VOIDED, "obsolete", "作废"):
         return False
     return True
+
+
+def normalize_document_number(number: str) -> str:
+    text = (number or "").strip().upper()
+    if not text:
+        return ""
+    text = _WS_INVISIBLE_RE.sub("", text)
+    text = _UNDERSCORE_RE.sub("-", text)
+    text = text.replace("—", "-").replace("–", "-").replace("－", "-")
+    text = _DASH_RE.sub("-", text)
+    return text.strip("-")
+
+
+def effective_document_norm(doc: ControlledDocument) -> str:
+    """以当前规范化规则重算编号键；优先 document_number，兼容旧库 normalized 字段。"""
+    raw = (doc.document_number or doc.normalized_document_number or "").strip()
+    return normalize_document_number(raw)
 
 
 def find_controlled_document_by_norm(
@@ -38,7 +57,20 @@ def find_controlled_document_by_norm(
     )
     if exclude_id:
         q = q.filter(ControlledDocument.id != exclude_id)
-    return q.first()
+    hit = q.first()
+    if hit:
+        return hit
+    # 兼容尚未回填 normalized_document_number 的历史记录
+    fallback_q = ControlledDocument.query.filter_by(
+        organization_id=org_id,
+        status=DOC_STATUS_CONTROLLED,
+    )
+    if exclude_id:
+        fallback_q = fallback_q.filter(ControlledDocument.id != exclude_id)
+    for row in fallback_q.all():
+        if effective_document_norm(row) == norm:
+            return row
+    return None
 
 
 def load_controlled_docs_by_norm(org_id: str) -> dict[str, ControlledDocument]:
@@ -46,11 +78,41 @@ def load_controlled_docs_by_norm(org_id: str) -> dict[str, ControlledDocument]:
         organization_id=org_id,
         status=DOC_STATUS_CONTROLLED,
     ).all()
-    return {
-        row.normalized_document_number: row
-        for row in rows
-        if row.normalized_document_number
-    }
+    out: dict[str, ControlledDocument] = {}
+    for row in rows:
+        norm = effective_document_norm(row)
+        if norm:
+            out[norm] = row
+    return out
+
+
+def backfill_normalized_document_numbers() -> int:
+    """按最新规则回填 normalized_document_number（幂等）。
+
+    启动时由 historical_migration.run_doc_control_norm_backfill_if_pending 调用；
+    全部对齐后在 app_configs 写入 DOC_CONTROL_NORMALIZED_NUMBER_BACKFILL_V1，不再重复全表扫描。
+    """
+    updated = 0
+    rows = (
+        ControlledDocument.query.order_by(ControlledDocument.created_at.asc(), ControlledDocument.id.asc())
+        .all()
+    )
+    controlled_keys: dict[tuple[str, str], str] = {}
+    for row in rows:
+        new_norm = normalize_document_number(row.document_number or "")
+        if not new_norm:
+            continue
+        if row.status == DOC_STATUS_CONTROLLED:
+            key = (row.organization_id or "", new_norm)
+            if key in controlled_keys and controlled_keys[key] != row.id:
+                continue
+            controlled_keys[key] = row.id
+        if (row.normalized_document_number or "") != new_norm:
+            row.normalized_document_number = new_norm
+            updated += 1
+    if updated:
+        db.session.commit()
+    return updated
 
 
 def controlled_number_conflict_message(
@@ -64,16 +126,6 @@ def controlled_number_conflict_message(
         return None
     label = (conflict.title or conflict.document_number or norm).strip()
     return f"受控编号已存在（{label}）"
-
-
-def normalize_document_number(number: str) -> str:
-    text = (number or "").strip().upper()
-    if not text:
-        return ""
-    text = _SEP_RE.sub("-", text)
-    text = text.replace("—", "-").replace("–", "-").replace("－", "-")
-    text = _DASH_RE.sub("-", text)
-    return text.strip("-")
 
 
 def registration_compare_key(number: str) -> str:
@@ -91,42 +143,156 @@ def _prefix_from_project_code(project_code: Optional[str], fallback: Optional[st
     return normalize_document_number(fallback or "")
 
 
-def _render_number(scheme: NumberingScheme, *, prefix: str, seq: int) -> str:
+def scheme_allocation_prefix(scheme: NumberingScheme, project_code: Optional[str]) -> str:
+    if (scheme.prefix_source or "fixed") == "from_project_code":
+        return _prefix_from_project_code(project_code, scheme.fixed_prefix)
+    return normalize_document_number(scheme.fixed_prefix or scheme.doc_type_code or "DOC")
+
+
+def _render_number(
+    scheme: NumberingScheme,
+    *,
+    prefix: str,
+    seq: int,
+    subtype: str = "",
+) -> str:
     template = (scheme.render_template or "{prefix}-{type}-{seq:03d}").strip()
     doc_type = normalize_document_number(scheme.doc_type_code or "DOC")
     safe_prefix = normalize_document_number(prefix) or "DOC"
-    return template.format(prefix=safe_prefix, type=doc_type, seq=int(seq))
+    sub_raw = (subtype or "").strip()
+    if "{subtype}" in template:
+        if not sub_raw:
+            raise ValueError("子类编号未生成，请检查文件名称")
+        safe_subtype = normalize_document_number(sub_raw)
+    else:
+        safe_subtype = normalize_document_number(sub_raw or doc_type)
+    pad = max(1, int(scheme.seq_pad or 3))
+    return template.format(
+        prefix=safe_prefix,
+        type=doc_type,
+        subtype=safe_subtype,
+        seq=int(seq),
+        seq_pad=pad,
+    )
 
 
-def _max_sequence_for_prefix(org_id: Optional[str], prefix: str, doc_type: str) -> int:
-    prefix2 = normalize_document_number(prefix)
-    doc_type2 = normalize_document_number(doc_type)
-    if not prefix2:
-        return 0
-    pattern = re.compile(rf"^{re.escape(prefix2)}-{re.escape(doc_type2)}-(\d+)$")
-    max_seq = 0
-    for row in (
-        db.session.query(ControlledDocument.document_number)
-        .filter(ControlledDocument.organization_id == org_id)
-        .all()
-    ):
-        value = normalize_document_number(row[0] or "")
-        m = pattern.match(value)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
-    for row in (
-        db.session.query(NumberAllocation.allocated_number)
-        .filter(
-            NumberAllocation.organization_id == org_id,
-            NumberAllocation.status.in_(("reserved", "issued")),
+def _template_seq_regex(
+    scheme: NumberingScheme,
+    *,
+    prefix: str,
+    subtype: str = "",
+) -> re.Pattern[str]:
+    custom = (scheme.pattern_regex or "").strip()
+    if custom:
+        return re.compile(custom, re.I)
+    doc_type = normalize_document_number(scheme.doc_type_code or "DOC")
+    safe_prefix = re.escape(normalize_document_number(prefix) or "")
+    safe_type = re.escape(doc_type)
+    safe_subtype = re.escape(normalize_document_number(subtype or doc_type))
+    template = (scheme.render_template or "{prefix}-{type}-{seq:03d}").strip()
+    pad = max(1, int(scheme.seq_pad or 3))
+    body = template
+    body = body.replace("{prefix}", safe_prefix or "([A-Z0-9]{2,24})")
+    body = body.replace("{type}", safe_type)
+    body = body.replace("{subtype}", safe_subtype or "([A-Z]{2,12})")
+    body = re.sub(r"\{seq:\d+d\}", rf"(\\d{{{pad},}})", body)
+    body = body.replace("{seq}", r"(\\d+)")
+    if safe_prefix:
+        body = body.replace("([A-Z0-9]{2,24})", safe_prefix, 1)
+    return re.compile(rf"^{body}$", re.I)
+
+
+def _scheme_uses_subtype_template(scheme: NumberingScheme) -> bool:
+    return "{subtype}" in ((scheme.render_template or "").strip())
+
+
+def allocation_counts_for_sequence(alloc: NumberAllocation) -> bool:
+    """预留或未作废发放的编号参与流水号计算。"""
+    st = (alloc.status or "").strip().lower()
+    if st == "reserved":
+        return True
+    if st != "issued":
+        return False
+    doc_id = (alloc.issued_document_id or "").strip()
+    if not doc_id:
+        return True
+    doc = ControlledDocument.query.filter_by(id=doc_id).first()
+    if not doc:
+        return False
+    return (doc.status or "").strip().lower() == DOC_STATUS_CONTROLLED
+
+
+def _seq_from_number_for_scheme(
+    scheme: NumberingScheme,
+    *,
+    prefix: str,
+    subtype: str,
+    number: str,
+) -> Optional[int]:
+    prefix_norm = normalize_document_number(prefix or "")
+    value = normalize_document_number(number or "")
+    if not prefix_norm or not value.startswith(prefix_norm + "-"):
+        return None
+    pattern = _template_seq_regex(scheme, prefix=prefix_norm, subtype=subtype)
+    m = pattern.match(value)
+    if not m:
+        return None
+    return int(m.groups()[-1])
+
+
+def _next_sequence_for_issue(
+    org_id: Optional[str],
+    scheme: NumberingScheme,
+    *,
+    prefix: str,
+    subtype: str,
+    title: Optional[str] = None,
+) -> int:
+    """新名称从 seq_start 起；精确同名在同名受控编号流水号后 +1；作废/已删不参与。"""
+    from .subtype_resolver import normalize_title_key
+
+    seq_start = max(1, int(scheme.seq_start or 1))
+    org = org_id or ""
+    title_key = normalize_title_key(title or "")
+    if not title_key:
+        return seq_start
+
+    max_same = 0
+    found_same = False
+    for doc in ControlledDocument.query.filter_by(
+        organization_id=org,
+        status=DOC_STATUS_CONTROLLED,
+    ).all():
+        if normalize_title_key(doc.title or "") != title_key:
+            continue
+        seq = _seq_from_number_for_scheme(
+            scheme, prefix=prefix, subtype=subtype, number=doc.document_number or ""
         )
-        .all()
-    ):
-        value = normalize_document_number(row[0] or "")
-        m = pattern.match(value)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
-    return max_seq
+        if seq is not None:
+            found_same = True
+            max_same = max(max_same, seq)
+
+    for alloc in NumberAllocation.query.filter(
+        NumberAllocation.organization_id == org,
+        NumberAllocation.status.in_(("reserved", "issued")),
+    ).all():
+        if not allocation_counts_for_sequence(alloc):
+            continue
+        if normalize_title_key(alloc.requested_title or "") != title_key:
+            continue
+        seq = _seq_from_number_for_scheme(
+            scheme,
+            prefix=prefix,
+            subtype=subtype,
+            number=alloc.allocated_number or "",
+        )
+        if seq is not None:
+            found_same = True
+            max_same = max(max_same, seq)
+
+    if found_same:
+        return max(seq_start, max_same + 1)
+    return seq_start
 
 
 def preview_next_number(
@@ -134,20 +300,47 @@ def preview_next_number(
     organization_id: Optional[str],
     scheme: NumberingScheme,
     project_code: Optional[str] = None,
+    subtype: Optional[str] = None,
+    title: Optional[str] = None,
+    title_en: Optional[str] = None,
+    subtype_from_title: bool = False,
 ) -> dict:
     prefix = (
         _prefix_from_project_code(project_code, scheme.fixed_prefix)
         if (scheme.prefix_source or "fixed") == "from_project_code"
-        else normalize_document_number(scheme.fixed_prefix or "DOC")
+        else normalize_document_number(scheme.fixed_prefix or scheme.doc_type_code or "DOC")
     )
-    max_seq = _max_sequence_for_prefix(organization_id, prefix, scheme.doc_type_code or "DOC")
-    seq = max(int(scheme.seq_start or 1), max_seq + 1)
-    number = _render_number(scheme, prefix=prefix, seq=seq)
+    if subtype_from_title and title:
+        from .subtype_resolver import resolve_allocation_subtype
+
+        sub = resolve_allocation_subtype(
+            organization_id=organization_id or "",
+            scheme=scheme,
+            project_code=project_code,
+            title=title,
+            title_en=title_en,
+            manual_subtype=subtype,
+            subtype_from_title=True,
+        )
+    elif _scheme_uses_subtype_template(scheme):
+        raise ValueError("请填写文件名称以生成子类编号")
+    else:
+        sub = (subtype or scheme.doc_type_code or "").strip()
+    seq = _next_sequence_for_issue(
+        organization_id,
+        scheme,
+        prefix=prefix,
+        subtype=sub,
+        title=title,
+    )
+    number = _render_number(scheme, prefix=prefix, seq=seq, subtype=sub)
     return {
         "document_number": number,
         "normalized_document_number": normalize_document_number(number),
         "prefix": prefix,
         "doc_type_code": scheme.doc_type_code,
+        "subtype": sub,
+        "title_en": (title_en or "").strip() or None,
         "seq": seq,
     }
 
@@ -161,23 +354,33 @@ def reserve_number(
     project_code: Optional[str],
     user_id: Optional[str],
     reserved_minutes: int = 30,
+    subtype: Optional[str] = None,
+    subtype_from_title: bool = False,
+    title_en: Optional[str] = None,
 ) -> NumberAllocation:
     info = preview_next_number(
         organization_id=organization_id,
         scheme=scheme,
         project_code=project_code,
+        subtype=subtype,
+        title=requested_title,
+        title_en=title_en,
+        subtype_from_title=subtype_from_title,
     )
     norm = info["normalized_document_number"]
-    conflict = (
-        db.session.query(NumberAllocation.id)
+    conflict_alloc = (
+        db.session.query(NumberAllocation)
         .filter(
             NumberAllocation.organization_id == organization_id,
             NumberAllocation.normalized_allocated_number == norm,
             NumberAllocation.status.in_(("reserved", "issued")),
         )
-        .first()
+        .all()
     )
-    if conflict:
+    if any(allocation_counts_for_sequence(a) for a in conflict_alloc):
+        raise ValueError("编号已被占用，请重试")
+    conflict_doc = find_controlled_document_by_norm(organization_id or "", norm)
+    if conflict_doc:
         raise ValueError("编号已被占用，请重试")
     allocation = NumberAllocation(
         organization_id=organization_id,
@@ -208,13 +411,17 @@ def issue_number(
     project_id: Optional[str] = None,
     project_code: Optional[str] = None,
     user_id: Optional[str] = None,
+    title_en: Optional[str] = None,
 ) -> ControlledDocument:
     if allocation.status not in ("reserved", "issued"):
         raise ValueError("编号状态不允许发放")
     norm = normalize_document_number(allocation.allocated_number or "")
     existing = find_controlled_document_by_norm(organization_id or "", norm)
+    title_en_clean = (title_en or "").strip() or None
     if existing:
         doc = existing
+        if title_en_clean and not (doc.title_en or "").strip():
+            doc.title_en = title_en_clean
     else:
         doc = ControlledDocument(
             organization_id=organization_id,
@@ -222,6 +429,7 @@ def issue_number(
             normalized_document_number=norm,
             version=(version or "").strip() or None,
             title=(title or "").strip() or allocation.requested_title or "未命名文件",
+            title_en=title_en_clean,
             doc_type_code=allocation.doc_type_code,
             project_id=(project_id or allocation.project_id or "").strip() or None,
             project_code=(project_code or allocation.project_code or "").strip() or None,

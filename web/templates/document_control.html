@@ -17,6 +17,13 @@
         line-height: 1.35;
         color: var(--bs-secondary-color, #6c757d);
     }
+    .dc-batch-create-table input.form-control-sm {
+        min-width: 5.5rem;
+    }
+    .dc-batch-create-table th {
+        white-space: nowrap;
+        font-size: 0.75rem;
+    }
 </style>
 {% endblock %}
 {% block content %}
@@ -43,7 +50,7 @@
 <div class="tab-content">
     <div class="tab-pane fade show active" id="dc-tab-ledger" role="tabpanel">
         <div class="card mb-3">
-            <div class="card-body">
+            <form id="dcFilterForm" class="card-body" autocomplete="off">
                 <div class="row g-2 align-items-end">
                     <div class="col-md-3">
                         <label class="form-label small">关键词</label>
@@ -86,22 +93,23 @@
                         <input id="dcProjectCode" class="form-control form-control-sm" placeholder="可选">
                     </div>
                     <div class="col-md-10 d-flex gap-2 flex-wrap">
-                        <button id="dcSearchBtn" class="btn btn-primary btn-sm">查询</button>
-                        <button id="dcResetBtn" class="btn btn-outline-secondary btn-sm">重置</button>
-                        <button id="dcAddDocBtn" class="btn btn-outline-success btn-sm">新增记录</button>
-                        <button id="dcOpenIssueModalBtn" class="btn btn-outline-primary btn-sm">申请编号</button>
+                        <button type="submit" id="dcSearchBtn" class="btn btn-primary btn-sm">查询</button>
+                        <button type="button" id="dcResetBtn" class="btn btn-outline-secondary btn-sm">重置</button>
+                        <button type="button" id="dcBatchAddDocBtn" class="btn btn-outline-success btn-sm">新增</button>
+                        <button type="button" id="dcOpenIssueModalBtn" class="btn btn-outline-primary btn-sm">申请编号</button>
                         <input id="dcExcelInput" type="file" accept=".xlsx,.xls" class="d-none">
                         <label id="dcExcelImportBtn" class="btn btn-outline-secondary btn-sm mb-0" for="dcExcelInput">
                             <span id="dcExcelImportBtnText">导入Excel</span>
                         </label>
                     </div>
                 </div>
-            </div>
+            </form>
         </div>
 
         <div id="dcListSummary" class="small text-muted mb-2"></div>
         <div id="dcBatchBar" class="alert alert-light border py-2 px-3 mb-2 d-none d-flex flex-wrap align-items-center gap-2">
             <span class="small">已选 <strong id="dcBatchCount">0</strong> 条</span>
+            <button type="button" id="dcBatchCopyDocBtn" class="btn btn-sm btn-outline-success">批量复制新增</button>
             <button type="button" id="dcBatchEditBtn" class="btn btn-sm btn-outline-primary">批量编辑</button>
             <button type="button" id="dcBatchDeleteBtn" class="btn btn-sm btn-outline-danger">批量删除</button>
             <button type="button" id="dcBatchClearBtn" class="btn btn-sm btn-link">取消选择</button>
@@ -111,33 +119,33 @@
 
     <div class="tab-pane fade" id="dc-tab-schemes" role="tabpanel">
         <div class="card mb-3">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span>编号规则</span>
-                <div class="d-flex gap-2">
-                    <button id="dcSyncRuleBtn" class="btn btn-sm btn-outline-secondary">从知识库同步候选</button>
-                    <button id="dcAddSchemeBtn" class="btn btn-sm btn-outline-primary">新增规则</button>
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div>
+                    <span>编号规则</span>
+                    <div class="small text-muted">以知识库《文件控制程序》为准；程序修订后点此更新即可。</div>
                 </div>
+                <button id="dcSyncRuleBtn" class="btn btn-sm btn-primary">从知识库更新规则</button>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table table-sm mb-0">
                         <thead class="table-light">
                             <tr>
-                                <th>名称</th>
-                                <th>类型码</th>
-                                <th>模板</th>
-                                <th>前缀来源</th>
-                                <th>起始</th>
-                                <th>补零</th>
+                                <th>文件类型</th>
+                                <th>台账分类</th>
+                                <th>编号示例</th>
+                                <th>程序规定（摘录）</th>
+                                <th>自动取号</th>
                             </tr>
                         </thead>
                         <tbody id="dcSchemesBody">
-                            <tr><td colspan="6" class="text-muted p-3">加载中…</td></tr>
+                            <tr><td colspan="5" class="text-muted p-3">加载中…</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
+        <div id="dcKbSyncSummary" class="small text-muted mb-3 d-none"></div>
     </div>
 </div>
 
@@ -161,8 +169,9 @@
                     </div>
                     <div class="col-md-4">
                         <label class="form-label small">分类（Sheet）</label>
-                        <input id="dcDocSheetCategory" class="form-control form-control-sm" list="dcDocSheetCategoryList">
-                        <datalist id="dcDocSheetCategoryList"></datalist>
+                        <select id="dcDocSheetCategory" class="form-select form-select-sm">
+                            <option value="">请选择</option>
+                        </select>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label small">文件名称 <span class="text-danger">*</span></label>
@@ -250,6 +259,58 @@
         </div>
     </div>
 </div>
+<div class="modal fade" id="dcBatchCreateModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h6 class="modal-title" id="dcBatchCreateModalTitle">批量新增台账</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="button" id="dcBatchCreateAddRowBtn" class="btn btn-outline-primary btn-sm">添加一行</button>
+                        <button type="button" id="dcBatchCreateClearRowsBtn" class="btn btn-outline-secondary btn-sm">清空表单</button>
+                    </div>
+                    <span id="dcBatchCreatePreview" class="small text-muted">共 1 行</span>
+                </div>
+                <div class="table-responsive dc-batch-create-table border rounded mb-3" style="max-height: 22rem;">
+                    <table class="table table-sm table-bordered mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>文件编号 <span class="text-danger">*</span></th>
+                                <th>文件名称 <span class="text-danger">*</span></th>
+                                <th>英文名</th>
+                                <th>版本</th>
+                                <th>分类</th>
+                                <th>项目编号</th>
+                                <th>所属项目</th>
+                                <th>注册国家</th>
+                                <th>状态</th>
+                                <th>注册递交</th>
+                                <th style="width:3rem"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="dcBatchCreateRowsBody"></tbody>
+                    </table>
+                </div>
+                <details class="small">
+                    <summary class="text-muted mb-2 user-select-none">从 Excel 粘贴导入（可选）</summary>
+                    <p class="text-muted mb-2">
+                        复制多行后粘贴（Tab 分隔）；支持表头。解析后将<strong>追加</strong>到上方表单。
+                        列顺序：文件编号、文件名称、英文名、版本、分类、项目编号、所属项目、注册国家、状态、注册递交。
+                    </p>
+                    <textarea id="dcBatchCreateInput" class="form-control form-control-sm font-monospace" rows="5" placeholder="PAPUWIS-XXX-001	中文名称	English Title	V1.0	DHF"></textarea>
+                    <button type="button" id="dcBatchCreateParseBtn" class="btn btn-outline-secondary btn-sm mt-2">解析并追加到表单</button>
+                </details>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button id="dcBatchCreateSaveBtn" class="btn btn-primary btn-sm">确认新增</button>
+            </div>
+        </div>
+    </div>
+</div>
 <div class="modal fade" id="dcIssueModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -258,26 +319,48 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
+                <p class="small text-muted mb-2">按《文件控制程序》取号；支持自动取号的类型将直接写入受控台账。</p>
                 <div class="mb-2">
-                    <label class="form-label small">规则</label>
-                    <select id="dcIssueScheme" class="form-select form-select-sm"></select>
+                    <label class="form-label small">台账分类</label>
+                    <select id="dcIssueSheetCategory" class="form-select form-select-sm"></select>
+                    <div id="dcIssueSchemeHint" class="small text-muted mt-1"></div>
+                </div>
+                <div class="mb-2" id="dcIssueProjectWrap">
+                    <label class="form-label small">所属项目（页面1）</label>
+                    <select id="dcIssueProject" class="form-select form-select-sm">
+                        <option value="">请选择项目</option>
+                    </select>
+                    <input type="hidden" id="dcIssueProjectId">
+                    <input type="hidden" id="dcIssueProjectName">
+                    <input type="hidden" id="dcIssueRegisteredCountry">
+                    <input type="hidden" id="dcIssueProjectCode">
+                </div>
+                <div class="mb-2 d-none" id="dcIssueSubtypeWrap">
+                    <label class="form-label small">文件子类（手工）</label>
+                    <input id="dcIssueSubtype" class="form-control form-control-sm" placeholder="仅非 DHF/注册文件时填写">
                 </div>
                 <div class="mb-2">
                     <label class="form-label small">文件名称</label>
                     <input id="dcIssueTitle" class="form-control form-control-sm">
+                    <input type="hidden" id="dcIssueTitleEn">
+                </div>
+                <div id="dcIssueTitleEnPreview" class="small text-muted mb-2 d-none"></div>
+                <div id="dcIssueDuplicatePanel" class="alert alert-warning py-2 px-3 small d-none mb-2">
+                    <div id="dcIssueDuplicateText"></div>
+                    <div class="d-flex gap-2 mt-2 flex-wrap">
+                        <button type="button" id="dcIssueConfirmSameBtn" class="btn btn-sm btn-outline-secondary">是同一份文件</button>
+                        <button type="button" id="dcIssueForceNewBtn" class="btn btn-sm btn-primary">不是，申请新编号（流水号递增）</button>
+                    </div>
                 </div>
                 <div class="mb-2">
-                    <label class="form-label small">项目编号</label>
-                    <input id="dcIssueProjectCode" class="form-control form-control-sm">
+                    <label class="form-label small">版本</label>
+                    <input id="dcIssueVersion" class="form-control form-control-sm" placeholder="可选，如 A3">
                 </div>
-                <div class="mb-2">
-                    <button id="dcPreviewBtn" class="btn btn-sm btn-outline-secondary">预览编号</button>
-                </div>
-                <div class="small text-muted" id="dcPreviewResult">尚未预览</div>
+                <div class="small text-muted" id="dcPreviewResult">选择分类后填写文件名称，移出输入框将预览建议编号</div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
-                <button id="dcReserveBtn" class="btn btn-primary btn-sm">预留编号</button>
+                <button id="dcApplyBtn" class="btn btn-primary btn-sm">申请编号并登记</button>
             </div>
         </div>
     </div>

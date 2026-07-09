@@ -31,6 +31,12 @@ from webapp.models import (
 )
 from webapp.tenant_context import resolve_organization_context
 from webapp.user_facing import user_facing_upstream_error
+from .allocation_categories import (
+    enrich_issue_categories,
+    resolve_scheme_for_issue,
+    sheet_category_for_doc_type,
+)
+from .kb_rules import upsert_schemes_from_kb_rules
 from .numbering_engine import (
     controlled_number_conflict_message,
     issue_number,
@@ -39,7 +45,11 @@ from .numbering_engine import (
     preview_next_number,
     registration_compare_key,
     reserve_number,
+    scheme_allocation_prefix,
+    _scheme_uses_subtype_template,
 )
+from .subtype_resolver import find_existing_controlled_doc_by_title
+from .title_en_resolver import resolve_title_en_for_issue
 
 
 document_control_bp = Blueprint("document_control", __name__)
@@ -59,6 +69,15 @@ def _parse_registration_submitted_filter(raw: Optional[str]) -> Optional[bool]:
     return None
 
 
+def _parse_registration_submitted_value(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    parsed = _parse_registration_submitted_filter(
+        str(raw).strip() if raw is not None else ""
+    )
+    return bool(parsed) if parsed is not None else False
+
+
 def _parse_status_filter(raw: Optional[str]) -> Optional[str]:
     value = (raw or "").strip().lower()
     if value in (_DOC_STATUS_VOIDED, "obsolete", "作废"):
@@ -73,12 +92,19 @@ def _documents_base_query(org_id: str):
 
 
 def _document_list_order_clauses(sheet_category: str = ""):
-    """台账列表按 Excel 行序展示。
+    """台账列表排序。
 
-    - DHF / 程序文件等：仅按各自 Sheet 的 excel_row_index
-    - 「注册文件」分类：注册 Sheet 行按 registration_excel_row_index；
-      关联进来的 DHF 等仍按原 Sheet 的 excel_row_index
+    - Excel 导入行：按 excel_row_index（注册文件视图用 registration 行序）
+    - 手动/申请编号等无行序记录：排在当前分类最后，按 created_at 升序（新建在下）
     """
+    manual_tier = case(
+        (ControlledDocument.excel_row_index.is_(None), 1),
+        else_=0,
+    )
+    tail = (
+        ControlledDocument.created_at.asc(),
+        ControlledDocument.document_number.asc(),
+    )
     category = (sheet_category or "").strip()
     if category == _REGISTRATION_SHEET_NAME:
         sort_key = case(
@@ -89,15 +115,17 @@ def _document_list_order_clauses(sheet_category: str = ""):
             else_=ControlledDocument.excel_row_index,
         )
         return (
+            manual_tier.asc(),
             sort_key.is_(None),
             sort_key.asc(),
-            ControlledDocument.document_number.asc(),
+            *tail,
         )
     return (
         ControlledDocument.sheet_category.asc(),
+        manual_tier.asc(),
         ControlledDocument.excel_row_index.is_(None),
         ControlledDocument.excel_row_index.asc(),
-        ControlledDocument.document_number.asc(),
+        *tail,
     )
 
 
@@ -316,6 +344,32 @@ def _apply_sheet_category_filter(q, sheet_category: str):
     return q.filter(ControlledDocument.sheet_category == category)
 
 
+def _filtered_category_counts(org_id: str) -> dict[str, int]:
+    """在当前筛选条件下按分类统计条数（注册文件单独规则，其余一次 GROUP BY）。"""
+    base = _apply_document_filters(_documents_base_query(org_id))
+    rows = (
+        base.filter(
+            ControlledDocument.sheet_category.isnot(None),
+            ControlledDocument.sheet_category != "",
+        )
+        .with_entities(
+            ControlledDocument.sheet_category.label("cat"),
+            func.count(ControlledDocument.id).label("cnt"),
+        )
+        .group_by(ControlledDocument.sheet_category)
+        .all()
+    )
+    counts: dict[str, int] = {
+        (row.cat or "").strip(): int(row.cnt or 0) for row in rows if (row.cat or "").strip()
+    }
+    reg_q = _apply_sheet_category_filter(
+        _apply_document_filters(_documents_base_query(org_id)),
+        _REGISTRATION_SHEET_NAME,
+    )
+    counts[_REGISTRATION_SHEET_NAME] = int(reg_q.count() or 0)
+    return counts
+
+
 def _list_sheet_categories(org_id: str) -> list[str]:
     rows = (
         db.session.query(ControlledDocument.sheet_category)
@@ -396,6 +450,8 @@ def _serialize_doc(row: ControlledDocument) -> dict[str, Any]:
 
 
 def _serialize_scheme(row: NumberingScheme) -> dict[str, Any]:
+    tmpl = (row.render_template or "").strip()
+    auto = bool(row.is_active and tmpl and "{seq" in tmpl)
     return {
         "id": row.id,
         "name": row.name,
@@ -409,6 +465,10 @@ def _serialize_scheme(row: NumberingScheme) -> dict[str, Any]:
         "seqPad": row.seq_pad,
         "isActive": bool(row.is_active),
         "kbRuleExcerpt": row.kb_rule_excerpt,
+        "sheetCategory": sheet_category_for_doc_type(row.doc_type_code or ""),
+        "autoAllocatable": auto,
+        "needsProjectCode": (row.prefix_source or "") == "from_project_code",
+        "needsSubtype": "{subtype}" in tmpl,
     }
 
 
@@ -564,7 +624,7 @@ def api_document_control_create_document():
         project_name=(data.get("projectName") or "").strip() or None,
         registered_country=(data.get("registeredCountry") or "").strip() or None,
         sheet_category=(data.get("sheetCategory") or "").strip() or None,
-        registration_submitted=bool(data.get("registrationSubmitted")),
+        registration_submitted=_parse_registration_submitted_value(data.get("registrationSubmitted")),
         status=doc_status,
         source="manual",
         metadata_json=metadata_json,
@@ -577,6 +637,135 @@ def api_document_control_create_document():
         db.session.rollback()
         return jsonify({"message": "保存失败：受控编号冲突"}), 409
     return jsonify({"message": "已新增", "item": _serialize_doc(doc)})
+
+
+def _controlled_document_from_manual_item(
+    org_id: str,
+    data: dict[str, Any],
+    *,
+    user_id: Optional[str],
+    existing_norms: Optional[set[str]] = None,
+) -> tuple[Optional[ControlledDocument], Optional[str]]:
+    doc_num = (data.get("documentNumber") or "").strip()
+    norm = normalize_document_number(doc_num)
+    if not norm:
+        return None, "请填写有效文件编号"
+    title = (data.get("title") or "").strip()
+    if not title:
+        return None, "请填写文件名称"
+    if existing_norms is not None and norm in existing_norms:
+        return None, "本批中文件编号重复"
+    doc_status = _parse_status_filter(str(data.get("status") or "")) or _DOC_STATUS_CONTROLLED
+    if doc_status == _DOC_STATUS_CONTROLLED:
+        conflict_msg = controlled_number_conflict_message(org_id, norm)
+        if conflict_msg:
+            return None, conflict_msg
+    title_en = (data.get("titleEn") or "").strip()
+    metadata_json = {"titleEn": title_en} if title_en else None
+    doc = ControlledDocument(
+        organization_id=org_id,
+        document_number=doc_num,
+        normalized_document_number=norm,
+        version=(data.get("version") or "").strip() or None,
+        title=title,
+        title_en=title_en or None,
+        doc_type_code=(data.get("docTypeCode") or "").strip() or None,
+        project_code=(data.get("projectCode") or "").strip() or None,
+        project_name=(data.get("projectName") or "").strip() or None,
+        registered_country=(data.get("registeredCountry") or "").strip() or None,
+        sheet_category=(data.get("sheetCategory") or "").strip() or None,
+        registration_submitted=_parse_registration_submitted_value(data.get("registrationSubmitted")),
+        status=doc_status,
+        source="manual",
+        metadata_json=metadata_json,
+        created_by_user_id=(user_id or "").strip() or None,
+    )
+    if existing_norms is not None:
+        existing_norms.add(norm)
+    return doc, None
+
+
+def _parse_batch_create_items(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        items.append(item)
+        if len(items) >= _BATCH_MAX_SIZE:
+            break
+    return items
+
+
+@document_control_bp.post("/api/document-control/documents/batch-create")
+def api_document_control_batch_create():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    data = request.get_json(silent=True) or {}
+    items = _parse_batch_create_items(data.get("items"))
+    if not items:
+        return jsonify({"message": "请提供要新增的记录"}), 400
+    user_id = (session.get("user_id") or "").strip() or None
+    existing = _load_existing_docs_by_norm(org_id)
+    batch_norms: set[str] = set()
+    created = 0
+    failed: list[dict[str, Any]] = []
+    created_items: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        doc_num = (item.get("documentNumber") or "").strip()
+        norm = normalize_document_number(doc_num)
+        row_ref = {
+            "index": index,
+            "documentNumber": doc_num or None,
+            "title": (item.get("title") or "").strip() or None,
+        }
+        if norm and norm in existing:
+            failed.append({**row_ref, "message": "受控编号已存在"})
+            continue
+        doc, err = _controlled_document_from_manual_item(
+            org_id,
+            item,
+            user_id=user_id,
+            existing_norms=batch_norms,
+        )
+        if err or not doc:
+            failed.append({**row_ref, "message": err or "无法创建"})
+            continue
+        try:
+            with db.session.begin_nested():
+                db.session.add(doc)
+                db.session.flush()
+        except IntegrityError:
+            failed.append({**row_ref, "message": "受控编号已存在（并发冲突）"})
+            continue
+        existing[norm] = doc
+        created += 1
+        created_items.append(_serialize_doc(doc))
+    if created:
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({"message": "批量新增失败：存在受控编号冲突"}), 409
+    else:
+        db.session.rollback()
+    message = f"已新增 {created} 条"
+    if failed:
+        message += f"，失败 {len(failed)} 条"
+    return jsonify(
+        {
+            "message": message,
+            "created": created,
+            "failed": failed,
+            "items": created_items,
+        }
+    )
 
 
 @document_control_bp.route(
@@ -768,16 +957,13 @@ def api_document_control_categories():
     org_id, _ = _org_context()
     all_items = _list_sheet_categories(org_id)
     only_sheet = (request.args.get("sheetCategory") or "").strip()
-    items_to_count = [only_sheet] if only_sheet else all_items
-    counts: dict[str, int] = {}
-    for name in items_to_count:
-        q = _documents_base_query(org_id)
-        q = _apply_document_filters(q)
-        q = _apply_sheet_category_filter(q, name)
-        counts[name] = q.count()
     if only_sheet:
+        q = _apply_document_filters(_documents_base_query(org_id))
+        q = _apply_sheet_category_filter(q, only_sheet)
+        counts = {only_sheet: int(q.count() or 0)}
         visible_items = [only_sheet] if counts.get(only_sheet, 0) > 0 else []
     else:
+        counts = _filtered_category_counts(org_id)
         visible_items = [name for name in all_items if counts.get(name, 0) > 0]
     visible_items = _sort_sheet_categories(visible_items, org_id)
     sheet_order = _load_sheet_order_map().get(org_id) or []
@@ -985,6 +1171,70 @@ def api_document_control_scheme_update(scheme_id: str):
     return jsonify({"message": "已更新", "item": _serialize_scheme(row)})
 
 
+def _apply_title_en_to_doc(doc: ControlledDocument, title_en: Optional[str]) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+
+    te = (title_en or "").strip()
+    if not te:
+        return
+    doc.title_en = te
+    meta = dict(doc.metadata_json) if isinstance(doc.metadata_json, dict) else {}
+    meta["titleEn"] = te
+    doc.metadata_json = meta
+    flag_modified(doc, "metadata_json")
+
+
+def _prepare_issue_number_inputs(
+    org_id: str,
+    collection: str,
+    scheme: NumberingScheme,
+    cfg: Optional[dict[str, Any]],
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    title = (data.get("title") or "").strip()
+    project_code = (data.get("projectCode") or "").strip() or None
+    project_id = (data.get("projectId") or "").strip() or None
+    subtype_from_title = bool((cfg or {}).get("subtypeFromTitle")) or _scheme_uses_subtype_template(scheme)
+    force_new = bool(data.get("forceNew"))
+    confirm_same = bool(data.get("confirmSameDocument"))
+    manual_subtype = (data.get("subtype") or data.get("docSubtype") or "").strip() or None
+    prefix = scheme_allocation_prefix(scheme, project_code)
+    existing = None
+    if title and not force_new:
+        existing = find_existing_controlled_doc_by_title(
+            organization_id=org_id,
+            prefix=prefix,
+            title=title,
+            project_id=project_id,
+        )
+    title_en = None
+    title_en_source = None
+    if subtype_from_title and title:
+        try:
+            title_en, title_en_source = resolve_title_en_for_issue(
+                title,
+                org_id=org_id,
+                collection=collection,
+                cached_title_en=(data.get("titleEn") or "").strip() or None,
+            )
+        except ValueError:
+            if not existing:
+                raise
+    return {
+        "title": title,
+        "project_code": project_code,
+        "project_id": project_id,
+        "subtype_from_title": subtype_from_title,
+        "force_new": force_new,
+        "confirm_same": confirm_same,
+        "manual_subtype": manual_subtype,
+        "title_en": title_en,
+        "title_en_source": title_en_source,
+        "prefix": prefix,
+        "existing": existing,
+    }
+
+
 @document_control_bp.post("/api/document-control/allocate/preview")
 def api_document_control_allocate_preview():
     blocked = _require_feature()
@@ -993,25 +1243,124 @@ def api_document_control_allocate_preview():
     wall = login_wall()
     if wall is not None:
         return wall
-    org_id, _ = _org_context()
+    org_id, collection = _org_context()
     data = request.get_json(force=True) or {}
     scheme_id = (data.get("schemeId") or "").strip()
-    doc_type = (data.get("docTypeCode") or "").strip().upper()
-    scheme = None
-    if scheme_id:
-        scheme = NumberingScheme.query.filter_by(id=scheme_id, organization_id=org_id).first()
-    elif doc_type:
-        scheme = NumberingScheme.query.filter_by(
-            organization_id=org_id, doc_type_code=doc_type, is_active=True
-        ).first()
-    if not scheme:
-        return jsonify({"message": "未找到可用编号规则"}), 404
-    info = preview_next_number(
-        organization_id=org_id,
-        scheme=scheme,
-        project_code=(data.get("projectCode") or "").strip() or None,
+    sheet_category = (data.get("sheetCategory") or "").strip()
+    scheme, cfg, err = resolve_scheme_for_issue(
+        org_id,
+        sheet_category=sheet_category,
+        scheme_id=scheme_id or None,
     )
-    return jsonify({"item": info, "scheme": _serialize_scheme(scheme)})
+    if not scheme:
+        return jsonify({"message": err or "未找到编号规则"}), 400
+    try:
+        ctx = _prepare_issue_number_inputs(org_id, collection, scheme, cfg, data)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    if not ctx["title"]:
+        return jsonify({"message": "请填写文件名称"}), 400
+    if ctx["subtype_from_title"] and (scheme.prefix_source or "") == "from_project_code" and not ctx["project_code"]:
+        return jsonify({"message": "请选择项目或填写项目编号"}), 400
+    existing = ctx["existing"]
+    if existing:
+        return jsonify(
+            {
+                "duplicateTitle": True,
+                "existingDocument": _serialize_doc(existing),
+                "titleEn": ctx["title_en"],
+                "titleEnSource": ctx["title_en_source"],
+                "message": (
+                    f"台账中已有名称包含「{ctx['title']}」的受控文件「{existing.title or '-'}」，"
+                    f"编号 {existing.document_number or '-'}。请确认是否为同一份文件。"
+                ),
+            }
+        )
+    try:
+        info = preview_next_number(
+            organization_id=org_id,
+            scheme=scheme,
+            project_code=ctx["project_code"],
+            subtype=ctx["manual_subtype"],
+            title=ctx["title"],
+            title_en=ctx["title_en"],
+            subtype_from_title=ctx["subtype_from_title"],
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except Exception as exc:
+        current_app.logger.exception("document-control allocate preview failed")
+        return jsonify({"message": "预览编号失败，请稍后重试"}), 500
+    if ctx["title_en"] and not info.get("title_en"):
+        info["title_en"] = ctx["title_en"]
+    return jsonify(
+        {
+            "item": info,
+            "scheme": _serialize_scheme(scheme),
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+        }
+    )
+
+
+def _page1_projects_for_issue(org_id: str) -> list[dict[str, Any]]:
+    """页面1 进行中项目，附带任务录入里常用的项目编号。"""
+    from webapp.authz import filter_projects_by_organization, project_in_scope, rbac_enforced
+    from webapp.models import Project, UploadRecord
+
+    rows = (
+        Project.query.filter(Project.status == Project.STATUS_ACTIVE)
+        .order_by(Project.name.asc())
+        .all()
+    )
+    if rbac_enforced():
+        rows = [p for p in rows if project_in_scope(p)]
+    rows = filter_projects_by_organization(rows)
+    pid_list = [p.id for p in rows if p.id]
+    code_by_pid: dict[str, str] = {}
+    if pid_list:
+        for ur in (
+            UploadRecord.query.filter(UploadRecord.project_id.in_(pid_list))
+            .order_by(UploadRecord.updated_at.desc())
+            .all()
+        ):
+            pid = (ur.project_id or "").strip()
+            pc = (ur.project_code or "").strip()
+            if pid and pc and pid not in code_by_pid:
+                code_by_pid[pid] = pc
+    items: list[dict[str, Any]] = []
+    for p in rows:
+        name = (p.name or "").strip()
+        code = code_by_pid.get(p.id or "", "") or ""
+        label = name if not code else f"{name}（{code}）"
+        items.append(
+            {
+                "id": p.id,
+                "name": name,
+                "projectCode": code,
+                "projectName": name,
+                "registeredCountry": (getattr(p, "registered_country", None) or "").strip() or None,
+                "label": label,
+            }
+        )
+    return items
+
+
+@document_control_bp.get("/api/document-control/allocate/options")
+def api_document_control_allocate_options():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    return jsonify(
+        {
+            "categories": enrich_issue_categories(org_id),
+            "projects": _page1_projects_for_issue(org_id),
+        }
+    )
 
 
 @document_control_bp.post("/api/document-control/allocate/reserve")
@@ -1086,6 +1435,125 @@ def api_document_control_allocate_issue():
     )
     db.session.commit()
     return jsonify({"message": "已发放", "document": _serialize_doc(doc)})
+
+
+@document_control_bp.post("/api/document-control/allocate/apply")
+def api_document_control_allocate_apply():
+    """预留编号并写入受控台账（一步完成）。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    data = request.get_json(force=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"message": "请填写文件名称"}), 400
+    sheet_category = (data.get("sheetCategory") or "").strip()
+    scheme_id = (data.get("schemeId") or "").strip()
+    scheme, cfg, err = resolve_scheme_for_issue(
+        org_id,
+        sheet_category=sheet_category,
+        scheme_id=scheme_id or None,
+    )
+    if not scheme:
+        return jsonify({"message": err or "该分类不支持自动取号"}), 400
+    tmpl = (scheme.render_template or "").strip()
+    if not scheme.is_active or not tmpl or "{seq" not in tmpl:
+        hint = (scheme.kb_rule_excerpt or "").strip() or "该文件类型须按《文件控制程序》手工编号"
+        return jsonify({"message": f"该类型不支持自动取号：{hint}"}), 400
+    project_name = (data.get("projectName") or "").strip() or None
+    sheet_cat = sheet_category or ((cfg or {}).get("sheetCategory") or "").strip()
+    try:
+        ctx = _prepare_issue_number_inputs(org_id, collection, scheme, cfg, data)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    if (scheme.prefix_source or "") == "from_project_code" and not ctx["project_code"]:
+        return jsonify({"message": "请选择项目或填写项目编号"}), 400
+
+    existing = ctx["existing"]
+    if existing and ctx["confirm_same"]:
+        if ctx["title_en"]:
+            _apply_title_en_to_doc(existing, ctx["title_en"])
+            db.session.add(existing)
+            db.session.commit()
+        return jsonify(
+            {
+                "message": f"该文件已在台账中，编号 {existing.document_number or '-'}",
+                "duplicateTitle": True,
+                "confirmedSameDocument": True,
+                "document": _serialize_doc(existing),
+            }
+        )
+    if existing and not ctx["force_new"]:
+        return jsonify(
+            {
+                "duplicateTitle": True,
+                "existingDocument": _serialize_doc(existing),
+                "titleEn": ctx["title_en"],
+                "titleEnSource": ctx["title_en_source"],
+                "message": (
+                    f"台账中已有名称包含「{ctx['title']}」的受控文件「{existing.title or '-'}」，"
+                    f"编号 {existing.document_number or '-'}。请确认是否为同一份文件。"
+                ),
+            }
+        ), 409
+
+    try:
+        allocation = reserve_number(
+            organization_id=org_id,
+            scheme=scheme,
+            requested_title=title,
+            project_id=ctx["project_id"],
+            project_code=ctx["project_code"],
+            user_id=(session.get("user_id") or "").strip() or None,
+            reserved_minutes=int(data.get("reservedMinutes") or 30),
+            subtype=ctx["manual_subtype"],
+            subtype_from_title=ctx["subtype_from_title"],
+            title_en=ctx["title_en"],
+        )
+        doc = issue_number(
+            organization_id=org_id,
+            allocation=allocation,
+            version=(data.get("version") or "").strip() or None,
+            title=title,
+            source="allocated",
+            project_id=ctx["project_id"],
+            project_code=ctx["project_code"],
+            user_id=(session.get("user_id") or "").strip() or None,
+            title_en=ctx["title_en"],
+        )
+        if sheet_cat:
+            doc.sheet_category = sheet_cat
+        if project_name:
+            doc.project_name = project_name
+        reg_country = (data.get("registeredCountry") or "").strip()
+        if reg_country:
+            doc.registered_country = reg_country
+        if ctx["title_en"]:
+            _apply_title_en_to_doc(doc, ctx["title_en"])
+        db.session.add(doc)
+        db.session.commit()
+        return jsonify(
+            {
+                "message": f"已申请编号：{doc.document_number}",
+                "document": _serialize_doc(doc),
+                "allocationId": allocation.id,
+                "titleEn": ctx["title_en"],
+                "titleEnSource": ctx["title_en_source"],
+            }
+        )
+    except ValueError as exc:
+        db.session.rollback()
+        msg = str(exc)
+        status = 409 if "已被占用" in msg else 400
+        return jsonify({"message": msg}), status
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("document-control allocate apply failed")
+        return jsonify({"message": "申请编号失败，请稍后重试"}), 500
 
 
 def _excel_import_header_map() -> dict[str, str]:
@@ -1341,10 +1809,27 @@ def _save_org_sheet_order(org_id: str, sheet_order: list[str]) -> None:
         db.session.add(AppConfig(config_key=_SHEET_ORDER_CONFIG_KEY, config_value=payload))
 
 
+def _apply_sheet_category_display_order(categories: list[str]) -> list[str]:
+    """四级表单紧跟程序文件之后展示。"""
+    if "四级表单" not in categories or "程序文件" not in categories:
+        return categories
+    without = [name for name in categories if name != "四级表单"]
+    try:
+        idx = without.index("程序文件") + 1
+    except ValueError:
+        return categories
+    return without[:idx] + ["四级表单"] + without[idx:]
+
+
 def _sort_sheet_categories(categories: list[str], org_id: str) -> list[str]:
+    """按 Excel 导入 Sheet 顺序排列；无配置时保留调用方顺序（不用名称字母序做 tie-break）。"""
     order = _load_sheet_order_map().get(org_id) or []
+    if not order:
+        return _apply_sheet_category_display_order(list(categories))
     rank = {name: idx for idx, name in enumerate(order)}
-    return sorted(categories, key=lambda name: (rank.get(name, 10_000), name))
+    known = [name for name in order if name in categories]
+    unknown = [name for name in categories if name not in rank]
+    return _apply_sheet_category_display_order(known + unknown)
 
 
 def _note_link_source_norm(
@@ -2402,5 +2887,32 @@ def api_document_control_sync_from_kb():
         return jsonify({"message": format_upstream_request_error(exc, base)}), 502
     if resp.status_code != 200:
         return jsonify({"message": f"规则解析失败 HTTP {resp.status_code}"}), 502
-    return jsonify(resp.json())
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        data = {}
+    rules = data.get("rules") or data.get("candidates") or []
+    created, updated, skipped = upsert_schemes_from_kb_rules(org_id, rules)
+    refs = data.get("references") or []
+    message = (data.get("message") or "").strip()
+    if created or updated:
+        message = f"{message}；已写入规则表（新增 {created}，更新 {updated}）".strip("；")
+    elif rules:
+        message = message or f"规则已与库内一致（共 {len(rules)} 类）"
+    elif not message:
+        message = f"检索到 {len(refs)} 条片段，未解析出可写入的规则"
+    rows = (
+        NumberingScheme.query.filter_by(organization_id=org_id)
+        .order_by(NumberingScheme.created_at.desc())
+        .all()
+    )
+    return jsonify(
+        {
+            **data,
+            "message": message,
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "items": [_serialize_scheme(x) for x in rows],
+        }
+    )
 
