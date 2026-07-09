@@ -1,0 +1,48 @@
+﻿document_number,title_zh,title_en_new,source,doc_id
+PAPUWIS-UDN-001,说明书（用户手册）,User Manual,xlsx,b386af7d-fbfe-46eb-930f-414eed44f1a8
+PAPUWIS-CMP-001,配置管理计划,Configuration Management Plan,xlsx,cfe363d0-337a-47a8-a7e8-879a74ed233a
+PAPUWIS-PAS-001,项目立项书,Project Initiation Document,xlsx,b3080e41-81d7-449b-b9c5-4536560daae7
+PAPUWIS-PMP-001,软件开发计划（即项目管理计划）,Software Development Plan,xlsx,63388300-49bd-4338-94c0-66b53bc4b6ef
+PAPUWIS-QMP-001,质量保证计划,Quality Assurance Plan,xlsx,0d67a590-55f9-41f3-8529-fe4ea527165f
+PAPUWIS-SRS-001,软件需求规范,Software Requirement Specification,xlsx,76f219e9-78d9-4800-b251-a6f04ee9c882
+PAPUWIS-URS-001,用户需求设计规范,User Requirement Specification,xlsx,972c970f-c67f-4492-88e2-ae76b1e8a202
+PAPUWIS-ADS-001,架构设计规范,Architecture Design Specification,xlsx,ad216528-6d2c-4549-bfbf-5d81dbc08370
+PAPUWIS-DDS-001,详细设计规范,Detailed Design Specification,xlsx,07e1fe27-a07a-4989-85e3-43f37c30cba6
+PAPUWIS-PPM-001,软件发布流程图,Software Release Flowchart,xlsx,91316c6c-8f16-48ba-a332-a4aaa5afbd08
+PAPUWIS-UIDS-001,用户接口设计规范,User Interface Design Specification,xlsx,464462c0-809d-4a18-9171-86571d249962
+PAPUWIS-PVR-001,软件发布验证报告,Software Release Verification Report,xlsx,9d9b969e-c0d0-4f88-ad96-2ef19ba1ef46
+PAPUWIS-PVS-001,软件发布验证方案,Software release verification scheme,xlsx,4e896fa9-61fc-42a4-8b28-05fa2fea3e06
+PAPUWIS-UTF-001,用户培训方案,User Training Program,xlsx,2ee44d64-7428-4be2-89a5-f15c23c0e371
+PAPUWIS-RMP-001,风险管理计划,Risk Management Plan,xlsx,3573ca1c-42e0-4c51-8987-fbfaf76299ae
+PAPUWIS-RAS-001,风险分析,Risk Analysis,xlsx,5a43bfc0-44cb-41d8-a009-a573922f8b95
+PAPUWIS-RMR-001,风险管理报告,Risk Management Report,xlsx,3d30c6b2-afc0-40ba-9e47-b15a20a97200
+PAPUWIS-NSP-001,网络安全风险管理计划,Cybersecurity Risk Management Plan,xlsx,42bf791a-647f-4f83-b4fd-c74e6d19ba5a
+PAPUWIS-NSA-001,网络安全风险分析,Cybersecurity Risk,docx,feced9d0-dc4d-4bec-aba8-6b8688223f8b
+PAPUWIS-NSR-001,网络安全风险管理报告,Cybersecurity Risk Management Report,xlsx,0bfb0434-0e5e-4667-95b6-74146715412e
+PAPUWIS-CRR-001,代码评审报告（各单元模块）,Code Review Report,xlsx,92e53de5-e6ce-41f8-9edd-d2726e096836
+PAPUWIS-UTS-001,单元测试方案,Unit Test Specification,xlsx,c0f4a846-8ec6-4518-ad0d-8e34221c25a3
+PAPUWIS-UTR-001,单元测试报告,Unit Test Report,xlsx,3aa4c4f7-cf9a-4cdc-b391-1823e51101ce
+PAPUWIS-STS-001,系统测试方案,System Test Specification,xlsx,94443753-1218-4d62-9aeb-ba9b32e7ca32
+PAPUWIS-STR-001,系统测试报告,System Test Report,xlsx,11f53c58-ab7f-447a-a01b-b99e833cda54
+PAPUWIS-RTS-001,用户测试方案,User Test Specification,xlsx,c479218a-87d4-45e6-a751-7305afcdd114
+PAPUWIS-CYRR-001,网络安全研究报告,Cybersecurity Research Report,docx,ff0f1c7a-70fc-4550-9cfd-686126a4d168
+PAPUWIS-NTS-001,网络安全系统测试方案,Cybersecurity System Test Specification,docx,1c3fba62-ca8c-4a34-a65b-4472585799bd
+PAPUWIS-NTR-001,网络安全系统测试报告,Cybersecurity System Test Report,docx,857cba77-fdaa-4d3c-b7a7-25f1093c851e
+PAPUWIS-SCR-001,兼容性测试报告,Security Software Compatibility Test Report,docx,4a07db8a-9c1a-4753-8b4b-9200d41651bd
+PAPUWIS-SUS-001,总结可用性测试方案,Summary Usability Test Specification,xlsx,cb1faa8d-7453-4ba1-bf12-00625d4a23ca
+PAPUWIS-SUR-001,总结可用性测试报告,Summary Usability Test Report,xlsx,9d8f2e6f-3b78-46c0-9152-b04c5f6fe65f
+QR-QP7.3-01,设计和开发评审报告（立项评审）,Design and Development Review Report,xlsx,6c652681-04ff-46a1-96eb-55134936cd00
+PAPUWIS-UIS-001,用户接口需求规范,User Interface Requirement Specification,xlsx,09b790e9-f6ba-4500-b645-124cf24b9bb4
+QR-SMP7.3-03 -01,配置项状态报告,Software Configuration Status Report,xlsx,17f1c8fd-ae93-489a-8dad-923e7855617f
+QR-SMP7.3-03 -02,配置审计报告,Configuration Audit Report,xlsx,baebdebe-90b9-4af5-a26b-7ed23d51c32b
+PAPUWIS-FII-001,成品检验作业指导书,Final Inspection Operation Instruction,xlsx,79ef6832-000a-4012-b019-4cbdb6591dbe
+PAPUWIS-PWI-001,软件发布作业指导书,Software Release Operation Instruction,xlsx,343541c1-713b-487e-bdd1-e6a3ea7ed9c1
+PAPUWIS-IWI-001,软件安装及交付作业指导书,Installation Operation Instruction,xlsx,eae53ee4-64ae-4d86-8a30-b6e4ba2b4d91
+QR-SMP 6.3-01-01,设备设施清单,Equipment/Facilities List,xlsx,3c3e4da9-9342-4444-8206-3a9925ac1cb7
+QR-SMP7.3-05-02,缺陷记录表,Defect Record Form,xlsx,097beed5-8090-4071-b482-761a536ecd29
+QR-QP7.3.8-01,设计开发转换计划,Design and Development Conversion Plan,xlsx,77096482-2a9f-44f5-8a2d-151ed56f1000
+QR-QP7.3.8-02,设计开发转换方案,Design and Development Conversion Scheme,xlsx,8f9155dc-cc3d-413c-847b-a1f4524295d5
+QR-QP7.3.8-03,设计和开发转换报告,Design and Development Conversion Report,xlsx,87e0b3d3-ae03-4f12-9d4d-d0e0a9b8e3ce
+QR-SMP7.3-05-01,缺陷评估报告,Defect Assessment Report,xlsx,d30197d4-a393-4c60-b53b-36b6cba67a73
+QR-SMP7.5.9-01-01,软件可追溯性分析报告,Confirmation stage software traceability analysis report,xlsx,ee6cdd52-ce37-4fb7-a90a-eea2b3af7980
+PAPUWIS-SMI-001,软件维护计划,Software Maintenance Plan,xlsx,9a8532ad-7304-4abe-bdd4-44ef20cd2b30

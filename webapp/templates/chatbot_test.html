@@ -7,10 +7,12 @@
 .cb-answer-detail { white-space: pre-wrap; line-height: 1.65; font-size: 0.95rem; }
 .cb-meta { font-size: 0.85rem; color: #6c757d; }
 .cb-ref-item { border-left: 3px solid #0d6efd; padding-left: 0.75rem; margin-bottom: 0.75rem; }
+.cb-detail-item { border-left: 3px solid #198754; }
 .cb-ref-name { font-weight: 600; font-size: 0.9rem; }
-.cb-ref-snippet { font-size: 0.85rem; color: #495057; white-space: pre-wrap; }
+.cb-ref-snippet { font-size: 0.85rem; color: #495057; white-space: pre-wrap; margin-top: 0.35rem; }
 .cb-badge-ok { background: #d1e7dd; color: #0f5132; }
 .cb-badge-warn { background: #fff3cd; color: #664d03; }
+.cb-full-content { white-space: pre-wrap; line-height: 1.65; max-height: 70vh; overflow: auto; font-size: 0.9rem; }
 </style>
 {% endblock %}
 
@@ -23,7 +25,7 @@
         <div class="card-body">
             <div class="mb-3">
                 <label class="form-label">问题文本</label>
-                <textarea id="cbText" class="form-control" rows="3" placeholder="例如：仓库管理员体系运行记录怎么写？"></textarea>
+                <textarea id="cbText" class="form-control" rows="3" placeholder="例如：根据程序文件规定，哪些文件需要2年更新一次？"></textarea>
             </div>
             <div class="row g-2 mb-3">
                 <div class="col-md-4">
@@ -71,7 +73,7 @@
                     <summary class="btn btn-sm btn-outline-secondary user-select-none">更多 ▾</summary>
                     <div class="mt-3 ps-1">
                         <h6 class="small fw-bold text-muted">详细版</h6>
-                        <div id="cbDetail" class="cb-answer-detail border rounded p-3 bg-light mb-3"></div>
+                        <div id="cbDetail" class="cb-answer-detail mb-3"></div>
 
                         <h6 class="small fw-bold text-muted">依据文件</h6>
                         <div id="cbRefs" class="mb-3"></div>
@@ -86,6 +88,21 @@
                         </details>
                     </div>
                 </details>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="cbFullModal" tabindex="-1" aria-labelledby="cbFullModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cbFullModalLabel">片段全文</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div id="cbFullMeta" class="small text-muted mb-2"></div>
+                <div id="cbFullBody" class="cb-full-content border rounded p-3 bg-light"></div>
             </div>
         </div>
     </div>
@@ -115,6 +132,11 @@
     const elMore = document.getElementById("cbMore");
     const elRawJson = document.getElementById("cbRawJson");
     const elDiag = document.getElementById("cbDiag");
+    const elFullModal = document.getElementById("cbFullModal");
+    const elFullMeta = document.getElementById("cbFullMeta");
+    const elFullBody = document.getElementById("cbFullBody");
+    let detailItemsCache = [];
+    let fullModal = null;
 
     function esc(s) {
         return String(s || "")
@@ -129,6 +151,61 @@
             .replace(/\\r\\n/g, "\n")
             .replace(/\\n/g, "\n")
             .trim();
+    }
+
+    function ensureModal() {
+        if (!fullModal && elFullModal && window.bootstrap && window.bootstrap.Modal) {
+            fullModal = new window.bootstrap.Modal(elFullModal);
+        }
+    }
+
+    function openFullContent(idx) {
+        const it = detailItemsCache[idx];
+        if (!it) return;
+        ensureModal();
+        const fn = it.file_name || "未知";
+        const chunk = it.chunk_index != null ? " · 块#" + it.chunk_index : "";
+        const kw = it.match_keyword || (Array.isArray(it.match_keywords) ? it.match_keywords.join("、") : "");
+        elFullMeta.textContent = fn + chunk + (kw ? " · 匹配：" + kw : "");
+        elFullBody.textContent = normText(it.full_content || it.matched_excerpt || "");
+        document.getElementById("cbFullModalLabel").textContent = fn;
+        if (fullModal) fullModal.show();
+    }
+
+    function sortDetailItems(items) {
+        return items.slice().sort(function (a, b) {
+            const sa = typeof a.match_score === "number" ? a.match_score : parseFloat(a.match_score || "0") || 0;
+            const sb = typeof b.match_score === "number" ? b.match_score : parseFloat(b.match_score || "0") || 0;
+            if (sb !== sa) return sb - sa;
+            return (a.index || 0) - (b.index || 0);
+        });
+    }
+
+    function renderDetailSection(data, detailFallback) {
+        detailItemsCache = sortDetailItems(Array.isArray(data.detail_items) ? data.detail_items : []);
+        if (detailItemsCache.length) {
+            elDetail.innerHTML = detailItemsCache.map(function (it, idx) {
+                const fn = esc(it.file_name || "未知");
+                const kw = it.match_keyword || (Array.isArray(it.match_keywords) ? it.match_keywords[0] : "") || "";
+                const para = normText(it.match_paragraph || it.matched_excerpt || it.match_sentence || "");
+                return (
+                    '<div class="cb-detail-item border rounded p-3 mb-2 bg-light">' +
+                    '<div class="cb-ref-name">' + (it.index || (idx + 1)) + ". " + fn + "</div>" +
+                    (kw ? '<div class="small text-muted mt-1">匹配关键词：「' + esc(kw) + "」</div>" : "") +
+                    '<div class="cb-ref-snippet mt-2">' + esc(para) + "</div>" +
+                    '<button type="button" class="btn btn-sm btn-outline-primary mt-2 cb-view-full" data-idx="' + idx + '">查看更多</button>' +
+                    "</div>"
+                );
+            }).join("");
+            elDetail.querySelectorAll(".cb-view-full").forEach(function (b) {
+                b.addEventListener("click", function () {
+                    openFullContent(parseInt(b.getAttribute("data-idx"), 10));
+                });
+            });
+            return;
+        }
+        elDetail.className = "cb-answer-detail border rounded p-3 bg-light mb-3";
+        elDetail.textContent = detailFallback || "（无详细版内容）";
     }
 
     function fillProviderOptions(data) {
@@ -211,7 +288,14 @@
         const conf = typeof data.confidence === "number" ? data.confidence.toFixed(2) : String(data.confidence || "");
 
         elSummary.textContent = summary || (data.message || "（无简化版内容）");
-        elDetail.textContent = detail || "（无详细版内容）";
+        elDetail.className = "mb-3";
+        renderDetailSection(data, detail);
+        if (Array.isArray(data.detail_items) && data.detail_items.length) {
+            elDetail.insertAdjacentHTML(
+                "afterbegin",
+                '<p class="small text-muted mb-2">共 ' + data.detail_items.length + " 份文件；每条展示含关键词的整段内容，序号与简化版一致。</p>"
+            );
+        }
         elDelivered.textContent = delivered || "（无）";
 
         if (needHuman) {
@@ -236,16 +320,17 @@
         }
 
         const refs = Array.isArray(data.references) ? data.references : [];
-        if (!refs.length) {
-            elRefs.innerHTML = '<p class="text-muted small mb-0">无引用片段</p>';
+        const names = refs.length
+            ? refs.map(function (r) { return r.file_name || "未知"; })
+            : detailItemsCache.map(function (it) { return it.file_name || "未知"; });
+        if (!names.length) {
+            elRefs.innerHTML = '<p class="text-muted small mb-0">无依据文件</p>';
         } else {
-            elRefs.innerHTML = refs.map(function (r) {
-                return (
-                    '<div class="cb-ref-item">' +
-                    '<div class="cb-ref-name">' + esc(r.file_name || "未知") + '</div>' +
-                    '<div class="cb-ref-snippet">' + esc(normText(r.snippet)) + "</div></div>"
-                );
-            }).join("");
+            elRefs.innerHTML = (
+                '<ul class="small mb-0 ps-3">' +
+                names.map(function (n) { return "<li>" + esc(n) + "</li>"; }).join("") +
+                "</ul>"
+            );
         }
 
         const rawCopy = Object.assign({}, data);
@@ -259,6 +344,7 @@
         elAnswerEmpty.classList.remove("d-none");
         elAnswerEmpty.textContent = msg || "尚未运行";
         elMeta.textContent = "";
+        detailItemsCache = [];
     }
 
     async function loadLlmSettings() {

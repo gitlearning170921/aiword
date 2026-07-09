@@ -148,6 +148,30 @@
         return Array.from(selectedDocIds);
     }
 
+    function renderScopeColumn(items, field, fallback) {
+        const list = Array.isArray(items) ? items : [];
+        const tokens = [];
+        const seen = new Set();
+        list.forEach((e) => {
+            const token = String((e && e[field]) || "").trim();
+            if (!token || seen.has(token)) return;
+            seen.add(token);
+            tokens.push(token);
+        });
+        if (tokens.length > 1) {
+            return `<span class="dc-meta-multi">${esc(tokens.join(", "))}</span>`;
+        }
+        const single = tokens.length === 1 ? tokens[0] : "";
+        const fb = String(fallback || "").trim();
+        if (!single && fb) {
+            const split = fb.split(/\s*[,，、]\s*|\s*\/\s*/).map((x) => x.trim()).filter(Boolean);
+            if (split.length > 1) {
+                return `<span class="dc-meta-multi">${esc(split.join(", "))}</span>`;
+            }
+        }
+        return esc(single || fb || "-");
+    }
+
     function renderDocRows(rows) {
         const list = rows || [];
         if (!list.length) {
@@ -165,8 +189,8 @@
                     <td>${esc(x.title || "-")}</td>
                     <td>${esc(x.titleEn || "-")}</td>
                     <td>${esc(x.version || "-")}</td>
-                    <td>${esc(x.projectName || "-")}</td>
-                    <td>${esc(x.registeredCountry || "-")}</td>
+                    <td>${renderScopeColumn(x.registrationProjects, "projectName", x.projectName)}</td>
+                    <td>${renderScopeColumn(x.registrationProjects, "registeredCountry", x.registeredCountry)}</td>
                     <td>${esc(x.statusLabel || "-")}</td>
                     <td>${x.registrationSubmitted ? "已递交" : "-"}</td>
                     <td class="text-nowrap">

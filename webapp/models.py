@@ -380,6 +380,7 @@ class ControlledDocument(db.Model):
     registered_country: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     sheet_category: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True, index=True)
     excel_row_index: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    registration_excel_row_index: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
     registration_submitted: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="controlled")
     source: Mapped[str] = mapped_column(db.String(32), nullable=False, default="manual")

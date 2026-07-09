@@ -1082,6 +1082,12 @@ def ensure_schema(app: Flask):
         ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN excel_row_index INTEGER",
         ddl_other="ALTER TABLE controlled_documents ADD COLUMN excel_row_index INT NULL",
     )
+    ensure_column(
+        "controlled_documents",
+        "registration_excel_row_index",
+        ddl_sqlite="ALTER TABLE controlled_documents ADD COLUMN registration_excel_row_index INTEGER",
+        ddl_other="ALTER TABLE controlled_documents ADD COLUMN registration_excel_row_index INT NULL",
+    )
     if "document_control_import_logs" not in doc_control_tables:
         from .models import DocumentControlImportLog
 
@@ -1096,12 +1102,35 @@ def ensure_schema(app: Flask):
                         "  SELECT l.row_index FROM document_control_import_logs l "
                         "  WHERE l.controlled_document_id = controlled_documents.id "
                         "    AND l.row_index IS NOT NULL "
+                        "    AND l.event_type IN ('import_success', 'import_update') "
+                        "    AND (l.sheet_name IS NULL OR l.sheet_name = controlled_documents.sheet_category) "
                         "  ORDER BY l.created_at DESC LIMIT 1"
                         ") "
                         "WHERE excel_row_index IS NULL AND EXISTS ("
                         "  SELECT 1 FROM document_control_import_logs l "
                         "  WHERE l.controlled_document_id = controlled_documents.id "
-                        "    AND l.row_index IS NOT NULL"
+                        "    AND l.row_index IS NOT NULL "
+                        "    AND l.event_type IN ('import_success', 'import_update')"
+                        ")"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET excel_row_index = ("
+                        "  SELECT l.row_index FROM document_control_import_logs l "
+                        "  WHERE l.controlled_document_id = controlled_documents.id "
+                        "    AND l.row_index IS NOT NULL "
+                        "    AND l.event_type IN ('import_success', 'import_update') "
+                        "    AND l.sheet_name = controlled_documents.sheet_category "
+                        "  ORDER BY l.created_at DESC LIMIT 1"
+                        ") "
+                        "WHERE sheet_category IS NOT NULL AND sheet_category != '' AND EXISTS ("
+                        "  SELECT 1 FROM document_control_import_logs l "
+                        "  WHERE l.controlled_document_id = controlled_documents.id "
+                        "    AND l.row_index IS NOT NULL "
+                        "    AND l.event_type IN ('import_success', 'import_update') "
+                        "    AND l.sheet_name = controlled_documents.sheet_category"
                         ")"
                     )
                 )
@@ -1117,12 +1146,72 @@ def ensure_schema(app: Flask):
                         "    FROM document_control_import_logs "
                         "    WHERE controlled_document_id IS NOT NULL "
                         "      AND row_index IS NOT NULL "
+                        "      AND event_type IN ('import_success', 'import_update') "
                         "    GROUP BY controlled_document_id"
                         "  ) latest ON l.controlled_document_id = latest.controlled_document_id "
                         "    AND l.created_at = latest.mx"
                         ") src ON cd.id = src.controlled_document_id "
                         "SET cd.excel_row_index = src.row_index "
                         "WHERE cd.excel_row_index IS NULL"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents cd "
+                        "INNER JOIN ("
+                        "  SELECT l.controlled_document_id, l.row_index "
+                        "  FROM document_control_import_logs l "
+                        "  INNER JOIN ("
+                        "    SELECT l2.controlled_document_id, MAX(l2.created_at) AS mx "
+                        "    FROM document_control_import_logs l2 "
+                        "    WHERE l2.controlled_document_id IS NOT NULL "
+                        "      AND l2.row_index IS NOT NULL "
+                        "      AND l2.event_type IN ('import_success', 'import_update') "
+                        "    GROUP BY l2.controlled_document_id"
+                        "  ) latest ON l.controlled_document_id = latest.controlled_document_id "
+                        "    AND l.created_at = latest.mx "
+                        "  WHERE l.sheet_name = cd.sheet_category"
+                        ") src ON cd.id = src.controlled_document_id "
+                        "SET cd.excel_row_index = src.row_index "
+                        "WHERE cd.sheet_category IS NOT NULL AND cd.sheet_category != ''"
+                    )
+                )
+    except Exception:
+        pass
+    try:
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET registration_excel_row_index = excel_row_index "
+                        "WHERE sheet_category = '注册文件' "
+                        "  AND registration_excel_row_index IS NULL "
+                        "  AND excel_row_index IS NOT NULL"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET registration_excel_row_index = NULL "
+                        "WHERE sheet_category IS NOT NULL AND sheet_category != '注册文件'"
+                    )
+                )
+            elif engine.dialect.name == "mysql":
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET registration_excel_row_index = excel_row_index "
+                        "WHERE sheet_category = '注册文件' "
+                        "  AND registration_excel_row_index IS NULL "
+                        "  AND excel_row_index IS NOT NULL"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE controlled_documents "
+                        "SET registration_excel_row_index = NULL "
+                        "WHERE sheet_category IS NOT NULL AND sheet_category != '注册文件'"
                     )
                 )
     except Exception:

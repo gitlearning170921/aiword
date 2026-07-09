@@ -431,8 +431,8 @@ def _chatbot_call_aicheckword(
             "knowledge_category": "program",
             "top_k": 6,
             "min_similarity": 0.55,
-            "max_reply_chars": 320,
-            "max_detail_chars": 2400,
+            "max_reply_chars": 8000,
+            "max_detail_chars": 4800,
         },
     }
     try:
@@ -12437,6 +12437,7 @@ def api_dingtalk_chatbot_test():
             "answer_detail": answer_detail,
             "answer_delivered": delivered_answer,
             "references": reply_data.get("references") or [],
+            "detail_items": reply_data.get("detail_items") or [],
             "reason": reply_data.get("reason") or "",
             "model_used": reply_data.get("model_used") or "",
             "effective_provider": reply_data.get("effective_provider") or eff_provider,
