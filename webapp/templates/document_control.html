@@ -356,6 +356,21 @@
                     <label class="form-label small">版本</label>
                     <input id="dcIssueVersion" class="form-control form-control-sm" placeholder="可选，如 A3">
                 </div>
+                <details class="mb-2">
+                    <summary class="small text-primary" style="cursor:pointer">批量申请（多行文件名称）</summary>
+                    <p class="small text-muted mb-1 mt-2">每行一个文件名称；移出输入框后点「批量预览」判重并取号。英文名优先取自台账同名，其次翻译缓存，最后才请求 AI。</p>
+                    <textarea id="dcIssueBatchTitles" class="form-control form-control-sm font-monospace" rows="4" placeholder="软件需求规范&#10;架构设计规范&#10;…"></textarea>
+                    <div class="d-flex gap-2 mt-2 flex-wrap">
+                        <button type="button" id="dcIssueBatchPreviewBtn" class="btn btn-outline-secondary btn-sm">批量预览</button>
+                        <button type="button" id="dcIssueBatchApplyBtn" class="btn btn-primary btn-sm">批量申请编号</button>
+                    </div>
+                    <div id="dcIssueBatchResultWrap" class="table-responsive mt-2 d-none">
+                        <table class="table table-sm table-bordered mb-0 small">
+                            <thead><tr><th>文件名称</th><th>英文名</th><th>建议编号</th><th>状态</th></tr></thead>
+                            <tbody id="dcIssueBatchResultBody"></tbody>
+                        </table>
+                    </div>
+                </details>
                 <div class="small text-muted" id="dcPreviewResult">选择分类后填写文件名称，移出输入框将预览建议编号</div>
             </div>
             <div class="modal-footer">

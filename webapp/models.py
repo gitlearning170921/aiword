@@ -415,6 +415,29 @@ class DocumentControlImportLog(db.Model):
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
+class DocumentTitleTranslationCache(db.Model):
+    """文件名称 → 英文名缓存（AI 翻译结果复用，按组织隔离）。"""
+    __tablename__ = "document_title_translation_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "title_key",
+            name="uq_doc_title_translation_org_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    title_key: Mapped[str] = mapped_column(db.String(255), nullable=False, index=True)
+    title_raw: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
+    title_en: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    source: Mapped[str] = mapped_column(db.String(32), nullable=False, default="translated")
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class NumberAllocation(db.Model):
     """编号预留与发放审计。"""
     __tablename__ = "number_allocations"

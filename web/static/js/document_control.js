@@ -9,6 +9,7 @@
     let issueForceNew = false;
     let issuePreviewSeq = 0;
     let issuePreviewTitle = null;
+    let issueBatchItems = [];
     const categoryPages = {};
     let ledgerLoading = false;
     const selectedDocIds = new Set();
@@ -1552,7 +1553,11 @@
         issueForceNew = false;
         issueResolvedTitleEn = null;
         issuePreviewTitle = null;
+        issueBatchItems = [];
         clearIssueDuplicateUi();
+        renderIssueBatchResults([]);
+        const batchTa = document.getElementById("dcIssueBatchTitles");
+        if (batchTa) batchTa.value = "";
         updateIssueTitleEnPreview("", "");
         const resultEl = document.getElementById("dcPreviewResult");
         if (resultEl) resultEl.textContent = "填写文件名称后移出输入框将预览建议编号";
@@ -1593,6 +1598,166 @@
         if (applyBtn) applyBtn.disabled = true;
     }
 
+    function titleEnSourceLabel(source) {
+        switch (source) {
+            case "translated":
+                return "（已自动翻译）";
+            case "embedded":
+                return "（取自名称中的英文）";
+            case "ledger":
+                return "（台账同名）";
+            case "cache":
+                return "（翻译缓存）";
+            case "cached":
+                return "（已指定）";
+            default:
+                return "";
+        }
+    }
+
+    function escHtml(s) {
+        return String(s || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function parseBatchTitlesText() {
+        const raw = document.getElementById("dcIssueBatchTitles")?.value || "";
+        return raw
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith("#"));
+    }
+
+    function renderIssueBatchResults(items) {
+        issueBatchItems = items || [];
+        const wrap = document.getElementById("dcIssueBatchResultWrap");
+        const body = document.getElementById("dcIssueBatchResultBody");
+        if (!wrap || !body) return;
+        if (!issueBatchItems.length) {
+            wrap.classList.add("d-none");
+            body.innerHTML = "";
+            return;
+        }
+        wrap.classList.remove("d-none");
+        body.innerHTML = issueBatchItems
+            .map((row) => {
+                const title = escHtml(row.title || "");
+                const te = escHtml(row.titleEn || "-");
+                const teSrc = titleEnSourceLabel(row.titleEnSource);
+                let num = "-";
+                let status = "";
+                if (row.error) {
+                    status = `<span class="text-danger">${escHtml(row.error)}</span>`;
+                } else if (row.duplicateTitle) {
+                    num = escHtml(row.existingDocument?.documentNumber || "-");
+                    status = '<span class="text-warning">需确认同名</span>';
+                } else {
+                    num = escHtml(row.documentNumber || row.preview?.document_number || "-");
+                    status = '<span class="text-success">可申请</span>';
+                }
+                const srcLine = teSrc ? `<div class="text-muted">${escHtml(teSrc)}</div>` : "";
+                return `<tr><td>${title}</td><td>${te}${srcLine}</td><td>${num}</td><td>${status}</td></tr>`;
+            })
+            .join("");
+    }
+
+    async function batchIssuePreview(busyBtn) {
+        const cfg = selectedIssueCategory();
+        if (!cfg) {
+            notify("请选择台账分类", "warning");
+            return;
+        }
+        if (!cfg.autoAllocatable || cfg.disabledReason) {
+            notify(cfg.manualHint || cfg.disabledReason || "该分类不支持自动取号", "warning");
+            return;
+        }
+        if (cfg.needsProjectCode && !(document.getElementById("dcIssueProjectCode")?.value || "").trim()) {
+            notify("请选择含项目编号的页面1项目", "warning");
+            return;
+        }
+        const titles = parseBatchTitlesText();
+        if (!titles.length) {
+            notify("请在批量区域填写至少一个文件名称", "warning");
+            return;
+        }
+        await withButtonBusy(busyBtn, "预览中…", async () => {
+            const res = await reqJson("/api/document-control/allocate/batch/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    ...buildIssuePayload(cfg),
+                    titlesText: document.getElementById("dcIssueBatchTitles")?.value || "",
+                }),
+            });
+            renderIssueBatchResults(res.items || []);
+            const el = document.getElementById("dcPreviewResult");
+            if (el) {
+                el.textContent = `批量预览：共 ${res.total || 0} 条，可申请 ${res.readyCount || 0} 条，同名 ${res.duplicateCount || 0} 条，失败 ${res.errorCount || 0} 条`;
+            }
+        });
+    }
+
+    async function batchIssueApply(busyBtn) {
+        const cfg = selectedIssueCategory();
+        if (!cfg) return;
+        if (!cfg.autoAllocatable || cfg.disabledReason) {
+            notify(cfg.manualHint || cfg.kbRuleExcerpt || "该分类须手工编号", "warning");
+            return;
+        }
+        let items = issueBatchItems;
+        if (!items.length) {
+            await batchIssuePreview(document.getElementById("dcIssueBatchPreviewBtn"));
+            items = issueBatchItems;
+        }
+        const applyItems = items.filter((r) => !r.error && !r.duplicateTitle);
+        if (!applyItems.length) {
+            notify("没有可直接申请的项目（请先批量预览，或处理同名项）", "warning");
+            return;
+        }
+        const modalEl = document.getElementById("dcIssueModal");
+        const modal = modalEl ? bootstrap.Modal.getOrCreateInstance(modalEl) : null;
+        await withButtonBusy(busyBtn, "提交中…", async () => {
+            const res = await reqJson("/api/document-control/allocate/batch/apply", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    ...buildIssuePayload(cfg),
+                    items: applyItems.map((r) => ({
+                        title: r.title,
+                        titleEn: r.titleEn,
+                    })),
+                }),
+            });
+            notify(res.message || "批量申请完成", res.failCount ? "warning" : "success");
+            issueBatchItems = [];
+            renderIssueBatchResults([]);
+            const batchTa = document.getElementById("dcIssueBatchTitles");
+            if (batchTa) batchTa.value = "";
+            modal?.hide();
+            resetCategoryPages();
+            await loadGroupedLedger();
+        });
+    }
+
+    function dismissIssueAsSameDocument() {
+        issueForceNew = false;
+        issueDuplicateState = null;
+        issuePreviewTitle = null;
+        previewResult = null;
+        clearIssueDuplicateUi();
+        const titleEl = document.getElementById("dcIssueTitle");
+        if (titleEl) titleEl.value = "";
+        issueResolvedTitleEn = null;
+        syncIssueTitleEnHidden("");
+        updateIssueTitleEnPreview("", "");
+        const resultEl = document.getElementById("dcPreviewResult");
+        if (resultEl) resultEl.textContent = "填写文件名称后移出输入框将预览建议编号";
+        restoreIssueApplyButtonState();
+    }
+
     function updateIssueTitleEnPreview(titleEn, source) {
         const el = document.getElementById("dcIssueTitleEnPreview");
         const val = (titleEn || "").trim();
@@ -1604,8 +1769,7 @@
             el.textContent = "";
             return;
         }
-        const srcLabel =
-            source === "translated" ? "（已自动翻译）" : source === "embedded" ? "（取自名称中的英文）" : "";
+        const srcLabel = titleEnSourceLabel(source);
         el.textContent = `英文名：${val}${srcLabel}`;
         el.classList.remove("d-none");
     }
@@ -1795,10 +1959,8 @@
             const title = (document.getElementById("dcIssueTitle")?.value || "").trim();
             if (title) refreshIssuePreview();
         });
-        document.getElementById("dcIssueConfirmSameBtn")?.addEventListener("click", async () => {
-            const cfg = selectedIssueCategory();
-            if (!cfg) return;
-            await submitIssueApply(cfg, { confirmSameDocument: true }, document.getElementById("dcIssueConfirmSameBtn"));
+        document.getElementById("dcIssueConfirmSameBtn")?.addEventListener("click", () => {
+            dismissIssueAsSameDocument();
         });
         document.getElementById("dcIssueForceNewBtn")?.addEventListener("click", async () => {
             const cfg = selectedIssueCategory();
@@ -1833,6 +1995,12 @@
                 return;
             }
             await submitIssueApply(cfg, null, document.getElementById("dcApplyBtn"));
+        });
+        document.getElementById("dcIssueBatchPreviewBtn")?.addEventListener("click", () => {
+            batchIssuePreview(document.getElementById("dcIssueBatchPreviewBtn"));
+        });
+        document.getElementById("dcIssueBatchApplyBtn")?.addEventListener("click", () => {
+            batchIssueApply(document.getElementById("dcIssueBatchApplyBtn"));
         });
     }
 

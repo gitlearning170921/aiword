@@ -1092,6 +1092,10 @@ def ensure_schema(app: Flask):
         from .models import DocumentControlImportLog
 
         DocumentControlImportLog.__table__.create(bind=engine, checkfirst=True)
+    if "document_title_translation_cache" not in doc_control_tables:
+        from .models import DocumentTitleTranslationCache
+
+        DocumentTitleTranslationCache.__table__.create(bind=engine, checkfirst=True)
     try:
         with engine.begin() as conn:
             if engine.dialect.name == "sqlite":

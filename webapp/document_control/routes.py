@@ -44,12 +44,13 @@ from .numbering_engine import (
     normalize_document_number,
     preview_next_number,
     registration_compare_key,
+    release_expired_number_reservations,
     reserve_number,
     scheme_allocation_prefix,
     _scheme_uses_subtype_template,
 )
 from .subtype_resolver import find_existing_controlled_doc_by_title
-from .title_en_resolver import resolve_title_en_for_issue
+from .title_en_resolver import persist_title_en_cache, resolve_title_en_for_issue
 
 
 document_control_bp = Blueprint("document_control", __name__)
@@ -1190,6 +1191,8 @@ def _prepare_issue_number_inputs(
     scheme: NumberingScheme,
     cfg: Optional[dict[str, Any]],
     data: dict[str, Any],
+    *,
+    session_cache: Optional[dict[str, tuple[str, str]]] = None,
 ) -> dict[str, Any]:
     title = (data.get("title") or "").strip()
     project_code = (data.get("projectCode") or "").strip() or None
@@ -1216,6 +1219,7 @@ def _prepare_issue_number_inputs(
                 org_id=org_id,
                 collection=collection,
                 cached_title_en=(data.get("titleEn") or "").strip() or None,
+                session_cache=session_cache,
             )
         except ValueError:
             if not existing:
@@ -1235,6 +1239,196 @@ def _prepare_issue_number_inputs(
     }
 
 
+def _duplicate_issue_message(title: str, existing: ControlledDocument) -> str:
+    return (
+        f"台账中已有名称包含「{title}」的受控文件「{existing.title or '-'}」，"
+        f"编号 {existing.document_number or '-'}。请确认是否为同一份文件。"
+    )
+
+
+def _allocate_preview_item(
+    org_id: str,
+    collection: str,
+    scheme: NumberingScheme,
+    cfg: Optional[dict[str, Any]],
+    data: dict[str, Any],
+    *,
+    session_cache: Optional[dict[str, tuple[str, str]]] = None,
+) -> dict[str, Any]:
+    title = (data.get("title") or "").strip()
+    if not title:
+        return {"title": "", "error": "文件名称不能为空"}
+    try:
+        ctx = _prepare_issue_number_inputs(
+            org_id, collection, scheme, cfg, data, session_cache=session_cache
+        )
+    except ValueError as exc:
+        return {"title": title, "error": str(exc)}
+    existing = ctx["existing"]
+    if existing:
+        return {
+            "title": title,
+            "duplicateTitle": True,
+            "existingDocument": _serialize_doc(existing),
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+            "message": _duplicate_issue_message(title, existing),
+        }
+    try:
+        info = preview_next_number(
+            organization_id=org_id,
+            scheme=scheme,
+            project_code=ctx["project_code"],
+            project_id=ctx["project_id"],
+            subtype=ctx["manual_subtype"],
+            title=ctx["title"],
+            title_en=ctx["title_en"],
+            subtype_from_title=ctx["subtype_from_title"],
+        )
+    except ValueError as exc:
+        return {"title": title, "titleEn": ctx["title_en"], "titleEnSource": ctx["title_en_source"], "error": str(exc)}
+    if ctx["title_en"] and not info.get("title_en"):
+        info["title_en"] = ctx["title_en"]
+    return {
+        "title": title,
+        "titleEn": ctx["title_en"],
+        "titleEnSource": ctx["title_en_source"],
+        "duplicateTitle": False,
+        "preview": info,
+        "documentNumber": info.get("document_number"),
+    }
+
+
+def _allocate_apply_item(
+    org_id: str,
+    collection: str,
+    scheme: NumberingScheme,
+    cfg: Optional[dict[str, Any]],
+    data: dict[str, Any],
+    *,
+    sheet_cat: str,
+    project_name: Optional[str],
+    session_cache: Optional[dict[str, tuple[str, str]]] = None,
+) -> dict[str, Any]:
+    title = (data.get("title") or "").strip()
+    if not title:
+        return {"title": "", "ok": False, "error": "文件名称不能为空"}
+    try:
+        ctx = _prepare_issue_number_inputs(
+            org_id, collection, scheme, cfg, data, session_cache=session_cache
+        )
+    except ValueError as exc:
+        return {"title": title, "ok": False, "error": str(exc)}
+
+    existing = ctx["existing"]
+    if existing and ctx["confirm_same"]:
+        if ctx["title_en"]:
+            _apply_title_en_to_doc(existing, ctx["title_en"])
+            db.session.add(existing)
+        return {
+            "title": title,
+            "ok": True,
+            "duplicateTitle": True,
+            "confirmedSameDocument": True,
+            "document": _serialize_doc(existing),
+            "message": f"该文件已在台账中，编号 {existing.document_number or '-'}",
+        }
+    if existing and not ctx["force_new"]:
+        return {
+            "title": title,
+            "ok": False,
+            "duplicateTitle": True,
+            "existingDocument": _serialize_doc(existing),
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+            "message": _duplicate_issue_message(title, existing),
+        }
+    try:
+        allocation = reserve_number(
+            organization_id=org_id,
+            scheme=scheme,
+            requested_title=title,
+            project_id=ctx["project_id"],
+            project_code=ctx["project_code"],
+            user_id=(session.get("user_id") or "").strip() or None,
+            reserved_minutes=int(data.get("reservedMinutes") or 30),
+            subtype=ctx["manual_subtype"],
+            subtype_from_title=ctx["subtype_from_title"],
+            title_en=ctx["title_en"],
+        )
+        doc = issue_number(
+            organization_id=org_id,
+            allocation=allocation,
+            version=(data.get("version") or "").strip() or None,
+            title=title,
+            source="allocated",
+            project_id=ctx["project_id"],
+            project_code=ctx["project_code"],
+            user_id=(session.get("user_id") or "").strip() or None,
+            title_en=ctx["title_en"],
+        )
+        if sheet_cat:
+            doc.sheet_category = sheet_cat
+        if project_name:
+            doc.project_name = project_name
+        reg_country = (data.get("registeredCountry") or "").strip()
+        if reg_country:
+            doc.registered_country = reg_country
+        if ctx["title_en"]:
+            _apply_title_en_to_doc(doc, ctx["title_en"])
+            if ctx["title_en_source"] == "translated":
+                persist_title_en_cache(org_id, title, ctx["title_en"], source="translated")
+        db.session.add(doc)
+        return {
+            "title": title,
+            "ok": True,
+            "document": _serialize_doc(doc),
+            "documentNumber": doc.document_number,
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+            "message": f"已申请编号：{doc.document_number}",
+        }
+    except ValueError as exc:
+        db.session.rollback()
+        return {"title": title, "ok": False, "error": str(exc)}
+
+
+def _parse_batch_titles(data: dict[str, Any]) -> list[str]:
+    items = data.get("items")
+    if isinstance(items, list) and items:
+        out: list[str] = []
+        seen: set[str] = set()
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            t = (row.get("title") or "").strip()
+            if not t:
+                continue
+            key = t.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+        return out
+    raw = (data.get("titlesText") or data.get("titles") or "")
+    if isinstance(raw, list):
+        lines = [str(x) for x in raw]
+    else:
+        lines = str(raw or "").splitlines()
+    out = []
+    seen: set[str] = set()
+    for line in lines:
+        t = (line or "").strip()
+        if not t or t.startswith("#"):
+            continue
+        key = t.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 @document_control_bp.post("/api/document-control/allocate/preview")
 def api_document_control_allocate_preview():
     blocked = _require_feature()
@@ -1245,6 +1439,7 @@ def api_document_control_allocate_preview():
         return wall
     org_id, collection = _org_context()
     data = request.get_json(force=True) or {}
+    release_expired_number_reservations(org_id)
     scheme_id = (data.get("schemeId") or "").strip()
     sheet_category = (data.get("sheetCategory") or "").strip()
     scheme, cfg, err = resolve_scheme_for_issue(
@@ -1264,6 +1459,10 @@ def api_document_control_allocate_preview():
         return jsonify({"message": "请选择项目或填写项目编号"}), 400
     existing = ctx["existing"]
     if existing:
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         return jsonify(
             {
                 "duplicateTitle": True,
@@ -1281,6 +1480,7 @@ def api_document_control_allocate_preview():
             organization_id=org_id,
             scheme=scheme,
             project_code=ctx["project_code"],
+            project_id=ctx["project_id"],
             subtype=ctx["manual_subtype"],
             title=ctx["title"],
             title_en=ctx["title_en"],
@@ -1293,6 +1493,10 @@ def api_document_control_allocate_preview():
         return jsonify({"message": "预览编号失败，请稍后重试"}), 500
     if ctx["title_en"] and not info.get("title_en"):
         info["title_en"] = ctx["title_en"]
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
     return jsonify(
         {
             "item": info,
@@ -1448,6 +1652,7 @@ def api_document_control_allocate_apply():
         return wall
     org_id, collection = _org_context()
     data = request.get_json(force=True) or {}
+    release_expired_number_reservations(org_id)
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify({"message": "请填写文件名称"}), 400
@@ -1534,6 +1739,8 @@ def api_document_control_allocate_apply():
             doc.registered_country = reg_country
         if ctx["title_en"]:
             _apply_title_en_to_doc(doc, ctx["title_en"])
+            if ctx["title_en_source"] == "translated":
+                persist_title_en_cache(org_id, title, ctx["title_en"], source="translated")
         db.session.add(doc)
         db.session.commit()
         return jsonify(
@@ -1554,6 +1761,178 @@ def api_document_control_allocate_apply():
         db.session.rollback()
         current_app.logger.exception("document-control allocate apply failed")
         return jsonify({"message": "申请编号失败，请稍后重试"}), 500
+
+
+@document_control_bp.post("/api/document-control/allocate/batch/preview")
+def api_document_control_allocate_batch_preview():
+    """批量预览：台账/缓存匹配英文名，仅未命中才调 AI；批量判重。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    data = request.get_json(force=True) or {}
+    release_expired_number_reservations(org_id)
+    titles = _parse_batch_titles(data)
+    if not titles:
+        return jsonify({"message": "请填写至少一个文件名称"}), 400
+    if len(titles) > 100:
+        return jsonify({"message": "单次批量最多 100 个文件名称"}), 400
+    sheet_category = (data.get("sheetCategory") or "").strip()
+    scheme, cfg, err = resolve_scheme_for_issue(
+        org_id,
+        sheet_category=sheet_category,
+        scheme_id=(data.get("schemeId") or "").strip() or None,
+    )
+    if not scheme:
+        return jsonify({"message": err or "未找到编号规则"}), 400
+    if (scheme.prefix_source or "") == "from_project_code" and not (data.get("projectCode") or "").strip():
+        return jsonify({"message": "请选择项目或填写项目编号"}), 400
+    base = {
+        "sheetCategory": sheet_category,
+        "schemeId": scheme.id,
+        "projectId": (data.get("projectId") or "").strip() or None,
+        "projectCode": (data.get("projectCode") or "").strip() or None,
+        "projectName": (data.get("projectName") or "").strip() or None,
+        "registeredCountry": (data.get("registeredCountry") or "").strip() or None,
+    }
+    session_cache: dict[str, tuple[str, str]] = {}
+    items: list[dict[str, Any]] = []
+    dup_count = 0
+    err_count = 0
+    ready_count = 0
+    for title in titles:
+        row = _allocate_preview_item(
+            org_id,
+            collection,
+            scheme,
+            cfg,
+            {**base, "title": title},
+            session_cache=session_cache,
+        )
+        items.append(row)
+        if row.get("error"):
+            err_count += 1
+        elif row.get("duplicateTitle"):
+            dup_count += 1
+        else:
+            ready_count += 1
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("document-control batch preview cache commit failed")
+    return jsonify(
+        {
+            "items": items,
+            "total": len(items),
+            "readyCount": ready_count,
+            "duplicateCount": dup_count,
+            "errorCount": err_count,
+        }
+    )
+
+
+@document_control_bp.post("/api/document-control/allocate/batch/apply")
+def api_document_control_allocate_batch_apply():
+    """批量申请编号：跳过判重项（除非 forceNew）；支持 confirmSameDocument。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    data = request.get_json(force=True) or {}
+    release_expired_number_reservations(org_id)
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return jsonify({"message": "请提供 items 列表"}), 400
+    if len(raw_items) > 100:
+        return jsonify({"message": "单次批量最多 100 条"}), 400
+    sheet_category = (data.get("sheetCategory") or "").strip()
+    scheme, cfg, err = resolve_scheme_for_issue(
+        org_id,
+        sheet_category=sheet_category,
+        scheme_id=(data.get("schemeId") or "").strip() or None,
+    )
+    if not scheme:
+        return jsonify({"message": err or "该分类不支持自动取号"}), 400
+    tmpl = (scheme.render_template or "").strip()
+    if not scheme.is_active or not tmpl or "{seq" not in tmpl:
+        hint = (scheme.kb_rule_excerpt or "").strip() or "该文件类型须按《文件控制程序》手工编号"
+        return jsonify({"message": f"该类型不支持自动取号：{hint}"}), 400
+    if (scheme.prefix_source or "") == "from_project_code" and not (data.get("projectCode") or "").strip():
+        return jsonify({"message": "请选择项目或填写项目编号"}), 400
+    sheet_cat = sheet_category or ((cfg or {}).get("sheetCategory") or "").strip()
+    project_name = (data.get("projectName") or "").strip() or None
+    base = {
+        "sheetCategory": sheet_category,
+        "schemeId": scheme.id,
+        "projectId": (data.get("projectId") or "").strip() or None,
+        "projectCode": (data.get("projectCode") or "").strip() or None,
+        "projectName": project_name,
+        "registeredCountry": (data.get("registeredCountry") or "").strip() or None,
+    }
+    session_cache: dict[str, tuple[str, str]] = {}
+    results: list[dict[str, Any]] = []
+    ok_count = 0
+    skip_count = 0
+    fail_count = 0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        title = (raw.get("title") or "").strip()
+        if not title:
+            continue
+        if raw.get("skip"):
+            skip_count += 1
+            results.append({"title": title, "ok": False, "skipped": True, "message": "已跳过"})
+            continue
+        item_data = {
+            **base,
+            "title": title,
+            "version": (raw.get("version") or "").strip() or None,
+            "titleEn": (raw.get("titleEn") or "").strip() or None,
+            "forceNew": bool(raw.get("forceNew")),
+            "confirmSameDocument": bool(raw.get("confirmSameDocument")),
+        }
+        row = _allocate_apply_item(
+            org_id,
+            collection,
+            scheme,
+            cfg,
+            item_data,
+            sheet_cat=sheet_cat,
+            project_name=project_name,
+            session_cache=session_cache,
+        )
+        results.append(row)
+        if row.get("ok"):
+            ok_count += 1
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                row["ok"] = False
+                row["error"] = "写入失败，请重试"
+                ok_count -= 1
+                fail_count += 1
+        elif row.get("duplicateTitle") and not row.get("confirmedSameDocument"):
+            skip_count += 1
+        else:
+            fail_count += 1
+    return jsonify(
+        {
+            "items": results,
+            "okCount": ok_count,
+            "skipCount": skip_count,
+            "failCount": fail_count,
+            "message": f"成功 {ok_count} 条，跳过 {skip_count} 条，失败 {fail_count} 条",
+        }
+    )
 
 
 def _excel_import_header_map() -> dict[str, str]:

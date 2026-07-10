@@ -195,8 +195,8 @@ def _template_seq_regex(
     body = body.replace("{prefix}", safe_prefix or "([A-Z0-9]{2,24})")
     body = body.replace("{type}", safe_type)
     body = body.replace("{subtype}", safe_subtype or "([A-Z]{2,12})")
-    body = re.sub(r"\{seq:\d+d\}", rf"(\\d{{{pad},}})", body)
-    body = body.replace("{seq}", r"(\\d+)")
+    body = re.sub(r"\{seq:\d+d\}", rf"(\d{{{pad},}})", body)
+    body = body.replace("{seq}", r"(\d+)")
     if safe_prefix:
         body = body.replace("([A-Z0-9]{2,24})", safe_prefix, 1)
     return re.compile(rf"^{body}$", re.I)
@@ -206,20 +206,32 @@ def _scheme_uses_subtype_template(scheme: NumberingScheme) -> bool:
     return "{subtype}" in ((scheme.render_template or "").strip())
 
 
-def allocation_counts_for_sequence(alloc: NumberAllocation) -> bool:
-    """预留或未作废发放的编号参与流水号计算。"""
+def allocation_blocks_number(alloc: NumberAllocation) -> bool:
+    """占用编号冲突检测：未过期预留，或已发放且台账仍为受控。"""
     st = (alloc.status or "").strip().lower()
     if st == "reserved":
+        until = alloc.reserved_until
+        if until is not None and until < now_local():
+            return False
         return True
     if st != "issued":
         return False
     doc_id = (alloc.issued_document_id or "").strip()
     if not doc_id:
-        return True
-    doc = ControlledDocument.query.filter_by(id=doc_id).first()
-    if not doc:
         return False
-    return (doc.status or "").strip().lower() == DOC_STATUS_CONTROLLED
+    doc = ControlledDocument.query.filter_by(id=doc_id).first()
+    return doc is not None and (doc.status or "").strip().lower() == DOC_STATUS_CONTROLLED
+
+
+def allocation_counts_for_subtype_reuse(alloc: NumberAllocation) -> bool:
+    """子类复用：仅已发放且对应台账仍为受控。"""
+    if (alloc.status or "").strip().lower() != "issued":
+        return False
+    doc_id = (alloc.issued_document_id or "").strip()
+    if not doc_id:
+        return False
+    doc = ControlledDocument.query.filter_by(id=doc_id).first()
+    return doc is not None and (doc.status or "").strip().lower() == DOC_STATUS_CONTROLLED
 
 
 def _seq_from_number_for_scheme(
@@ -240,6 +252,38 @@ def _seq_from_number_for_scheme(
     return int(m.groups()[-1])
 
 
+def release_expired_number_reservations(org_id: Optional[str]) -> int:
+    """清理已过期的预留编号（不参与流水号，仅释放占用）。"""
+    if not (org_id or "").strip():
+        return 0
+    now = now_local()
+    deleted = (
+        NumberAllocation.query.filter(
+            NumberAllocation.organization_id == org_id,
+            NumberAllocation.status == "reserved",
+            NumberAllocation.reserved_until.isnot(None),
+            NumberAllocation.reserved_until < now,
+        )
+        .delete(synchronize_session=False)
+    )
+    if deleted:
+        db.session.flush()
+    return int(deleted or 0)
+
+
+def _extract_trailing_seq(number: str) -> Optional[int]:
+    norm = normalize_document_number(number or "")
+    if not norm:
+        return None
+    m = re.search(r"-(\d+)$", norm)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
 def _next_sequence_for_issue(
     org_id: Optional[str],
     scheme: NumberingScheme,
@@ -247,51 +291,36 @@ def _next_sequence_for_issue(
     prefix: str,
     subtype: str,
     title: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> int:
-    """新名称从 seq_start 起；精确同名在同名受控编号流水号后 +1；作废/已删不参与。"""
-    from .subtype_resolver import normalize_title_key
+    """新名称从 seq_start 起；名称相关受控记录（与判重一致）最大流水号 +1。"""
+    from .subtype_resolver import find_controlled_docs_for_issue_title
 
+    db.session.expire_all()
     seq_start = max(1, int(scheme.seq_start or 1))
     org = org_id or ""
-    title_key = normalize_title_key(title or "")
-    if not title_key:
+    raw_title = (title or "").strip()
+    if not raw_title:
         return seq_start
 
-    max_same = 0
-    found_same = False
-    for doc in ControlledDocument.query.filter_by(
+    prefix_norm = normalize_document_number(prefix or "")
+    matched = find_controlled_docs_for_issue_title(
         organization_id=org,
-        status=DOC_STATUS_CONTROLLED,
-    ).all():
-        if normalize_title_key(doc.title or "") != title_key:
+        prefix=prefix,
+        title=raw_title,
+        project_id=project_id,
+    )
+    max_seq = 0
+    for doc in matched:
+        num = normalize_document_number(doc.document_number or "")
+        if prefix_norm and not num.startswith(prefix_norm + "-"):
             continue
-        seq = _seq_from_number_for_scheme(
-            scheme, prefix=prefix, subtype=subtype, number=doc.document_number or ""
-        )
+        seq = _extract_trailing_seq(num)
         if seq is not None:
-            found_same = True
-            max_same = max(max_same, seq)
+            max_seq = max(max_seq, seq)
 
-    for alloc in NumberAllocation.query.filter(
-        NumberAllocation.organization_id == org,
-        NumberAllocation.status.in_(("reserved", "issued")),
-    ).all():
-        if not allocation_counts_for_sequence(alloc):
-            continue
-        if normalize_title_key(alloc.requested_title or "") != title_key:
-            continue
-        seq = _seq_from_number_for_scheme(
-            scheme,
-            prefix=prefix,
-            subtype=subtype,
-            number=alloc.allocated_number or "",
-        )
-        if seq is not None:
-            found_same = True
-            max_same = max(max_same, seq)
-
-    if found_same:
-        return max(seq_start, max_same + 1)
+    if max_seq > 0:
+        return max(seq_start, max_seq + 1)
     return seq_start
 
 
@@ -300,6 +329,7 @@ def preview_next_number(
     organization_id: Optional[str],
     scheme: NumberingScheme,
     project_code: Optional[str] = None,
+    project_id: Optional[str] = None,
     subtype: Optional[str] = None,
     title: Optional[str] = None,
     title_en: Optional[str] = None,
@@ -332,6 +362,7 @@ def preview_next_number(
         prefix=prefix,
         subtype=sub,
         title=title,
+        project_id=project_id,
     )
     number = _render_number(scheme, prefix=prefix, seq=seq, subtype=sub)
     return {
@@ -358,10 +389,12 @@ def reserve_number(
     subtype_from_title: bool = False,
     title_en: Optional[str] = None,
 ) -> NumberAllocation:
+    release_expired_number_reservations(organization_id)
     info = preview_next_number(
         organization_id=organization_id,
         scheme=scheme,
         project_code=project_code,
+        project_id=project_id,
         subtype=subtype,
         title=requested_title,
         title_en=title_en,
@@ -377,7 +410,7 @@ def reserve_number(
         )
         .all()
     )
-    if any(allocation_counts_for_sequence(a) for a in conflict_alloc):
+    if any(allocation_blocks_number(a) for a in conflict_alloc):
         raise ValueError("编号已被占用，请重试")
     conflict_doc = find_controlled_document_by_norm(organization_id or "", norm)
     if conflict_doc:

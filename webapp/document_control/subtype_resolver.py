@@ -112,7 +112,7 @@ def _controlled_docs_for_prefix(org_id: str, prefix: str) -> list[ControlledDocu
 
 
 def _active_allocations_for_prefix(org_id: str, prefix: str) -> list[NumberAllocation]:
-    from .numbering_engine import allocation_counts_for_sequence
+    from .numbering_engine import allocation_counts_for_subtype_reuse
 
     prefix_norm = normalize_document_number(prefix or "")
     if not prefix_norm:
@@ -120,9 +120,9 @@ def _active_allocations_for_prefix(org_id: str, prefix: str) -> list[NumberAlloc
     out: list[NumberAllocation] = []
     for row in NumberAllocation.query.filter(
         NumberAllocation.organization_id == org_id,
-        NumberAllocation.status.in_(("reserved", "issued")),
+        NumberAllocation.status == "issued",
     ).all():
-        if not allocation_counts_for_sequence(row):
+        if not allocation_counts_for_subtype_reuse(row):
             continue
         num = normalize_document_number(row.allocated_number or "")
         if num.startswith(prefix_norm + "-"):
@@ -164,11 +164,10 @@ def _subtype_conflicts_other_title(
     titles = mapping.get(subtype) or set()
     if not titles:
         return False
-    if titles == {title_key}:
-        return False
-    if title_key in titles and len(titles) == 1:
-        return False
-    return True
+    outsiders = {
+        t for t in titles if t != title_key and not _title_keys_same_issue_line(t, title_key)
+    }
+    return bool(outsiders)
 
 
 def _title_matches_for_duplicate(existing_title: str, input_title: str) -> bool:
@@ -182,19 +181,33 @@ def _title_matches_for_duplicate(existing_title: str, input_title: str) -> bool:
     return input_key in existing_key
 
 
-def find_existing_controlled_doc_by_title(
+def _title_same_issue_line(existing_title: str, input_title: str) -> bool:
+    """判重/流水号/子类复用：精确同名或双向包含。"""
+    if _title_matches_for_duplicate(existing_title, input_title):
+        return True
+    return _title_matches_for_duplicate(input_title, existing_title)
+
+
+def _title_keys_same_issue_line(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a in b or b in a
+
+
+def find_controlled_docs_for_issue_title(
     *,
     organization_id: str,
     prefix: str,
     title: str,
     project_id: Optional[str] = None,
-) -> Optional[ControlledDocument]:
-    """同组织内同名或名称包含关系的受控文件（用于申请前确认）。"""
+) -> list[ControlledDocument]:
+    """与判重一致：受控台账中名称相关的文件（精确或包含）。"""
     from .numbering_engine import DOC_STATUS_CONTROLLED
 
-    title_key = normalize_title_key(title)
-    if not title_key:
-        return None
+    if not normalize_title_key(title):
+        return []
     prefix_norm = normalize_document_number(prefix or "")
     pid = (project_id or "").strip() or None
 
@@ -204,11 +217,11 @@ def find_existing_controlled_doc_by_title(
             organization_id=organization_id,
             status=DOC_STATUS_CONTROLLED,
         )
-        .order_by(ControlledDocument.created_at.desc())
+        .order_by(ControlledDocument.created_at.desc(), ControlledDocument.id.desc())
         .all()
     )
     for doc in rows:
-        if not _title_matches_for_duplicate(doc.title or "", title):
+        if not _title_same_issue_line(doc.title or "", title):
             continue
         doc_pid = (doc.project_id or "").strip()
         if pid and doc_pid and doc_pid != pid:
@@ -218,6 +231,23 @@ def find_existing_controlled_doc_by_title(
             if doc_prefix and doc_prefix != prefix_norm:
                 continue
         matches.append(doc)
+    return matches
+
+
+def find_existing_controlled_doc_by_title(
+    *,
+    organization_id: str,
+    prefix: str,
+    title: str,
+    project_id: Optional[str] = None,
+) -> Optional[ControlledDocument]:
+    """同组织内同名或名称包含关系的受控文件（用于申请前确认）。"""
+    matches = find_controlled_docs_for_issue_title(
+        organization_id=organization_id,
+        prefix=prefix,
+        title=title,
+        project_id=project_id,
+    )
     return matches[0] if matches else None
 
 
@@ -228,18 +258,20 @@ def find_existing_subtype_for_title(
     prefix: str,
     title: str,
 ) -> Optional[str]:
-    """同名文件复用已有子类，流水号由取号引擎递增。"""
-    title_key = normalize_title_key(title)
-    if not title_key:
-        return None
-    for doc in _controlled_docs_for_prefix(organization_id, prefix):
-        if normalize_title_key(doc.title or "") != title_key:
-            continue
+    """名称相关文件复用已有子类，流水号由取号引擎递增。"""
+    for doc in find_controlled_docs_for_issue_title(
+        organization_id=organization_id,
+        prefix=prefix,
+        title=title,
+    ):
         sub = extract_subtype_from_number(doc.document_number or "", scheme=scheme, prefix=prefix)
         if sub:
             return sub
+    title_key = normalize_title_key(title)
+    if not title_key:
+        return None
     for alloc in _active_allocations_for_prefix(organization_id, prefix):
-        if normalize_title_key(alloc.requested_title or "") != title_key:
+        if not _title_keys_same_issue_line(normalize_title_key(alloc.requested_title or ""), title_key):
             continue
         sub = extract_subtype_from_number(alloc.allocated_number or "", scheme=scheme, prefix=prefix)
         if sub:
