@@ -1138,7 +1138,7 @@ def _import_log_batch_summaries(
         q = q.filter(DocumentControlImportLog.import_batch_id == batch_id)
     q = q.filter(DocumentControlImportLog.import_batch_id.isnot(None))
     q = q.filter(DocumentControlImportLog.import_batch_id != "")
-    rows = (
+    q = (
         q.with_entities(
             DocumentControlImportLog.import_batch_id.label("batch_id"),
             func.min(DocumentControlImportLog.created_at).label("started_at"),
