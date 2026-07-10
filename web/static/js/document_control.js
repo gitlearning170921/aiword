@@ -181,28 +181,66 @@
         return Array.from(selectedDocIds);
     }
 
-    function renderScopeColumn(items, field, fallback) {
+    function renderEllipsisCell(text) {
+        const full = String(text || "").trim() || "-";
+        if (full === "-") return esc(full);
+        return `<span class="dc-cell-ellipsis" title="${esc(full)}">${esc(full)}</span>`;
+    }
+
+    function splitScopeTokens(text) {
+        return String(text || "")
+            .split(/\s*[,，、]\s*|\s*\/\s*/)
+            .map((x) => x.trim())
+            .filter(Boolean);
+    }
+
+    function uniqueScopeTokens(tokens) {
+        const out = [];
+        const seen = new Set();
+        (tokens || []).forEach((token) => {
+            const key = token.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push(token);
+        });
+        return out;
+    }
+
+    function renderScopeColumn(items, field, fallback, options) {
+        const opts = options && typeof options === "object" ? options : {};
         const list = Array.isArray(items) ? items : [];
         const tokens = [];
         const seen = new Set();
         list.forEach((e) => {
-            const token = String((e && e[field]) || "").trim();
-            if (!token || seen.has(token)) return;
-            seen.add(token);
-            tokens.push(token);
+            uniqueScopeTokens(splitScopeTokens((e && e[field]) || "")).forEach((token) => {
+                const key = token.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                tokens.push(token);
+            });
         });
         if (tokens.length > 1) {
-            return `<span class="dc-meta-multi">${esc(tokens.join(", "))}</span>`;
+            const joined = tokens.join(", ");
+            if (opts.ellipsis) {
+                return `<span class="dc-meta-multi dc-cell-ellipsis" title="${esc(joined)}">${esc(joined)}</span>`;
+            }
+            return `<span class="dc-meta-multi">${esc(joined)}</span>`;
         }
         const single = tokens.length === 1 ? tokens[0] : "";
         const fb = String(fallback || "").trim();
         if (!single && fb) {
-            const split = fb.split(/\s*[,，、]\s*|\s*\/\s*/).map((x) => x.trim()).filter(Boolean);
+            const split = uniqueScopeTokens(splitScopeTokens(fb));
             if (split.length > 1) {
-                return `<span class="dc-meta-multi">${esc(split.join(", "))}</span>`;
+                const joined = split.join(", ");
+                if (opts.ellipsis) {
+                    return `<span class="dc-meta-multi dc-cell-ellipsis" title="${esc(joined)}">${esc(joined)}</span>`;
+                }
+                return `<span class="dc-meta-multi">${esc(joined)}</span>`;
             }
         }
-        return esc(single || fb || "-");
+        const display = single || uniqueScopeTokens(splitScopeTokens(fb)).join(", ") || fb || "-";
+        if (opts.ellipsis) return renderEllipsisCell(display);
+        return esc(display);
     }
 
     function renderDocRows(rows) {
@@ -222,7 +260,7 @@
                     <td>${esc(x.title || "-")}</td>
                     <td>${esc(x.titleEn || "-")}</td>
                     <td>${esc(x.version || "-")}</td>
-                    <td>${renderScopeColumn(x.registrationProjects, "projectName", x.projectName)}</td>
+                    <td class="dc-project-name-col">${renderScopeColumn(x.registrationProjects, "projectName", x.projectName, { ellipsis: true })}</td>
                     <td>${renderScopeColumn(x.registrationProjects, "registeredCountry", x.registeredCountry)}</td>
                     <td>${esc(x.statusLabel || "-")}</td>
                     <td>${x.registrationSubmitted ? "已递交" : "-"}</td>
@@ -310,7 +348,7 @@
                             <th>文件名称</th>
                             <th>英文名</th>
                             <th>版本</th>
-                            <th>所属项目</th>
+                            <th class="dc-project-name-col">所属项目</th>
                             <th>注册国家</th>
                             <th>状态</th>
                             <th>注册递交</th>
@@ -709,27 +747,54 @@
         });
     }
 
+    function populateBatchSheetCategorySelect() {
+        const sel = document.getElementById("dcBatchSheetCategory");
+        if (!sel) return;
+        const options = [...sheetCategoryOptions];
+        sel.innerHTML =
+            '<option value="">请选择</option>' +
+            options.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
+    }
+
     function openBatchEditModal() {
         const ids = getSelectedDocIds();
         if (!ids.length) {
             notify("请先勾选要编辑的记录", "warning");
             return;
         }
-        const countEl = document.getElementById("dcBatchModalCount");
-        if (countEl) countEl.textContent = String(ids.length);
-        ["dcBatchChkStatus", "dcBatchChkRegistration", "dcBatchChkProjectName", "dcBatchChkRegisteredCountry"].forEach((id) => {
-            const el = document.getElementById(id);
-            if (el) el.checked = false;
-        });
-        ["dcBatchStatus", "dcBatchRegistration", "dcBatchProjectName", "dcBatchRegisteredCountry"].forEach((id) => {
-            const el = document.getElementById(id);
-            if (el) {
-                el.disabled = true;
-                if (el.tagName === "SELECT" && id === "dcBatchStatus") el.value = "voided";
-            }
-        });
-        const modalEl = document.getElementById("dcBatchModal");
-        if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        const open = async () => {
+            await ensureSheetCategoryOptions();
+            populateBatchSheetCategorySelect();
+            const countEl = document.getElementById("dcBatchModalCount");
+            if (countEl) countEl.textContent = String(ids.length);
+            [
+                "dcBatchChkSheetCategory",
+                "dcBatchChkStatus",
+                "dcBatchChkRegistration",
+                "dcBatchChkProjectName",
+                "dcBatchChkRegisteredCountry",
+            ].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.checked = false;
+            });
+            [
+                "dcBatchSheetCategory",
+                "dcBatchStatus",
+                "dcBatchRegistration",
+                "dcBatchProjectName",
+                "dcBatchRegisteredCountry",
+            ].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.disabled = true;
+                    if (el.tagName === "SELECT" && id === "dcBatchStatus") el.value = "voided";
+                    if (el.tagName === "SELECT" && id === "dcBatchSheetCategory") el.value = "";
+                }
+            });
+            const modalEl = document.getElementById("dcBatchModal");
+            if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        };
+        open().catch((e) => notify(e.message || "加载分类列表失败", "danger"));
     }
 
     async function saveBatchEdit() {
@@ -739,6 +804,14 @@
             return;
         }
         const payload = { ids };
+        if (document.getElementById("dcBatchChkSheetCategory")?.checked) {
+            const sheetCategory = (document.getElementById("dcBatchSheetCategory")?.value || "").trim();
+            if (!sheetCategory) {
+                notify("请选择要修改的分类", "warning");
+                return;
+            }
+            payload.sheetCategory = sheetCategory;
+        }
         if (document.getElementById("dcBatchChkStatus")?.checked) {
             payload.status = (document.getElementById("dcBatchStatus")?.value || "").trim();
         }
@@ -753,6 +826,7 @@
             payload.registeredCountry = (document.getElementById("dcBatchRegisteredCountry")?.value || "").trim();
         }
         if (
+            !("sheetCategory" in payload) &&
             !("status" in payload) &&
             !("registrationSubmitted" in payload) &&
             !("projectName" in payload) &&
@@ -1304,6 +1378,7 @@
     }
 
     function bindBatchActions() {
+        bindBatchFieldToggle("dcBatchChkSheetCategory", "dcBatchSheetCategory");
         bindBatchFieldToggle("dcBatchChkStatus", "dcBatchStatus");
         bindBatchFieldToggle("dcBatchChkRegistration", "dcBatchRegistration");
         bindBatchFieldToggle("dcBatchChkProjectName", "dcBatchProjectName");
@@ -2123,12 +2198,6 @@
             notify(doneMsg, skipped ? "warning" : "success");
             resetCategoryPages();
             await loadGroupedLedger();
-            if (result.batchId) {
-                const goLogs = window.confirm("是否查看本次导入操作日志？");
-                if (goLogs) {
-                    window.location.href = `/document-control/import-logs?batchId=${encodeURIComponent(result.batchId)}`;
-                }
-            }
         });
     }
 

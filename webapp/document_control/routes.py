@@ -5,12 +5,12 @@ import json
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import requests
 from flask import Blueprint, current_app, jsonify, render_template, request, session
 from openpyxl import load_workbook
-from sqlalchemy import case, func
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 
 from webapp import db
@@ -59,6 +59,8 @@ _DOC_STATUS_CONTROLLED = "controlled"
 _DOC_STATUS_VOIDED = "voided"
 _REGISTRATION_SHEET_NAME = "注册文件"
 _SCOPE_DISPLAY_SEP = ", "
+# 跨 Sheet 增量更新时，以下分类的名称/英文名不被其他 Sheet 覆盖
+_AUTHORITATIVE_NAME_SHEETS = frozenset({"程序文件", "四级表单"})
 
 
 def _parse_registration_submitted_filter(raw: Optional[str]) -> Optional[bool]:
@@ -92,15 +94,34 @@ def _documents_base_query(org_id: str):
     return ControlledDocument.query.filter_by(organization_id=org_id)
 
 
+def _excel_import_batch_sort_at_subquery():
+    """文档所属 Excel 导入批次的最早日志时间（同批次共享，用于批次间排序）。"""
+    return (
+        select(func.min(DocumentControlImportLog.created_at))
+        .where(
+            DocumentControlImportLog.import_batch_id == ControlledDocument.import_batch_id,
+            DocumentControlImportLog.import_batch_id.isnot(None),
+            DocumentControlImportLog.import_batch_id != "",
+        )
+        .correlate(ControlledDocument)
+        .scalar_subquery()
+    )
+
+
 def _document_list_order_clauses(sheet_category: str = ""):
     """台账列表排序。
 
-    - Excel 导入行：按 excel_row_index（注册文件视图用 registration 行序）
-    - 手动/申请编号等无行序记录：排在当前分类最后，按 created_at 升序（新建在下）
+    - Excel 导入：先按导入批次时间升序（后导入批次在后），同批次按 excel 行号
+    - 注册文件视图：注册 Sheet 自身记录用 registration_excel_row_index
+    - 手动/申请编号等无行序记录：排在当前分类最后，按 created_at 升序
     """
     manual_tier = case(
         (ControlledDocument.excel_row_index.is_(None), 1),
         else_=0,
+    )
+    batch_sort_at = func.coalesce(
+        _excel_import_batch_sort_at_subquery(),
+        ControlledDocument.created_at,
     )
     tail = (
         ControlledDocument.created_at.asc(),
@@ -117,6 +138,7 @@ def _document_list_order_clauses(sheet_category: str = ""):
         )
         return (
             manual_tier.asc(),
+            batch_sort_at.asc(),
             sort_key.is_(None),
             sort_key.asc(),
             *tail,
@@ -124,6 +146,7 @@ def _document_list_order_clauses(sheet_category: str = ""):
     return (
         ControlledDocument.sheet_category.asc(),
         manual_tier.asc(),
+        batch_sort_at.asc(),
         ControlledDocument.excel_row_index.is_(None),
         ControlledDocument.excel_row_index.asc(),
         *tail,
@@ -141,6 +164,75 @@ def _split_scope_display_tokens(value: str) -> list[str]:
         return []
     parts = re.split(r"[,，、]|\s*/\s*", text)
     return [p.strip() for p in parts if p and p.strip()]
+
+
+def _unique_scope_tokens(tokens: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in tokens:
+        token = (raw or "").strip()
+        if not token:
+            continue
+        key = token.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
+
+
+def _scope_display_tokens(value: str) -> list[str]:
+    return _unique_scope_tokens(_split_scope_display_tokens(value))
+
+
+def _format_scope_display(value: str) -> str:
+    return _SCOPE_DISPLAY_SEP.join(_scope_display_tokens(value))
+
+
+def _normalize_scope_field_value(value: Any) -> Optional[str]:
+    text = _format_scope_display(str(value or ""))
+    return text or None
+
+
+def _expand_scope_pairs(
+    project_name: str,
+    registered_country: str,
+    project_code: str = "",
+) -> list[tuple[str, str, str]]:
+    pn_tokens = _scope_display_tokens(project_name)
+    rc_tokens = _scope_display_tokens(registered_country)
+    pc_tokens = _scope_display_tokens(project_code)
+    if not pn_tokens and not rc_tokens and not pc_tokens:
+        return []
+
+    if len(pn_tokens) > 1 and len(rc_tokens) > 1:
+        count = max(len(pn_tokens), len(rc_tokens))
+    elif len(pn_tokens) > 1:
+        count = len(pn_tokens)
+    elif len(rc_tokens) > 1:
+        count = len(rc_tokens)
+    elif len(pc_tokens) > 1:
+        count = len(pc_tokens)
+    else:
+        count = 1
+
+    def _token_at(tokens: list[str], index: int) -> str:
+        if not tokens:
+            return ""
+        if len(tokens) == 1:
+            return tokens[0]
+        return tokens[index] if index < len(tokens) else ""
+
+    pairs: list[tuple[str, str, str]] = []
+    for i in range(count):
+        pairs.append(
+            (
+                _token_at(pn_tokens, i),
+                _token_at(rc_tokens, i),
+                _token_at(pc_tokens, i),
+            )
+        )
+    return pairs
 
 
 def _registration_scope_entries(meta: Optional[dict]) -> list[dict[str, Any]]:
@@ -162,20 +254,32 @@ def _add_registration_scope(
     project_name: str,
     registered_country: str,
     row_index: Optional[int],
+    project_code: str = "",
 ) -> dict[str, Any]:
-    pn, rc = _scope_pair_key(project_name, registered_country)
-    if not pn and not rc:
+    pairs = _expand_scope_pairs(project_name, registered_country, project_code)
+    if not pairs:
         return meta
     entries = _registration_scope_entries(meta)
-    keys = {_scope_pair_key(e.get("projectName", ""), e.get("registeredCountry", "")) for e in entries}
-    if (pn, rc) not in keys:
-        entries.append(
-            {
-                "projectName": pn,
-                "registeredCountry": rc,
-                "rowIndex": row_index,
-            }
-        )
+    for pn, rc, pc in pairs:
+        pair = _scope_pair_key(pn, rc)
+        if pair == ("", "") and not pc:
+            continue
+        matched = False
+        for entry in entries:
+            if _scope_pair_key(entry.get("projectName", ""), entry.get("registeredCountry", "")) == pair:
+                matched = True
+                if pc and not (entry.get("projectCode") or "").strip():
+                    entry["projectCode"] = pc
+                break
+        if not matched:
+            entries.append(
+                {
+                    "projectName": pn,
+                    "registeredCountry": rc,
+                    "projectCode": pc,
+                    "rowIndex": row_index,
+                }
+            )
     entries.sort(
         key=lambda e: (
             int(e.get("rowIndex") or 999_999),
@@ -192,30 +296,16 @@ def _capture_primary_scope_to_meta(doc: ControlledDocument, meta: dict[str, Any]
         return meta
     pn = (doc.project_name or "").strip()
     rc = (doc.registered_country or "").strip()
-    if not pn and not rc:
+    pc = (doc.project_code or "").strip()
+    if not pn and not rc and not pc:
         return meta
-    project_tokens = _split_scope_display_tokens(pn) or ([pn] if pn else [])
-    country_tokens = _split_scope_display_tokens(rc) or ([rc] if rc else [])
-    if not project_tokens and not country_tokens:
-        return meta
-    if len(project_tokens) <= 1 and len(country_tokens) <= 1:
-        return _add_registration_scope(
-            meta,
-            project_name=project_tokens[0] if project_tokens else "",
-            registered_country=country_tokens[0] if country_tokens else "",
-            row_index=doc.excel_row_index,
-        )
-    for i, project in enumerate(project_tokens or [""]):
-        country = country_tokens[i] if i < len(country_tokens) else (
-            country_tokens[0] if len(country_tokens) == 1 else ""
-        )
-        meta = _add_registration_scope(
-            meta,
-            project_name=project,
-            registered_country=country,
-            row_index=doc.excel_row_index,
-        )
-    return meta
+    return _add_registration_scope(
+        meta,
+        project_name=pn,
+        registered_country=rc,
+        row_index=doc.excel_row_index,
+        project_code=pc,
+    )
 
 
 def _apply_registration_scope_display(doc: ControlledDocument, meta: dict[str, Any]) -> None:
@@ -224,21 +314,37 @@ def _apply_registration_scope_display(doc: ControlledDocument, meta: dict[str, A
         return
     projects: list[str] = []
     countries: list[str] = []
+    project_codes: list[str] = []
     seen_p: set[str] = set()
     seen_c: set[str] = set()
+    seen_pc: set[str] = set()
     for entry in entries:
-        pn = (entry.get("projectName") or "").strip()
-        rc = (entry.get("registeredCountry") or "").strip()
-        if pn and pn not in seen_p:
-            projects.append(pn)
-            seen_p.add(pn)
-        if rc and rc not in seen_c:
-            countries.append(rc)
-            seen_c.add(rc)
+        for pn, rc, pc in _expand_scope_pairs(
+            entry.get("projectName", "") or "",
+            entry.get("registeredCountry", "") or "",
+            entry.get("projectCode", "") or "",
+        ):
+            if pn:
+                key = pn.casefold()
+                if key not in seen_p:
+                    projects.append(pn)
+                    seen_p.add(key)
+            if rc:
+                key = rc.casefold()
+                if key not in seen_c:
+                    countries.append(rc)
+                    seen_c.add(key)
+            if pc:
+                key = pc.casefold()
+                if key not in seen_pc:
+                    project_codes.append(pc)
+                    seen_pc.add(key)
     if projects:
         doc.project_name = _SCOPE_DISPLAY_SEP.join(projects)
     if countries:
         doc.registered_country = _SCOPE_DISPLAY_SEP.join(countries)
+    if project_codes:
+        doc.project_code = _SCOPE_DISPLAY_SEP.join(project_codes)
 
 
 def _registration_projects_for_doc(
@@ -246,41 +352,57 @@ def _registration_projects_for_doc(
 ) -> list[dict[str, Any]]:
     entries = _registration_scope_entries(meta)
     if entries:
-        return [
-            {
-                "projectName": (e.get("projectName") or "").strip(),
-                "registeredCountry": (e.get("registeredCountry") or "").strip(),
-                "rowIndex": e.get("rowIndex"),
-            }
-            for e in entries
-        ]
+        items: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[tuple[str, str], str]] = set()
+        for e in entries:
+            for pn, rc, pc in _expand_scope_pairs(
+                e.get("projectName", "") or "",
+                e.get("registeredCountry", "") or "",
+                e.get("projectCode", "") or "",
+            ):
+                pair = _scope_pair_key(pn, rc)
+                if pair == ("", "") and not pc:
+                    continue
+                dedupe_key = (pair, pc)
+                if dedupe_key in seen_pairs:
+                    continue
+                seen_pairs.add(dedupe_key)
+                items.append(
+                    {
+                        "projectName": pn,
+                        "registeredCountry": rc,
+                        "projectCode": pc,
+                        "rowIndex": e.get("rowIndex"),
+                    }
+                )
+        return items
     pn = (doc.project_name or "").strip()
     rc = (doc.registered_country or "").strip()
-    project_tokens = _split_scope_display_tokens(pn) or ([pn] if pn else [])
-    country_tokens = _split_scope_display_tokens(rc) or ([rc] if rc else [])
-    if not project_tokens and not country_tokens:
+    pc = (doc.project_code or "").strip()
+    pairs = _expand_scope_pairs(pn, rc, pc)
+    if not pairs:
         return []
-    if len(project_tokens) <= 1 and len(country_tokens) <= 1:
-        return [
-            {
-                "projectName": project_tokens[0] if project_tokens else "",
-                "registeredCountry": country_tokens[0] if country_tokens else "",
-                "rowIndex": doc.excel_row_index,
-            }
-        ]
-    items: list[dict[str, Any]] = []
-    for i, project in enumerate(project_tokens):
-        country = country_tokens[i] if i < len(country_tokens) else (
-            country_tokens[0] if len(country_tokens) == 1 else ""
-        )
-        items.append(
-            {
-                "projectName": project,
-                "registeredCountry": country,
-                "rowIndex": doc.excel_row_index,
-            }
-        )
-    return items
+    return [
+        {
+            "projectName": pair_pn,
+            "registeredCountry": pair_rc,
+            "projectCode": pair_pc,
+            "rowIndex": doc.excel_row_index,
+        }
+        for pair_pn, pair_rc, pair_pc in pairs
+    ]
+
+
+def _scope_display_fields_from_meta(
+    meta: dict[str, Any],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    scratch = ControlledDocument(
+        document_number="-",
+        normalized_document_number="-",
+        title="-",
+    )
+    _apply_registration_scope_display(scratch, meta)
+    return scratch.project_name, scratch.registered_country, scratch.project_code
 
 
 def _set_registration_excel_row_index(doc: ControlledDocument, row_index: Optional[int]) -> None:
@@ -434,8 +556,8 @@ def _serialize_doc(row: ControlledDocument) -> dict[str, Any]:
         "docTypeCode": row.doc_type_code,
         "projectId": row.project_id,
         "projectCode": row.project_code,
-        "projectName": row.project_name,
-        "registeredCountry": row.registered_country,
+        "projectName": _format_scope_display(row.project_name or ""),
+        "registeredCountry": _format_scope_display(row.registered_country or ""),
         "registrationProjects": registration_projects,
         "hasMultipleRegistrationScopes": len(registration_projects) > 1,
         "sheetCategory": row.sheet_category,
@@ -568,9 +690,9 @@ def _apply_document_payload(doc: ControlledDocument, data: dict[str, Any]) -> Op
     if "projectCode" in data:
         doc.project_code = (data.get("projectCode") or "").strip() or None
     if "projectName" in data:
-        doc.project_name = (data.get("projectName") or "").strip() or None
+        doc.project_name = _normalize_scope_field_value(data.get("projectName"))
     if "registeredCountry" in data:
-        doc.registered_country = (data.get("registeredCountry") or "").strip() or None
+        doc.registered_country = _normalize_scope_field_value(data.get("registeredCountry"))
     if "sheetCategory" in data:
         doc.sheet_category = (data.get("sheetCategory") or "").strip() or None
     if "registrationSubmitted" in data:
@@ -814,7 +936,14 @@ def api_document_control_document_detail(doc_id: str):
 
 
 _BATCH_EDIT_FIELDS = frozenset(
-    {"status", "registrationSubmitted", "projectName", "projectCode", "registeredCountry"}
+    {
+        "status",
+        "registrationSubmitted",
+        "projectName",
+        "projectCode",
+        "registeredCountry",
+        "sheetCategory",
+    }
 )
 _BATCH_MAX_SIZE = 500
 
@@ -842,11 +971,13 @@ def _build_batch_update_payload(data: dict[str, Any]) -> tuple[dict[str, Any], O
     if "registrationSubmitted" in data:
         payload["registrationSubmitted"] = bool(data.get("registrationSubmitted"))
     if "projectName" in data:
-        payload["projectName"] = (data.get("projectName") or "").strip()
+        payload["projectName"] = _format_scope_display(str(data.get("projectName") or ""))
     if "projectCode" in data:
         payload["projectCode"] = (data.get("projectCode") or "").strip()
     if "registeredCountry" in data:
-        payload["registeredCountry"] = (data.get("registeredCountry") or "").strip()
+        payload["registeredCountry"] = _format_scope_display(str(data.get("registeredCountry") or ""))
+    if "sheetCategory" in data:
+        payload["sheetCategory"] = (data.get("sheetCategory") or "").strip()
     unknown = set(data.keys()) - {"ids"} - _BATCH_EDIT_FIELDS
     if unknown:
         return {}, f"不支持批量修改字段：{', '.join(sorted(unknown))}"
@@ -996,6 +1127,9 @@ def _import_logs_base_query(org_id: str):
     return DocumentControlImportLog.query.filter_by(organization_id=org_id)
 
 
+_IMPORT_LOG_MAX_BATCHES = 100
+
+
 def _import_log_batch_summaries(
     org_id: str, *, batch_id: Optional[str] = None
 ) -> list[dict[str, Any]]:
@@ -1027,8 +1161,10 @@ def _import_log_batch_summaries(
         )
         .group_by(DocumentControlImportLog.import_batch_id)
         .order_by(func.min(DocumentControlImportLog.created_at).desc())
-        .all()
     )
+    if not batch_id:
+        q = q.limit(_IMPORT_LOG_MAX_BATCHES)
+    rows = q.all()
     summaries: list[dict[str, Any]] = []
     for row in rows:
         summaries.append(
@@ -1371,7 +1507,7 @@ def _allocate_apply_item(
             doc.sheet_category = sheet_cat
         if project_name:
             doc.project_name = project_name
-        reg_country = (data.get("registeredCountry") or "").strip()
+        reg_country = _normalize_scope_field_value(data.get("registeredCountry"))
         if reg_country:
             doc.registered_country = reg_country
         if ctx["title_en"]:
@@ -1734,7 +1870,7 @@ def api_document_control_allocate_apply():
             doc.sheet_category = sheet_cat
         if project_name:
             doc.project_name = project_name
-        reg_country = (data.get("registeredCountry") or "").strip()
+        reg_country = _normalize_scope_field_value(data.get("registeredCountry"))
         if reg_country:
             doc.registered_country = reg_country
         if ctx["title_en"]:
@@ -1959,6 +2095,10 @@ def _excel_import_header_map() -> dict[str, str]:
         "类型": "docTypeCode",
         "项目编号": "projectCode",
         "项目号": "projectCode",
+        "project code": "projectCode",
+        "projectcode": "projectCode",
+        "project no": "projectCode",
+        "projectno": "projectCode",
         "所属项目": "projectName",
         "注册国家": "registeredCountry",
         "状态": "lifecycleStatus",
@@ -2014,15 +2154,77 @@ def _sheet_supports_multi_project_scope(sheet_name: str) -> bool:
     return _is_dhf_sheet(sheet_name)
 
 
+def _excel_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        if text.endswith(".0"):
+            return text[:-2]
+        return text
+    return str(value).strip()
+
+
+def _normalize_excel_header(header: str) -> str:
+    text = (header or "").strip().lower()
+    return re.sub(r"[\s_\-（）()]+", "", text)
+
+
+def _lookup_excel_header_field(header: str, header_map: dict[str, str]) -> Optional[str]:
+    raw = (header or "").strip()
+    if not raw:
+        return None
+    if raw in header_map:
+        return header_map[raw]
+    lower = raw.lower()
+    lower_map = {k.lower(): v for k, v in header_map.items()}
+    if lower in lower_map:
+        return lower_map[lower]
+    compact = _normalize_excel_header(raw)
+    if not compact:
+        return None
+    for key, field in header_map.items():
+        if _normalize_excel_header(key) == compact:
+            return field
+    return None
+
+
+def _excel_row_optional_text(row: dict[str, Any], field: str) -> str:
+    """读取 Excel 行可选列：列不存在或单元格为空时返回空串，增量导入时不覆盖已有值。"""
+    if field not in row:
+        return ""
+    return (row.get(field) or "").strip()
+
+
+def _apply_project_code_from_row(
+    doc: ControlledDocument, row: dict[str, Any]
+) -> bool:
+    """有项目编号时才写入；空值不覆盖台账已有 project_code（兼容无该列的 Sheet）。"""
+    project_code = _excel_row_optional_text(row, "projectCode")
+    if not project_code:
+        return False
+    if project_code != (doc.project_code or "").strip():
+        doc.project_code = project_code
+        return True
+    return False
+
+
 def _merge_project_scope_from_row(
     doc: ControlledDocument,
     meta: dict[str, Any],
     row: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    project_name = (row.get("projectName") or "").strip()
-    registered_country = (row.get("registeredCountry") or "").strip()
+    project_name = _excel_row_optional_text(row, "projectName")
+    registered_country = _excel_row_optional_text(row, "registeredCountry")
+    project_code = _excel_row_optional_text(row, "projectCode")
     updated_fields: list[str] = []
-    if not project_name and not registered_country:
+    if not project_name and not registered_country and not project_code:
         return meta, updated_fields
     sheet_category = (
         (row.get("sheetName") or row.get("sheetCategory") or doc.sheet_category or "").strip()
@@ -2033,14 +2235,16 @@ def _merge_project_scope_from_row(
         or bool(doc.registration_submitted)
     )
     if not use_scope_store:
-        if project_name != (doc.project_name or "").strip():
-            doc.project_name = project_name or None
+        if project_name != _format_scope_display(doc.project_name or ""):
+            doc.project_name = _normalize_scope_field_value(project_name)
             if project_name:
                 updated_fields.append("所属项目")
-        if registered_country != (doc.registered_country or "").strip():
-            doc.registered_country = registered_country or None
+        if registered_country != _format_scope_display(doc.registered_country or ""):
+            doc.registered_country = _normalize_scope_field_value(registered_country)
             if registered_country:
                 updated_fields.append("注册国家")
+        if _apply_project_code_from_row(doc, row):
+            updated_fields.append("项目编号")
         return meta, updated_fields
     meta = _capture_primary_scope_to_meta(doc, meta)
     before = {
@@ -2052,17 +2256,21 @@ def _merge_project_scope_from_row(
         project_name=project_name,
         registered_country=registered_country,
         row_index=_excel_row_index_from_row(row),
+        project_code=project_code,
     )
     after = {
         _scope_pair_key(e.get("projectName", ""), e.get("registeredCountry", ""))
         for e in _registration_scope_entries(meta)
     }
+    prev_code = (doc.project_code or "").strip()
     _apply_registration_scope_display(doc, meta)
     if after != before:
         if project_name:
             updated_fields.append("所属项目")
         if registered_country:
             updated_fields.append("注册国家")
+    if project_code and (doc.project_code or "").strip() != prev_code:
+        updated_fields.append("项目编号")
     return meta, updated_fields
 
 
@@ -2085,14 +2293,16 @@ def _consolidate_sheet_multi_project_scopes(
             norm = normalize_document_number((row.get("documentNumber") or "").strip())
         if not norm:
             continue
-        project_name = (row.get("projectName") or "").strip()
-        registered_country = (row.get("registeredCountry") or "").strip()
-        if not project_name and not registered_country:
+        project_name = _excel_row_optional_text(row, "projectName")
+        registered_country = _excel_row_optional_text(row, "registeredCountry")
+        project_code = _excel_row_optional_text(row, "projectCode")
+        if not project_name and not registered_country and not project_code:
             continue
         scopes_by_norm.setdefault(norm, []).append(
             {
                 "projectName": project_name,
                 "registeredCountry": registered_country,
+                "projectCode": project_code,
                 "rowIndex": _excel_row_index_from_row(row),
             }
         )
@@ -2112,6 +2322,7 @@ def _consolidate_sheet_multi_project_scopes(
                 project_name=scope.get("projectName", ""),
                 registered_country=scope.get("registeredCountry", ""),
                 row_index=scope.get("rowIndex"),
+                project_code=scope.get("projectCode", ""),
             )
         after = {
             _scope_pair_key(e.get("projectName", ""), e.get("registeredCountry", ""))
@@ -2121,6 +2332,12 @@ def _consolidate_sheet_multi_project_scopes(
             _apply_registration_scope_display(doc, meta)
             doc.metadata_json = meta
             doc.updated_at = now_local()
+        elif any((scope.get("projectCode") or "").strip() for scope in scopes):
+            prev_code = (doc.project_code or "").strip()
+            _apply_registration_scope_display(doc, meta)
+            if (doc.project_code or "").strip() != prev_code:
+                doc.metadata_json = meta
+                doc.updated_at = now_local()
 
 
 def _seen_in_file_entry(
@@ -2466,12 +2683,22 @@ def _apply_existing_doc_status(
     )
 
 
+def _excel_update_preserves_authoritative_names(doc: ControlledDocument, row: dict[str, Any]) -> bool:
+    """台账归属程序文件/四级表单时，其他 Sheet 的增量导入不覆盖中文名/英文名。"""
+    doc_cat = (doc.sheet_category or "").strip()
+    if doc_cat not in _AUTHORITATIVE_NAME_SHEETS:
+        return False
+    row_sheet = (row.get("sheetName") or row.get("sheetCategory") or "").strip()
+    return bool(row_sheet) and row_sheet != doc_cat
+
+
 def _apply_excel_row_to_document(
     doc: ControlledDocument, row: dict[str, Any]
 ) -> list[str]:
     updated_fields: list[str] = []
+    preserve_names = _excel_update_preserves_authoritative_names(doc, row)
     title = (row.get("title") or "").strip()
-    if title and (doc.title or "").strip() != title:
+    if not preserve_names and title and (doc.title or "").strip() != title:
         doc.title = title
         updated_fields.append("文件名称")
     version = (row.get("version") or "").strip()
@@ -2480,14 +2707,9 @@ def _apply_excel_row_to_document(
         if version:
             updated_fields.append("版本")
     title_en = (row.get("titleEn") or "").strip()
-    if title_en and title_en != (doc.title_en or "").strip():
+    if not preserve_names and title_en and title_en != (doc.title_en or "").strip():
         doc.title_en = title_en
         updated_fields.append("英文名")
-    project_code = (row.get("projectCode") or "").strip()
-    if project_code != (doc.project_code or "").strip():
-        doc.project_code = project_code or None
-        if project_code:
-            updated_fields.append("项目编号")
     meta = dict(doc.metadata_json or {}) if isinstance(doc.metadata_json, dict) else {}
     meta, scope_updates = _merge_project_scope_from_row(doc, meta, row)
     updated_fields.extend(scope_updates)
@@ -2496,17 +2718,14 @@ def _apply_excel_row_to_document(
         doc.doc_type_code = doc_type or None
         if doc_type:
             updated_fields.append("文件类型")
-    sheet_category = (row.get("sheetName") or row.get("sheetCategory") or "").strip()
-    if sheet_category and sheet_category != (doc.sheet_category or "").strip():
-        doc.sheet_category = sheet_category
-        updated_fields.append("分类")
     row_index = _excel_row_index_from_row(row)
     if row_index is not None:
         doc.excel_row_index = row_index
+    sheet_category = (row.get("sheetName") or row.get("sheetCategory") or "").strip()
     if _is_registration_sheet(sheet_category):
         _set_registration_excel_row_index(doc, row_index)
     batch_id = (row.get("importBatchId") or "").strip()
-    if title_en:
+    if title_en and not preserve_names:
         meta["titleEn"] = title_en
     doc.metadata_json = meta or None
     doc.updated_at = now_local()
@@ -2524,24 +2743,30 @@ def _find_excel_header_row(rows: list[tuple]) -> tuple[int, list[str]] | None:
     return None
 
 
-def _parse_excel_row(headers: list[str], values: list[str]) -> dict[str, Any]:
+def _parse_excel_row(headers: list[str], values: list[Any]) -> dict[str, Any]:
     header_map = _excel_import_header_map()
     data: dict[str, str] = {}
+    present_fields: set[str] = set()
     for header, value in zip(headers, values):
-        key = header_map.get(header) or header_map.get(header.lower())
+        key = _lookup_excel_header_field(header, header_map)
         if key:
-            data[key] = value
-    return {
+            data[key] = _excel_cell_text(value)
+            present_fields.add(key)
+    row: dict[str, Any] = {
         "documentNumber": data.get("documentNumber", ""),
         "title": data.get("title", ""),
         "titleEn": data.get("titleEn", ""),
         "version": data.get("version", ""),
         "docTypeCode": data.get("docTypeCode", ""),
-        "projectCode": data.get("projectCode", ""),
         "projectName": data.get("projectName", ""),
         "registeredCountry": data.get("registeredCountry", ""),
         "lifecycleStatus": data.get("lifecycleStatus", ""),
     }
+    # 项目编号为各 Sheet（SOP/DHF/注册文件等）可选列：无表头时不写入键，增量导入不覆盖已有值
+    if "projectCode" in present_fields:
+        row["projectCode"] = data.get("projectCode", "")
+    row["_excelPresentFields"] = sorted(present_fields)
+    return row
 
 
 def _read_excel_rows(
@@ -2568,7 +2793,7 @@ def _read_excel_rows(
             if sheet_has_status:
                 has_status_column = True
             for idx, row in enumerate(raw_rows[header_idx + 1 :], start=header_idx + 2):
-                values = [str(x).strip() if x is not None else "" for x in row]
+                values = [_excel_cell_text(x) for x in row]
                 if not any(values):
                     continue
                 item = _parse_excel_row(headers, values)
@@ -2581,7 +2806,8 @@ def _read_excel_rows(
         if not all_rows:
             parse_error = (
                 "未识别到有效表头，请确认至少一个工作表含「文件编号/编号」等列"
-                "（支持：文件名称、版本号、状态、所属项目、注册国家）"
+                "（支持：文件名称、版本号、状态、所属项目、注册国家；"
+                "项目编号为可选列，SOP/DHF/注册文件等 Sheet 有则导入、无则跳过）"
             )
     finally:
         wb.close()
@@ -2652,13 +2878,16 @@ def _build_excel_import_preview(
                 file_by_compare_key=file_by_compare_key,
                 existing=existing,
             )
-            project_name = (row.get("projectName") or "").strip()
-            registered_country = (row.get("registeredCountry") or "").strip()
-            if not reg_targets and norm in reg_targets_by_norm and (project_name or registered_country):
+            project_name = _excel_row_optional_text(row, "projectName")
+            registered_country = _excel_row_optional_text(row, "registeredCountry")
+            project_code = _excel_row_optional_text(row, "projectCode")
+            if not reg_targets and norm in reg_targets_by_norm and (
+                project_name or registered_country or project_code
+            ):
                 reg_targets = list(reg_targets_by_norm[norm])
                 row["_registrationTargets"] = reg_targets
                 status = "registration_update"
-                status_detail = "将补充注册所属项目/国家至已关联台账"
+                status_detail = "将补充注册所属项目/国家/项目编号至已关联台账"
             elif reg_targets:
                 status = "registration_update"
                 row["_registrationTargets"] = reg_targets
@@ -2683,8 +2912,8 @@ def _build_excel_import_preview(
                 )
         elif norm in seen_in_file:
             prev = seen_in_file[norm]
-            project_name = (row.get("projectName") or "").strip()
-            registered_country = (row.get("registeredCountry") or "").strip()
+            project_name = _excel_row_optional_text(row, "projectName")
+            registered_country = _excel_row_optional_text(row, "registeredCountry")
             curr_pair = _scope_pair_key(project_name, registered_country)
             prev_pair = _scope_pair_key(
                 (prev.get("projectName") or "").strip(),
@@ -2779,8 +3008,9 @@ def _apply_registration_update(
     doc: ControlledDocument, row: dict[str, Any]
 ) -> None:
     doc.registration_submitted = True
-    project_name = (row.get("projectName") or "").strip()
-    registered_country = (row.get("registeredCountry") or "").strip()
+    project_name = _excel_row_optional_text(row, "projectName")
+    registered_country = _excel_row_optional_text(row, "registeredCountry")
+    project_code = _excel_row_optional_text(row, "projectCode")
     title_en = (row.get("titleEn") or "").strip()
     row_index = _excel_row_index_from_row(row)
     updated_fields: list[str] = []
@@ -2789,18 +3019,22 @@ def _apply_registration_update(
         updated_fields.append("英文名")
     meta = dict(doc.metadata_json or {}) if isinstance(doc.metadata_json, dict) else {}
     meta = _capture_primary_scope_to_meta(doc, meta)
-    if project_name or registered_country:
+    if project_name or registered_country or project_code:
         meta = _add_registration_scope(
             meta,
             project_name=project_name,
             registered_country=registered_country,
             row_index=row_index,
+            project_code=project_code,
         )
+        prev_code = (doc.project_code or "").strip()
         _apply_registration_scope_display(doc, meta)
         if project_name:
             updated_fields.append("所属项目")
         if registered_country:
             updated_fields.append("注册国家")
+        if project_code and (doc.project_code or "").strip() != prev_code:
+            updated_fields.append("项目编号")
     _set_registration_excel_row_index(doc, row_index)
     if title_en:
         meta["titleEn"] = title_en
@@ -2867,34 +3101,28 @@ def _import_excel_rows(
         title_en = (row.get("titleEn") or "").strip()
         row_index = _excel_row_index_from_row(row)
         sheet_cat = (row.get("sheetName") or row.get("sheetCategory") or "").strip() or None
-        project_name = (row.get("projectName") or "").strip()
-        registered_country = (row.get("registeredCountry") or "").strip()
+        project_name = _excel_row_optional_text(row, "projectName")
+        registered_country = _excel_row_optional_text(row, "registeredCountry")
+        project_code = _excel_row_optional_text(row, "projectCode")
         metadata_json: Optional[dict[str, Any]] = {"titleEn": title_en} if title_en else None
-        display_project = project_name or None
-        display_country = registered_country or None
-        if _sheet_supports_multi_project_scope(sheet_cat or "") and (project_name or registered_country):
+        display_project = _normalize_scope_field_value(project_name)
+        display_country = _normalize_scope_field_value(registered_country)
+        display_code = _normalize_scope_field_value(project_code)
+        if _sheet_supports_multi_project_scope(sheet_cat or "") and (
+            project_name or registered_country or project_code
+        ):
             meta: dict[str, Any] = dict(metadata_json or {})
             meta = _add_registration_scope(
                 meta,
                 project_name=project_name,
                 registered_country=registered_country,
                 row_index=row_index,
+                project_code=project_code,
             )
-            projects: list[str] = []
-            countries: list[str] = []
-            seen_p: set[str] = set()
-            seen_c: set[str] = set()
-            for entry in _registration_scope_entries(meta):
-                pn = (entry.get("projectName") or "").strip()
-                rc = (entry.get("registeredCountry") or "").strip()
-                if pn and pn not in seen_p:
-                    projects.append(pn)
-                    seen_p.add(pn)
-                if rc and rc not in seen_c:
-                    countries.append(rc)
-                    seen_c.add(rc)
-            display_project = _SCOPE_DISPLAY_SEP.join(projects) if projects else display_project
-            display_country = _SCOPE_DISPLAY_SEP.join(countries) if countries else display_country
+            scope_project, scope_country, scope_code = _scope_display_fields_from_meta(meta)
+            display_project = scope_project or display_project
+            display_country = scope_country or display_country
+            display_code = scope_code or display_code
             metadata_json = meta
         doc = ControlledDocument(
             organization_id=org_id,
@@ -2904,7 +3132,7 @@ def _import_excel_rows(
             title=(row.get("title") or "").strip() or "未命名文件",
             title_en=title_en or None,
             doc_type_code=(row.get("docTypeCode") or "").strip() or None,
-            project_code=(row.get("projectCode") or "").strip() or None,
+            project_code=display_code,
             project_name=display_project,
             registered_country=display_country,
             sheet_category=sheet_cat,
@@ -2953,7 +3181,7 @@ def _import_excel_rows(
         norm = normalize_document_number(doc_num)
         if not norm:
             continue
-        if norm in updated_in_batch or norm in imported_in_batch:
+        if norm in updated_in_batch:
             continue
         doc = existing.get(norm)
         if not doc:
@@ -2970,8 +3198,10 @@ def _import_excel_rows(
             continue
         row_with_batch = {**row, "importBatchId": batch_id}
         updated_fields = _apply_excel_row_to_document(doc, row_with_batch)
-        doc.import_batch_id = batch_id
-        updated += 1
+        if not doc.import_batch_id:
+            doc.import_batch_id = batch_id
+        if norm not in imported_in_batch:
+            updated += 1
         updated_in_batch.add(norm)
         reason = "增量更新成功"
         if updated_fields:
@@ -3053,13 +3283,15 @@ def _import_excel_rows(
     for row in preview:
         if row.get("status") != "registration_update":
             continue
-        project_name = (row.get("projectName") or "").strip()
-        registered_country = (row.get("registeredCountry") or "").strip()
-        if not project_name and not registered_country:
+        project_name = _excel_row_optional_text(row, "projectName")
+        registered_country = _excel_row_optional_text(row, "registeredCountry")
+        project_code = _excel_row_optional_text(row, "projectCode")
+        if not project_name and not registered_country and not project_code:
             continue
         scope = {
             "projectName": project_name,
             "registeredCountry": registered_country,
+            "projectCode": project_code,
             "rowIndex": _excel_row_index_from_row(row),
         }
         for target in row.get("_registrationTargets") or []:
@@ -3085,6 +3317,7 @@ def _import_excel_rows(
                 project_name=scope.get("projectName", ""),
                 registered_country=scope.get("registeredCountry", ""),
                 row_index=scope.get("rowIndex"),
+                project_code=scope.get("projectCode", ""),
             )
         after = {
             _scope_pair_key(e.get("projectName", ""), e.get("registeredCountry", ""))
@@ -3097,6 +3330,15 @@ def _import_excel_rows(
             meta.setdefault("registrationLinkedAt", now_local().isoformat())
             doc.metadata_json = meta
             doc.updated_at = now_local()
+        elif any((scope.get("projectCode") or "").strip() for scope in scopes):
+            prev_code = (doc.project_code or "").strip()
+            _apply_registration_scope_display(doc, meta)
+            if (doc.project_code or "").strip() != prev_code:
+                doc.registration_submitted = True
+                meta["registrationLinkedFromSheet"] = _REGISTRATION_SHEET_NAME
+                meta.setdefault("registrationLinkedAt", now_local().isoformat())
+                doc.metadata_json = meta
+                doc.updated_at = now_local()
 
     _consolidate_sheet_multi_project_scopes(preview, existing, sheet_name="DHF")
 

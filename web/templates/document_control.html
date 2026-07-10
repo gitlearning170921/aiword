@@ -17,6 +17,17 @@
         line-height: 1.35;
         color: var(--bs-secondary-color, #6c757d);
     }
+    .dc-cell-ellipsis {
+        display: inline-block;
+        max-width: 11rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: bottom;
+    }
+    .dc-project-name-col {
+        max-width: 11rem;
+    }
     .dc-batch-create-table input.form-control-sm {
         min-width: 5.5rem;
     }
@@ -226,6 +237,13 @@
             <div class="modal-body">
                 <p class="small text-muted mb-3">已选 <span id="dcBatchModalCount">0</span> 条；仅勾选要修改的项，未勾选项保持原值。</p>
                 <div class="mb-2 form-check">
+                    <input class="form-check-input" type="checkbox" id="dcBatchChkSheetCategory">
+                    <label class="form-check-label small" for="dcBatchChkSheetCategory">修改分类</label>
+                    <select id="dcBatchSheetCategory" class="form-select form-select-sm mt-1" disabled>
+                        <option value="">请选择</option>
+                    </select>
+                </div>
+                <div class="mb-2 form-check">
                     <input class="form-check-input" type="checkbox" id="dcBatchChkStatus">
                     <label class="form-check-label small" for="dcBatchChkStatus">修改状态</label>
                     <select id="dcBatchStatus" class="form-select form-select-sm mt-1" disabled>
@@ -298,7 +316,8 @@
                     <summary class="text-muted mb-2 user-select-none">从 Excel 粘贴导入（可选）</summary>
                     <p class="text-muted mb-2">
                         复制多行后粘贴（Tab 分隔）；支持表头。解析后将<strong>追加</strong>到上方表单。
-                        列顺序：文件编号、文件名称、英文名、版本、分类、项目编号、所属项目、注册国家、状态、注册递交。
+                        列顺序：文件编号、文件名称、英文名、版本、分类、项目编号（可选）、所属项目、注册国家、状态、注册递交。
+                        SOP、DHF、注册文件等 Sheet 均可含「项目编号」列；无该列时不影响导入。
                     </p>
                     <textarea id="dcBatchCreateInput" class="form-control form-control-sm font-monospace" rows="5" placeholder="PAPUWIS-XXX-001	中文名称	English Title	V1.0	DHF"></textarea>
                     <button type="button" id="dcBatchCreateParseBtn" class="btn btn-outline-secondary btn-sm mt-2">解析并追加到表单</button>

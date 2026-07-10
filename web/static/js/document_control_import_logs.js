@@ -108,7 +108,12 @@
                 </tr>`
             )
             .join("");
-        if (hint) hint.textContent = `共 ${list.length} 个导入批次`;
+        if (hint) {
+            const batchFilter = (document.getElementById("dcImportBatchId")?.value || "").trim();
+            hint.textContent = batchFilter
+                ? `共 ${list.length} 个导入批次`
+                : `最近 ${list.length} 个导入批次（最多 100 批）`;
+        }
     }
 
     function renderLogRows(rows) {
