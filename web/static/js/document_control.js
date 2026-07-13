@@ -9,6 +9,8 @@
     let issueForceNew = false;
     let issuePreviewSeq = 0;
     let issuePreviewTitle = null;
+    let issueSelectedSubtype = null;
+    let issueSubtypeChoices = [];
     let issueBatchItems = [];
     const categoryPages = {};
     let ledgerLoading = false;
@@ -1550,7 +1552,10 @@
         applyBtn.removeAttribute("aria-busy");
         const cfg = selectedIssueCategory();
         const canAuto = !!cfg?.autoAllocatable && !cfg?.disabledReason;
-        applyBtn.disabled = !canAuto || (!!issueDuplicateState && !issueForceNew);
+        applyBtn.disabled =
+            !canAuto ||
+            (!!issueDuplicateState && !issueForceNew) ||
+            (issueSubtypeChoices.length > 1 && !issueSelectedSubtype);
     }
 
     function setIssuePreviewBusy(busy) {
@@ -1599,7 +1604,7 @@
             let hint = cfg.disabledReason || cfg.kbRuleExcerpt || cfg.manualHint || "";
             if (autoSubtype) {
                 hint =
-                    "子类由英文单词首字母自动生成；同名文件子类不变、流水号递增。纯中文将自动翻译为英文。";
+                    "优先复用台账同名受控文件的子类（多个时需单选）。流水号从起始值起取首个未被占用的完整编号（规范化判重，全局唯一）。";
             }
             hintEl.textContent = hint.slice(0, 240);
         }
@@ -1629,7 +1634,10 @@
         issueResolvedTitleEn = null;
         issuePreviewTitle = null;
         issueBatchItems = [];
+        issueSelectedSubtype = null;
+        issueSubtypeChoices = [];
         clearIssueDuplicateUi();
+        clearIssueSubtypeChoiceUi();
         renderIssueBatchResults([]);
         const batchTa = document.getElementById("dcIssueBatchTitles");
         if (batchTa) batchTa.value = "";
@@ -1641,6 +1649,49 @@
     function syncIssueTitleEnHidden(titleEn) {
         const el = document.getElementById("dcIssueTitleEn");
         if (el) el.value = (titleEn || "").trim();
+    }
+
+    function clearIssueSubtypeChoiceUi() {
+        issueSubtypeChoices = [];
+        issueSelectedSubtype = null;
+        document.getElementById("dcIssueSubtypeChoicePanel")?.classList.add("d-none");
+        const optionsEl = document.getElementById("dcIssueSubtypeChoiceOptions");
+        if (optionsEl) optionsEl.innerHTML = "";
+    }
+
+    function showIssueSubtypeChoice(res) {
+        const choices = Array.isArray(res.subtypeChoices) ? res.subtypeChoices : [];
+        issueSubtypeChoices = choices;
+        issueSelectedSubtype = null;
+        previewResult = null;
+        const panel = document.getElementById("dcIssueSubtypeChoicePanel");
+        const textEl = document.getElementById("dcIssueSubtypeChoiceText");
+        const optionsEl = document.getElementById("dcIssueSubtypeChoiceOptions");
+        if (textEl) {
+            textEl.textContent =
+                res.message || "台账中有多个同名文件的子类编号，请选择一个：";
+        }
+        if (optionsEl) {
+            optionsEl.innerHTML = choices
+                .map((choice, idx) => {
+                    const sub = escHtml(choice.subtype || "-");
+                    const num = escHtml(choice.documentNumber || "-");
+                    const cat = escHtml(choice.sheetCategory || "-");
+                    const project = escHtml(choice.projectName || choice.projectCode || "-");
+                    const id = `dcIssueSubtypeChoice${idx}`;
+                    return `<div class="form-check">
+                        <input class="form-check-input dc-issue-subtype-choice" type="radio"
+                            name="dcIssueSubtypeChoice" id="${id}" value="${idx}"
+                            data-subtype="${sub}">
+                        <label class="form-check-label" for="${id}">
+                            子类 ${sub}（项目 ${project}，编号 ${num}，分类 ${cat}）
+                        </label>
+                    </div>`;
+                })
+                .join("");
+        }
+        panel?.classList.remove("d-none");
+        restoreIssueApplyButtonState();
     }
 
     function clearIssueDuplicateUi() {
@@ -1726,6 +1777,12 @@
                 let status = "";
                 if (row.error) {
                     status = `<span class="text-danger">${escHtml(row.error)}</span>`;
+                } else if (row.subtypeChoiceRequired) {
+                    const subs = (row.subtypeChoices || [])
+                        .map((x) => x.subtype)
+                        .filter(Boolean)
+                        .join(" / ");
+                    status = `<span class="text-warning">需选择子类${subs ? `（${escHtml(subs)}）` : ""}</span>`;
                 } else if (row.duplicateTitle) {
                     num = escHtml(row.existingDocument?.documentNumber || "-");
                     status = '<span class="text-warning">需确认同名</span>';
@@ -1787,7 +1844,9 @@
             await batchIssuePreview(document.getElementById("dcIssueBatchPreviewBtn"));
             items = issueBatchItems;
         }
-        const applyItems = items.filter((r) => !r.error && !r.duplicateTitle);
+        const applyItems = items.filter(
+            (r) => !r.error && !r.duplicateTitle && !r.subtypeChoiceRequired
+        );
         if (!applyItems.length) {
             notify("没有可直接申请的项目（请先批量预览，或处理同名项）", "warning");
             return;
@@ -1864,6 +1923,7 @@
             version: (document.getElementById("dcIssueVersion")?.value || "").trim() || null,
             titleEn: issueResolvedTitleEn || hiddenTitleEn || null,
             forceNew: !!issueForceNew,
+            subtype: issueSelectedSubtype || null,
             ...(extra || {}),
         };
     }
@@ -1909,6 +1969,14 @@
             if (seq !== issuePreviewSeq) return;
             issueResolvedTitleEn = res.titleEn || res.item?.title_en || null;
             updateIssueTitleEnPreview(issueResolvedTitleEn, res.titleEnSource);
+            if (res.subtypeChoiceRequired) {
+                previewResult = null;
+                issuePreviewTitle = title;
+                resultEl.textContent = "请先选择台账同名文件使用的子类编号";
+                showIssueSubtypeChoice(res);
+                return;
+            }
+            clearIssueSubtypeChoiceUi();
             if (res.duplicateTitle) {
                 previewResult = null;
                 issuePreviewTitle = title;
@@ -1919,6 +1987,9 @@
             clearIssueDuplicateUi();
             previewResult = res.item || null;
             issuePreviewTitle = title;
+            if (previewResult?.document_number) {
+                document.getElementById("dcIssueSubtypeChoicePanel")?.classList.add("d-none");
+            }
             const subLabel = previewResult?.subtype ? `，子类 ${previewResult.subtype}` : "";
             resultEl.textContent = previewResult?.document_number
                 ? `建议编号：${previewResult.document_number}${subLabel}`
@@ -1957,6 +2028,12 @@
                 resetCategoryPages();
                 await loadGroupedLedger();
             } catch (e) {
+                if (e.status === 400 && e.data?.subtypeChoiceRequired) {
+                    showIssueSubtypeChoice(e.data);
+                    const resultEl = document.getElementById("dcPreviewResult");
+                    if (resultEl) resultEl.textContent = "请先选择台账同名文件使用的子类编号";
+                    return;
+                }
                 if (e.status === 409 && e.data?.duplicateTitle) {
                     showIssueDuplicate(e.data);
                     const resultEl = document.getElementById("dcPreviewResult");
@@ -2020,6 +2097,7 @@
             previewResult = null;
             issuePreviewSeq += 1;
             clearIssueDuplicateUi();
+            clearIssueSubtypeChoiceUi();
             updateIssueTitleEnPreview("", "");
             const resultEl = document.getElementById("dcPreviewResult");
             const title = (document.getElementById("dcIssueTitle")?.value || "").trim();
@@ -2033,6 +2111,14 @@
         document.getElementById("dcIssueTitle")?.addEventListener("blur", () => {
             const title = (document.getElementById("dcIssueTitle")?.value || "").trim();
             if (title) refreshIssuePreview();
+        });
+        document.getElementById("dcIssueSubtypeChoiceOptions")?.addEventListener("change", (e) => {
+            const input = e.target.closest(".dc-issue-subtype-choice");
+            if (!input || !input.checked) return;
+            const idx = parseInt(String(input.value), 10);
+            const choice = Number.isFinite(idx) ? issueSubtypeChoices[idx] : null;
+            issueSelectedSubtype = (choice?.subtype || input.getAttribute("data-subtype") || "").trim() || null;
+            refreshIssuePreview();
         });
         document.getElementById("dcIssueConfirmSameBtn")?.addEventListener("click", () => {
             dismissIssueAsSameDocument();
@@ -2173,6 +2259,7 @@
             const confirmFd = new FormData();
             confirmFd.append("file", file);
             confirmFd.append("confirm", "1");
+            confirmFd.append("confirmProjectCodeSync", "1");
             let result;
             try {
                 setImportButtonBusy(true, "导入中…");

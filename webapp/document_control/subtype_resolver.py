@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from webapp.models import ControlledDocument, NumberAllocation, NumberingScheme
 
@@ -16,6 +16,14 @@ from .numbering_engine import (
 
 _WORD_RE = re.compile(r"[A-Za-z]+")
 _TITLE_WS_RE = re.compile(r"\s+")
+
+
+class SubtypeChoiceRequired(ValueError):
+    """台账中存在多个同名受控文件的子类编号，需用户选择。"""
+
+    def __init__(self, choices: list[dict[str, Any]]):
+        self.choices = choices
+        super().__init__("台账中有多个同名文件的子类编号，请选择")
 
 
 def normalize_title_key(title: str) -> str:
@@ -196,6 +204,80 @@ def _title_keys_same_issue_line(a: str, b: str) -> bool:
     return a in b or b in a
 
 
+def find_controlled_docs_for_exact_title(
+    *,
+    organization_id: str,
+    prefix: str,
+    title: str,
+    project_id: Optional[str] = None,
+) -> list[ControlledDocument]:
+    """受控台账中与填写名称完全相同的文件（不含包含关系）。"""
+    from .numbering_engine import DOC_STATUS_CONTROLLED
+
+    title_key = normalize_title_key(title)
+    if not title_key:
+        return []
+    prefix_norm = normalize_document_number(prefix or "")
+    pid = (project_id or "").strip() or None
+
+    matches: list[ControlledDocument] = []
+    rows = (
+        ControlledDocument.query.filter_by(
+            organization_id=organization_id,
+            status=DOC_STATUS_CONTROLLED,
+        )
+        .order_by(ControlledDocument.created_at.desc(), ControlledDocument.id.desc())
+        .all()
+    )
+    for doc in rows:
+        if normalize_title_key(doc.title or "") != title_key:
+            continue
+        doc_pid = (doc.project_id or "").strip()
+        if pid and doc_pid and doc_pid != pid:
+            continue
+        if prefix_norm:
+            doc_prefix = normalize_document_number(doc.project_code or "")
+            if doc_prefix and doc_prefix != prefix_norm:
+                continue
+        matches.append(doc)
+    return matches
+
+
+def find_subtype_choices_for_exact_title(
+    *,
+    organization_id: str,
+    scheme: NumberingScheme,
+    prefix: str,
+    title: str,
+    project_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """同名受控文件已使用的子类编号（去重，按台账时间新→旧）。"""
+    choices: list[dict[str, Any]] = []
+    seen_sub: set[str] = set()
+    for doc in find_controlled_docs_for_exact_title(
+        organization_id=organization_id,
+        prefix=prefix,
+        title=title,
+        project_id=project_id,
+    ):
+        sub = extract_subtype_from_number(doc.document_number or "", scheme=scheme, prefix=prefix)
+        if not sub or sub in seen_sub:
+            continue
+        seen_sub.add(sub)
+        choices.append(
+            {
+                "subtype": sub,
+                "documentNumber": doc.document_number,
+                "sheetCategory": doc.sheet_category,
+                "title": doc.title,
+                "documentId": doc.id,
+                "projectName": (doc.project_name or "").strip() or None,
+                "projectCode": (doc.project_code or "").strip() or None,
+            }
+        )
+    return choices
+
+
 def find_controlled_docs_for_issue_title(
     *,
     organization_id: str,
@@ -286,6 +368,7 @@ def resolve_subtype_from_title(
     project_code: Optional[str],
     title: str,
     title_en: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> str:
     prefix = (
         _prefix_from_project_code(project_code, scheme.fixed_prefix)
@@ -295,6 +378,18 @@ def resolve_subtype_from_title(
     title_key = normalize_title_key(title)
     if not title_key:
         raise ValueError("请填写文件名称")
+
+    exact_choices = find_subtype_choices_for_exact_title(
+        organization_id=organization_id,
+        scheme=scheme,
+        prefix=prefix,
+        title=title,
+        project_id=project_id,
+    )
+    if exact_choices:
+        if len(exact_choices) == 1:
+            return exact_choices[0]["subtype"]
+        raise SubtypeChoiceRequired(exact_choices)
 
     existing_sub = find_existing_subtype_for_title(
         organization_id=organization_id,
@@ -334,10 +429,29 @@ def resolve_allocation_subtype(
     title_en: Optional[str] = None,
     manual_subtype: Optional[str] = None,
     subtype_from_title: bool = False,
+    project_id: Optional[str] = None,
 ) -> str:
+    prefix = (
+        _prefix_from_project_code(project_code, scheme.fixed_prefix)
+        if (scheme.prefix_source or "fixed") == "from_project_code"
+        else normalize_document_number(scheme.fixed_prefix or scheme.doc_type_code or "DOC")
+    )
     manual = (manual_subtype or "").strip()
     if manual:
-        return normalize_document_number(manual)
+        norm_manual = normalize_document_number(manual)
+        exact_choices = find_subtype_choices_for_exact_title(
+            organization_id=organization_id,
+            scheme=scheme,
+            prefix=prefix,
+            title=title,
+            project_id=project_id,
+        )
+        if len(exact_choices) > 1:
+            allowed = {c["subtype"] for c in exact_choices}
+            if norm_manual not in allowed:
+                allowed_text = ", ".join(sorted(allowed))
+                raise ValueError(f"请选择台账同名文件已有的子类编号：{allowed_text}")
+        return norm_manual
     if subtype_from_title or _scheme_uses_subtype_template(scheme):
         return resolve_subtype_from_title(
             organization_id=organization_id,
@@ -345,5 +459,6 @@ def resolve_allocation_subtype(
             project_code=project_code,
             title=title,
             title_en=title_en,
+            project_id=project_id,
         )
     return normalize_document_number(scheme.doc_type_code or "DOC")

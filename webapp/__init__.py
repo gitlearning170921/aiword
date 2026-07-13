@@ -938,8 +938,34 @@ def ensure_schema(app: Flask):
             "ALTER TABLE projects ADD COLUMN progress_updated_at DATETIME",
             "ALTER TABLE projects ADD COLUMN progress_updated_at DATETIME",
         ),
+        (
+            "project_code",
+            "ALTER TABLE projects ADD COLUMN project_code VARCHAR(128)",
+            "ALTER TABLE projects ADD COLUMN project_code VARCHAR(128)",
+        ),
     ):
         ensure_column("projects", col, ddl_s, ddl_m)
+
+    try:
+        from .models import Project, UploadRecord
+
+        for p in Project.query.filter(
+            (Project.project_code.is_(None)) | (Project.project_code == "")
+        ).all():
+            ur = (
+                UploadRecord.query.filter_by(project_id=p.id)
+                .filter(
+                    UploadRecord.project_code.isnot(None),
+                    UploadRecord.project_code != "",
+                )
+                .order_by(UploadRecord.updated_at.desc())
+                .first()
+            )
+            if ur and (ur.project_code or "").strip():
+                p.project_code = ur.project_code.strip()
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
 
     insp_rbac = inspect(engine)
     rbac_tables = insp_rbac.get_table_names()

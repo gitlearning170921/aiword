@@ -84,6 +84,26 @@ const App = {
             }
             
             if (response.status === 409 && data && data.needsConfirmation) {
+                if (data.confirmationKind === "projectCodeSync") {
+                    const confirmSync = window.confirm(data.message || "项目编号将同步更新相关记录，是否继续？");
+                    if (!confirmSync) {
+                        throw new Error("用户取消了项目编号修改");
+                    }
+                    if (options.body instanceof FormData) {
+                        const fd = new FormData();
+                        for (const [k, v] of options.body.entries()) {
+                            fd.append(k, v);
+                        }
+                        fd.set("confirmProjectCodeSync", "true");
+                        return this.request(url, { ...options, body: fd });
+                    }
+                    const payload = JSON.parse(options.body || "{}");
+                    payload.confirmProjectCodeSync = true;
+                    return this.request(url, {
+                        ...options,
+                        body: JSON.stringify(payload),
+                    });
+                }
                 if (options.body instanceof FormData) {
                     const err = new Error(data.message || "存在重复记录，是否替换？");
                     err.is409Replace = true;
@@ -602,11 +622,32 @@ function _projectEntryMetaStorageKey(projectSelectValue) {
     return PROJECT_ENTRY_META_LS_PREFIX + String(projectSelectValue || "").trim();
 }
 
+function _resolveProjectCodeForRecord(record) {
+    const pid = record?.projectId != null && record.projectId !== "" ? String(record.projectId).trim() : "";
+    const meta = pid
+        ? (projectsMetaCache || []).find((p) => String(p.id || "").trim() === pid)
+        : null;
+    return (meta?.projectCode || record?.projectCode || "").trim();
+}
+
+function _syncProjectCodeDisplayFromProject(block) {
+    if (!block) return;
+    const sel = block.querySelector(".project-name");
+    const display = block.querySelector(".project-code-display");
+    if (!display) return;
+    const pid = (sel?.value || "").trim();
+    const meta = (projectsMetaCache || []).find((p) => String(p.id || "").trim() === pid);
+    const code = (meta?.projectCode || "").trim();
+    display.textContent = code || "—";
+    display.title = code
+        ? "项目编号在「项目管理」中维护"
+        : "尚未在项目管理中设置项目编号";
+}
+
 function _captureProjectMetaFromBlock(block) {
     if (!block) return {};
     const g = (sel) => (block.querySelector(sel)?.value || "").trim();
     return {
-        projectCode: g(".project-code"),
         projectNotes: g(".project-notes"),
         businessSide: g(".project-business-side"),
         product: g(".project-product"),
@@ -624,7 +665,6 @@ function _applyProjectMetaToBlock(block, meta) {
         const v = meta[key];
         if (el && v != null && String(v).trim() !== "") el.value = String(v).trim();
     };
-    set(".project-code", "projectCode");
     set(".project-notes", "projectNotes");
     set(".project-business-side", "businessSide");
     set(".project-product", "product");
@@ -632,6 +672,7 @@ function _applyProjectMetaToBlock(block, meta) {
     set(".project-registered-product-name", "registeredProductName");
     set(".project-model", "model");
     set(".project-registration-version", "registrationVersion");
+    _syncProjectCodeDisplayFromProject(block);
 }
 
 function _loadProjectMetaForEntry(projectSelectValue, projectKey) {
@@ -886,6 +927,7 @@ function _bindProjectEntryBlock(block) {
         if (pid) {
             _applyProjectMetaToBlock(block, _loadProjectMetaForEntry(pid, projectKey));
         }
+        _syncProjectCodeDisplayFromProject(block);
         const regCountry = opt?.dataset?.registeredCountry || "";
         if (countryInputEl && regCountry && !(countryInputEl.value || "").trim()) {
             countryInputEl.value = regCountry;
@@ -895,7 +937,7 @@ function _bindProjectEntryBlock(block) {
     });
 
     block.querySelectorAll(
-        ".project-code, .project-notes, .project-business-side, .project-product, .project-country, .project-registered-product-name, .project-model, .project-registration-version"
+        ".project-notes, .project-business-side, .project-product, .project-country, .project-registered-product-name, .project-model, .project-registration-version"
     ).forEach((inp) => {
         inp.addEventListener("change", () => _persistProjectMetaFromBlock(block));
         inp.addEventListener("blur", () => _persistProjectMetaFromBlock(block));
@@ -957,7 +999,7 @@ function createProjectBlock() {
                     <div class="col-md-3"><label class="form-label small">国家</label><input type="text" class="form-control form-control-sm project-country" placeholder="国家"></div>
                 </div>
                 <div class="row g-2 mb-0">
-                    <div class="col-md-3"><label class="form-label small">项目编号</label><input type="text" class="form-control form-control-sm project-code" placeholder="项目编号"></div>
+                    <div class="col-md-3"><label class="form-label small">项目编号</label><div class="form-control form-control-sm bg-light project-code-display text-muted" title="项目编号在「项目管理」中维护">—</div></div>
                     <div class="col-md-3"><label class="form-label small">项目备注</label><input type="text" class="form-control form-control-sm project-notes" placeholder="项目备注"></div>
                     <div class="col-md-2"><label class="form-label small">注册产品名称</label><input type="text" class="form-control form-control-sm project-registered-product-name" placeholder="注册产品名称"></div>
                     <div class="col-md-2"><label class="form-label small">型号</label><input type="text" class="form-control form-control-sm project-model" placeholder="型号"></div>
@@ -1012,6 +1054,7 @@ function createProjectBlock() {
     const tbody = block.querySelector(".project-task-tbody");
     _populateProjectNameSelect(block.querySelector(".project-name"));
     _bindProjectEntryBlock(block);
+    _syncProjectCodeDisplayFromProject(block);
     tbody.appendChild(createTaskRowUnderProject(block));
     _updateProjectBlockTaskRowCount(block);
     return block;
@@ -1144,12 +1187,12 @@ function createTaskRowUnderProject(projectBlock) {
             return;
         }
         const fileName = (tr.querySelector(".task-filename")?.value || "").trim();
-        const projectCode = (projectBlock?.querySelector(".project-code")?.value || "").trim();
+        const projectCode = (projectBlock?.querySelector(".project-code-display")?.textContent || "").trim();
         const docInput = tr.querySelector(".task-document-number");
         try {
             const q = new URLSearchParams();
             if (fileName) q.set("keyword", fileName);
-            if (projectCode) q.set("projectCode", projectCode);
+            if (projectCode && projectCode !== "—") q.set("projectCode", projectCode);
             const searchRes = await App.request(`/api/document-control/search?${q.toString()}`);
             const first = (searchRes.items || [])[0];
             if (first && first.documentNumber) {
@@ -1172,7 +1215,7 @@ function createTaskRowUnderProject(projectBlock) {
             const preview = await App.request("/api/document-control/allocate/preview", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ schemeId: firstScheme.id, projectCode: projectCode || null }),
+                body: JSON.stringify({ schemeId: firstScheme.id, projectCode: (projectCode && projectCode !== "—") ? projectCode : null }),
             });
             const suggested = preview?.item?.document_number || "";
             if (!suggested) {
@@ -1446,7 +1489,7 @@ async function initUploadPage() {
             const rows = await App.request("/api/projects");
             projectsMetaCache = rows || [];
             projectsManageBody.innerHTML = "";
-            const tableColspan = page13SuperAdminFlag ? 13 : 12;
+            const tableColspan = page13SuperAdminFlag ? 14 : 13;
             if (!rows || !rows.length) {
                 const emptyHtml =
                     window.ScopeBar && ScopeBar.emptyTableRow
@@ -1483,6 +1526,7 @@ async function initUploadPage() {
                 tr.innerHTML = `
                     <td class="text-center align-middle"><input type="checkbox" class="form-check-input project-row-checkbox" data-id="${esc(p.id)}"></td>
                     <td class="p1-cell-name fw-medium" title="${esc(p.name)}"><span class="p1-cell-text">${esc(p.name)}</span>${linkHint}</td>
+                    <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-code-input" value="${esc(p.projectCode || "")}" placeholder="—" title="项目编号在此维护"></td>
                     <td class="p1-cell-field"><select class="form-select form-select-sm project-registered-country-select">${buildRegisteredCountryOptionsHtml(p.registeredCountry || "", true)}</select></td>
                     <td class="p1-cell-field"><input type="text" class="form-control form-control-sm project-registered-category-input" value="${esc(p.registeredCategory || "")}" placeholder="—"></td>
                     <td class="p1-cell-org">${buildProjectOrganizationSelectHtml(p.organizationId, orgLocked)}</td>
@@ -1522,6 +1566,7 @@ async function initUploadPage() {
                     const tr = projectsManageBody.querySelector(`.btn-save-project[data-id="${id}"]`)?.closest("tr");
                     const rcInput = tr ? tr.querySelector(".project-registered-country-select") : null;
                     const catInput = tr ? tr.querySelector(".project-registered-category-input") : null;
+                    const codeInput = tr ? tr.querySelector(".project-code-input") : null;
                     const ptInput = tr ? tr.querySelector(".project-product-type-input") : null;
                     const certInput = tr ? tr.querySelector(".project-cert-date-input") : null;
                     const subInput = tr ? tr.querySelector(".project-submit-date-input") : null;
@@ -1533,6 +1578,7 @@ async function initUploadPage() {
                         status: stEl ? stEl.value : "active",
                         registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
                         registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                        projectCode: codeInput ? (codeInput.value || "").trim() || null : null,
                         productType: ptInput ? (ptInput.value || "").trim() : null,
                         expectedCertificationDate: certInput ? certInput.value || null : null,
                         expectedSubmissionDate: subInput ? subInput.value || null : null,
@@ -1552,6 +1598,17 @@ async function initUploadPage() {
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify(bodyPayload),
                         });
+                        const cacheIdx = (projectsMetaCache || []).findIndex((p) => String(p.id || "") === String(id));
+                        if (cacheIdx >= 0) {
+                            if (bodyPayload.projectCode !== undefined) {
+                                projectsMetaCache[cacheIdx].projectCode = bodyPayload.projectCode;
+                            }
+                        }
+                        const docBtn = tr?.querySelector(".btn-project-doc-control");
+                        if (docBtn && bodyPayload.projectCode !== undefined) {
+                            docBtn.dataset.code = bodyPayload.projectCode || "";
+                        }
+                        document.querySelectorAll(".project-block").forEach((b) => _syncProjectCodeDisplayFromProject(b));
                         App.notify(typeof window.ufText === "function" ? window.ufText("项目已更新（已与页面0 同步）", "项目已更新（已与公司总览同步）") : "项目已更新（已与公司总览同步）", "success");
                         // 单个保存时不要刷新整张表/任务列表，避免把页面1录入块中已填内容冲掉。
                         // 仅刷新“任务录入”的项目下拉选项（会保持当前已选值）。
@@ -1632,7 +1689,7 @@ async function initUploadPage() {
             updateBatchProjectsBtnState();
             applyProjectsFilter();
         } catch (e) {
-            projectsManageBody.innerHTML = '<tr><td colspan="11" class="text-danger small">加载失败</td></tr>';
+            projectsManageBody.innerHTML = '<tr><td colspan="14" class="text-danger small">加载失败</td></tr>';
         }
     };
     document.getElementById("refreshProjectsBtn")?.addEventListener("click", loadProjectsManage);
@@ -1681,6 +1738,7 @@ async function initUploadPage() {
                 status: stEl ? stEl.value : "active",
                 registeredCountry: rcEl ? (rcEl.value || "").trim() : null,
                 registeredCategory: catEl ? (catEl.value || "").trim() : null,
+                projectCode: (document.getElementById("newProjectCode")?.value || "").trim() || null,
                 includeInCompanyRegistry: !!document.getElementById("newProjectIncludeCompany")?.checked,
                 productType: (document.getElementById("newProjectProductType")?.value || "").trim() || null,
                 expectedCertificationDate: document.getElementById("newProjectCertDate")?.value || null,
@@ -1694,6 +1752,8 @@ async function initUploadPage() {
                 body: JSON.stringify(payload),
             });
             if (nameEl) nameEl.value = "";
+            const newCodeEl = document.getElementById("newProjectCode");
+            if (newCodeEl) newCodeEl.value = "";
             if (catEl) catEl.value = "";
             if (document.getElementById("newProjectProductType")) {
                 document.getElementById("newProjectProductType").value = "";
@@ -1758,6 +1818,7 @@ async function initUploadPage() {
             const stEl = projectsManageBody.querySelector(`.project-status-select[data-id="${id}"]`);
             const rcInput = tr.querySelector(".project-registered-country-select");
             const catInput = tr.querySelector(".project-registered-category-input");
+            const codeInput = tr.querySelector(".project-code-input");
             const ptInput = tr.querySelector(".project-product-type-input");
             const certInput = tr.querySelector(".project-cert-date-input");
             const subInput = tr.querySelector(".project-submit-date-input");
@@ -1770,6 +1831,7 @@ async function initUploadPage() {
                 status: stEl.value,
                 registeredCountry: rcInput ? (rcInput.value || "").trim() : null,
                 registeredCategory: catInput ? (catInput.value || "").trim() : null,
+                projectCode: codeInput ? (codeInput.value || "").trim() || null : null,
                 productType: ptInput ? (ptInput.value || "").trim() : null,
                 expectedCertificationDate: certInput ? certInput.value || null : null,
                 expectedSubmissionDate: subInput ? subInput.value || null : null,
@@ -1795,6 +1857,7 @@ async function initUploadPage() {
             });
             App.notify(res.message || "已保存", "success");
             loadProjectsManage();
+            document.querySelectorAll(".project-block").forEach((b) => _syncProjectCodeDisplayFromProject(b));
             loadRecordsList();
             if (window.loadMyTasks) window.loadMyTasks();
             if (window.loadSummary) window.loadSummary();
@@ -1809,6 +1872,7 @@ async function initUploadPage() {
                     });
                     App.notify(res2.message || "已保存", "success");
                     loadProjectsManage();
+                    document.querySelectorAll(".project-block").forEach((b) => _syncProjectCodeDisplayFromProject(b));
                     loadRecordsList();
                     if (window.loadMyTasks) window.loadMyTasks();
                     if (window.loadSummary) window.loadSummary();
@@ -2059,7 +2123,6 @@ async function initUploadPage() {
                 const projectSelect = block.querySelector(".project-name");
                 const projectId = (projectSelect?.value || "").trim();
                 const projectKey = (projectSelect?.options?.[projectSelect.selectedIndex]?.dataset?.projectKey || "").trim();
-                const projectCode = (block.querySelector(".project-code")?.value || "").trim() || "";
                 const businessSide = (block.querySelector(".project-business-side")?.value || "").trim() || "";
                 const product = (block.querySelector(".project-product")?.value || "").trim() || "";
                 const country = (block.querySelector(".project-country")?.value || "").trim() || "";
@@ -2109,7 +2172,6 @@ async function initUploadPage() {
                     formData.append("projectId", projectId);
                     formData.append("projectName", projectKey);
                     formData.append("fileName", fileName);
-                    formData.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
                     formData.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
                     if (taskType) formData.append("taskType", taskType);
                     formData.append("author", author);
@@ -2172,7 +2234,6 @@ async function initUploadPage() {
                             formDataReplace.append("projectId", projectId);
                             formDataReplace.append("projectName", projectKey);
                             formDataReplace.append("fileName", fileName);
-                            formDataReplace.append("projectCode", (block.querySelector(".project-code")?.value || "").trim());
                             formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
                             if (taskType) formDataReplace.append("taskType", taskType);
                             formDataReplace.append("author", author);
@@ -3030,7 +3091,10 @@ async function openEditRecordModal(r) {
     if (tplFileEl) tplFileEl.value = "";
     document.getElementById("editRecordProject").value = r.projectName || "";
     const projectCodeEl = document.getElementById("editRecordProjectCode");
-    if (projectCodeEl) projectCodeEl.value = r.projectCode || "";
+    if (projectCodeEl) {
+        const code = _resolveProjectCodeForRecord(r);
+        projectCodeEl.value = code || "—";
+    }
     document.getElementById("editRecordFile").value = r.fileName || "";
     const taskTypeEl = document.getElementById("editRecordTaskType");
     const taskCategoryEl = document.getElementById("editRecordTaskCategory");
@@ -3250,8 +3314,6 @@ function initEditRecordModal() {
             belongingModule: document.getElementById("editRecordBelongingModule")?.value?.trim() || null,
             projectNotes: document.getElementById("editRecordProjectNotes")?.value?.trim() || null,
         };
-        const projectCodeEl = document.getElementById("editRecordProjectCode");
-        if (projectCodeEl) payload.projectCode = projectCodeEl.value.trim() || null;
         const documentNumberEl = document.getElementById("editRecordDocumentNumber");
         if (documentNumberEl) payload.documentNumber = documentNumberEl.value.trim() || null;
         const fileVersionEl = document.getElementById("editRecordFileVersion");
@@ -3298,7 +3360,6 @@ function initEditRecordModal() {
                 fd.append("registeredProductName", payload.registeredProductName || "");
                 fd.append("model", payload.model || "");
                 fd.append("registrationVersion", payload.registrationVersion || "");
-                if (projectCodeEl) fd.append("projectCode", projectCodeEl.value.trim());
                 if (documentNumberEl) fd.append("documentNumber", documentNumberEl.value.trim());
                 if (fileVersionEl) fd.append("fileVersion", fileVersionEl.value.trim());
                 if (docDisplayDateEl) fd.append("documentDisplayDate", docDisplayDateEl.value || "");
@@ -3444,8 +3505,6 @@ function initBatchEditRecords() {
             .map((id) => allRecordsCache.find((x) => String(x.id) === String(id)))
             .filter(Boolean);
         const first = records[0];
-        const projectCodeVal = first ? (first.projectCode || "").trim() : "";
-        const sameProjectCode = projectCodeVal !== "" && records.every((r) => ((r.projectCode || "").trim()) === projectCodeVal);
         const taskTypeVal = first ? (first.taskType || "").trim() : "";
         const authorVal = first ? (first.author || "").trim() : "";
         const assigneeVal = first ? (first.assigneeName || first.author || "").trim() : "";
@@ -3525,7 +3584,23 @@ function initBatchEditRecords() {
             }
         }
         const batchEditProjectCodeEl = document.getElementById("batchEditProjectCode");
-        if (batchEditProjectCodeEl) batchEditProjectCodeEl.value = sameProjectCode ? projectCodeVal : "";
+        if (batchEditProjectCodeEl) {
+            const pid = first?.projectId != null && first.projectId !== "" ? String(first.projectId).trim() : "";
+            const meta = pid
+                ? (projectsMetaCache || []).find((p) => String(p.id || "").trim() === pid)
+                : null;
+            const fromMeta = (meta?.projectCode || "").trim();
+            const codes = [...new Set(records.map((r) => _resolveProjectCodeForRecord(r)).filter(Boolean))];
+            let display = "—";
+            if (fromMeta) {
+                display = fromMeta;
+            } else if (codes.length === 1) {
+                display = codes[0];
+            } else if (codes.length > 1) {
+                display = "（所选任务编号不一致）";
+            }
+            batchEditProjectCodeEl.value = display;
+        }
         await loadAuthorCandidates({ projectId: first?.projectId || "" });
         ensureBatchEditAuthorPicker();
         setAuthorPickerValue("batchEditAuthorPicker", sameAuthor ? authorVal : "");
@@ -3645,7 +3720,6 @@ function initBatchEditRecords() {
         const idsStr = batchEditModal?.dataset.batchEditIds;
         if (!idsStr) return;
         const ids = idsStr.split(",").filter(Boolean);
-        const projectCode = (document.getElementById("batchEditProjectCode")?.value || "").trim();
         const taskType = (document.getElementById("batchEditTaskType")?.value || "").trim();
         const author = (document.querySelector("#batchEditAuthorPicker .task-author")?.value || "").trim();
         const assignee = (document.getElementById("batchEditAssignee")?.value || "").trim();
@@ -3668,7 +3742,6 @@ function initBatchEditRecords() {
         const notes = (document.getElementById("batchEditNotes")?.value || "").trim();
         const displayedAuthor = (document.getElementById("batchEditDisplayedAuthor")?.value || "").trim();
         const payload = {};
-        if (projectCode !== "") payload.projectCode = projectCode;
         if (taskType !== "") payload.taskType = taskType;
         if (belongingModule !== "") payload.belongingModule = belongingModule;
         if (author !== "") payload.author = author;
@@ -7488,16 +7561,17 @@ function ensurePage2ColumnToggle() {
     initColumnToggle("colToggleBtn2", "colToggleMenu2", "myTasksTable");
 }
 
-function initColumnToggle(btnId, menuId, tableId) {
+function initColumnToggle(btnId, menuId, tableId, options) {
     const btn = document.getElementById(btnId);
     const menu = document.getElementById(menuId);
     const table = document.getElementById(tableId);
     if (!btn || !menu || !table) return;
+    const opts = options || {};
     const storeKey = table.dataset.colStoreKey || ("colVis_" + tableId + "_v2");
     const ths = table.querySelectorAll("thead tr th[data-col]");
     if (!ths.length) return;
 
-    const colNames = {
+    const baseColNames = {
         seq: "序号", observerTeam: "项目组", observerPerson: "负责人",
         projectName: "项目名称", projectCode: "项目编号",
         fileName: "文件名称", taskType: "任务类型", belongingModule: "所属模块",
@@ -7508,11 +7582,20 @@ function initColumnToggle(btnId, menuId, tableId) {
         projectNotes: "项目备注", notes: "下发任务备注", executionNotes: "执行任务备注",
         registeredProductName: "注册产品名称", model: "型号", registrationVersion: "注册版本号",
         op: "操作", docLink: "文档链接/地址", completionStatus: "完成状态",
+        check: "选择", name: "项目", category: "注册类别", org: "所属公司", team: "所属项目组",
+        productType: "产品类型", certDate: "预计取证", submitDate: "预计递交", progress: "进度描述",
+        priority: "优先级", status: "状态", actions: "操作",
     };
-    const defaultHiddenCols = ["projectCode", "documentNumber", "fileVersion", "docDisplayDate", "reviewer", "approver", "displayedAuthor", "projectNotes", "registeredProductName", "model", "registrationVersion"];
+    const colNames = { ...baseColNames, ...(opts.colNames || {}) };
+    const defaultHiddenCols = opts.defaultHiddenCols || [
+        "projectCode", "documentNumber", "fileVersion", "docDisplayDate", "reviewer", "approver",
+        "displayedAuthor", "projectNotes", "registeredProductName", "model", "registrationVersion",
+    ];
+    const alwaysVisible = new Set(opts.alwaysVisibleCols || ["op"]);
     const defaultHidden = new Set(defaultHiddenCols);
 
     function getDefaultVisible(col) {
+        if (alwaysVisible.has(col)) return true;
         return !defaultHidden.has(col);
     }
 
@@ -7538,7 +7621,12 @@ function initColumnToggle(btnId, menuId, tableId) {
         colList.forEach(({ col, colIndex, visible }) => {
             allRows.forEach((tr) => {
                 const cell = tr.children[colIndex];
-                if (cell) cell.style.display = visible ? "" : "none";
+                if (!cell) return;
+                if (alwaysVisible.has(col)) {
+                    cell.style.display = "";
+                    return;
+                }
+                cell.style.display = visible ? "" : "none";
             });
         });
         const state = {};
@@ -7550,7 +7638,7 @@ function initColumnToggle(btnId, menuId, tableId) {
     }
 
     function syncCheckboxes() {
-        const items = colList.filter(c => c.col !== "op");
+        const items = colList.filter((c) => c.col !== "op" && c.col !== "actions" && !alwaysVisible.has(c.col));
         const cbs = menu.querySelectorAll("input[type=checkbox]");
         items.forEach((item, idx) => {
             if (cbs[idx]) cbs[idx].checked = item.visible;
@@ -7584,7 +7672,7 @@ function initColumnToggle(btnId, menuId, tableId) {
     menu.appendChild(btnRow);
 
     colList.forEach((item) => {
-        if (item.col === "op") return;
+        if (item.col === "op" || item.col === "actions" || alwaysVisible.has(item.col)) return;
         const label = document.createElement("label");
         const cb = document.createElement("input");
         cb.type = "checkbox";
@@ -7873,4 +7961,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     initColumnToggle("colToggleBtn1", "colToggleMenu1", "recordsTable");
     initColumnToggle("colToggleBtn3", "colToggleMenu3", "detailTable");
+    initColumnToggle("colToggleBtnProjects", "colToggleMenuProjects", "page1ProjectsTable", {
+        defaultHiddenCols: ["productType", "certDate", "submitDate", "progress"],
+        alwaysVisibleCols: ["check", "actions"],
+    });
 });

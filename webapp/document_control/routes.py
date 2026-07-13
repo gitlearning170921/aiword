@@ -49,8 +49,13 @@ from .numbering_engine import (
     scheme_allocation_prefix,
     _scheme_uses_subtype_template,
 )
-from .subtype_resolver import find_existing_controlled_doc_by_title
+from .subtype_resolver import SubtypeChoiceRequired, find_existing_controlled_doc_by_title
 from .title_en_resolver import persist_title_en_cache, resolve_title_en_for_issue
+from webapp.project_code_uniqueness import gate_project_code_save
+from .project_link import (
+    backfill_controlled_document_project_ids,
+    link_controlled_document_to_page1_project,
+)
 
 
 document_control_bp = Blueprint("document_control", __name__)
@@ -88,6 +93,37 @@ def _parse_status_filter(raw: Optional[str]) -> Optional[str]:
     if value in (_DOC_STATUS_CONTROLLED, "active", "受控"):
         return _DOC_STATUS_CONTROLLED
     return None
+
+
+def _project_code_gate_response(
+    org_id: Optional[str],
+    project_code: Optional[str],
+    *,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
+    exclude_upload_id: Optional[str] = None,
+    exclude_document_id: Optional[str] = None,
+    confirm_sync: bool = False,
+):
+    code = (project_code or "").strip()
+    if not code:
+        return None
+    gate = gate_project_code_save(
+        org_id,
+        code,
+        project_id=project_id,
+        project_name=project_name,
+        registered_country=registered_country,
+        exclude_upload_id=exclude_upload_id,
+        exclude_document_id=exclude_document_id,
+        confirm_sync=confirm_sync,
+    )
+    if not gate:
+        return None
+    if gate[0] == "confirm":
+        return jsonify(gate[1]), 409
+    return jsonify({"message": gate[1]}), 409
 
 
 def _documents_base_query(org_id: str):
@@ -648,6 +684,11 @@ def api_document_control_documents():
     if wall is not None:
         return wall
     org_id, _ = _org_context()
+    try:
+        backfill_controlled_document_project_ids(org_id)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
     q = _documents_base_query(org_id)
     q = _apply_document_filters(q)
     sheet_category = (request.args.get("sheetCategory") or "").strip()
@@ -733,6 +774,18 @@ def api_document_control_create_document():
         conflict_msg = controlled_number_conflict_message(org_id, norm)
         if conflict_msg:
             return jsonify({"message": conflict_msg}), 409
+    pc = (data.get("projectCode") or "").strip() or None
+    if pc:
+        blocked = _project_code_gate_response(
+            org_id,
+            pc,
+            project_id=(data.get("projectId") or "").strip() or None,
+            project_name=(data.get("projectName") or "").strip() or None,
+            registered_country=(data.get("registeredCountry") or "").strip() or None,
+            confirm_sync=bool(data.get("confirmProjectCodeSync")),
+        )
+        if blocked:
+            return blocked
     title_en = (data.get("titleEn") or "").strip()
     metadata_json = {"titleEn": title_en} if title_en else None
     doc = ControlledDocument(
@@ -743,6 +796,7 @@ def api_document_control_create_document():
         title=title,
         title_en=title_en or None,
         doc_type_code=(data.get("docTypeCode") or "").strip() or None,
+        project_id=(data.get("projectId") or "").strip() or None,
         project_code=(data.get("projectCode") or "").strip() or None,
         project_name=(data.get("projectName") or "").strip() or None,
         registered_country=(data.get("registeredCountry") or "").strip() or None,
@@ -755,6 +809,8 @@ def api_document_control_create_document():
     )
     try:
         db.session.add(doc)
+        db.session.flush()
+        link_controlled_document_to_page1_project(doc, organization_id=org_id)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
@@ -768,6 +824,7 @@ def _controlled_document_from_manual_item(
     *,
     user_id: Optional[str],
     existing_norms: Optional[set[str]] = None,
+    confirm_sync: bool = False,
 ) -> tuple[Optional[ControlledDocument], Optional[str]]:
     doc_num = (data.get("documentNumber") or "").strip()
     norm = normalize_document_number(doc_num)
@@ -783,6 +840,20 @@ def _controlled_document_from_manual_item(
         conflict_msg = controlled_number_conflict_message(org_id, norm)
         if conflict_msg:
             return None, conflict_msg
+    pc = (data.get("projectCode") or "").strip() or None
+    if pc:
+        gate = gate_project_code_save(
+            org_id,
+            pc,
+            project_id=(data.get("projectId") or "").strip() or None,
+            project_name=(data.get("projectName") or "").strip() or None,
+            registered_country=(data.get("registeredCountry") or "").strip() or None,
+            confirm_sync=confirm_sync,
+        )
+        if gate:
+            if gate[0] == "confirm":
+                return None, gate[1].get("message") or "项目编号变更需确认"
+            return None, gate[1]
     title_en = (data.get("titleEn") or "").strip()
     metadata_json = {"titleEn": title_en} if title_en else None
     doc = ControlledDocument(
@@ -793,6 +864,7 @@ def _controlled_document_from_manual_item(
         title=title,
         title_en=title_en or None,
         doc_type_code=(data.get("docTypeCode") or "").strip() or None,
+        project_id=(data.get("projectId") or "").strip() or None,
         project_code=(data.get("projectCode") or "").strip() or None,
         project_name=(data.get("projectName") or "").strip() or None,
         registered_country=(data.get("registeredCountry") or "").strip() or None,
@@ -835,11 +907,27 @@ def api_document_control_batch_create():
     if not items:
         return jsonify({"message": "请提供要新增的记录"}), 400
     user_id = (session.get("user_id") or "").strip() or None
+    confirm_sync = bool(data.get("confirmProjectCodeSync"))
     existing = _load_existing_docs_by_norm(org_id)
     batch_norms: set[str] = set()
     created = 0
     failed: list[dict[str, Any]] = []
     created_items: list[dict[str, Any]] = []
+    if not confirm_sync:
+        for item in items:
+            pc = (item.get("projectCode") or "").strip()
+            if not pc:
+                continue
+            blocked = _project_code_gate_response(
+                org_id,
+                pc,
+                project_id=(item.get("projectId") or "").strip() or None,
+                project_name=(item.get("projectName") or "").strip() or None,
+                registered_country=(item.get("registeredCountry") or "").strip() or None,
+                confirm_sync=False,
+            )
+            if blocked:
+                return blocked
     for index, item in enumerate(items):
         doc_num = (item.get("documentNumber") or "").strip()
         norm = normalize_document_number(doc_num)
@@ -856,6 +944,7 @@ def api_document_control_batch_create():
             item,
             user_id=user_id,
             existing_norms=batch_norms,
+            confirm_sync=confirm_sync,
         )
         if err or not doc:
             failed.append({**row_ref, "message": err or "无法创建"})
@@ -864,6 +953,7 @@ def api_document_control_batch_create():
             with db.session.begin_nested():
                 db.session.add(doc)
                 db.session.flush()
+            link_controlled_document_to_page1_project(doc, organization_id=org_id)
         except IntegrityError:
             failed.append({**row_ref, "message": "受控编号已存在（并发冲突）"})
             continue
@@ -921,6 +1011,18 @@ def api_document_control_document_detail(doc_id: str):
     err = _apply_document_payload(doc, data)
     if err:
         return jsonify({"message": err}), 400
+    if "projectCode" in data and (doc.project_code or "").strip():
+        blocked = _project_code_gate_response(
+            org_id,
+            doc.project_code,
+            project_id=doc.project_id,
+            project_name=doc.project_name,
+            registered_country=doc.registered_country,
+            exclude_document_id=doc.id,
+            confirm_sync=bool(data.get("confirmProjectCodeSync")),
+        )
+        if blocked:
+            return blocked
     if doc.status == _DOC_STATUS_CONTROLLED:
         conflict_msg = controlled_number_conflict_message(
             org_id, doc.normalized_document_number, exclude_id=doc.id
@@ -928,6 +1030,7 @@ def api_document_control_document_detail(doc_id: str):
         if conflict_msg:
             return jsonify({"message": conflict_msg}), 409
     try:
+        link_controlled_document_to_page1_project(doc, organization_id=org_id)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
@@ -1002,6 +1105,7 @@ def api_document_control_batch_update():
     payload, err = _build_batch_update_payload(data)
     if err:
         return jsonify({"message": err}), 400
+    confirm_sync = bool(data.get("confirmProjectCodeSync"))
     docs = (
         ControlledDocument.query.filter(
             ControlledDocument.organization_id == org_id,
@@ -1015,6 +1119,29 @@ def api_document_control_batch_update():
     failed: list[dict[str, str]] = []
     for doc_id in missing:
         failed.append({"id": doc_id, "message": "记录不存在"})
+    if "projectCode" in payload and (payload.get("projectCode") or "").strip() and not confirm_sync:
+        for doc in docs:
+            eff_name = (
+                payload.get("projectName")
+                if "projectName" in payload
+                else doc.project_name
+            )
+            eff_country = (
+                payload.get("registeredCountry")
+                if "registeredCountry" in payload
+                else doc.registered_country
+            )
+            blocked = _project_code_gate_response(
+                org_id,
+                payload["projectCode"],
+                project_id=doc.project_id,
+                project_name=eff_name,
+                registered_country=eff_country,
+                exclude_document_id=doc.id,
+                confirm_sync=False,
+            )
+            if blocked:
+                return blocked
     for doc in docs:
         next_status = (
             payload["status"]
@@ -1027,6 +1154,31 @@ def api_document_control_batch_update():
             )
             if conflict_msg:
                 failed.append({"id": doc.id, "message": conflict_msg})
+                continue
+        if "projectCode" in payload and (payload.get("projectCode") or "").strip():
+            eff_name = (
+                payload.get("projectName")
+                if "projectName" in payload
+                else doc.project_name
+            )
+            eff_country = (
+                payload.get("registeredCountry")
+                if "registeredCountry" in payload
+                else doc.registered_country
+            )
+            gate = gate_project_code_save(
+                org_id,
+                payload["projectCode"],
+                project_id=doc.project_id,
+                project_name=eff_name,
+                registered_country=eff_country,
+                exclude_document_id=doc.id,
+                confirm_sync=confirm_sync,
+            )
+            if gate:
+                if gate[0] == "confirm":
+                    return jsonify(gate[1]), 409
+                failed.append({"id": doc.id, "message": gate[1]})
                 continue
         apply_err = _apply_document_payload(doc, payload)
         if apply_err:
@@ -1333,6 +1485,7 @@ def _prepare_issue_number_inputs(
     title = (data.get("title") or "").strip()
     project_code = (data.get("projectCode") or "").strip() or None
     project_id = (data.get("projectId") or "").strip() or None
+    project_name = (data.get("projectName") or "").strip() or None
     subtype_from_title = bool((cfg or {}).get("subtypeFromTitle")) or _scheme_uses_subtype_template(scheme)
     force_new = bool(data.get("forceNew"))
     confirm_same = bool(data.get("confirmSameDocument"))
@@ -1364,6 +1517,7 @@ def _prepare_issue_number_inputs(
         "title": title,
         "project_code": project_code,
         "project_id": project_id,
+        "project_name": project_name,
         "subtype_from_title": subtype_from_title,
         "force_new": force_new,
         "confirm_same": confirm_same,
@@ -1416,11 +1570,21 @@ def _allocate_preview_item(
             scheme=scheme,
             project_code=ctx["project_code"],
             project_id=ctx["project_id"],
+            project_name=ctx["project_name"],
             subtype=ctx["manual_subtype"],
             title=ctx["title"],
             title_en=ctx["title_en"],
             subtype_from_title=ctx["subtype_from_title"],
         )
+    except SubtypeChoiceRequired as exc:
+        return {
+            "title": title,
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+            "subtypeChoiceRequired": True,
+            "subtypeChoices": exc.choices,
+            "message": str(exc),
+        }
     except ValueError as exc:
         return {"title": title, "titleEn": ctx["title_en"], "titleEnSource": ctx["title_en_source"], "error": str(exc)}
     if ctx["title_en"] and not info.get("title_en"):
@@ -1486,6 +1650,7 @@ def _allocate_apply_item(
             requested_title=title,
             project_id=ctx["project_id"],
             project_code=ctx["project_code"],
+            project_name=ctx["project_name"],
             user_id=(session.get("user_id") or "").strip() or None,
             reserved_minutes=int(data.get("reservedMinutes") or 30),
             subtype=ctx["manual_subtype"],
@@ -1523,6 +1688,17 @@ def _allocate_apply_item(
             "titleEn": ctx["title_en"],
             "titleEnSource": ctx["title_en_source"],
             "message": f"已申请编号：{doc.document_number}",
+        }
+    except SubtypeChoiceRequired as exc:
+        db.session.rollback()
+        return {
+            "title": title,
+            "ok": False,
+            "subtypeChoiceRequired": True,
+            "subtypeChoices": exc.choices,
+            "titleEn": ctx["title_en"],
+            "titleEnSource": ctx["title_en_source"],
+            "message": str(exc),
         }
     except ValueError as exc:
         db.session.rollback()
@@ -1617,10 +1793,25 @@ def api_document_control_allocate_preview():
             scheme=scheme,
             project_code=ctx["project_code"],
             project_id=ctx["project_id"],
+            project_name=ctx["project_name"],
             subtype=ctx["manual_subtype"],
             title=ctx["title"],
             title_en=ctx["title_en"],
             subtype_from_title=ctx["subtype_from_title"],
+        )
+    except SubtypeChoiceRequired as exc:
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        return jsonify(
+            {
+                "subtypeChoiceRequired": True,
+                "subtypeChoices": exc.choices,
+                "titleEn": ctx["title_en"],
+                "titleEnSource": ctx["title_en_source"],
+                "message": str(exc),
+            }
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
@@ -1658,16 +1849,22 @@ def _page1_projects_for_issue(org_id: str) -> list[dict[str, Any]]:
     rows = filter_projects_by_organization(rows)
     pid_list = [p.id for p in rows if p.id]
     code_by_pid: dict[str, str] = {}
+    for p in rows:
+        pc = (getattr(p, "project_code", None) or "").strip()
+        if p.id and pc:
+            code_by_pid[p.id] = pc
     if pid_list:
-        for ur in (
-            UploadRecord.query.filter(UploadRecord.project_id.in_(pid_list))
-            .order_by(UploadRecord.updated_at.desc())
-            .all()
-        ):
-            pid = (ur.project_id or "").strip()
-            pc = (ur.project_code or "").strip()
-            if pid and pc and pid not in code_by_pid:
-                code_by_pid[pid] = pc
+        missing = [x for x in pid_list if x not in code_by_pid]
+        if missing:
+            for ur in (
+                UploadRecord.query.filter(UploadRecord.project_id.in_(missing))
+                .order_by(UploadRecord.updated_at.desc())
+                .all()
+            ):
+                pid = (ur.project_id or "").strip()
+                pc = (ur.project_code or "").strip()
+                if pid and pc and pid not in code_by_pid:
+                    code_by_pid[pid] = pc
     items: list[dict[str, Any]] = []
     for p in rows:
         name = (p.name or "").strip()
@@ -1849,6 +2046,7 @@ def api_document_control_allocate_apply():
             requested_title=title,
             project_id=ctx["project_id"],
             project_code=ctx["project_code"],
+            project_name=ctx["project_name"],
             user_id=(session.get("user_id") or "").strip() or None,
             reserved_minutes=int(data.get("reservedMinutes") or 30),
             subtype=ctx["manual_subtype"],
@@ -1888,6 +2086,17 @@ def api_document_control_allocate_apply():
                 "titleEnSource": ctx["title_en_source"],
             }
         )
+    except SubtypeChoiceRequired as exc:
+        db.session.rollback()
+        return jsonify(
+            {
+                "subtypeChoiceRequired": True,
+                "subtypeChoices": exc.choices,
+                "titleEn": ctx["title_en"],
+                "titleEnSource": ctx["title_en_source"],
+                "message": str(exc),
+            }
+        ), 400
     except ValueError as exc:
         db.session.rollback()
         msg = str(exc)
@@ -1939,6 +2148,7 @@ def api_document_control_allocate_batch_preview():
     dup_count = 0
     err_count = 0
     ready_count = 0
+    subtype_choice_count = 0
     for title in titles:
         row = _allocate_preview_item(
             org_id,
@@ -1953,6 +2163,8 @@ def api_document_control_allocate_batch_preview():
             err_count += 1
         elif row.get("duplicateTitle"):
             dup_count += 1
+        elif row.get("subtypeChoiceRequired"):
+            subtype_choice_count += 1
         else:
             ready_count += 1
     try:
@@ -1967,6 +2179,7 @@ def api_document_control_allocate_batch_preview():
             "readyCount": ready_count,
             "duplicateCount": dup_count,
             "errorCount": err_count,
+            "subtypeChoiceCount": subtype_choice_count,
         }
     )
 
@@ -3045,8 +3258,42 @@ def _apply_registration_update(
     row["_registrationUpdatedFields"] = updated_fields
 
 
+def _import_project_code_block_reason(
+    org_id: str,
+    project_code: str,
+    *,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
+    exclude_document_id: Optional[str] = None,
+    confirm_sync: bool = False,
+) -> Optional[str]:
+    gate = gate_project_code_save(
+        org_id,
+        project_code,
+        project_id=project_id,
+        project_name=project_name,
+        registered_country=registered_country,
+        exclude_document_id=exclude_document_id,
+        confirm_sync=confirm_sync,
+    )
+    if not gate:
+        return None
+    if gate[0] == "confirm":
+        payload = gate[1] if isinstance(gate[1], dict) else {}
+        return (payload.get("message") or "项目编号变更需确认") + (
+            "；请先在页面确认修改后再导入，或导入时勾选同步确认"
+        )
+    return str(gate[1])
+
+
 def _import_excel_rows(
-    preview: list[dict[str, Any]], org_id: str, batch_id: str, user_id: Optional[str]
+    preview: list[dict[str, Any]],
+    org_id: str,
+    batch_id: str,
+    user_id: Optional[str],
+    *,
+    confirm_project_code_sync: bool = False,
 ) -> tuple[int, int, int, list[dict[str, Any]]]:
     existing = _load_existing_docs_by_norm(org_id)
     imported_in_batch: set[str] = set()
@@ -3108,6 +3355,25 @@ def _import_excel_rows(
         display_project = _normalize_scope_field_value(project_name)
         display_country = _normalize_scope_field_value(registered_country)
         display_code = _normalize_scope_field_value(project_code)
+        if display_code:
+            pcode_conflict = _import_project_code_block_reason(
+                org_id,
+                display_code,
+                project_name=display_project or project_name,
+                registered_country=display_country or registered_country,
+                confirm_sync=confirm_project_code_sync,
+            )
+            if pcode_conflict:
+                skipped.append({**row, "skipReason": pcode_conflict})
+                _append_import_log(
+                    org_id=org_id,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                    event_type="import_skip",
+                    row=row,
+                    reason=pcode_conflict,
+                )
+                continue
         if _sheet_supports_multi_project_scope(sheet_cat or "") and (
             project_name or registered_country or project_code
         ):
@@ -3148,6 +3414,7 @@ def _import_excel_rows(
             with db.session.begin_nested():
                 db.session.add(doc)
                 db.session.flush()
+                link_controlled_document_to_page1_project(doc, organization_id=org_id)
         except IntegrityError:
             reason = "受控编号已存在（并发冲突）"
             skipped.append({**row, "skipReason": reason})
@@ -3197,7 +3464,40 @@ def _import_excel_rows(
             )
             continue
         row_with_batch = {**row, "importBatchId": batch_id}
+        project_code_in_row = _excel_row_optional_text(row, "projectCode")
+        if project_code_in_row:
+            project_name_in_row = _excel_row_optional_text(row, "projectName")
+            country_in_row = _excel_row_optional_text(row, "registeredCountry")
+            eff_name = (
+                _normalize_scope_field_value(project_name_in_row)
+                or doc.project_name
+            )
+            eff_country = (
+                _normalize_scope_field_value(country_in_row)
+                or doc.registered_country
+            )
+            pcode_conflict = _import_project_code_block_reason(
+                org_id,
+                project_code_in_row,
+                project_id=doc.project_id,
+                project_name=eff_name,
+                registered_country=eff_country,
+                exclude_document_id=doc.id,
+                confirm_sync=confirm_project_code_sync,
+            )
+            if pcode_conflict:
+                skipped.append({**row, "skipReason": pcode_conflict})
+                _append_import_log(
+                    org_id=org_id,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                    event_type="import_fail",
+                    row=row,
+                    reason=pcode_conflict,
+                )
+                continue
         updated_fields = _apply_excel_row_to_document(doc, row_with_batch)
+        link_controlled_document_to_page1_project(doc, organization_id=org_id)
         if not doc.import_batch_id:
             doc.import_batch_id = batch_id
         if norm not in imported_in_batch:
@@ -3239,6 +3539,38 @@ def _import_excel_rows(
                 continue
             if (doc.status or "").strip().lower() == _DOC_STATUS_VOIDED:
                 continue
+            project_code_in_row = _excel_row_optional_text(row, "projectCode")
+            if project_code_in_row:
+                project_name_in_row = _excel_row_optional_text(row, "projectName")
+                country_in_row = _excel_row_optional_text(row, "registeredCountry")
+                eff_name = (
+                    _normalize_scope_field_value(project_name_in_row)
+                    or doc.project_name
+                )
+                eff_country = (
+                    _normalize_scope_field_value(country_in_row)
+                    or doc.registered_country
+                )
+                pcode_conflict = _import_project_code_block_reason(
+                    org_id,
+                    project_code_in_row,
+                    project_id=doc.project_id,
+                    project_name=eff_name,
+                    registered_country=eff_country,
+                    exclude_document_id=doc.id,
+                    confirm_sync=confirm_project_code_sync,
+                )
+                if pcode_conflict:
+                    skipped.append({**row, "skipReason": pcode_conflict})
+                    _append_import_log(
+                        org_id=org_id,
+                        batch_id=batch_id,
+                        user_id=user_id,
+                        event_type="import_fail",
+                        row=row,
+                        reason=pcode_conflict,
+                    )
+                    continue
             link_row = {
                 **row,
                 "statusDetail": (
@@ -3388,6 +3720,9 @@ def api_document_control_import_excel():
         "true",
         "yes",
     )
+    confirm_project_code_sync = str(
+        request.form.get("confirmProjectCodeSync") or ""
+    ).strip().lower() in ("1", "true", "yes", "on")
     imported = 0
     updated = 0
     registration_updated = 0
@@ -3397,7 +3732,11 @@ def api_document_control_import_excel():
         user_id = (session.get("user_id") or "").strip() or None
         try:
             imported, updated, registration_updated, skipped = _import_excel_rows(
-                preview, org_id, batch_id, user_id
+                preview,
+                org_id,
+                batch_id,
+                user_id,
+                confirm_project_code_sync=confirm_project_code_sync or confirm,
             )
             _save_org_sheet_order(org_id, sheet_order)
         except IntegrityError:

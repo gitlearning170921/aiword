@@ -47,6 +47,10 @@
                 <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="{% if is_page13_super_admin %}从页面0 同步分配到本账号所属项目组的公司总览项目{% else %}从公司总览同步分配到本账号所属项目组的项目{% endif %}">{% if is_page13_super_admin %}同步页面0项目{% else %}同步公司总览项目{% endif %}</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
+                <div class="position-relative d-inline-block">
+                    <button type="button" class="btn btn-sm btn-outline-secondary col-toggle-btn" id="colToggleBtnProjects" title="列设置">列设置</button>
+                    <div class="col-toggle-menu" id="colToggleMenuProjects"></div>
+                </div>
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
             </div>
         </div>
@@ -88,24 +92,25 @@
             {% endif %}
         </div>
         <div class="table-responsive page1-projects-table-wrap">
-            <table class="table table-sm table-hover align-middle mb-0 page1-projects-table">
+            <table class="table table-sm table-hover align-middle mb-0 page1-projects-table" id="page1ProjectsTable" data-col-store-key="colVis_page1Projects_v1">
                 <thead class="table-light sticky-top">
                 <tr>
-                    <th class="p1-col-check text-center"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
-                    <th class="p1-col-name">项目</th>
-                    <th class="p1-col-country">注册国家</th>
-                    <th class="p1-col-category">注册类别</th>
-                    <th class="p1-col-org">所属公司</th>
+                    <th class="p1-col-check text-center" data-col="check"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>
+                    <th class="p1-col-name" data-col="name">项目</th>
+                    <th class="p1-col-code" data-col="projectCode">项目编号</th>
+                    <th class="p1-col-country" data-col="country">注册国家</th>
+                    <th class="p1-col-category" data-col="category">注册类别</th>
+                    <th class="p1-col-org" data-col="org">所属公司</th>
                     {% if is_page13_super_admin %}
-                    <th class="p1-col-team">所属项目组</th>
+                    <th class="p1-col-team" data-col="team">所属项目组</th>
                     {% endif %}
-                    <th class="p1-col-type">产品类型</th>
-                    <th class="p1-col-date">预计取证</th>
-                    <th class="p1-col-date">预计递交</th>
-                    <th class="p1-col-progress">进度描述</th>
-                    <th class="p1-col-priority">优先级</th>
-                    <th class="p1-col-status">状态</th>
-                    <th class="p1-col-actions text-end">操作</th>
+                    <th class="p1-col-type" data-col="productType">产品类型</th>
+                    <th class="p1-col-date" data-col="certDate">预计取证</th>
+                    <th class="p1-col-date" data-col="submitDate">预计递交</th>
+                    <th class="p1-col-progress" data-col="progress">进度描述</th>
+                    <th class="p1-col-priority" data-col="priority">优先级</th>
+                    <th class="p1-col-status" data-col="status">状态</th>
+                    <th class="p1-col-actions text-end" data-col="actions">操作</th>
                 </tr>
                 </thead>
                 <tbody id="projectsManageBody"></tbody>
@@ -126,6 +131,10 @@
                         <div class="mb-2">
                             <label class="form-label small mb-0">项目名称 *</label>
                             <input type="text" class="form-control form-control-sm" id="newProjectName" placeholder="输入项目名称…">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-0">项目编号</label>
+                            <input type="text" class="form-control form-control-sm" id="newProjectCode" placeholder="可选，在项目管理中维护">
                         </div>
                         <div class="row g-2 mb-2">
                             <div class="col-md-6">
@@ -533,7 +542,8 @@
                     <div class="row g-2">
                             <div class="col-md-6">
                                 <label class="form-label small">项目编号</label>
-                                <input type="text" class="form-control form-control-sm" id="editRecordProjectCode" placeholder="可选">
+                                <input type="text" class="form-control form-control-sm bg-light" id="editRecordProjectCode" readonly placeholder="—" title="项目编号在「项目管理」中维护，此处仅展示">
+                                <p class="form-text small text-muted mb-0">如需修改，请前往上方「项目管理」</p>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small">文件编号</label>
@@ -665,7 +675,8 @@
                         <div class="row g-2">
                             <div class="col-md-6">
                                 <label class="form-label small">项目编号</label>
-                                <input type="text" class="form-control form-control-sm" id="batchEditProjectCode" placeholder="留空不修改">
+                                <input type="text" class="form-control form-control-sm bg-light" id="batchEditProjectCode" readonly placeholder="—" title="项目编号在「项目管理」中维护，此处仅展示">
+                                <p class="form-text small text-muted mb-0">如需修改，请前往上方「项目管理」</p>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label small">文件编号</label>

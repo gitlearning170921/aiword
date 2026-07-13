@@ -296,6 +296,7 @@ class Project(db.Model):
     organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
     company_project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
     name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    project_code: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     # 注册国家/注册类别用于区分“同名不同项目”的唯一性
     registered_country: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     registered_category: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)

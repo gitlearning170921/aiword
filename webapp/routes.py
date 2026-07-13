@@ -9814,7 +9814,6 @@ def api_audit_statuses_delete(item_id: str):
 def api_upload():
     project_id = (request.form.get("projectId") or "").strip() or None
     project_name = request.form.get("projectName", "").strip()
-    project_code = request.form.get("projectCode", "").strip() or None
     document_number = request.form.get("documentNumber", "").strip() or None
     file_name = request.form.get("fileName", "").strip()
     task_type = request.form.get("taskType", "").strip() or None
@@ -9864,6 +9863,7 @@ def api_upload():
     from .project_teams import resolve_organization_id_for_project_upload
 
     upload_org_id = resolve_organization_id_for_project_upload(project_id=project_id)
+    project_code = _project_code_from_project(project_id)
 
     upload_record_id = (request.form.get("uploadRecordId") or request.form.get("uploadId") or "").strip()
     existing: UploadRecord | None = None
@@ -10012,8 +10012,9 @@ def api_upload():
             existing.product = product
         if _sent("country"):
             existing.country = country
-        if _sent("projectCode"):
-            existing.project_code = project_code
+        resolved_pc = _project_code_from_project(project_id or existing.project_id)
+        if resolved_pc is not None:
+            existing.project_code = resolved_pc
         if _sent("documentNumber"):
             existing.document_number = document_number
         if _sent("fileVersion"):
@@ -10498,6 +10499,28 @@ def api_uploads_import():
         proj = by_label.get(project_name) or by_name.get(project_name)
         import_org_id = resolve_organization_id_for_project_upload(project=proj)
 
+        import_pcode = (d.get("project_code") or "").strip() or None
+        if import_pcode:
+            from webapp.project_code_uniqueness import gate_project_code_save
+
+            gate = gate_project_code_save(
+                import_org_id,
+                import_pcode,
+                project_id=getattr(proj, "id", None) if proj else None,
+                project_name=project_name,
+                registered_country=(d.get("country") or "").strip() or getattr(proj, "registered_country", None),
+                exclude_upload_id=existing.id if existing else None,
+                confirm_sync=False,
+            )
+            if gate:
+                msg = (
+                    gate[1].get("message")
+                    if gate[0] == "confirm" and isinstance(gate[1], dict)
+                    else gate[1]
+                )
+                errors.append({"row": row_no, "message": msg})
+                continue
+
         try:
             if existing:
                 existing.organization_id = import_org_id
@@ -10760,7 +10783,6 @@ def api_upload_update(upload_id: str):
     product = (data.get("product") or "").strip() or None
     country = (data.get("country") or "").strip() or None
     assignee_name = (data.get("assigneeName") or "").strip() or None
-    project_code = (data.get("projectCode") or "").strip() or None
     document_number = (data.get("documentNumber") or "").strip() or None
     file_version = (data.get("fileVersion") or "").strip() or None
     document_display_date_str = (data.get("documentDisplayDate") or "").strip() or None
@@ -10821,8 +10843,7 @@ def api_upload_update(upload_id: str):
         upload.notes = s or None
     if has_project_notes:
         upload.project_notes = project_notes
-    if project_code is not None:
-        upload.project_code = project_code
+    _refresh_upload_project_code_from_project(upload)
     if document_number is not None:
         upload.document_number = document_number
     if file_version is not None:
@@ -11535,6 +11556,62 @@ def _sync_company_registry_projects_to_page1() -> int:
     return n
 
 
+def _parse_confirm_project_code_sync(data: dict) -> bool:
+    v = data.get("confirmProjectCodeSync")
+    if isinstance(v, bool):
+        return v
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _project_code_from_project(project_id: Optional[str]) -> Optional[str]:
+    pid = (project_id or "").strip()
+    if not pid:
+        return None
+    row = Project.query.get(pid)
+    if not row:
+        return None
+    code = (getattr(row, "project_code", None) or "").strip()
+    return code or None
+
+
+def _refresh_upload_project_code_from_project(upload: UploadRecord) -> None:
+    pid = (upload.project_id or "").strip()
+    if not pid:
+        return
+    upload.project_code = _project_code_from_project(pid)
+
+
+def _gate_and_apply_project_code(
+    row: Project,
+    new_code_raw,
+    *,
+    confirm_sync: bool,
+):
+    from webapp.project_code_uniqueness import gate_project_code_save
+
+    new_code = (new_code_raw or "").strip() or None
+    org_id = str(getattr(row, "organization_id", "") or "").strip() or None
+    if new_code:
+        gate = gate_project_code_save(
+            org_id,
+            new_code,
+            project_id=row.id,
+            project_name=row.name,
+            registered_country=getattr(row, "registered_country", None),
+            confirm_sync=confirm_sync,
+        )
+        if gate:
+            if gate[0] == "confirm":
+                return jsonify(gate[1]), 409
+            return jsonify({"message": gate[1]}), 409
+    row.project_code = new_code
+    if new_code:
+        for ur in UploadRecord.query.filter_by(project_id=row.id).all():
+            if not (ur.project_code or "").strip():
+                ur.project_code = new_code
+    return None
+
+
 def _project_api_item(
     p: Project,
     *,
@@ -11556,6 +11633,7 @@ def _project_api_item(
         "organizationName": org_map.get(org_id) if org_id else None,
         "organizationIdLocked": org_locked,
         "name": p.name,
+        "projectCode": getattr(p, "project_code", None),
         "registeredCountry": getattr(p, "registered_country", None),
         "registeredCategory": getattr(p, "registered_category", None),
         "registeredProductName": (prod_hints or {}).get(p.id),
@@ -11794,6 +11872,15 @@ def api_projects_create_or_update():
             row.company_project_id = cp.id
     db.session.add(row)
     db.session.flush()
+    if "projectCode" in data:
+        err = _gate_and_apply_project_code(
+            row,
+            data.get("projectCode"),
+            confirm_sync=_parse_confirm_project_code_sync(data),
+        )
+        if err:
+            db.session.rollback()
+            return err
     _apply_page1_registry_fields_and_sync(row, data)
     db.session.commit()
     return jsonify(
@@ -11825,6 +11912,16 @@ def api_projects_patch(project_id: str):
     if not row:
         return jsonify({"message": "未找到该项目"}), 404
     data = request.get_json(force=True) or {}
+    confirm_sync = _parse_confirm_project_code_sync(data)
+
+    if "projectCode" in data:
+        err = _gate_and_apply_project_code(
+            row,
+            data.get("projectCode"),
+            confirm_sync=confirm_sync,
+        )
+        if err:
+            return err
 
     old_key = _project_display_label(row)
     new_name = row.name
@@ -12025,6 +12122,7 @@ def api_projects_batch_update():
                 409,
             )
 
+    confirm_sync = _parse_confirm_project_code_sync(data)
     updated = 0
     for it in items:
         if not isinstance(it, dict):
@@ -12060,6 +12158,16 @@ def api_projects_batch_update():
             row.registered_country = rc
         if "registeredCategory" in it:
             row.registered_category = (it.get("registeredCategory") or "").strip() or None
+
+        if "projectCode" in it:
+            err = _gate_and_apply_project_code(
+                row,
+                it.get("projectCode"),
+                confirm_sync=confirm_sync,
+            )
+            if err:
+                db.session.rollback()
+                return err
 
         if "assignedTeamId" in it:
             from .project_teams import (

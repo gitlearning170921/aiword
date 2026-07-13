@@ -284,6 +284,19 @@ def _extract_trailing_seq(number: str) -> Optional[int]:
         return None
 
 
+def _normalized_allocated_number_blocked(org_id: str, norm: str) -> bool:
+    """完整受控编号（规范化后）是否已被台账或有效预留占用。"""
+    if not norm:
+        return True
+    if find_controlled_document_by_norm(org_id, norm):
+        return True
+    rows = NumberAllocation.query.filter_by(
+        organization_id=org_id,
+        normalized_allocated_number=norm,
+    ).filter(NumberAllocation.status.in_(("reserved", "issued"))).all()
+    return any(allocation_blocks_number(row) for row in rows)
+
+
 def _next_sequence_for_issue(
     org_id: Optional[str],
     scheme: NumberingScheme,
@@ -292,36 +305,38 @@ def _next_sequence_for_issue(
     subtype: str,
     title: Optional[str] = None,
     project_id: Optional[str] = None,
+    project_code: Optional[str] = None,
+    project_name: Optional[str] = None,
 ) -> int:
-    """新名称从 seq_start 起；名称相关受控记录（与判重一致）最大流水号 +1。"""
-    from .subtype_resolver import find_controlled_docs_for_issue_title
+    """从 seq_start 起取首个「规范化完整编号」未被占用的流水号。"""
+    del title, project_id, project_code, project_name  # 完整编号全局唯一，不按项目推算流水号
 
     db.session.expire_all()
     seq_start = max(1, int(scheme.seq_start or 1))
-    org = org_id or ""
-    raw_title = (title or "").strip()
-    if not raw_title:
+    org = (org_id or "").strip()
+    if not org:
         return seq_start
 
     prefix_norm = normalize_document_number(prefix or "")
-    matched = find_controlled_docs_for_issue_title(
-        organization_id=org,
-        prefix=prefix,
-        title=raw_title,
-        project_id=project_id,
-    )
-    max_seq = 0
-    for doc in matched:
-        num = normalize_document_number(doc.document_number or "")
-        if prefix_norm and not num.startswith(prefix_norm + "-"):
-            continue
-        seq = _extract_trailing_seq(num)
-        if seq is not None:
-            max_seq = max(max_seq, seq)
+    uses_subtype = _scheme_uses_subtype_template(scheme)
+    sub_norm = normalize_document_number(subtype or "")
+    if uses_subtype and not sub_norm:
+        sub_norm = normalize_document_number(scheme.doc_type_code or "")
 
-    if max_seq > 0:
-        return max(seq_start, max_seq + 1)
-    return seq_start
+    for candidate in range(seq_start, seq_start + 10000):
+        try:
+            number = _render_number(
+                scheme,
+                prefix=prefix_norm,
+                seq=candidate,
+                subtype=sub_norm if uses_subtype else (subtype or scheme.doc_type_code or ""),
+            )
+        except ValueError:
+            break
+        norm = normalize_document_number(number)
+        if not _normalized_allocated_number_blocked(org, norm):
+            return candidate
+    raise ValueError("无可用流水号：当前前缀与子类组合下编号已用尽，请检查台账或联系管理员")
 
 
 def preview_next_number(
@@ -330,6 +345,7 @@ def preview_next_number(
     scheme: NumberingScheme,
     project_code: Optional[str] = None,
     project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
     subtype: Optional[str] = None,
     title: Optional[str] = None,
     title_en: Optional[str] = None,
@@ -351,6 +367,7 @@ def preview_next_number(
             title_en=title_en,
             manual_subtype=subtype,
             subtype_from_title=True,
+            project_id=project_id,
         )
     elif _scheme_uses_subtype_template(scheme):
         raise ValueError("请填写文件名称以生成子类编号")
@@ -363,6 +380,8 @@ def preview_next_number(
         subtype=sub,
         title=title,
         project_id=project_id,
+        project_code=project_code,
+        project_name=project_name,
     )
     number = _render_number(scheme, prefix=prefix, seq=seq, subtype=sub)
     return {
@@ -383,6 +402,7 @@ def reserve_number(
     requested_title: str,
     project_id: Optional[str],
     project_code: Optional[str],
+    project_name: Optional[str] = None,
     user_id: Optional[str],
     reserved_minutes: int = 30,
     subtype: Optional[str] = None,
@@ -395,6 +415,7 @@ def reserve_number(
         scheme=scheme,
         project_code=project_code,
         project_id=project_id,
+        project_name=project_name,
         subtype=subtype,
         title=requested_title,
         title_en=title_en,
