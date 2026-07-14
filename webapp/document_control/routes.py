@@ -3,8 +3,9 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
 import requests
@@ -17,6 +18,7 @@ from webapp import db
 from webapp._integration_common import (
     format_upstream_request_error,
     integration_api_base,
+    integration_request,
     integration_requests_timeout,
     login_wall,
     upstream_headers,
@@ -25,12 +27,35 @@ from webapp.app_settings import is_effective_feature_enabled
 from webapp.models import (
     ControlledDocument,
     DocumentControlImportLog,
+    GenerationSummary,
     NumberAllocation,
     NumberingScheme,
+    Project,
+    UploadRecord,
+    VersionTaskGenerationJob,
     now_local,
 )
 from webapp.tenant_context import resolve_organization_context
-from webapp.user_facing import user_facing_upstream_error
+from webapp.user_facing import api_debug_fields, user_facing_upstream_error
+from webapp.authz import is_page13_super_admin
+from .version_task_generator import (
+    build_adjustment_rows,
+    delete_project_version_record,
+    diagnose_release_dates,
+    feedback_rows_for_org,
+    generate_task_preview,
+    get_latest_version_task_preview,
+    get_project_version_record,
+    list_project_version_records,
+    batch_save_project_version_records,
+    rebind_project_version_records,
+    resolve_project_product_name,
+    save_project_version_record_item,
+    save_version_task_preview_edits,
+    set_project_product_name,
+    suggest_release_dates,
+    upsert_project_version_records,
+)
 from .allocation_categories import (
     enrich_issue_categories,
     resolve_scheme_for_issue,
@@ -651,6 +676,1001 @@ def document_control_import_logs_page():
     if wall is not None:
         return wall
     return render_template("document_control_import_logs.html")
+
+
+@document_control_bp.get("/document-control/version-task-generator")
+def version_task_generator_page():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    return render_template("version_task_generator.html")
+
+
+def _parse_optional_date(value: Any) -> Optional[date]:
+    text = (str(value or "")).strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _ensure_generation_summary(upload: UploadRecord) -> None:
+    existing = GenerationSummary.query.filter_by(upload_id=upload.id).first()
+    if existing:
+        return
+    db.session.add(
+        GenerationSummary(
+            upload_id=upload.id,
+            project_id=upload.project_id,
+            project_name=upload.project_name or "",
+            file_name=upload.file_name or "",
+            author=upload.author or "",
+        )
+    )
+
+
+def _project_in_org(project: Project, org_id: str) -> bool:
+    if project.organization_id and str(project.organization_id).strip() != org_id:
+        return False
+    return True
+
+
+def _suggest_release_dates_upstream(
+  *,
+  org_id: str,
+  collection: str,
+  payload: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    base = integration_api_base()
+    if not base:
+        return None, user_facing_upstream_error(
+            "未配置文档服务地址，无法调用发布时间检索",
+            "文档服务未配置，请联系管理员",
+        )
+    url = f"{base}/api/integration/document-control/release-date-suggest"
+    body = {
+        "collection": collection,
+        "productName": payload.get("productName") or "",
+        "fromVersion": payload.get("fromVersion") or "",
+        "toVersion": payload.get("toVersion") or "",
+        "intermediateVersions": payload.get("intermediateVersions") or [],
+        "targetVersion": payload.get("targetVersion"),
+        "registrationCountry": payload.get("registrationCountry") or "",
+    }
+    current_app.logger.info("version-tasks release-date-suggest -> %s", url)
+    try:
+        # 直连文档服务，禁止走系统 HTTP_PROXY（否则 Clash 易 10054 后误入本地回退）
+        resp = integration_request(
+            "POST",
+            url,
+            json=body,
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
+            timeout=integration_requests_timeout(read_seconds=120),
+        )
+    except requests.RequestException as exc:
+        current_app.logger.warning("version-tasks release-date-suggest upstream failed: %s", exc)
+        return None, format_upstream_request_error(exc, base)
+    current_app.logger.info(
+        "version-tasks release-date-suggest upstream status=%s bytes=%s",
+        resp.status_code,
+        len(resp.content or b""),
+    )
+    if resp.status_code != 200:
+        return None, user_facing_upstream_error(
+            f"发布时间检索失败 HTTP {resp.status_code}",
+            "发布时间检索失败，请稍后重试",
+        )
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        return None, user_facing_upstream_error("上游响应非 JSON", "服务响应异常，请联系管理员")
+    return data, None
+
+
+def _release_date_diagnostics_summary(result: dict[str, Any]) -> dict[str, Any]:
+    diag = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    per_version = result.get("perVersion") if isinstance(result.get("perVersion"), list) else []
+    return {
+        "source": result.get("source") or "unknown",
+        "candidateCount": len(result.get("candidates") or []),
+        "versionCount": diag.get("versionCount") or len(per_version),
+        "totalRawHits": diag.get("totalRawHits"),
+        "versionsWithCandidates": diag.get("versionsWithCandidates"),
+        "failureHint": diag.get("failureHint"),
+    }
+
+
+def _sanitize_release_date_diagnose(data: dict[str, Any], *, super_admin: bool) -> dict[str, Any]:
+    if super_admin:
+        return data
+    summary = _release_date_diagnostics_summary(data)
+    public_per_version = []
+    for row in data.get("perVersion") or []:
+        if not isinstance(row, dict):
+            continue
+        item_diag = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+        ddg = item_diag.get("duckduckgo") if isinstance(item_diag.get("duckduckgo"), dict) else {}
+        extraction = item_diag.get("dateExtraction") if isinstance(item_diag.get("dateExtraction"), dict) else {}
+        public_per_version.append(
+            {
+                "version": row.get("version"),
+                "query": row.get("query"),
+                "candidateCount": len(row.get("candidates") or []),
+                "diagnostics": {
+                    "rawHits": ddg.get("rawHits"),
+                    "parser": ddg.get("parser"),
+                    "networkError": "网络异常" if ddg.get("networkError") else None,
+                    "failureHint": extraction.get("failureHint"),
+                },
+            }
+        )
+    out = {
+        "mode": data.get("mode") or "diagnose",
+        "fromVersion": data.get("fromVersion"),
+        "toVersion": data.get("toVersion"),
+        "versionChain": data.get("versionChain"),
+        "candidateCount": summary.get("candidateCount"),
+        "diagnostics": summary,
+        "perVersion": public_per_version,
+        "message": data.get("message") or summary.get("failureHint") or "诊断完成",
+    }
+    if data.get("route"):
+        out["route"] = data.get("route")
+    return out
+
+
+def _diagnose_release_dates_upstream(
+    *,
+    org_id: str,
+    collection: str,
+    payload: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str], dict[str, Any]]:
+    meta: dict[str, Any] = {"attempted": False, "latencyMs": 0}
+    base = integration_api_base()
+    meta["configured"] = bool(base)
+    if not base:
+        return None, user_facing_upstream_error(
+            "未配置文档服务地址，无法调用发布时间检索诊断",
+            "文档服务未配置，请联系管理员",
+        ), meta
+    url = f"{base}/api/integration/document-control/release-date-suggest/diagnose"
+    body = {
+        "collection": collection,
+        "productName": payload.get("productName") or "",
+        "fromVersion": payload.get("fromVersion") or "",
+        "toVersion": payload.get("toVersion") or "",
+        "intermediateVersions": payload.get("intermediateVersions") or [],
+        "targetVersion": payload.get("targetVersion"),
+        "registrationCountry": payload.get("registrationCountry") or "",
+    }
+    meta["attempted"] = True
+    meta["url"] = url
+    started = time.time()
+    current_app.logger.info("version-tasks release-date-diagnose -> %s", url)
+    try:
+        resp = integration_request(
+            "POST",
+            url,
+            json=body,
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
+            timeout=integration_requests_timeout(read_seconds=120),
+        )
+    except requests.RequestException as exc:
+        meta["latencyMs"] = int((time.time() - started) * 1000)
+        meta["error"] = str(exc)
+        current_app.logger.warning("version-tasks release-date-diagnose upstream failed: %s", exc)
+        return None, format_upstream_request_error(exc, base), meta
+    meta["latencyMs"] = int((time.time() - started) * 1000)
+    meta["statusCode"] = resp.status_code
+    if resp.status_code != 200:
+        return None, user_facing_upstream_error(
+            f"发布时间检索诊断失败 HTTP {resp.status_code}",
+            "发布时间检索诊断失败，请稍后重试",
+        ), meta
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        return None, user_facing_upstream_error("上游响应非 JSON", "服务响应异常，请联系管理员"), meta
+    data["route"] = "upstream"
+    data["upstreamMeta"] = meta
+    return data, None, meta
+
+
+@document_control_bp.post("/api/document-control/version-tasks/release-date-suggest")
+def api_version_task_release_date_suggest():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    payload = request.get_json(silent=True) or {}
+    from_version = str(payload.get("fromVersion") or "").strip()
+    to_version = str(payload.get("toVersion") or "").strip()
+    if not from_version or not to_version:
+        return jsonify({"message": "请先填写开始版本号和最新版本号"}), 400
+    intermediate_versions = payload.get("intermediateVersions") or []
+    if not isinstance(intermediate_versions, list):
+        return jsonify({"message": "intermediateVersions 必须为数组"}), 400
+    target_version = str(payload.get("targetVersion") or "").strip() or None
+    registration_country = str(payload.get("registrationCountry") or "").strip()
+    product_name = str(payload.get("productName") or "").strip()
+    project_id = str(payload.get("projectId") or "").strip()
+    if project_id:
+        proj = Project.query.filter_by(id=project_id).first()
+        if proj and _project_in_org(proj, org_id):
+            if not registration_country:
+                registration_country = str(getattr(proj, "registered_country", None) or "").strip()
+            # 页面未填产品名时，回退用项目名称（通常与商店上架名接近）
+            if not product_name:
+                product_name = str(getattr(proj, "name", None) or "").strip()
+    upstream_payload = {
+        "productName": product_name,
+        "fromVersion": from_version,
+        "toVersion": to_version,
+        "intermediateVersions": [str(x or "").strip() for x in intermediate_versions],
+        "targetVersion": target_version,
+        "registrationCountry": registration_country,
+    }
+    result, err = _suggest_release_dates_upstream(
+        org_id=org_id,
+        collection=collection,
+        payload=upstream_payload,
+    )
+    if result is not None:
+        result["route"] = "upstream"
+        result["diagnosticsSummary"] = _release_date_diagnostics_summary(result)
+        result.setdefault("productName", product_name)
+        result.setdefault("registrationCountry", registration_country)
+        return jsonify(result)
+    # 文档服务不可达时不再做本地 DuckDuckGo（易被系统代理 10054 打断，且与手工浏览器检索不一致）
+    current_app.logger.warning("version-tasks release-date-suggest upstream unavailable: %s", err)
+    chain_versions: list[str] = []
+    try:
+        from .version_task_generator import parse_version_chain
+
+        chain_versions = [
+            x.normalized
+            for x in parse_version_chain(
+                from_version, to_version, upstream_payload["intermediateVersions"]
+            )
+        ]
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    if target_version:
+        tv = str(target_version).strip()
+        if tv:
+            chain_versions = [tv]
+    msg = user_facing_upstream_error(
+        f"文档服务不可用，无法联网检索发布时间：{err}",
+        "文档服务暂不可用，请稍后重试或手动填写各版本发布时间",
+    )
+    empty = {
+        "ok": False,
+        "source": "upstream_unreachable",
+        "route": "upstream_unreachable",
+        "candidates": [],
+        "perVersion": [
+            {
+                "version": ver,
+                "query": "",
+                "candidates": [],
+                "message": msg,
+            }
+            for ver in chain_versions
+        ],
+        "message": msg,
+        "upstreamWarning": err,
+        "diagnostics": {
+            "failureHint": msg,
+            "versionCount": len(chain_versions),
+            "candidateCount": 0,
+            "versionsMissing": chain_versions,
+        },
+    }
+    empty["diagnosticsSummary"] = _release_date_diagnostics_summary(empty)
+    if is_page13_super_admin():
+        empty.update(api_debug_fields(upstreamWarning=err, detail=err))
+    return jsonify(empty)
+
+
+@document_control_bp.post("/api/document-control/version-tasks/release-date-suggest/diagnose")
+def api_version_task_release_date_suggest_diagnose():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    super_admin = is_page13_super_admin()
+    payload = request.get_json(silent=True) or {}
+    from_version = str(payload.get("fromVersion") or "").strip()
+    to_version = str(payload.get("toVersion") or "").strip()
+    if not from_version or not to_version:
+        return jsonify({"message": "请先填写开始版本号和最新版本号"}), 400
+    intermediate_versions = payload.get("intermediateVersions") or []
+    if not isinstance(intermediate_versions, list):
+        return jsonify({"message": "intermediateVersions 必须为数组"}), 400
+    target_version = str(payload.get("targetVersion") or "").strip() or None
+    registration_country = str(payload.get("registrationCountry") or "").strip()
+    product_name = str(payload.get("productName") or "").strip()
+    project_id = str(payload.get("projectId") or "").strip()
+    if project_id:
+        proj = Project.query.filter_by(id=project_id).first()
+        if proj and _project_in_org(proj, org_id):
+            if not registration_country:
+                registration_country = str(getattr(proj, "registered_country", None) or "").strip()
+            if not product_name:
+                product_name = str(getattr(proj, "name", None) or "").strip()
+    upstream_payload = {
+        "productName": product_name,
+        "fromVersion": from_version,
+        "toVersion": to_version,
+        "intermediateVersions": [str(x or "").strip() for x in intermediate_versions],
+        "targetVersion": target_version,
+        "registrationCountry": registration_country,
+    }
+
+    result, err, upstream_meta = _diagnose_release_dates_upstream(
+        org_id=org_id,
+        collection=collection,
+        payload=upstream_payload,
+    )
+    if result is None:
+        current_app.logger.warning("version-tasks release-date-diagnose fallback local: %s", err)
+        try:
+            local = diagnose_release_dates(
+                product_name=upstream_payload["productName"],
+                from_version=from_version,
+                to_version=to_version,
+                intermediate_versions=upstream_payload["intermediateVersions"],
+                target_version=target_version,
+            )
+        except ValueError as exc:
+            return jsonify({"message": str(exc)}), 400
+        local["route"] = "local_fallback"
+        local["upstreamMeta"] = upstream_meta
+        if err:
+            local["upstreamWarning"] = err
+        out = _sanitize_release_date_diagnose(local, super_admin=super_admin)
+        if super_admin:
+            out.update(api_debug_fields(upstreamWarning=err, upstreamMeta=upstream_meta))
+        return jsonify(out)
+
+    out = _sanitize_release_date_diagnose(result, super_admin=super_admin)
+    if super_admin:
+        out.update(api_debug_fields(upstreamMeta=upstream_meta))
+    return jsonify(out)
+
+
+@document_control_bp.get("/api/document-control/version-tasks/project-records")
+def api_version_task_project_records_list():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 不能为空"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    items = list_project_version_records(org_id=org_id, project_id=project_id)
+    product_name = resolve_project_product_name(org_id=org_id, project_id=project_id)
+    return jsonify(
+        {"projectId": project_id, "productName": product_name, "items": items}
+    )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/project-product-name")
+def api_version_task_project_product_name():
+    """单独保存项目的应用市场产品名（刷新后回填用）。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 不能为空"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    try:
+        result = set_project_product_name(
+            org_id=org_id,
+            project_id=project_id,
+            product_name=str(payload.get("productName") or "").strip(),
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    # 尚无版本记录/预览批次时，创建轻量草稿批次仅保存产品名，避免刷新丢失
+    if int(result.get("updatedRecords") or 0) == 0 and int(result.get("updatedJobs") or 0) == 0:
+        product_name = str(payload.get("productName") or "").strip()
+        if product_name:
+            draft = VersionTaskGenerationJob(
+                organization_id=org_id,
+                project_id=project_id,
+                from_version="-",
+                to_version="-",
+                status="product_meta",
+                rule_snapshot_json={"productName": product_name},
+                preview_json=None,
+                created_by_user_id=str(session.get("user_id") or "").strip() or None,
+            )
+            db.session.add(draft)
+            result["updatedJobs"] = 1
+            result["metaJobCreated"] = True
+    db.session.commit()
+    return jsonify(result)
+
+
+@document_control_bp.post("/api/document-control/version-tasks/project-records")
+def api_version_task_project_records_save():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 不能为空"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    version_release_dates = payload.get("versionReleaseDates")
+    if not isinstance(version_release_dates, dict) or not version_release_dates:
+        return jsonify({"message": "versionReleaseDates 不能为空"}), 400
+    try:
+        items = upsert_project_version_records(
+            org_id=org_id,
+            project_id=project_id,
+            version_release_dates=version_release_dates,
+            product_name=str(payload.get("productName") or "").strip(),
+            chain_from_version=str(payload.get("fromVersion") or "").strip(),
+            chain_to_version=str(payload.get("toVersion") or "").strip(),
+            generation_status=str(payload.get("generationStatus") or "").strip().lower(),
+            allow_downgrade_status=bool(payload.get("allowDowngradeStatus")),
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    db.session.commit()
+    return jsonify({"saved": len(items), "items": items})
+
+
+@document_control_bp.post("/api/document-control/version-tasks/project-records/item")
+def api_version_task_project_record_create():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 不能为空"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    version = str(payload.get("version") or "").strip()
+    if not version:
+        return jsonify({"message": "version 不能为空"}), 400
+    try:
+        item = save_project_version_record_item(
+            org_id=org_id,
+            project_id=project_id,
+            version=version,
+            released_at=str(payload.get("releasedAt") or "").strip(),
+            product_name=str(payload.get("productName") or "").strip(),
+            chain_from_version=str(payload.get("chainFromVersion") or payload.get("fromVersion") or "").strip(),
+            chain_to_version=str(payload.get("chainToVersion") or payload.get("toVersion") or "").strip(),
+            generation_status=str(payload.get("generationStatus") or "none").strip().lower(),
+            allow_downgrade_status=True,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    db.session.commit()
+    return jsonify({"item": item})
+
+
+@document_control_bp.post("/api/document-control/version-tasks/project-records/batch")
+def api_version_task_project_records_batch():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"message": "items 不能为空"}), 400
+    project_ids = {
+        str(x.get("projectId") or "").strip()
+        for x in items
+        if isinstance(x, dict) and str(x.get("projectId") or "").strip()
+    }
+    if not project_ids:
+        return jsonify({"message": "items 中缺少关联项目"}), 400
+    for project_id in project_ids:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": f"未找到项目：{project_id}"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    try:
+        result = batch_save_project_version_records(
+            org_id=org_id,
+            items=items,
+            chain_from_version=str(
+                payload.get("chainFromVersion") or payload.get("fromVersion") or ""
+            ).strip(),
+            chain_to_version=str(
+                payload.get("chainToVersion") or payload.get("toVersion") or ""
+            ).strip(),
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    db.session.commit()
+    return jsonify(result)
+
+
+@document_control_bp.patch("/api/document-control/version-tasks/project-records/<record_id>")
+def api_version_task_project_record_update(record_id: str):
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    row = get_project_version_record(org_id=org_id, record_id=record_id)
+    if not row:
+        return jsonify({"message": "未找到版本记录"}), 404
+    target_project_id = str(payload.get("projectId") or row.project_id or "").strip()
+    if not target_project_id:
+        return jsonify({"message": "projectId 不能为空"}), 400
+    project = Project.query.filter_by(id=target_project_id).first()
+    if not project or not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    version = str(payload.get("version") or row.version).strip()
+    try:
+        result = rebind_project_version_records(
+            org_id=org_id,
+            record_id=record_id,
+            target_project_id=target_project_id,
+            version=version,
+            released_at=str(payload.get("releasedAt") or "").strip(),
+            product_name=str(payload.get("productName") or row.product_name or "").strip(),
+            chain_from_version=str(payload.get("chainFromVersion") or row.chain_from_version or "").strip(),
+            chain_to_version=str(payload.get("chainToVersion") or row.chain_to_version or "").strip(),
+            generation_status=str(payload.get("generationStatus") or row.generation_status or "none").strip().lower(),
+            allow_downgrade_status=bool(payload.get("allowDowngradeStatus", True)),
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    db.session.commit()
+    return jsonify(result)
+
+
+@document_control_bp.delete("/api/document-control/version-tasks/project-records/<record_id>")
+def api_version_task_project_record_delete(record_id: str):
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    row = get_project_version_record(org_id=org_id, record_id=record_id)
+    if not row:
+        return jsonify({"message": "未找到版本记录"}), 404
+    project = Project.query.filter_by(id=row.project_id).first()
+    if not project or not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    delete_project_version_record(org_id=org_id, record_id=record_id)
+    db.session.commit()
+    return jsonify({"deleted": True, "id": record_id})
+
+
+@document_control_bp.get("/api/document-control/version-tasks/latest-preview")
+def api_version_task_latest_preview():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip() or None
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    data = get_latest_version_task_preview(org_id=org_id, project_id=project_id)
+    if not data:
+        return jsonify({"jobId": "", "items": [], "message": "暂无已保存的预览"})
+    return jsonify(data)
+
+
+@document_control_bp.post("/api/document-control/version-tasks/preview")
+def api_version_task_preview():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    from_version = str(payload.get("fromVersion") or "").strip()
+    to_version = str(payload.get("toVersion") or "").strip()
+    if not from_version or not to_version:
+        return jsonify({"message": "开始版本号和最新版本号不能为空"}), 400
+
+    intermediate_versions = payload.get("intermediateVersions") or []
+    if not isinstance(intermediate_versions, list):
+        return jsonify({"message": "intermediateVersions 必须为数组"}), 400
+
+    version_release_dates = payload.get("versionReleaseDates")
+    if not isinstance(version_release_dates, dict) or not version_release_dates:
+        # 兼容旧字段：单一 releaseDate 仅填充最新版本
+        legacy_release_date = str(
+            payload.get("releaseDate") or payload.get("confirmedReleaseDate") or ""
+        ).strip()
+        if legacy_release_date:
+            version_release_dates = {to_version: legacy_release_date}
+        else:
+            return jsonify(
+                {
+                    "message": "请为版本链路中的每个版本填写发布时间后再生成预览（可先点「检索候选发布日期」填入）",
+                    "needsReleaseDateConfirmation": True,
+                }
+            ), 409
+
+    try:
+        feedback_rows = feedback_rows_for_org(org_id)
+        preview = generate_task_preview(
+            from_version=from_version,
+            to_version=to_version,
+            intermediate_versions=[str(x or "").strip() for x in intermediate_versions],
+            version_release_dates=version_release_dates,
+            feedback_rows=feedback_rows,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"message": f"生成预览失败：{exc}"}), 500
+
+    project_id = str(payload.get("projectId") or "").strip() or None
+    # 同一项目+起止版本再次预览：更新已有批次，避免重复堆积
+    job = None
+    if project_id:
+        job = (
+            VersionTaskGenerationJob.query.filter_by(
+                organization_id=org_id,
+                project_id=project_id,
+                from_version=preview["fromVersion"],
+                to_version=preview["toVersion"],
+            )
+            .order_by(VersionTaskGenerationJob.updated_at.desc())
+            .first()
+        )
+    preview_updated = bool(job)
+    if job is None:
+        job = VersionTaskGenerationJob(
+            organization_id=org_id,
+            project_id=project_id,
+            from_version=preview["fromVersion"],
+            to_version=preview["toVersion"],
+            created_by_user_id=str(session.get("user_id") or "").strip() or None,
+        )
+        db.session.add(job)
+    job.project_id = project_id
+    job.from_version = preview["fromVersion"]
+    job.to_version = preview["toVersion"]
+    job.intermediate_versions_json = (
+        preview.get("versionChain")[1:-1] if preview.get("versionChain") else []
+    )
+    job.released_at = _parse_optional_date(preview.get("releaseDate"))
+    # 已下发过的批次再次预览仍保留 applied，结果以最新 preview 为准
+    if (job.status or "") != "applied":
+        job.status = "previewed"
+    product_name = str(payload.get("productName") or "").strip()
+    job.rule_snapshot_json = {
+        "rulesMode": "yy_iw_020_plus_qp739",
+        "versionRule": "X.Y.Z.B",
+        "ruleSource": preview.get("ruleSource"),
+        "ruleBasis": preview.get("ruleBasis"),
+        "versionReleaseDates": preview.get("versionReleaseDates") or {},
+        "productName": product_name,
+        "generatedAt": now_local().isoformat(),
+        "updated": preview_updated,
+    }
+    preview = dict(preview)
+    if product_name:
+        preview["productName"] = product_name
+    job.preview_json = preview
+    db.session.flush()
+
+    saved_records: list[dict[str, Any]] = []
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            db.session.rollback()
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            db.session.rollback()
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+        try:
+            saved_records = upsert_project_version_records(
+                org_id=org_id,
+                project_id=project_id,
+                version_release_dates=preview.get("versionReleaseDates") or {},
+                product_name=product_name,
+                chain_from_version=preview.get("fromVersion") or "",
+                chain_to_version=preview.get("toVersion") or "",
+                generation_status="previewed",
+                job_id=job.id,
+            )
+        except ValueError as exc:
+            db.session.rollback()
+            return jsonify({"message": str(exc)}), 400
+
+    db.session.commit()
+    return jsonify(
+        {
+            "jobId": job.id,
+            "previewUpdated": preview_updated,
+            "savedRecords": saved_records,
+            **preview,
+        }
+    )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/feedback")
+def api_version_task_feedback():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    adjustments = payload.get("adjustments") or []
+    if not isinstance(adjustments, list):
+        return jsonify({"message": "adjustments 必须为数组"}), 400
+    rows = build_adjustment_rows(
+        org_id=org_id,
+        source_job_id=str(payload.get("sourceJobId") or "").strip() or None,
+        project_id=str(payload.get("projectId") or "").strip() or None,
+        adjustments=adjustments,
+    )
+    if not rows:
+        return jsonify({"saved": 0, "message": "无有效调整项"}), 200
+    for row in rows:
+        db.session.add(row)
+    db.session.commit()
+    return jsonify({"saved": len(rows)})
+
+
+@document_control_bp.post("/api/document-control/version-tasks/preview/save-edits")
+def api_version_task_preview_save_edits():
+    """保存预览表格人工修改；同时写入反馈，供下次「生成预览」优化。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    job_id = str(payload.get("jobId") or payload.get("sourceJobId") or "").strip()
+    items = payload.get("items")
+    if not job_id:
+        return jsonify({"message": "请先生成预览后再保存修改"}), 400
+    if not isinstance(items, list):
+        return jsonify({"message": "items 必须为数组"}), 400
+    adjustments = payload.get("adjustments")
+    if adjustments is not None and not isinstance(adjustments, list):
+        return jsonify({"message": "adjustments 必须为数组"}), 400
+    project_id = str(payload.get("projectId") or "").strip() or None
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    try:
+        result = save_version_task_preview_edits(
+            org_id=org_id,
+            job_id=job_id,
+            items=items,
+            adjustments=adjustments if isinstance(adjustments, list) else None,
+            project_id=project_id,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    db.session.commit()
+    return jsonify(
+        {
+            "message": (
+                f"已保存预览修改（{result.get('itemCount') or 0} 条）"
+                + (
+                    f"，并写入反馈 {result.get('feedbackSaved') or 0} 条供下次生成生效"
+                    if result.get("feedbackSaved")
+                    else "（无字段变更，仅更新了预览快照）"
+                )
+            ),
+            **result,
+        }
+    )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/apply")
+def api_version_task_apply():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "转换为任务列表时必须选择项目"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if project.organization_id and str(project.organization_id).strip() != org_id:
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"message": "items 不能为空"}), 400
+
+    source_job_id = str(payload.get("sourceJobId") or "").strip() or None
+    source_job = (
+        VersionTaskGenerationJob.query.filter_by(id=source_job_id, organization_id=org_id).first()
+        if source_job_id
+        else None
+    )
+
+    created = 0
+    updated = 0
+    upload_ids: list[str] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        file_name = str(row.get("fileName") or "").strip()
+        author = str(row.get("author") or "").strip()
+        task_type = str(row.get("taskType") or "").strip()
+        if not file_name:
+            continue
+        if not author:
+            author = "待分配"
+        if not task_type:
+            task_type = "版本变更任务"
+        existing = UploadRecord.query.filter_by(
+            project_name=project.name,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+        ).first()
+        due_date = _parse_optional_date(row.get("dueDate"))
+        document_display_date = _parse_optional_date(row.get("documentDisplayDate"))
+        notes = str(row.get("notes") or "").strip() or None
+        module = str(row.get("belongingModule") or "").strip() or None
+        if existing:
+            existing.organization_id = org_id
+            existing.project_id = project.id
+            existing.project_name = project.name
+            existing.project_code = project.project_code
+            existing.notes = notes
+            existing.due_date = due_date
+            existing.document_display_date = document_display_date
+            existing.belonging_module = module
+            existing.file_version = str(row.get("fileVersion") or "").strip() or None
+            existing.registration_version = str(row.get("registrationVersion") or "").strip() or None
+            existing.task_status = "pending"
+            existing.completion_status = None
+            db.session.add(existing)
+            upload_ids.append(existing.id)
+            updated += 1
+        else:
+            created_row = UploadRecord(
+                organization_id=org_id,
+                project_id=project.id,
+                project_name=project.name,
+                project_code=project.project_code,
+                file_name=file_name,
+                task_type=task_type,
+                author=author,
+                notes=notes,
+                due_date=due_date,
+                document_display_date=document_display_date,
+                belonging_module=module,
+                file_version=str(row.get("fileVersion") or "").strip() or None,
+                registration_version=str(row.get("registrationVersion") or "").strip() or None,
+                task_status="pending",
+                completion_status=None,
+            )
+            db.session.add(created_row)
+            db.session.flush()
+            _ensure_generation_summary(created_row)
+            upload_ids.append(created_row.id)
+            created += 1
+
+    if source_job is not None:
+        source_job.project_id = project.id
+        source_job.status = "applied"
+        source_job.result_json = {
+            "created": created,
+            "updated": updated,
+            "uploadIds": upload_ids,
+        }
+        db.session.add(source_job)
+
+    version_release_dates = payload.get("versionReleaseDates")
+    if not isinstance(version_release_dates, dict) or not version_release_dates:
+        if source_job and isinstance(source_job.preview_json, dict):
+            version_release_dates = source_job.preview_json.get("versionReleaseDates") or {}
+    if isinstance(version_release_dates, dict) and version_release_dates:
+        try:
+            upsert_project_version_records(
+                org_id=org_id,
+                project_id=project_id,
+                version_release_dates=version_release_dates,
+                product_name=str(payload.get("productName") or "").strip(),
+                chain_from_version=str(payload.get("fromVersion") or "").strip()
+                or (source_job.from_version if source_job else ""),
+                chain_to_version=str(payload.get("toVersion") or "").strip()
+                or (source_job.to_version if source_job else ""),
+                generation_status="generated",
+                job_id=source_job_id,
+            )
+        except ValueError:
+            pass
+
+    db.session.commit()
+    return jsonify(
+        {
+            "created": created,
+            "updated": updated,
+            "uploadIds": upload_ids,
+            "message": f"已下发到任务列表：新增 {created} 条，更新 {updated} 条",
+        }
+    )
 
 
 @document_control_bp.get("/api/document-control/bootstrap")

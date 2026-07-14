@@ -7602,18 +7602,23 @@ function initColumnToggle(btnId, menuId, tableId, options) {
     let saved;
     try { saved = JSON.parse(localStorage.getItem(storeKey)); } catch (e) { saved = null; }
 
+    function isToggleableCol(col) {
+        return col !== "op" && col !== "actions" && !alwaysVisible.has(col);
+    }
+
+    function colVisibleFromSaved(col) {
+        if (saved && Object.prototype.hasOwnProperty.call(saved, col) && typeof saved[col] === "boolean") {
+            return saved[col];
+        }
+        return getDefaultVisible(col);
+    }
+
     const colList = [];
     ths.forEach((th) => {
         const col = th.dataset.col;
         if (!col) return;
         const colIndex = Array.from(th.parentNode.children).indexOf(th);
-        let visible;
-        if (saved && typeof saved[col] === "boolean") {
-            visible = saved[col];
-        } else {
-            visible = getDefaultVisible(col);
-        }
-        colList.push({ col, colIndex, visible });
+        colList.push({ col, colIndex, visible: colVisibleFromSaved(col) });
     });
 
     function applyVisibility() {
@@ -7630,18 +7635,23 @@ function initColumnToggle(btnId, menuId, tableId, options) {
             });
         });
         const state = {};
-        colList.forEach(c => { state[c.col] = c.visible; });
+        colList.forEach((c) => {
+            if (isToggleableCol(c.col)) state[c.col] = c.visible;
+        });
         try { localStorage.setItem(storeKey, JSON.stringify(state)); } catch (e) {}
         if (table.classList.contains("table-sticky-name-cols")) {
             scheduleSyncStickyNameColumns(table);
         }
+        if (menu.classList.contains("show")) syncCheckboxes();
     }
 
     function syncCheckboxes() {
-        const items = colList.filter((c) => c.col !== "op" && c.col !== "actions" && !alwaysVisible.has(c.col));
-        const cbs = menu.querySelectorAll("input[type=checkbox]");
+        const items = colList.filter((c) => isToggleableCol(c.col));
+        const cbs = menu.querySelectorAll("input.col-toggle-cb");
         items.forEach((item, idx) => {
-            if (cbs[idx]) cbs[idx].checked = item.visible;
+            const cb = cbs[idx];
+            if (!cb) return;
+            cb.checked = !!item.visible;
         });
     }
 
@@ -7672,11 +7682,12 @@ function initColumnToggle(btnId, menuId, tableId, options) {
     menu.appendChild(btnRow);
 
     colList.forEach((item) => {
-        if (item.col === "op" || item.col === "actions" || alwaysVisible.has(item.col)) return;
+        if (!isToggleableCol(item.col)) return;
         const label = document.createElement("label");
         const cb = document.createElement("input");
         cb.type = "checkbox";
-        cb.checked = item.visible;
+        cb.className = "form-check-input col-toggle-cb";
+        cb.checked = !!item.visible;
         cb.addEventListener("change", () => {
             item.visible = cb.checked;
             applyVisibility();
@@ -7689,10 +7700,13 @@ function initColumnToggle(btnId, menuId, tableId, options) {
     });
 
     applyVisibility();
+    syncCheckboxes();
 
     btn.addEventListener("click", (e) => {
         e.stopPropagation();
+        const willShow = !menu.classList.contains("show");
         menu.classList.toggle("show");
+        if (willShow) syncCheckboxes();
     });
     document.addEventListener("click", (e) => {
         if (!menu.contains(e.target) && e.target !== btn) {

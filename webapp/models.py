@@ -472,6 +472,73 @@ class NumberAllocation(db.Model):
     )
 
 
+class VersionTaskGenerationJob(db.Model):
+    """版本任务清单生成批次（预览/下发审计）。"""
+
+    __tablename__ = "version_task_generation_jobs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    from_version: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    to_version: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    intermediate_versions_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    released_at: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
+    rule_source_file: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    rule_snapshot_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    preview_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    result_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="previewed")
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
+class VersionTaskGenerationFeedback(db.Model):
+    """版本任务清单人工调整记忆（跨项目复用）。"""
+
+    __tablename__ = "version_task_generation_feedbacks"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    source_job_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    original_item_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    adjusted_item_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    adjust_type: Mapped[str] = mapped_column(db.String(16), nullable=False, default="update")
+    applied_count: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)
+    last_applied_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
+class ProjectVersionRecord(db.Model):
+    """按项目保存的软件版本号与发布时间，并标记任务清单生成状态。"""
+
+    __tablename__ = "project_version_records"
+    __table_args__ = (
+        db.UniqueConstraint("project_id", "version", name="uq_project_version_record"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    released_at: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
+    product_name: Mapped[Optional[str]] = mapped_column(db.String(256), nullable=True)
+    chain_from_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    chain_to_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
+    generation_status: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="none"
+    )  # none | previewed | generated
+    last_job_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class UploadRecord(db.Model):
     """
     上传记录：支持文件上传或多行文档链接。

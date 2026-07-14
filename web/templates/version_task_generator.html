@@ -1,0 +1,385 @@
+{% extends "base.html" %}
+{% block title %}页面1 · 版本任务清单生成{% endblock %}
+{% block page_id %}version-task-generator{% endblock %}
+
+{% block content %}
+<style>
+  .vtg-page { max-width: 1180px; }
+  .vtg-hero {
+    border: 1px solid #d7e3f4;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #f7fbff 0%, #eef5fc 55%, #f8fafc 100%);
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .vtg-hero-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .vtg-hero h1 { margin: 0 0 0.35rem; font-size: 1.4rem; }
+  .vtg-hero p { margin: 0; color: #5b6b7c; font-size: 0.92rem; line-height: 1.5; max-width: 46rem; }
+  .vtg-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.9rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .vtg-steps li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.28rem 0.7rem;
+    border-radius: 999px;
+    background: #fff;
+    border: 1px solid #d5e2f0;
+    color: #4a5d73;
+    font-size: 0.82rem;
+  }
+  .vtg-steps .vtg-step-n {
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d6efd;
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .vtg-panel {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #fff;
+    margin-bottom: 1rem;
+    overflow: hidden;
+  }
+  .vtg-panel-h {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.85rem 1.1rem;
+    border-bottom: 1px solid #eef2f7;
+    background: #fbfcfe;
+  }
+  .vtg-panel-h .vtg-step-badge {
+    flex: 0 0 auto;
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 8px;
+    background: #0d6efd;
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 0.1rem;
+  }
+  .vtg-panel-h h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 650;
+  }
+  .vtg-panel-h .vtg-sub {
+    margin: 0.2rem 0 0;
+    font-size: 0.82rem;
+    color: #6c7a89;
+  }
+  .vtg-panel-b { padding: 1rem 1.1rem 1.15rem; }
+  .vtg-subpanel {
+    border: 1px solid #e8eef5;
+    border-radius: 10px;
+    background: #f8fafc;
+    padding: 0.85rem 1rem;
+    margin-top: 0.85rem;
+  }
+  .vtg-subpanel > .vtg-subpanel-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #334155;
+    margin: 0 0 0.15rem;
+  }
+  .vtg-subpanel > .vtg-subpanel-hint {
+    font-size: 0.8rem;
+    color: #748194;
+    margin: 0 0 0.65rem;
+  }
+  .vtg-version-rail {
+    display: grid;
+    grid-template-columns: 1fr auto 1.4fr auto 1fr;
+    gap: 0.55rem;
+    align-items: end;
+  }
+  @media (max-width: 900px) {
+    .vtg-version-rail { grid-template-columns: 1fr; }
+    .vtg-version-rail .vtg-arrow { display: none; }
+  }
+  .vtg-arrow {
+    color: #94a3b8;
+    font-size: 1.1rem;
+    padding-bottom: 0.55rem;
+    text-align: center;
+  }
+  .vtg-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.9rem;
+    padding-top: 0.85rem;
+    border-top: 1px dashed #e2e8f0;
+  }
+  .vtg-actions .btn-primary { min-width: 8.5rem; }
+  .vtg-preview-panel .vtg-panel-h {
+    background: linear-gradient(90deg, #eef6ff, #fbfcfe);
+  }
+  .vtg-apply-box {
+    margin-top: 1rem;
+    padding: 0.9rem 1rem;
+    border-radius: 10px;
+    border: 1px solid #cfe2ff;
+    background: #f0f7ff;
+  }
+  .vtg-apply-box .vtg-subpanel-title { margin-bottom: 0.35rem; }
+  .vtg-collapse-toggle {
+    border: 0;
+    background: transparent;
+    color: #0d6efd;
+    font-size: 0.88rem;
+    padding: 0;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .vtg-collapse-toggle:hover { text-decoration: underline; }
+  .vtg-saved-panel .vtg-panel-h { cursor: pointer; user-select: none; }
+  .vtg-saved-panel .vtg-panel-h:hover { background: #f3f7fc; }
+  .vtg-panel-h .vtg-count-slot { margin-left: auto; align-self: center; }
+</style>
+
+<div class="container-fluid px-3 px-lg-4 vtg-page">
+  <div class="vtg-hero">
+    <div class="vtg-hero-top">
+      <div>
+        <h1>版本任务清单生成</h1>
+        <p>
+          按规则与版本链路自动生成任务清单。可关联项目保存各版本发布时间，确认预览后下发到任务列表。
+        </p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pages.upload_page') }}">返回页面1</a>
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('document_control.document_control_page') }}">文控中心</a>
+      </div>
+    </div>
+    <ol class="vtg-steps" aria-label="操作步骤">
+      <li><span class="vtg-step-n">1</span>项目与产品</li>
+      <li><span class="vtg-step-n">2</span>版本链路与日期</li>
+      <li><span class="vtg-step-n">3</span>生成预览</li>
+      <li><span class="vtg-step-n">4</span>确认下发</li>
+    </ol>
+  </div>
+
+  <!-- 步骤1+2：输入（项目 / 版本 / 日期） -->
+  <section class="vtg-panel" aria-labelledby="vtgStep1Title">
+    <div class="vtg-panel-h">
+      <span class="vtg-step-badge">1</span>
+      <div>
+        <h2 id="vtgStep1Title">项目、产品与版本链路</h2>
+        <p class="vtg-sub">先选定项目与产品，再填写起止/中间版本与各版本发布时间，最后生成预览。</p>
+      </div>
+    </div>
+    <div class="vtg-panel-b">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label small" for="vtgProjectId">关联项目（保存版本记录 / 下发任务）</label>
+          <select id="vtgProjectId" class="form-select form-select-sm">
+            <option value="">请选择项目</option>
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label small" for="vtgProductName">产品名称（应用市场检索用）</label>
+          <input id="vtgProductName" class="form-control form-control-sm" placeholder="与商店上架名称一致，如 My Pocket by yuwell">
+          <div class="form-text">与商店上架名一致；选项目后会自动回填已保存名称。修改后失焦/回车会写入当前项目，刷新不丢。</div>
+        </div>
+      </div>
+
+      <div class="vtg-subpanel">
+        <p class="vtg-subpanel-title"><span class="badge text-bg-primary me-1">2</span>版本链路</p>
+        <p class="vtg-subpanel-hint">格式 X.Y.Z.B。路由：X/Y→变更管理，Z→缺陷管理，B 仅生产发布。</p>
+        <div class="vtg-version-rail">
+          <div>
+            <label class="form-label small" for="vtgFromVersion">开始版本号</label>
+            <input id="vtgFromVersion" class="form-control form-control-sm" placeholder="如 1.0.0.0">
+          </div>
+          <div class="vtg-arrow" aria-hidden="true">→</div>
+          <div>
+            <label class="form-label small" for="vtgIntermediateVersions">中间版本号（可选）</label>
+            <textarea id="vtgIntermediateVersions" class="form-control form-control-sm" rows="2" placeholder="逗号/换行分隔，如 1.0.1.0, 1.1.0.0"></textarea>
+          </div>
+          <div class="vtg-arrow" aria-hidden="true">→</div>
+          <div>
+            <label class="form-label small" for="vtgToVersion">最新版本号</label>
+            <input id="vtgToVersion" class="form-control form-control-sm" placeholder="如 1.2.0.0">
+          </div>
+        </div>
+
+        <div class="mt-3">
+          <p class="vtg-subpanel-title mb-1">各版本发布时间</p>
+          <p class="vtg-subpanel-hint">链路中每个版本均需填写；可整链检索或按行单独检索。</p>
+          <div class="table-responsive border rounded bg-white">
+            <table class="table table-sm table-bordered mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th style="width: 28%">版本号</th>
+                  <th style="width: 18%">生成状态</th>
+                  <th style="width: 34%">发布时间</th>
+                  <th style="width: 20%">操作</th>
+                </tr>
+              </thead>
+              <tbody id="vtgVersionDatesBody">
+                <tr>
+                  <td colspan="4" class="text-muted small">请先填写开始版本号与最新版本号</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="vtg-actions">
+        <button id="vtgSaveRecordsBtn" class="btn btn-outline-primary btn-sm" type="button" title="将上方链路版本与下方表格一并保存">保存版本记录</button>
+        <button id="vtgSuggestDateBtn" class="btn btn-outline-secondary btn-sm" type="button">AI 检索候选发布时间</button>
+        <button id="vtgDiagnoseBtn" class="btn btn-outline-warning btn-sm d-none" type="button">检索诊断</button>
+        <button id="vtgPreviewBtn" class="btn btn-primary btn-sm" type="button">预览任务清单</button>
+      </div>
+      <div id="vtgSuggestWrap" class="mt-3 d-none">
+        <div class="small fw-semibold mb-1">候选发布时间（需人工确认）</div>
+        <div id="vtgSuggestList" class="small border rounded p-2 bg-light"></div>
+      </div>
+      <div id="vtgDiagnoseWrap" class="mt-3 d-none">
+        <div class="small fw-semibold mb-1">检索诊断</div>
+        <pre id="vtgDiagnoseJson" class="small border rounded p-2 bg-light mb-0" style="max-height: 320px; overflow: auto;"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 库内记录：次要，默认可折叠 -->
+  <section class="vtg-panel vtg-saved-panel" aria-labelledby="vtgSavedTitle">
+    <div class="vtg-panel-h" data-bs-toggle="collapse" data-bs-target="#vtgSavedCollapse" aria-expanded="false" aria-controls="vtgSavedCollapse" role="button">
+      <span class="vtg-step-badge" style="background:#64748b">·</span>
+      <div class="flex-grow-1">
+        <h2 id="vtgSavedTitle">项目已保存版本记录 <span class="text-muted fw-normal fs-6">（可选）</span></h2>
+        <p class="vtg-sub mb-0">查阅/编辑库内版本；可用「加载到链路」回填上方表单。不参与当前主流程时可保持收起。</p>
+      </div>
+      <span id="vtgSavedRecordsCount" class="badge text-bg-secondary vtg-count-slot">0 条</span>
+      <button type="button" class="vtg-collapse-toggle ms-2" tabindex="-1">展开 / 收起</button>
+    </div>
+    <div id="vtgSavedCollapse" class="collapse">
+      <div class="vtg-panel-b pt-0">
+        <p class="small text-muted mb-2">选择项目后可在表格中批量改版本/日期/状态/关联项目，再点「批量保存」。「加载到链路」会写入上方表单。</p>
+        <div class="d-flex gap-2 flex-wrap mb-2 align-items-center">
+          <button id="vtgReloadRecordsBtn" class="btn btn-outline-secondary btn-sm" type="button">刷新</button>
+          <button id="vtgAddRecordBtn" class="btn btn-outline-primary btn-sm" type="button">新增版本</button>
+          <button id="vtgLoadRecordsToChainBtn" class="btn btn-outline-primary btn-sm" type="button">加载到链路</button>
+          <button id="vtgSyncChainToRecordsBtn" class="btn btn-outline-secondary btn-sm" type="button">当前链路写入库</button>
+          <span class="vr d-none d-md-inline"></span>
+          <label class="small text-muted mb-0" for="vtgBatchProjectId">批量设项目</label>
+          <select id="vtgBatchProjectId" class="form-select form-select-sm" style="width: auto; min-width: 10rem;"></select>
+          <label class="small text-muted mb-0" for="vtgBatchStatus">批量设状态</label>
+          <select id="vtgBatchStatus" class="form-select form-select-sm" style="width: auto;">
+            <option value="">不修改</option>
+            <option value="none">未生成</option>
+            <option value="previewed">已预览</option>
+            <option value="generated">已下发</option>
+          </select>
+          <button id="vtgBatchApplyBtn" class="btn btn-outline-secondary btn-sm" type="button">应用到全部行</button>
+          <button id="vtgBatchSaveBtn" class="btn btn-primary btn-sm" type="button">批量保存</button>
+        </div>
+        <div class="table-responsive border rounded">
+          <table class="table table-sm table-bordered mb-0 align-middle">
+            <thead class="table-light">
+              <tr>
+                <th style="width: 18%">关联项目</th>
+                <th style="width: 14%">版本号</th>
+                <th style="width: 12%">发布时间</th>
+                <th style="width: 10%">生成状态</th>
+                <th style="width: 14%">产品名称</th>
+                <th style="width: 12%">更新时间</th>
+                <th style="width: 20%">操作</th>
+              </tr>
+            </thead>
+            <tbody id="vtgSavedRecordsBody">
+              <tr>
+                <td colspan="7" class="text-muted small text-center py-3">请先选择项目</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 步骤3+4：预览与下发 -->
+  <section class="vtg-panel vtg-preview-panel" aria-labelledby="vtgStep3Title">
+    <div class="vtg-panel-h">
+      <span class="vtg-step-badge">3</span>
+      <div class="flex-grow-1">
+        <h2 id="vtgStep3Title">任务预览（可编辑）</h2>
+        <p class="vtg-sub">「生成预览」会自动保存规则结果。表格内手改后请点「保存预览修改」，下次再生成才会按反馈优化；下发时也会写入反馈。</p>
+      </div>
+      <span id="vtgPreviewCount" class="badge text-bg-secondary vtg-count-slot">0 条</span>
+    </div>
+    <div class="vtg-panel-b">
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <button id="vtgSavePreviewEditsBtn" class="btn btn-outline-primary btn-sm" type="button" disabled>
+          保存预览修改
+        </button>
+        <span class="small text-muted">写入当前预览快照 + 调整反馈（不必下发）</span>
+      </div>
+      <div id="vtgPreviewMeta" class="small text-muted mb-2">尚未生成预览。</div>
+      <div class="table-responsive border rounded">
+        <table class="table table-sm table-hover table-bordered mb-0 align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width: 3%">#</th>
+              <th style="width: 16%">文件名</th>
+              <th style="width: 10%">任务类型</th>
+              <th style="width: 9%">目标版本</th>
+              <th style="width: 9%">责任人</th>
+              <th style="width: 10%">完成日期</th>
+              <th style="width: 10%">文档日期</th>
+              <th style="width: 8%">模块</th>
+              <th style="width: 15%">备注</th>
+              <th style="width: 7%" title="版本号 X.Y.Z.B 的最高变化位">触发位</th>
+              <th style="width: 3%"></th>
+            </tr>
+          </thead>
+          <tbody id="vtgPreviewBody">
+            <tr>
+              <td colspan="11" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="vtg-apply-box" aria-labelledby="vtgStep4Title">
+        <p class="vtg-subpanel-title" id="vtgStep4Title">
+          <span class="badge text-bg-primary me-1">4</span>转换为任务列表
+        </p>
+        <p class="vtg-subpanel-hint mb-2">确认项目与预览内容无误后，下发到当前所选项目的任务列表。</p>
+        <button id="vtgApplyBtn" class="btn btn-success btn-sm" type="button">确认下发到任务列表</button>
+        <div id="vtgApplyMsg" class="small text-muted mt-2"></div>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/version_task_generator.js', v=static_version) }}"></script>
+{% endblock %}

@@ -34,6 +34,7 @@
             {% endif %}
             {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
             <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
+            <a href="{{ url_for('document_control.version_task_generator_page') }}" class="btn btn-outline-secondary">版本任务清单生成</a>
             {% endif %}
         </div>
     </div>
@@ -47,8 +48,8 @@
                 <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="{% if is_page13_super_admin %}从页面0 同步分配到本账号所属项目组的公司总览项目{% else %}从公司总览同步分配到本账号所属项目组的项目{% endif %}">{% if is_page13_super_admin %}同步页面0项目{% else %}同步公司总览项目{% endif %}</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
-                <div class="position-relative d-inline-block">
-                    <button type="button" class="btn btn-sm btn-outline-secondary col-toggle-btn" id="colToggleBtnProjects" title="列设置">列设置</button>
+                <div class="col-toggle-wrap">
+                    <button type="button" class="btn btn-sm btn-outline-secondary col-toggle-btn" id="colToggleBtnProjects" title="列设置">列设置 ▾</button>
                     <div class="col-toggle-menu" id="colToggleMenuProjects"></div>
                 </div>
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
@@ -92,7 +93,7 @@
             {% endif %}
         </div>
         <div class="table-responsive page1-projects-table-wrap">
-            <table class="table table-sm table-hover align-middle mb-0 page1-projects-table" id="page1ProjectsTable" data-col-store-key="colVis_page1Projects_v1">
+            <table class="table table-sm table-hover align-middle mb-0 page1-projects-table" id="page1ProjectsTable" data-col-store-key="colVis_page1Projects_v2">
                 <thead class="table-light sticky-top">
                 <tr>
                     <th class="p1-col-check text-center" data-col="check"><input type="checkbox" class="form-check-input" id="projectSelectAll" title="全选"></th>

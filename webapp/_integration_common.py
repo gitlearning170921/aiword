@@ -305,6 +305,23 @@ def integration_requests_timeout(read_seconds: int) -> tuple[int, int]:
     return (integration_connect_timeout(), max(5, int(read_seconds)))
 
 
+def integration_http_session() -> requests.Session:
+    """调用 aicheckword 的 Session：禁用系统代理。
+
+    本机/内网文档服务若走 Clash 等 HTTP_PROXY，常见 WinError 10054（连接被重置），
+    与 Cursor 出站代理无关——上游调用必须直连。
+    """
+    sess = requests.Session()
+    sess.trust_env = False
+    return sess
+
+
+def integration_request(method: str, url: str, **kwargs: Any) -> requests.Response:
+    """对文档服务发请求（永不读 HTTP_PROXY/HTTPS_PROXY）。"""
+    with integration_http_session() as sess:
+        return sess.request(method=method.upper(), url=url, **kwargs)
+
+
 def upstream_headers(
     *,
     for_multipart: bool = False,
