@@ -294,6 +294,10 @@ def generate_task_preview(
         for ver, r in sorted(route_by_version.items())
     )
     note = f"{RULE_BASIS_NOTE} {note} 路由：{branch_summary or '无'}。"
+    note += (
+        " 另请对照公司「发补记录」中同一注册国家与注册类别、且发补日期不晚于今日的历史意见"
+        "（含未完成），补充相关文档/章节的复核与整改任务。"
+    )
 
     return {
         "fromVersion": chain[0].normalized,

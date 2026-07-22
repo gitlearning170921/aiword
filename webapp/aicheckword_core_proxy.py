@@ -11,6 +11,7 @@ from flask import jsonify
 from ._integration_common import (
     format_upstream_request_error,
     integration_api_base,
+    integration_request,
     integration_requests_timeout,
     msg_upstream_http,
     msg_upstream_not_configured_env,
@@ -39,7 +40,8 @@ def upstream_form_post(
     if extra_headers:
         headers.update(extra_headers)
     try:
-        resp = requests.post(
+        resp = integration_request(
+            "POST",
             url,
             data=data or {},
             files=files or [],
@@ -75,7 +77,8 @@ def upstream_json_post(
     if extra_headers:
         headers.update(extra_headers)
     try:
-        resp = requests.post(
+        resp = integration_request(
+            "POST",
             url,
             json=body,
             headers=headers,
@@ -106,7 +109,8 @@ def upstream_get(
         return upstream_unconfigured_response()
     url = f"{base.rstrip('/')}/{path.lstrip('/')}"
     try:
-        resp = requests.get(
+        resp = integration_request(
+            "GET",
             url,
             params=params or {},
             headers=upstream_headers(for_multipart=False, organization_id=organization_id),

@@ -854,27 +854,6 @@ def api_company_training_checklist_train():
     )
 
 
-@company_bp.post("/api/company/training/knowledge/clear")
-@company_admin_write_required
-def api_company_training_knowledge_clear():
-    data = request.get_json(force=True) or {}
-    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
-    try:
-        organization_id, collection = resolve_organization_context(
-            explicit_organization_id=explicit_org or None
-        )
-    except ValueError as exc:
-        return jsonify({"message": str(exc)}), 403
-    from .aicheckword_core_proxy import upstream_json_post
-
-    return upstream_json_post(
-        "knowledge/clear",
-        body={"collection": collection},
-        organization_id=organization_id or None,
-        read_seconds=120,
-    )
-
-
 @company_bp.post("/api/company/training/directory")
 @company_admin_write_required
 def api_company_training_directory():
@@ -915,19 +894,34 @@ def api_company_training_directory():
     )
 
 
+def _train_read_timeout_seconds() -> int:
+    from .app_settings import get_setting
+
+    raw = str(get_setting("AICHECKWORD_TRAIN_TIMEOUT_SECONDS") or "").strip()
+    try:
+        v = int(raw) if raw else 120
+    except ValueError:
+        v = 120
+    return max(30, min(3600, v))
+
+
 @company_bp.post("/api/company/training/upload")
 @company_admin_write_required
 def api_company_training_upload():
+    """提交异步训练任务（上游 /api/integration/train/jobs），避免同步 embedding 长请求断连。"""
     files = request.files.getlist("files")
     if not files:
         return jsonify({"message": "请先选择要训练的文件"}), 400
     category = str(request.form.get("category") or "regulation").strip() or "regulation"
+    overwrite_mode = str(request.form.get("overwriteMode") or request.form.get("overwrite_mode") or "overwrite").strip() or "overwrite"
+    if overwrite_mode not in ("overwrite", "skip"):
+        overwrite_mode = "overwrite"
     explicit_org = str(request.form.get("organizationId") or request.form.get("organization_id") or "").strip()
     organization_id, collection = resolve_organization_context(explicit_organization_id=explicit_org)
     base = integration_api_base()
     if not base:
         return jsonify({"message": msg_upstream_not_configured_env()}), 503
-    upstream_url = f"{base.rstrip('/')}/train/upload"
+    upstream_url = f"{base.rstrip('/')}/api/integration/train/jobs"
     form_files: list[tuple[str, tuple[str, bytes, str]]] = []
     raw_items: list[tuple[str, bytes]] = []
     for f in files:
@@ -943,13 +937,20 @@ def api_company_training_upload():
         return jsonify({"message": "无有效训练文件（支持单文件或 zip/tar 压缩包）"}), 400
     for disp_name, raw in expanded:
         form_files.append(("files", (disp_name, raw, "application/octet-stream")))
+    from ._integration_common import integration_request
+
     try:
-        resp = requests.post(
+        resp = integration_request(
+            "POST",
             upstream_url,
-            data={"collection": collection, "category": category},
+            data={
+                "collection": collection,
+                "category": category,
+                "overwrite_mode": overwrite_mode,
+            },
             files=form_files,
             headers=upstream_headers(for_multipart=True, organization_id=organization_id),
-            timeout=integration_requests_timeout(read_seconds=600),
+            timeout=integration_requests_timeout(read_seconds=_train_read_timeout_seconds()),
         )
     except requests.RequestException as exc:
         return jsonify({"message": user_facing_upstream_error(f"上游训练请求失败：{exc}")}), 502
@@ -958,13 +959,94 @@ def api_company_training_upload():
     except Exception:
         body = {"raw": (resp.text or "")[:4000]}
     if resp.status_code >= 400:
-        return jsonify({"message": user_facing_upstream_error(f"上游训练失败（HTTP {resp.status_code}）"), **api_debug_fields(upstream=body)}), resp.status_code
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(f"上游训练失败（HTTP {resp.status_code}）"),
+                **api_debug_fields(upstream=body),
+            }
+        ), resp.status_code
+    job_id = ""
+    if isinstance(body, dict):
+        job_id = str(body.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify(
+            {
+                "message": user_facing_text("上游未返回 job_id", "未收到训练任务编号，请稍后重试"),
+                **api_debug_fields(upstream=body),
+            }
+        ), 502
     return jsonify(
         {
-            "message": "训练请求已完成",
+            "ok": True,
+            "message": "训练任务已提交，请等待进度",
+            "jobId": job_id,
             "organizationId": organization_id,
             "collection": collection,
+            "category": category,
             **api_debug_fields(upstream=body),
+        }
+    )
+
+
+@company_bp.get("/api/company/training/jobs/<job_id>")
+@company_registry_api_required
+def api_company_training_job_status(job_id: str):
+    explicit_org = str(
+        request.args.get("organizationId") or request.args.get("organization_id") or ""
+    ).strip()
+    try:
+        organization_id, _collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_get
+
+    resp, code = upstream_get(
+        f"api/integration/train/jobs/{job_id}",
+        organization_id=organization_id or None,
+        read_seconds=min(120, _train_read_timeout_seconds()),
+    )
+    if code != 200:
+        return resp, code
+    data = resp.get_json() if hasattr(resp, "get_json") else None
+    upstream = data.get("upstream") if isinstance(data, dict) else data
+    if not isinstance(upstream, dict):
+        upstream = {}
+    details = []
+    result = upstream.get("result") if isinstance(upstream.get("result"), dict) else {}
+    if isinstance(result.get("details"), list):
+        details = result.get("details") or []
+    # 失败明细对业务用户可见（脱敏后的文件名+原因）
+    visible_errors = []
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        if str(d.get("status") or "") != "error":
+            continue
+        visible_errors.append(
+            {
+                "fileName": str(d.get("original_filename") or "").strip() or "（未命名）",
+                "message": str(d.get("message") or "训练失败").strip()[:500],
+            }
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "jobId": job_id,
+            "status": upstream.get("status"),
+            "progress": upstream.get("progress"),
+            "message": upstream.get("message") or "",
+            "error": upstream.get("error") or "",
+            "currentFile": upstream.get("current_file") or "",
+            "filesDone": upstream.get("files_done"),
+            "filesTotal": upstream.get("files_total"),
+            "chunksDone": upstream.get("chunks_done"),
+            "chunksTotal": upstream.get("chunks_total"),
+            "result": result,
+            "errors": visible_errors,
+            "organizationId": organization_id,
+            **api_debug_fields(upstream=upstream),
         }
     )
 
@@ -981,8 +1063,11 @@ def api_company_training_project_case_create():
     base = integration_api_base()
     if not base:
         return jsonify({"message": msg_upstream_not_configured_env()}), 503
+    from ._integration_common import integration_request
+
     try:
-        resp = requests.post(
+        resp = integration_request(
+            "POST",
             f"{base.rstrip('/')}/train/project-cases/create",
             data={
                 "collection": collection,
@@ -1055,8 +1140,11 @@ def api_company_training_project_case_upload():
         )
     if not form_files:
         return jsonify({"message": "文件为空或读取失败"}), 400
+    from ._integration_common import integration_request
+
     try:
-        resp = requests.post(
+        resp = integration_request(
+            "POST",
             f"{base.rstrip('/')}/train/project-cases/upload",
             data={"collection": collection, "case_id": case_id_raw},
             files=form_files,
@@ -1078,6 +1166,431 @@ def api_company_training_project_case_upload():
             "collection": collection,
             "caseId": case_id_raw,
             **api_debug_fields(upstream=body),
+        }
+    )
+
+
+def _deficiency_proxy_org():
+    explicit_org = str(
+        request.args.get("organizationId")
+        or request.args.get("organization_id")
+        or (request.get_json(silent=True) or {}).get("organizationId")
+        or (request.get_json(silent=True) or {}).get("organization_id")
+        or request.form.get("organizationId")
+        or request.form.get("organization_id")
+        or ""
+    ).strip()
+    return resolve_organization_context(explicit_organization_id=explicit_org or None)
+
+
+@company_bp.get("/api/company/deficiency/records")
+@company_registry_api_required
+def api_company_deficiency_list():
+    try:
+        organization_id, collection = _deficiency_proxy_org()
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_get
+
+    params = {
+        "collection": collection,
+        "remediation_status": str(request.args.get("remediationStatus") or "").strip(),
+        "deficiency_type": str(request.args.get("deficiencyType") or "").strip(),
+        "limit": str(request.args.get("limit") or "200"),
+    }
+    resp, code = upstream_get(
+        "api/deficiency/records",
+        params=params,
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return resp, code
+    data = resp.get_json() if hasattr(resp, "get_json") else {}
+    upstream = data.get("upstream") if isinstance(data, dict) else {}
+    rows = upstream.get("data") if isinstance(upstream, dict) else []
+    return jsonify({"ok": True, "records": rows or [], "organizationId": organization_id, "collection": collection})
+
+
+@company_bp.post("/api/company/deficiency/records")
+@company_admin_write_required
+def api_company_deficiency_create():
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    project_id = str(data.get("companyProjectId") or data.get("linked_company_project_id") or "").strip()
+    if not project_id:
+        return jsonify({"message": "请选择所属项目"}), 400
+    cp = CompanyProject.query.get(project_id)
+    if not cp or not _company_project_in_active_org(cp):
+        return jsonify({"message": "所属项目无效或不在当前公司范围"}), 400
+    country = str(cp.registered_country or "").strip()
+    category = str(cp.registered_category or "").strip()
+    if not country or not category:
+        return jsonify({"message": "所属项目缺少注册国家或注册类别，请先完善项目信息"}), 400
+    from .aicheckword_core_proxy import upstream_json_post
+
+    body = {
+        "collection": collection,
+        "linked_company_project_id": project_id,
+        "registration_country": country,
+        "registration_category": category,
+        "opinion_text": str(data.get("opinionText") or data.get("opinion_text") or "").strip(),
+        "priority": str(data.get("priority") or "medium").strip() or "medium",
+        "remediation_plan": str(data.get("remediationPlan") or data.get("remediation_plan") or "").strip(),
+        "issued_on": str(data.get("issuedOn") or data.get("issued_on") or "").strip(),
+        "remediation_status": str(data.get("remediationStatus") or data.get("remediation_status") or "open").strip()
+        or "open",
+        "completed_on": str(data.get("completedOn") or data.get("completed_on") or "").strip() or None,
+        "deficiency_type": str(data.get("deficiencyType") or data.get("deficiency_type") or "registration_review").strip(),
+        "deficiency_source": str(data.get("deficiencySource") or data.get("deficiency_source") or "").strip(),
+    }
+    resp, code = upstream_json_post(
+        "api/deficiency/records",
+        body=body,
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json() if hasattr(resp, "get_json") else {}
+    upstream = payload.get("upstream") if isinstance(payload, dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "message": "发补记录已创建",
+            "record": (upstream or {}).get("data") if isinstance(upstream, dict) else None,
+            "organizationId": organization_id,
+            "collection": collection,
+            **api_debug_fields(upstream=upstream),
+        }
+    )
+
+
+@company_bp.patch("/api/company/deficiency/records/<int:record_id>")
+@company_admin_write_required
+def api_company_deficiency_patch(record_id: int):
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    body: dict[str, Any] = {"collection": collection}
+    mapping = {
+        "opinionText": "opinion_text",
+        "opinion_text": "opinion_text",
+        "priority": "priority",
+        "remediationPlan": "remediation_plan",
+        "remediation_plan": "remediation_plan",
+        "issuedOn": "issued_on",
+        "issued_on": "issued_on",
+        "remediationStatus": "remediation_status",
+        "remediation_status": "remediation_status",
+        "completedOn": "completed_on",
+        "completed_on": "completed_on",
+        "deficiencyType": "deficiency_type",
+        "deficiency_type": "deficiency_type",
+        "deficiencySource": "deficiency_source",
+        "deficiency_source": "deficiency_source",
+        "status": "status",
+    }
+    for src, dst in mapping.items():
+        if src in data:
+            body[dst] = data.get(src)
+    # 切换项目时重固化国家类别
+    project_id = str(data.get("companyProjectId") or data.get("linked_company_project_id") or "").strip()
+    if project_id:
+        cp = CompanyProject.query.get(project_id)
+        if not cp or not _company_project_in_active_org(cp):
+            return jsonify({"message": "所属项目无效或不在当前公司范围"}), 400
+        body["linked_company_project_id"] = project_id
+        body["registration_country"] = str(cp.registered_country or "").strip()
+        body["registration_category"] = str(cp.registered_category or "").strip()
+        if not body["registration_country"] or not body["registration_category"]:
+            return jsonify({"message": "所属项目缺少注册国家或注册类别"}), 400
+    from ._integration_common import integration_request
+
+    base = integration_api_base()
+    if not base:
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
+    try:
+        resp = integration_request(
+            "PATCH",
+            f"{base.rstrip('/')}/api/deficiency/records/{int(record_id)}",
+            json=body,
+            headers=upstream_headers(for_multipart=False, organization_id=organization_id),
+            timeout=integration_requests_timeout(read_seconds=60),
+        )
+    except requests.RequestException as exc:
+        return jsonify({"message": user_facing_upstream_error(f"更新发补失败：{exc}")}), 502
+    try:
+        upstream = resp.json()
+    except Exception:
+        upstream = {"raw": (resp.text or "")[:4000]}
+    if resp.status_code >= 400:
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(f"更新发补失败（HTTP {resp.status_code}）"),
+                **api_debug_fields(upstream=upstream),
+            }
+        ), resp.status_code
+    return jsonify(
+        {
+            "ok": True,
+            "message": "已保存",
+            "record": upstream.get("data") if isinstance(upstream, dict) else None,
+            **api_debug_fields(upstream=upstream),
+        }
+    )
+
+
+@company_bp.get("/api/company/deficiency/records/<int:record_id>")
+@company_registry_api_required
+def api_company_deficiency_get(record_id: int):
+    try:
+        organization_id, collection = _deficiency_proxy_org()
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_get
+
+    resp, code = upstream_get(
+        f"api/deficiency/records/{int(record_id)}",
+        params={"collection": collection},
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return resp, code
+    data = resp.get_json() if hasattr(resp, "get_json") else {}
+    upstream = data.get("upstream") if isinstance(data, dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "record": (upstream or {}).get("data") if isinstance(upstream, dict) else None,
+            "organizationId": organization_id,
+            "collection": collection,
+        }
+    )
+
+
+@company_bp.post("/api/company/deficiency/records/<int:record_id>/assets")
+@company_admin_write_required
+def api_company_deficiency_assets(record_id: int):
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"message": "请选择文件"}), 400
+    role = str(request.form.get("role") or "before_doc").strip() or "before_doc"
+    explicit_org = str(request.form.get("organizationId") or request.form.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    form_files = []
+    for f in files:
+        if f is None:
+            continue
+        raw = f.read()
+        if not raw:
+            continue
+        form_files.append(
+            ("files", (str(f.filename or "upload.bin"), raw, "application/octet-stream"))
+        )
+    from .aicheckword_core_proxy import upstream_form_post
+
+    return upstream_form_post(
+        f"api/deficiency/records/{int(record_id)}/assets",
+        data={"collection": collection, "role": role},
+        files=form_files,
+        organization_id=organization_id or None,
+        read_seconds=_train_read_timeout_seconds(),
+    )
+
+
+@company_bp.post("/api/company/deficiency/records/<int:record_id>/train")
+@company_admin_write_required
+def api_company_deficiency_train(record_id: int):
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_form_post
+
+    resp, code = upstream_form_post(
+        f"api/deficiency/records/{int(record_id)}/train",
+        data={"collection": collection},
+        organization_id=organization_id or None,
+        read_seconds=max(120, _train_read_timeout_seconds()),
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json() if hasattr(resp, "get_json") else {}
+    upstream = payload.get("upstream") if isinstance(payload, dict) else {}
+    chunks = 0
+    if isinstance(upstream, dict):
+        chunks = int(((upstream.get("data") or {}) if isinstance(upstream.get("data"), dict) else {}).get("chunks_added") or 0)
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"发补记录已训练入库（{chunks} 块）",
+            "chunksAdded": chunks,
+            **api_debug_fields(upstream=upstream),
+        }
+    )
+
+
+def _resolve_company_project_by_name(organization_id: str | None, project_name: str):
+    name = (project_name or "").strip()
+    if not name:
+        return None
+    q = CompanyProject.query.filter(CompanyProject.name == name)
+    if organization_id:
+        q = q.filter(CompanyProject.organization_id == organization_id)
+    rows = q.all()
+    rows = [cp for cp in rows if _company_project_in_active_org(cp)]
+    if len(rows) == 1:
+        return rows[0]
+    if len(rows) > 1:
+        return rows[0]  # 同名取第一条；导入结果里会提示
+    # 宽松：去空白后匹配
+    compact = re.sub(r"\s+", "", name)
+    all_q = CompanyProject.query
+    if organization_id:
+        all_q = all_q.filter(CompanyProject.organization_id == organization_id)
+    for cp in all_q.all():
+        if not _company_project_in_active_org(cp):
+            continue
+        if re.sub(r"\s+", "", str(cp.name or "")) == compact:
+            return cp
+    return None
+
+
+@company_bp.get("/api/company/deficiency/import-template")
+@company_registry_api_required
+def api_company_deficiency_import_template():
+    from flask import Response
+
+    from .deficiency_excel import build_deficiency_import_template_bytes
+
+    raw = build_deficiency_import_template_bytes()
+    return Response(
+        raw,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=deficiency_import_template.xlsx",
+        },
+    )
+
+
+@company_bp.post("/api/company/deficiency/import-excel")
+@company_admin_write_required
+def api_company_deficiency_import_excel():
+    """批量导入发补记录（xlsx）。所属项目按名称匹配当前公司下的公司总览项目。"""
+    f = request.files.get("file") or (request.files.getlist("file") or [None])[0]
+    if f is None:
+        return jsonify({"message": "请上传 Excel 文件（.xlsx）"}), 400
+    explicit_org = str(request.form.get("organizationId") or request.form.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    raw = f.read()
+    if not raw:
+        return jsonify({"message": "文件为空"}), 400
+    from .deficiency_excel import parse_deficiency_excel
+    from .aicheckword_core_proxy import upstream_json_post
+
+    try:
+        rows, parse_warnings = parse_deficiency_excel(raw)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+
+    created = 0
+    failed: list[dict[str, Any]] = []
+    warnings = list(parse_warnings)
+    for row in rows:
+        excel_row = row.get("_excel_row")
+        cp = _resolve_company_project_by_name(organization_id, str(row.get("project_name") or ""))
+        if not cp:
+            failed.append(
+                {
+                    "excelRow": excel_row,
+                    "projectName": row.get("project_name"),
+                    "message": "未找到同名所属项目（须与公司总览项目名称一致）",
+                }
+            )
+            continue
+        country = str(cp.registered_country or "").strip()
+        category = str(cp.registered_category or "").strip()
+        if not country or not category:
+            failed.append(
+                {
+                    "excelRow": excel_row,
+                    "projectName": row.get("project_name"),
+                    "message": "项目缺少注册国家或注册类别",
+                }
+            )
+            continue
+        body = {
+            "collection": collection,
+            "linked_company_project_id": str(cp.id),
+            "registration_country": country,
+            "registration_category": category,
+            "opinion_text": row["opinion_text"],
+            "priority": row["priority"],
+            "remediation_plan": row.get("remediation_plan") or "",
+            "issued_on": row["issued_on"],
+            "remediation_status": row["remediation_status"],
+            "completed_on": row.get("completed_on"),
+            "deficiency_type": row["deficiency_type"],
+            "deficiency_source": row.get("deficiency_source") or "",
+        }
+        resp, code = upstream_json_post(
+            "api/deficiency/records",
+            body=body,
+            organization_id=organization_id or None,
+            read_seconds=60,
+        )
+        if code != 200:
+            payload = resp.get_json(silent=True) if hasattr(resp, "get_json") else None
+            msg = ""
+            if isinstance(payload, dict):
+                msg = str(payload.get("message") or "")[:300]
+            failed.append(
+                {
+                    "excelRow": excel_row,
+                    "projectName": row.get("project_name"),
+                    "message": msg or f"上游创建失败（HTTP {code}）",
+                }
+            )
+            continue
+        created += 1
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"导入完成：成功 {created}，失败 {len(failed)}",
+            "created": created,
+            "failedCount": len(failed),
+            "failed": failed[:50],
+            "warnings": warnings[:50],
+            "organizationId": organization_id,
+            "collection": collection,
         }
     )
 

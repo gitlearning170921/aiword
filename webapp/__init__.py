@@ -1817,6 +1817,7 @@ def create_app() -> Flask:
             "js/document_control.js",
             "js/exam_center.js",
             "js/draft_gen.js",
+            "js/literature_search.js",
             "css/app.css",
             "data/iso13485_document_name_pairs.json",
             "vendor/bootstrap-5.3.3/bootstrap.min.css",
@@ -1984,6 +1985,9 @@ def create_app() -> Flask:
         from .document_control.routes import document_control_bp
 
         app.register_blueprint(document_control_bp)
+        from .literature_routes import literature_bp
+
+        app.register_blueprint(literature_bp)
 
         from .app_settings import register_exam_center_feature_gate
 

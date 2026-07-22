@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}文献检索{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+    <div>
+        <h1 class="h4 mb-1">文献检索（MVP）</h1>
+        <div class="text-muted small">
+            每次检索/导入单独成一批次并落库（刷新可恢复）；导出为 Clinical Literature Search Result 格式（Database / Item / Literature / Link）。
+            Scholar 默认逐字对齐浏览器参数（hl=zh-CN、as_sdt=0,5、默认 filter、相关性排序），排序与命中集与浏览器结果页一致；页面顶部「约 N 条」是 Scholar 的估计值，实际可翻页条数通常更少。若中途触发 Google 人机验证，会弹窗验证，完成后点「继续检索」可从断点续抓。截断字段（含「…」）会按 DOI/标题回查权威库覆盖为完整信息。
+        </div>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-12">
+                <label class="form-label" for="litQuery">检索式</label>
+                <textarea class="form-control" id="litQuery" rows="3" placeholder="例如：((&quot;medical device software&quot;) AND (risk management))"></textarea>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">来源（可单选或多选，至少选 1 项）</label>
+                <div class="d-flex flex-wrap gap-3">
+                    <label class="form-check-label"><input class="form-check-input me-1 lit-source" type="checkbox" value="pubmed" checked>PubMed</label>
+                    <label class="form-check-label"><input class="form-check-input me-1 lit-source" type="checkbox" value="scholar">Google Scholar</label>
+                    <label class="form-check-label"><input class="form-check-input me-1 lit-source" type="checkbox" value="embase">Embase（导入）</label>
+                    <label class="form-check-label"><input class="form-check-input me-1 lit-source" type="checkbox" value="cochrane">Cochrane（导入）</label>
+                </div>
+                <div class="form-text">
+                    Scholar 默认按浏览器参数检索（hl=zh-CN、as_sdt=0,5、默认 filter、相关性排序），排序与命中集逐字对齐浏览器结果页；顶部「约 N 条」为 Scholar 估计值，实际可翻页条数通常更少。
+                    逐页抓取；截断字段会并行回查权威库补全（有时限，避免整次超时）。
+                    若提示代理超时：先确认 Clash 已开启且端口与 aicheckword「llm_http_proxy」一致（如 7897），再重启 aicheckword 后重试。
+                </div>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="litStartYear">起始年份</label>
+                <input class="form-control" id="litStartYear" type="number" min="1900" max="3000" placeholder="可空">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="litEndYear">截止年份</label>
+                <input class="form-control" id="litEndYear" type="number" min="1900" max="3000" placeholder="可空">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="litMaxPerSource">每源条数</label>
+                <input class="form-control" id="litMaxPerSource" type="number" min="1" max="500" value="200">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="litScholarSort">Scholar 排序</label>
+                <select class="form-select" id="litScholarSort">
+                    <option value="relevance" selected>相关性（默认）</option>
+                    <option value="date">日期</option>
+                </select>
+            </div>
+        </div>
+        <div class="d-flex gap-2 mt-3 flex-wrap">
+            <button class="btn btn-primary" id="litSearchBtn" type="button">开始检索</button>
+            <button class="btn btn-outline-secondary" id="litClearBatchesBtn" type="button">清空全部批次</button>
+        </div>
+        <div class="small mt-2" id="litStatus"></div>
+    </div>
+</div>
+
+<div class="card mb-3" id="litImportCard">
+    <div class="card-header">手工导入（Embase / Cochrane）</div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label" for="litImportSource">来源</label>
+                <select class="form-select" id="litImportSource">
+                    <option value="embase">Embase</option>
+                    <option value="cochrane">Cochrane</option>
+                    <option value="pubmed">PubMed</option>
+                    <option value="scholar">Google Scholar</option>
+                </select>
+            </div>
+            <div class="col-md-7">
+                <label class="form-label" for="litImportFile">文件（RIS/CSV）</label>
+                <input class="form-control" id="litImportFile" type="file" accept=".ris,.csv">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-outline-primary w-100" id="litImportBtn" type="button">导入为新批次</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+    <h2 class="h6 mb-0">结果批次</h2>
+    <span class="badge text-bg-secondary" id="litCountBadge">0 批 / 0 条</span>
+</div>
+<div id="litBatchList">
+    <div class="text-muted text-center py-4 border rounded">暂无批次。请先检索或导入。</div>
+</div>
+
+<div class="modal fade" id="litDetailModal" tabindex="-1" aria-labelledby="litDetailModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="litDetailModalLabel">文献详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body" id="litDetailBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="litCaptchaModal" tabindex="-1" aria-labelledby="litCaptchaModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="litCaptchaModalLabel">Google Scholar 人机验证</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div class="p-2 small text-muted border-bottom">
+                    请在下方完成验证（经文档服务同一代理出口）。完成后点击「验证完成，继续检索」。
+                    若弹窗内无法显示，可
+                    <a href="#" id="litCaptchaOpenTab" target="_blank" rel="noopener">新标签打开验证页</a>。
+                    <span id="litCaptchaProgress" class="d-block mt-1 fw-semibold text-primary"></span>
+                </div>
+                <iframe id="litCaptchaFrame" title="Scholar captcha" style="width:100%;height:70vh;border:0;background:#fff;"></iframe>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">稍后</button>
+                <button type="button" class="btn btn-primary" id="litCaptchaContinueBtn">验证完成，继续检索</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/literature_search.js', v=static_version) }}"></script>
+{% endblock %}

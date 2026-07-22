@@ -39,6 +39,7 @@ REQUIRED_ORG_COLUMN_TABLES = (
     "exam_attempts",
     "exam_bank_ingest_jobs",
     "exam_set_review_jobs",
+    "literature_search_batches",
 )
 
 

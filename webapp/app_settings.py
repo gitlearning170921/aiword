@@ -90,6 +90,12 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
         False,
     ),
     (
+        "AICHECKWORD_TRAIN_TIMEOUT_SECONDS",
+        "知识库/发补训练：创建异步任务与轮询上游的 HTTP 读超时（秒，默认 120；提交大文件建议 120～300；"
+        "实际 embedding 在 aicheckword 异步执行，前端通过进度轮询等待）。",
+        False,
+    ),
+    (
         "AICHECKWORD_DRAFT_COLLECTION_IDS",
         "初稿页「知识库名称」下拉：英文逗号分隔的 collection id（默认仅 regulations；与 aicheckword 侧栏知识库名称一致）",
         False,
@@ -355,6 +361,7 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",
             "AICHECKWORD_AUDIT_TIMEOUT_SECONDS",
             "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",
+            "AICHECKWORD_TRAIN_TIMEOUT_SECONDS",
             "AICHECKWORD_DRAFT_COLLECTION_IDS",
         ),
     },
@@ -763,6 +770,11 @@ CONFIG_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "aicheckword_translation_timeout_seconds",
         "aicheckwordTranslationTimeoutSeconds",
     ),
+    "AICHECKWORD_TRAIN_TIMEOUT_SECONDS": (
+        "AICHECKWORD_TRAIN_TIMEOUT_SECONDS",
+        "aicheckword_train_timeout_seconds",
+        "aicheckwordTrainTimeoutSeconds",
+    ),
     "AICHECKWORD_DRAFT_COLLECTION_IDS": (
         "AICHECKWORD_DRAFT_COLLECTION_IDS",
         "aicheckword_draft_collection_ids",
@@ -822,6 +834,7 @@ ENV_VAR_NAMES: dict[str, tuple[str, ...]] = {
     "AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS": ("AICHECKWORD_DRAFT_CONNECT_TIMEOUT_SECONDS",),
     "AICHECKWORD_AUDIT_TIMEOUT_SECONDS": ("AICHECKWORD_AUDIT_TIMEOUT_SECONDS",),
     "AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS": ("AICHECKWORD_TRANSLATION_TIMEOUT_SECONDS",),
+    "AICHECKWORD_TRAIN_TIMEOUT_SECONDS": ("AICHECKWORD_TRAIN_TIMEOUT_SECONDS",),
     "AICHECKWORD_DRAFT_COLLECTION_IDS": ("AICHECKWORD_DRAFT_COLLECTION_IDS",),
     "AICHECKWORD_CHAT_API_BASE": ("AICHECKWORD_CHAT_API_BASE",),
     "AICHECKWORD_CHAT_API_KEY": ("AICHECKWORD_CHAT_API_KEY",),

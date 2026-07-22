@@ -1049,3 +1049,25 @@ class ExamCenterActivityDetail(db.Model):
     upstream_payload: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
+
+class LiteratureSearchBatch(db.Model):
+    """文献检索操作批次：按次存储，刷新后可恢复。"""
+
+    __tablename__ = "literature_search_batches"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    batch_type: Mapped[str] = mapped_column(db.String(16), nullable=False, default="search")  # search|import
+    # 属性名不能用 query：会覆盖 Flask-SQLAlchemy 的 Model.query 查询接口；
+    # 保留数据库列名 "query" 以兼容已有数据。
+    query_text: Mapped[Optional[str]] = mapped_column("query", db.Text, nullable=True)
+    sources_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    status_note: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    details_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    records_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    record_count: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, index=True)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
+

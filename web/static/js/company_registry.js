@@ -1480,11 +1480,54 @@
                     const fd = new FormData();
                     fd.append("organizationId", String(orgSel.value || "").trim());
                     fd.append("category", category);
+                    const overwriteMode = String(
+                        document.getElementById("companyTrainOverwriteMode")?.value || "overwrite"
+                    ).trim();
+                    fd.append("overwriteMode", overwriteMode);
                     selected.forEach((f) => fd.append("files", f));
                     res = await apiRequest("/api/company/training/upload", {
                         method: "POST",
                         body: fd,
                     });
+                    const jobId = String(res?.jobId || res?.job_id || "").trim();
+                    if (jobId) {
+                        const progressWrap = document.getElementById("companyTrainProgressWrap");
+                        const progressBar = document.getElementById("companyTrainProgressBar");
+                        if (progressWrap) progressWrap.style.display = "";
+                        const poll = async () => {
+                            const st = await apiRequest(
+                                `/api/company/training/jobs/${encodeURIComponent(jobId)}?organizationId=${encodeURIComponent(String(orgSel.value || "").trim())}`
+                            );
+                            const prog = Math.max(0, Math.min(100, Math.round(Number(st?.progress || 0) * 100)));
+                            if (progressBar) progressBar.style.width = `${prog}%`;
+                            const msg = String(st?.message || "").trim();
+                            const cur = String(st?.currentFile || "").trim();
+                            setHint(cur ? `${msg}（${cur}）` : msg || `进度 ${prog}%`);
+                            const status = String(st?.status || "").toLowerCase();
+                            if (status === "succeeded" || status === "failed") {
+                                if (progressWrap) progressWrap.style.display = "none";
+                                const errs = Array.isArray(st?.errors) ? st.errors : [];
+                                if (status === "failed") {
+                                    throw new Error(st?.error || msg || "训练失败");
+                                }
+                                const result = st?.result || {};
+                                const files = Number(result?.files_processed || st?.filesDone || 0);
+                                const chunks = Number(result?.total_chunks_added || 0);
+                                let hintMsg = `训练完成：文件 ${files}，新增块 ${chunks}`;
+                                if (errs.length) {
+                                    hintMsg += `；失败 ${errs.length}：` + errs.map((e) => `${e.fileName}:${e.message}`).join("；");
+                                }
+                                setHint(hintMsg);
+                                notify(errs.length ? `训练完成（含 ${errs.length} 个失败）` : `训练完成（${files} 个文件，${chunks} 个块）`, errs.length ? "warning" : "success");
+                                filesInput.value = "";
+                                return;
+                            }
+                            await new Promise((r) => setTimeout(r, 1500));
+                            return poll();
+                        };
+                        await poll();
+                        return;
+                    }
                 }
                 const files = Number(
                     res?.upstream?.files_processed ||
@@ -1501,6 +1544,8 @@
                 filesInput.value = "";
             } catch (e) {
                 setHint("");
+                const progressWrap = document.getElementById("companyTrainProgressWrap");
+                if (progressWrap) progressWrap.style.display = "none";
                 notify(e.message || "训练失败", "danger");
             } finally {
                 uploadBtn.disabled = false;
@@ -1691,25 +1736,6 @@
         }
 
         document.getElementById("btnRefreshKnowledgeStatus")?.addEventListener("click", refreshKnowledgeStatus);
-        document.getElementById("btnClearKnowledge")?.addEventListener("click", async () => {
-            const orgId = readHubOrg();
-            if (!orgId) {
-                notify("请先选择公司", "warning");
-                return;
-            }
-            if (!window.confirm("确定清空当前公司知识库？此操作不可恢复。")) return;
-            try {
-                await apiRequest("/api/company/training/knowledge/clear", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ organizationId: orgId }),
-                });
-                notify("知识库已清空", "success");
-                refreshKnowledgeStatus();
-            } catch (e) {
-                notify(e.message || "清空失败", "danger");
-            }
-        });
 
         document.getElementById("btnTrainDirectory")?.addEventListener("click", async () => {
             const orgId = readHubOrg();
@@ -1735,6 +1761,354 @@
         document.querySelector('[data-bs-target="#trainTabKnowledge"]')?.addEventListener("shown.bs.tab", refreshKnowledgeStatus);
     }
 
+    function initDeficiencyPanel() {
+        const orgSel = document.getElementById("defOrgSelect");
+        const statusFilter = document.getElementById("defStatusFilter");
+        const body = document.getElementById("defRecordsBody");
+        const editor = document.getElementById("defEditorPanel");
+        if (!orgSel || !body) return;
+
+        const todayIso = () => {
+            const d = new Date();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const day = String(d.getDate()).padStart(2, "0");
+            return `${d.getFullYear()}-${m}-${day}`;
+        };
+
+        async function syncOrgOptions() {
+            const src = document.getElementById("companyActiveOrgSelect");
+            if (!src) return;
+            orgSel.innerHTML = src.innerHTML;
+            if (!orgSel.value && src.value) orgSel.value = src.value;
+        }
+
+        async function loadProjectsForOrg() {
+            const projectSel = document.getElementById("defProjectId");
+            if (!projectSel) return;
+            const orgId = String(orgSel.value || "").trim();
+            projectSel.innerHTML = '<option value="">加载中…</option>';
+            if (!orgId) {
+                projectSel.innerHTML = '<option value="">请先选择公司</option>';
+                return;
+            }
+            try {
+                const res = await apiRequest(
+                    `/api/company/projects?organizationId=${encodeURIComponent(orgId)}`
+                );
+                const rows = Array.isArray(res?.projects) ? res.projects : Array.isArray(res) ? res : [];
+                projectSel.innerHTML = rows.length
+                    ? rows
+                          .map((p) => {
+                              const id = String(p.id || "").trim();
+                              const name = String(p.name || "").trim() || id;
+                              const country = String(p.registeredCountry || p.registered_country || "").trim();
+                              const cat = String(p.registeredCategory || p.registered_category || "").trim();
+                              return `<option value="${esc(id)}" data-country="${esc(country)}" data-category="${esc(cat)}">${esc(name)}（${esc(country || "—")}/${esc(cat || "—")}）</option>`;
+                          })
+                          .join("")
+                    : '<option value="">（该公司暂无项目）</option>';
+                updateDimReadonly();
+            } catch (e) {
+                projectSel.innerHTML = `<option value="">加载失败：${esc(e.message || "")}</option>`;
+            }
+        }
+
+        function updateDimReadonly() {
+            const projectSel = document.getElementById("defProjectId");
+            const dim = document.getElementById("defDimReadonly");
+            if (!projectSel || !dim) return;
+            const opt = projectSel.selectedOptions?.[0];
+            const country = opt?.getAttribute("data-country") || "";
+            const cat = opt?.getAttribute("data-category") || "";
+            dim.textContent = country || cat ? `${country || "—"} / ${cat || "—"}` : "—";
+        }
+
+        async function refreshList() {
+            const orgId = String(orgSel.value || "").trim();
+            if (!orgId) {
+                body.innerHTML = '<tr><td colspan="8" class="text-muted small p-3">请选择公司</td></tr>';
+                return;
+            }
+            body.innerHTML = '<tr><td colspan="8" class="text-muted small p-3">加载中…</td></tr>';
+            try {
+                const st = String(statusFilter?.value || "").trim();
+                let url = `/api/company/deficiency/records?organizationId=${encodeURIComponent(orgId)}`;
+                if (st) url += `&remediationStatus=${encodeURIComponent(st)}`;
+                const res = await apiRequest(url);
+                const rows = Array.isArray(res?.records) ? res.records : [];
+                if (!rows.length) {
+                    body.innerHTML = '<tr><td colspan="8" class="text-muted small p-3">暂无发补记录</td></tr>';
+                    return;
+                }
+                const typeLabel = (t) =>
+                    t === "type_testing" ? "体考" : t === "registration_review" ? "注册审评" : t || "—";
+                const priLabel = (p) => ({ high: "高", medium: "中", low: "低" }[p] || p || "—");
+                const stLabel = (s) => (s === "done" ? "已完成" : "未完成");
+                const trainLabel = (s) =>
+                    ({ trained: "已训练", stale: "待重训", not_trained: "未训练" }[s] || s || "—");
+                body.innerHTML = rows
+                    .map((r) => {
+                        const id = String(r.id || "").trim();
+                        return `<tr>
+                          <td>${esc(String(r.issued_on || "").slice(0, 10))}</td>
+                          <td class="small">${esc(r.linked_company_project_id || "—")}</td>
+                          <td>${esc(typeLabel(r.deficiency_type))}</td>
+                          <td class="small">${esc(r.deficiency_source || "—")}</td>
+                          <td>${esc(priLabel(r.priority))}</td>
+                          <td>${esc(stLabel(r.remediation_status))}</td>
+                          <td>${esc(trainLabel(r.train_status))}</td>
+                          <td class="text-end"><button type="button" class="btn btn-sm btn-outline-primary def-edit-btn" data-id="${esc(id)}">编辑</button></td>
+                        </tr>`;
+                    })
+                    .join("");
+                body.querySelectorAll(".def-edit-btn").forEach((btn) => {
+                    btn.addEventListener("click", () => openEditor(String(btn.getAttribute("data-id") || "")));
+                });
+            } catch (e) {
+                body.innerHTML = `<tr><td colspan="8" class="text-danger small p-3">${esc(e.message || "加载失败")}</td></tr>`;
+            }
+        }
+
+        function resetEditor() {
+            document.getElementById("defEditId").value = "";
+            document.getElementById("defEditorTitle").textContent = "新建发补记录";
+            document.getElementById("defOpinion").value = "";
+            document.getElementById("defPlan").value = "";
+            document.getElementById("defSource").value = "";
+            document.getElementById("defIssuedOn").value = todayIso();
+            document.getElementById("defRemediationStatus").value = "open";
+            document.getElementById("defCompletedOn").value = "";
+            document.getElementById("defPriority").value = "medium";
+            document.getElementById("defType").value = "registration_review";
+            document.getElementById("defAssetsHint").textContent = "";
+            document.getElementById("defTrainHint").textContent = "";
+            document.getElementById("defBeforeFiles").value = "";
+            document.getElementById("defAfterFiles").value = "";
+            const wrap = document.getElementById("defTrainProgressWrap");
+            if (wrap) wrap.style.display = "none";
+        }
+
+        async function openEditor(id) {
+            await loadProjectsForOrg();
+            if (!id) {
+                resetEditor();
+                if (editor) editor.style.display = "";
+                return;
+            }
+            const orgId = String(orgSel.value || "").trim();
+            try {
+                const res = await apiRequest(
+                    `/api/company/deficiency/records/${encodeURIComponent(id)}?organizationId=${encodeURIComponent(orgId)}`
+                );
+                const r = res?.record || {};
+                document.getElementById("defEditId").value = String(r.id || id);
+                document.getElementById("defEditorTitle").textContent = `编辑发补 #${r.id || id}`;
+                const projectSel = document.getElementById("defProjectId");
+                if (projectSel && r.linked_company_project_id) {
+                    projectSel.value = String(r.linked_company_project_id);
+                }
+                updateDimReadonly();
+                document.getElementById("defType").value = r.deficiency_type || "registration_review";
+                document.getElementById("defPriority").value = r.priority || "medium";
+                document.getElementById("defIssuedOn").value = String(r.issued_on || "").slice(0, 10);
+                document.getElementById("defRemediationStatus").value = r.remediation_status || "open";
+                document.getElementById("defCompletedOn").value = String(r.completed_on || "").slice(0, 10);
+                document.getElementById("defSource").value = r.deficiency_source || "";
+                document.getElementById("defOpinion").value = r.opinion_text || "";
+                document.getElementById("defPlan").value = r.remediation_plan || "";
+                const assets = Array.isArray(r.assets) ? r.assets : [];
+                document.getElementById("defAssetsHint").textContent = assets.length
+                    ? `已有附件 ${assets.length}：` +
+                      assets.map((a) => `${a.role}:${a.display_name}`).join("；")
+                    : "尚无整改前/后文档附件";
+                if (editor) editor.style.display = "";
+            } catch (e) {
+                notify(e.message || "加载发补失败", "danger");
+            }
+        }
+
+        document.getElementById("defRemediationStatus")?.addEventListener("change", () => {
+            const st = String(document.getElementById("defRemediationStatus")?.value || "");
+            const completed = document.getElementById("defCompletedOn");
+            if (st === "done" && completed && !completed.value) completed.value = todayIso();
+            if (st === "open" && completed) completed.value = "";
+        });
+        document.getElementById("defProjectId")?.addEventListener("change", updateDimReadonly);
+        document.getElementById("btnDefRefresh")?.addEventListener("click", refreshList);
+        document.getElementById("btnDefNew")?.addEventListener("click", () => openEditor(""));
+        document.getElementById("btnDefCancel")?.addEventListener("click", () => {
+            if (editor) editor.style.display = "none";
+        });
+        document.getElementById("btnDefDownloadTemplate")?.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            window.location.href = "/api/company/deficiency/import-template";
+        });
+        document.getElementById("defExcelFile")?.addEventListener("change", async (ev) => {
+            const input = ev.target;
+            const file = input?.files?.[0];
+            const orgId = String(orgSel.value || "").trim();
+            const hint = document.getElementById("defImportHint");
+            if (!file) return;
+            if (!orgId) {
+                notify("请先选择公司再导入", "warning");
+                input.value = "";
+                return;
+            }
+            const fd = new FormData();
+            fd.append("organizationId", orgId);
+            fd.append("file", file);
+            if (hint) hint.textContent = "正在导入…";
+            try {
+                const res = await apiRequest("/api/company/deficiency/import-excel", {
+                    method: "POST",
+                    body: fd,
+                });
+                const created = Number(res?.created || 0);
+                const failed = Number(res?.failedCount || 0);
+                let msg = res?.message || `导入完成：成功 ${created}，失败 ${failed}`;
+                const fails = Array.isArray(res?.failed) ? res.failed : [];
+                if (fails.length) {
+                    msg +=
+                        "；失败明细：" +
+                        fails
+                            .slice(0, 5)
+                            .map((x) => `第${x.excelRow}行 ${x.projectName || ""}:${x.message}`)
+                            .join("；");
+                }
+                if (hint) hint.textContent = msg;
+                notify(msg, failed ? "warning" : "success");
+                await refreshList();
+            } catch (e) {
+                if (hint) hint.textContent = "";
+                notify(e.message || "导入失败", "danger");
+            } finally {
+                input.value = "";
+            }
+        });
+        orgSel.addEventListener("change", async () => {
+            await loadProjectsForOrg();
+            await refreshList();
+        });
+        statusFilter?.addEventListener("change", refreshList);
+        document.getElementById("companyActiveOrgSelect")?.addEventListener("change", async () => {
+            await syncOrgOptions();
+            await loadProjectsForOrg();
+            await refreshList();
+        });
+
+        document.getElementById("btnDefSave")?.addEventListener("click", async () => {
+            const orgId = String(orgSel.value || "").trim();
+            const projectId = String(document.getElementById("defProjectId")?.value || "").trim();
+            const opinion = String(document.getElementById("defOpinion")?.value || "").trim();
+            const issuedOn = String(document.getElementById("defIssuedOn")?.value || "").trim();
+            if (!orgId || !projectId || !opinion || !issuedOn) {
+                notify("请填写公司、项目、发补意见与发补日期", "warning");
+                return;
+            }
+            const remStatus = String(document.getElementById("defRemediationStatus")?.value || "open");
+            let completedOn = String(document.getElementById("defCompletedOn")?.value || "").trim();
+            if (remStatus === "done" && !completedOn) completedOn = todayIso();
+            const editId = String(document.getElementById("defEditId")?.value || "").trim();
+            const payload = {
+                organizationId: orgId,
+                companyProjectId: projectId,
+                opinionText: opinion,
+                remediationPlan: String(document.getElementById("defPlan")?.value || "").trim(),
+                priority: String(document.getElementById("defPriority")?.value || "medium"),
+                issuedOn,
+                remediationStatus: remStatus,
+                completedOn: remStatus === "done" ? completedOn : null,
+                deficiencyType: String(document.getElementById("defType")?.value || "registration_review"),
+                deficiencySource: String(document.getElementById("defSource")?.value || "").trim(),
+            };
+            try {
+                let res;
+                if (editId) {
+                    res = await apiRequest(`/api/company/deficiency/records/${encodeURIComponent(editId)}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                } else {
+                    res = await apiRequest("/api/company/deficiency/records", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                }
+                const rid = String(res?.record?.id || editId || "").trim();
+                if (rid) {
+                    document.getElementById("defEditId").value = rid;
+                    // 上传附件（若有）
+                    const before = document.getElementById("defBeforeFiles")?.files;
+                    const after = document.getElementById("defAfterFiles")?.files;
+                    const uploadRole = async (fileList, role) => {
+                        if (!fileList || !fileList.length) return;
+                        const fd = new FormData();
+                        fd.append("organizationId", orgId);
+                        fd.append("role", role);
+                        [...fileList].forEach((f) => fd.append("files", f));
+                        await apiRequest(`/api/company/deficiency/records/${encodeURIComponent(rid)}/assets`, {
+                            method: "POST",
+                            body: fd,
+                        });
+                    };
+                    await uploadRole(before, "before_doc");
+                    await uploadRole(after, "after_doc");
+                    if (document.getElementById("defBeforeFiles")) document.getElementById("defBeforeFiles").value = "";
+                    if (document.getElementById("defAfterFiles")) document.getElementById("defAfterFiles").value = "";
+                }
+                notify(res?.message || "已保存", "success");
+                await refreshList();
+                if (rid) await openEditor(rid);
+            } catch (e) {
+                notify(e.message || "保存失败", "danger");
+            }
+        });
+
+        document.getElementById("btnDefTrain")?.addEventListener("click", async () => {
+            const orgId = String(orgSel.value || "").trim();
+            const editId = String(document.getElementById("defEditId")?.value || "").trim();
+            if (!orgId || !editId) {
+                notify("请先保存发补记录再训练", "warning");
+                return;
+            }
+            const hint = document.getElementById("defTrainHint");
+            const wrap = document.getElementById("defTrainProgressWrap");
+            const bar = document.getElementById("defTrainProgressBar");
+            if (hint) hint.textContent = "训练中…";
+            if (wrap) wrap.style.display = "";
+            if (bar) bar.style.width = "40%";
+            try {
+                const res = await apiRequest(`/api/company/deficiency/records/${encodeURIComponent(editId)}/train`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ organizationId: orgId }),
+                });
+                if (bar) bar.style.width = "100%";
+                if (hint) hint.textContent = res?.message || "训练完成";
+                notify(res?.message || "训练完成", "success");
+                await refreshList();
+                await openEditor(editId);
+            } catch (e) {
+                if (hint) hint.textContent = "";
+                notify(e.message || "训练失败", "danger");
+            } finally {
+                setTimeout(() => {
+                    if (wrap) wrap.style.display = "none";
+                    if (bar) bar.style.width = "0%";
+                }, 800);
+            }
+        });
+
+        document.querySelector('[data-bs-target="#trainTabDeficiency"]')?.addEventListener("shown.bs.tab", async () => {
+            await syncOrgOptions();
+            await loadProjectsForOrg();
+            await refreshList();
+        });
+        syncOrgOptions();
+    }
+
     async function initDictMaintenanceOnly() {
         bindDictMaintenanceEvents();
         await loadAdminOrganizationsForDict();
@@ -1748,6 +2122,7 @@
             initCompanySessionBar();
             initCompanyTrainingPanel();
             initTrainingHubExtras();
+            initDeficiencyPanel();
             initStarFilterSelect();
             initGroupBySelect();
             bindEvents();

@@ -37,6 +37,11 @@
                     <a class="nav-link {% if request.path == '/generate' %}active{% endif %}" href="{{ url_for('pages.generate_page') }}">{% if is_page13_super_admin %}页面2 · {% endif %}我的任务</a>
                 </li>
                 {% endif %}
+                {% if nav_show_page2|default(false) or nav_show_page123_staff|default(false) %}
+                <li class="nav-item">
+                    <a class="nav-link {% if request.path.startswith('/literature') %}active{% endif %}" href="{{ url_for('literature.literature_page') }}">文献检索</a>
+                </li>
+                {% endif %}
                 {% if nav_show_page123_staff|default(false) %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.path == '/dashboard' %}active{% endif %}" href="{{ url_for('pages.dashboard_page') }}">{% if is_page13_super_admin %}页面3 · {% endif %}统计</a>
