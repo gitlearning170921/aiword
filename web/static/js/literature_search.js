@@ -88,10 +88,42 @@
       details: Array.isArray(b.details) ? b.details : [],
       summary: b.summary || "",
       statusNote: b.statusNote || "",
+      params: b.params && typeof b.params === "object" ? b.params : {},
       query: b.query || "",
       sources: Array.isArray(b.sources) ? b.sources : [],
       persisted: true,
     };
+  }
+
+  // 批次的「每源目标条数」：优先用该批次存下的检索参数，其次用当前表单值。
+  // Scholar 的「约 N 条」估计不可靠，续抓目标以用户填写的每源条数为准。
+  function batchTarget(b) {
+    const rp = (b && b.params) || {};
+    const t = Number(rp.max_results_per_source || 0);
+    if (t > 0) return t;
+    return Number((el.maxPerSource && el.maxPerSource.value) || 200) || 200;
+  }
+
+  // 判断某检索批次是否还能「续抓」：含 scholar、已有记录，且「已抓 < 目标(每源条数)」。
+  // 不再依赖不靠谱的 totalFound 估计来隐藏按钮——只要没到用户设定的每源条数就允许续抓。
+  function scholarResumeInfo(b) {
+    if (!b || b.type === "import") return null;
+    const sources = Array.isArray(b.sources) ? b.sources : [];
+    const hasScholar =
+      sources.includes("scholar") ||
+      (b.records || []).some((r) => (r.source || "") === "scholar");
+    if (!hasScholar) return null;
+    const scholarCount = (b.records || []).filter((r) => (r.source || "") === "scholar").length;
+    if (scholarCount <= 0) return null;
+    const detail = (b.details || []).find((d) => d && d.source === "scholar") || {};
+    const totalFoundRaw = Number(detail.totalFound || 0);
+    const hadError = !!detail.error;
+    const target = batchTarget(b);
+    // 已达到用户设定的每源条数 → 视为完成，不再显示续抓
+    if (scholarCount >= target) return null;
+    // 展示分母：估计值明显大于已抓时才用估计，否则用用户填写的每源条数
+    const displayTotal = totalFoundRaw > scholarCount ? totalFoundRaw : target;
+    return { offset: scholarCount, totalFound: displayTotal, hadError };
   }
 
   function upsertBatch(batch) {
@@ -122,6 +154,13 @@
     return bits.join(". ");
   }
 
+  // 卷/期/页缺失（仅对学术文献 scholar/pubmed 提示；导入类不判）
+  function vipMissing(rec) {
+    const src = String((rec && rec.source) || "").toLowerCase();
+    if (src !== "scholar" && src !== "pubmed") return false;
+    return !String((rec && rec.volume_issue_pages) || "").trim();
+  }
+
   function showDetail(batchId, index) {
     const batch = findBatch(batchId);
     const rec = batch && Array.isArray(batch.records) ? batch.records[index] : null;
@@ -140,7 +179,12 @@
       ["Source", rec.source],
       ["Link", rec.source_url],
     ];
-    el.detailBody.innerHTML = rows
+    const vipWarn = vipMissing(rec)
+      ? '<div class="alert alert-warning py-2 px-3 mb-3 small">⚠ 卷/期/页缺失：Crossref 未能按该文献补全，建议核对原文后手动补充（工具不会虚构编号）。</div>'
+      : "";
+    el.detailBody.innerHTML =
+      vipWarn +
+      rows
       .map(([k, v]) => {
         const val = String(v || "").trim();
         if (!val) return "";
@@ -170,19 +214,25 @@
     el.batchList.innerHTML = state.batches
       .map((b, i) => {
         const no = batchCount - i;
+        // 最近一批（列表第 0 项）默认展开，其余默认收起
+        const expanded = i === 0;
+        const collapseId = `litBatchBody_${escapeHtml(b.id)}`;
         const counters = {};
         const rows = (b.records || [])
           .map((r, ri) => {
             const db = dbLabel(r);
             counters[db] = (counters[db] || 0) + 1;
             const cite = citationOf(r);
+            const vipTag = vipMissing(r)
+              ? ' <span class="badge text-bg-warning" title="卷/期/页缺失，建议核对原文后手动补充">卷期页缺失</span>'
+              : "";
             const link = r.source_url
               ? `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开</a>`
               : '<span class="text-muted">—</span>';
             return `<tr class="lit-row" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" style="cursor:pointer;" title="点击查看完整详情">
               <td class="text-nowrap">${escapeHtml(db)}</td>
               <td class="text-nowrap">[${counters[db]}]</td>
-              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}</td>
+              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}${vipTag}</td>
               <td class="text-nowrap">${link}</td>
               <td class="text-nowrap"><button type="button" class="btn btn-sm btn-link p-0 lit-detail-btn" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}">详情</button></td>
             </tr>`;
@@ -207,22 +257,52 @@
             : `<div class="p-3 text-muted small">${escapeHtml(b.statusNote || "本批次暂无记录")}</div>`;
         return `<div class="card mb-3" data-batch-id="${escapeHtml(b.id)}">
           <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-            <div>
-              <div class="fw-semibold">批次 #${no} · ${escapeHtml(b.typeLabel)} · ${escapeHtml(b.createdAt)}${b.persisted ? "" : " · 未落库"}</div>
+            <div class="flex-grow-1" style="min-width:200px;">
+              <button type="button" class="btn btn-link text-decoration-none text-dark p-0 text-start lit-batch-toggle"
+                data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${collapseId}">
+                <span class="fw-semibold">${expanded ? "▼" : "▶"} 批次 #${no} · ${escapeHtml(b.typeLabel)} · ${escapeHtml(b.createdAt)}${b.persisted ? "" : " · 未落库"}</span>
+              </button>
               <div class="small text-muted mt-1">${escapeHtml(b.summary || "")}</div>
               ${b.statusNote ? `<div class="small text-warning mt-1">${escapeHtml(b.statusNote)}</div>` : ""}
             </div>
             <div class="d-flex gap-2 align-items-center flex-wrap">
               <span class="badge text-bg-secondary">${(b.records || []).length} 条</span>
+              ${
+                (() => {
+                  const ri = scholarResumeInfo(b);
+                  if (!ri) return "";
+                  const tip = ri.totalFound
+                    ? `从第 ${ri.offset + 1} 条续抓（scholar ${ri.offset}/${ri.totalFound}）`
+                    : `从第 ${ri.offset + 1} 条继续抓取`;
+                  return `<button type="button" class="btn btn-sm btn-primary lit-continue-batch" data-batch-id="${escapeHtml(b.id)}" title="${escapeHtml(tip)}">继续抓取</button>`;
+                })()
+              }
               <button type="button" class="btn btn-sm btn-outline-success lit-export-batch" data-batch-id="${escapeHtml(b.id)}" data-format="docx" ${(b.records || []).length ? "" : "disabled"}>导出 Word</button>
               <button type="button" class="btn btn-sm btn-outline-success lit-export-batch" data-batch-id="${escapeHtml(b.id)}" data-format="xlsx" ${(b.records || []).length ? "" : "disabled"}>导出 Excel</button>
               <button type="button" class="btn btn-sm btn-outline-danger lit-remove-batch" data-batch-id="${escapeHtml(b.id)}">删除</button>
             </div>
           </div>
-          <div class="card-body p-0">${body}</div>
+          <div id="${collapseId}" class="collapse${expanded ? " show" : ""} card-body p-0">${body}</div>
         </div>`;
       })
       .join("");
+
+    // 折叠态切换时更新箭头
+    el.batchList.querySelectorAll(".lit-batch-toggle").forEach((btn) => {
+      const targetSel = btn.getAttribute("data-bs-target");
+      const panel = targetSel ? document.querySelector(targetSel) : null;
+      if (!panel) return;
+      const syncArrow = () => {
+        const open = panel.classList.contains("show");
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        const label = btn.querySelector(".fw-semibold");
+        if (label) {
+          label.textContent = label.textContent.replace(/^[▼▶]\s*/, open ? "▼ " : "▶ ");
+        }
+      };
+      panel.addEventListener("shown.bs.collapse", syncArrow);
+      panel.addEventListener("hidden.bs.collapse", syncArrow);
+    });
   }
 
   function openCaptchaModal(sessionId, progress) {
@@ -233,9 +313,12 @@
     }
     const url = `/literature/api/scholar-captcha/${encodeURIComponent(state.captchaSessionId)}`;
     if (el.captchaFrame) el.captchaFrame.src = url;
-    if (el.captchaOpenTab) el.captchaOpenTab.href = url;
-
+    // 「新标签打开」优先指向真实 Google 验证页：浏览器与后端同一代理出口 IP，
+    // 在真实浏览器里原生解 reCAPTCHA 更可靠，解完同一 IP 会被放行，再点继续检索。
     const p = progress || {};
+    const directUrl = (p.searchUrl || "").trim();
+    if (el.captchaOpenTab) el.captchaOpenTab.href = directUrl || url;
+
     const fetched = Number(p.fetched || 0);
     const target = Number(p.target || 0);
     const totalFound = Number(p.totalFound || 0);
@@ -257,17 +340,30 @@
       el.captchaContinueBtn.dataset.label = label;
     }
 
+    if (el.captchaProgress) {
+      const tip =
+        "提示：若弹窗内验证码无法点选，请点上方「新标签打开验证页」，在浏览器里完成验证（与后端同一代理出口，解完同一 IP 会放行），再回此处点「继续检索」。";
+      el.captchaProgress.textContent = progressText ? `${progressText} ${tip}` : tip;
+    }
+
     const modal =
       window.bootstrap && bootstrap.Modal ? bootstrap.Modal.getOrCreateInstance(el.captchaModal) : null;
     if (modal) modal.show();
-    else window.open(url, "_blank", "noopener");
+    else window.open(directUrl || url, "_blank", "noopener");
     setStatus(
-      `请在弹窗中完成 Google 人机验证，然后点击「继续检索」。${progressText ? " " + progressText : ""}`,
+      `请完成 Google 人机验证后点击「继续检索」。若弹窗内无法验证，用「新标签打开验证页」在浏览器里解。${progressText ? " " + progressText : ""}`,
       "warn"
     );
   }
 
   function applySearchResult(data, payload, batchId) {
+    // 续抓前的 scholar 已抓数（用于判断本次是否真的取到了新记录）
+    const priorScholarCount = (() => {
+      const b = findBatch(batchId);
+      return b ? (b.records || []).filter((r) => (r.source || "") === "scholar").length : 0;
+    })();
+    const isContinue = Array.isArray(payload.prior_records) && payload.prior_records.length > 0;
+    const targetPerSource = Number(payload.max_results_per_source || 0) || 0;
     state.lastDetails = Array.isArray(data.details) ? data.details : [];
     const hasErr = state.lastDetails.some((d) => d && d.error);
     const rateLimited = state.lastDetails.some(
@@ -281,7 +377,11 @@
             : Array.isArray(d.records)
               ? d.records.length
               : 0;
-        const total = d.totalFound || 0;
+        // Scholar 估计不可靠：估计值不明显大于已抓时用「每源条数」作分母
+        let total = Number(d.totalFound || 0);
+        if ((d.source || "") === "scholar" && targetPerSource && total <= fetched) {
+          total = targetPerSource;
+        }
         if (d.error) {
           return total ? `${d.source}: ${fetched}/${total}，${d.error}` : `${d.source}: ${d.error}`;
         }
@@ -316,18 +416,30 @@
     }
     upsertBatch(batch);
 
+    // 续抓后本次 scholar 已抓数：判断是否真的取到新记录
+    const newScholarCount = (batch.records || []).filter(
+      (r) => (r.source || "") === "scholar"
+    ).length;
+    const continueNoGain =
+      isContinue && !data.needsCaptcha && !rateLimited && newScholarCount <= priorScholarCount;
+
     let level = "ok";
     if (data.needsCaptcha || rateLimited) level = "warn";
     else if (hasErr && !(data.count > 0)) level = "error";
     else if (hasErr) level = "warn";
+    else if (continueNoGain) level = "warn";
     const short = state.lastDetails.some((d) => {
       const fetched =
         typeof d.fetched === "number" ? d.fetched : Array.isArray(d.records) ? d.records.length : 0;
-      return d.totalFound && fetched < d.totalFound && fetched < payload.max_results_per_source;
+      return targetPerSource && fetched < targetPerSource;
     });
     setStatus(
       `批次已更新：${data.count || 0} 条。${detailMsg ? " " + detailMsg : ""}${
-        short ? " 若未取全：可提高「每源条数」，或完成 Scholar 验证后点「继续检索」。" : ""
+        continueNoGain
+          ? " 本次续抓未获取到新记录：可能该出口 IP 暂时看不到更多结果，建议换 Clash 节点后再点「继续抓取」。"
+          : short
+            ? " 未取满「每源条数」：可点「继续抓取」续抓，或完成 Scholar 验证后继续。"
+            : ""
       }${data.persistWarning ? " " + data.persistWarning : ""}`,
       level
     );
@@ -344,7 +456,12 @@
         : (batch.records || []).length;
       const totalFound = scholarDetail ? scholarDetail.totalFound || 0 : 0;
       const target = Number(payload.max_results_per_source || 0);
-      openCaptchaModal(data.captchaSessionId, { fetched, target, totalFound });
+      openCaptchaModal(data.captchaSessionId, {
+        fetched,
+        target,
+        totalFound,
+        searchUrl: data.captchaSearchUrl || "",
+      });
     } else if (!data.needsCaptcha) {
       state.captchaSessionId = "";
       state.pendingBatchId = "";
@@ -374,8 +491,14 @@
 
   async function doSearch(opts) {
     const options = opts || {};
-    const query = (el.query.value || "").trim();
-    const sources = selectedSources();
+    // 续抓某历史批次：用该批次存下的检索式与参数（保证 offset 落在同一结果集）
+    const resumeBatch = options.continueBatchId ? findBatch(options.continueBatchId) : null;
+    const query = resumeBatch ? resumeBatch.query || "" : (el.query.value || "").trim();
+    const sources = resumeBatch
+      ? Array.isArray(resumeBatch.sources) && resumeBatch.sources.length
+        ? resumeBatch.sources
+        : ["scholar"]
+      : selectedSources();
     if (!query) {
       setStatus("请先输入检索式。", "error");
       return;
@@ -384,20 +507,27 @@
       setStatus("至少选择 1 个来源。", "error");
       return;
     }
+    const rp = (resumeBatch && resumeBatch.params) || {};
     const payload = {
       query,
       sources,
-      start_year: (el.startYear.value || "").trim(),
-      end_year: (el.endYear.value || "").trim(),
-      max_results_per_source: Number(el.maxPerSource.value || 200),
-      scholar_sort_by: (el.scholarSort && el.scholarSort.value) || "relevance",
+      start_year: resumeBatch ? String(rp.start_year || "") : (el.startYear.value || "").trim(),
+      end_year: resumeBatch ? String(rp.end_year || "") : (el.endYear.value || "").trim(),
+      max_results_per_source: resumeBatch
+        ? Number(rp.max_results_per_source || el.maxPerSource.value || 200)
+        : Number(el.maxPerSource.value || 200),
+      scholar_sort_by: resumeBatch
+        ? rp.scholar_sort_by || "relevance"
+        : (el.scholarSort && el.scholarSort.value) || "relevance",
     };
     if (options.withCaptcha && state.captchaSessionId) {
       payload.scholar_captcha_session_id = state.captchaSessionId;
     }
     state.lastSearchPayload = payload;
 
-    let batchId = options.withCaptcha && state.pendingBatchId ? state.pendingBatchId : "";
+    let batchId = "";
+    if (resumeBatch) batchId = resumeBatch.id;
+    else if (options.withCaptcha && state.pendingBatchId) batchId = state.pendingBatchId;
     if (!batchId) {
       batchId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       upsertBatch({
@@ -407,18 +537,24 @@
         createdAt: nowLabel(),
         records: [],
         summary: `检索中… ${query}`,
-        statusNote: "正在检索并翻页，条数较多时可能需 1–3 分钟…",
+        statusNote: "正在按真人节奏放慢翻页抓取（抗验证码），全量约需 5–12 分钟，请勿刷新…",
         query,
         sources,
         persisted: false,
       });
     } else {
-      // 续抓：带上已有记录与偏移
+      // 续抓：带上已有记录，scholar 从「已抓 scholar 条数」处继续翻页
       const existing = findBatch(batchId);
       if (existing && (existing.records || []).length) {
+        const scholarOffset = (existing.records || []).filter(
+          (r) => (r.source || "") === "scholar"
+        ).length;
         payload.batch_id = batchId;
         payload.prior_records = existing.records;
-        payload.scholar_start_offset = existing.records.length;
+        payload.scholar_start_offset = scholarOffset || existing.records.length;
+        // 带上历史见过的最大总数，避免续抓时被本次缩水的估计覆盖成「47/11」
+        const sd = (existing.details || []).find((d) => d && d.source === "scholar");
+        if (sd && Number(sd.totalFound) > 0) payload.prior_total_found = Number(sd.totalFound);
       } else if (batchId && !String(batchId).startsWith("tmp_")) {
         payload.batch_id = batchId;
       }
@@ -426,7 +562,12 @@
 
     setBusy(el.searchBtn, true, "检索中...");
     if (el.captchaContinueBtn) setBusy(el.captchaContinueBtn, true, "继续检索中...");
-    setStatus("正在检索并翻页（Scholar 约每页 10 条），请稍候...", "warn");
+    setStatus(
+      resumeBatch
+        ? `正在从上次结束处续抓（scholar 第 ${payload.scholar_start_offset + 1} 条起），按真人节奏放慢翻页，请耐心等待、不要刷新页面…`
+        : "正在按真人节奏放慢翻页抓取（每页间隔十几~二十几秒，抗验证码），全量约需 5–12 分钟，请耐心等待、不要刷新页面…",
+      "warn"
+    );
     try {
       const res = await fetch("/literature/api/search", {
         method: "POST",
@@ -623,6 +764,11 @@
         exportBtn.getAttribute("data-batch-id") || "",
         exportBtn.getAttribute("data-format") || "docx"
       );
+      return;
+    }
+    const continueBtn = t.closest(".lit-continue-batch");
+    if (continueBtn) {
+      doSearch({ continueBatchId: continueBtn.getAttribute("data-batch-id") || "" });
       return;
     }
     const removeBtn = t.closest(".lit-remove-batch");

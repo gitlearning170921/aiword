@@ -18,9 +18,21 @@ EXPORT_HEADERS = (
     "Authors",
     "Journal",
     "Year",
+    "Volume/Issue/Pages",
     "DOI/PMID",
     "Source",
+    "Note",
 )
+
+
+def _vip_note(record: LiteratureRecord) -> str:
+    """卷/期/页缺失提示：仅对学术文献(scholar/pubmed)且确实缺失时给出。"""
+    src = normalize_text(record.get("source")).lower()
+    if src not in ("scholar", "pubmed"):
+        return ""
+    if normalize_text(record.get("volume_issue_pages")):
+        return ""
+    return "卷期页缺失，建议核对原文后手动补充"
 
 
 def _id_column(record: LiteratureRecord) -> str:
@@ -58,8 +70,10 @@ def export_records_to_excel(records: list[LiteratureRecord]) -> tuple[bytes, str
                 normalize_text(rec.get("authors")),
                 normalize_text(rec.get("journal")),
                 normalize_text(rec.get("year")),
+                normalize_text(rec.get("volume_issue_pages")),
                 _id_column(rec),
                 normalize_text(rec.get("source")),
+                _vip_note(rec),
             ]
         )
 
@@ -73,8 +87,10 @@ def export_records_to_excel(records: list[LiteratureRecord]) -> tuple[bytes, str
         "F": 28,
         "G": 22,
         "H": 10,
-        "I": 26,
-        "J": 12,
+        "I": 18,
+        "J": 26,
+        "K": 12,
+        "L": 26,
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width

@@ -867,6 +867,14 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
     )
 
+    # 文献检索批次：检索参数快照（用于「续抓」时复用完全一致的参数）
+    ensure_column(
+        "literature_search_batches",
+        "params",
+        "ALTER TABLE literature_search_batches ADD COLUMN params TEXT",
+        "ALTER TABLE literature_search_batches ADD COLUMN params JSON",
+    )
+
     # 任务类型一级分类（文件型/事项型）：历史行回填为 file
     ensure_column(
         "task_type_configs",

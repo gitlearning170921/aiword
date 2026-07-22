@@ -1065,6 +1065,9 @@ class LiteratureSearchBatch(db.Model):
     sources_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
     status_note: Mapped[Optional[str]] = mapped_column(db.Text, nullable=True)
+    # 检索参数快照（start_year/end_year/max_results_per_source/scholar_sort_by）：
+    # 续抓时须用与首次完全一致的参数，否则 offset 会落到不同的结果集。
+    params_json: Mapped[Optional[dict]] = mapped_column("params", db.JSON, nullable=True)
     details_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     records_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     record_count: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)

@@ -117,8 +117,9 @@
             <div class="modal-body p-0">
                 <div class="p-2 small text-muted border-bottom">
                     请在下方完成验证（经文档服务同一代理出口）。完成后点击「验证完成，继续检索」。
-                    若弹窗内无法显示，可
-                    <a href="#" id="litCaptchaOpenTab" target="_blank" rel="noopener">新标签打开验证页</a>。
+                    若弹窗内验证码无法点选，请
+                    <a href="#" id="litCaptchaOpenTab" target="_blank" rel="noopener">在浏览器新标签打开验证页</a>
+                    （与后端同一代理出口 IP，原生解验证更可靠，解完同一 IP 会放行），再回此处点「继续检索」。
                     <span id="litCaptchaProgress" class="d-block mt-1 fw-semibold text-primary"></span>
                 </div>
                 <iframe id="litCaptchaFrame" title="Scholar captcha" style="width:100%;height:70vh;border:0;background:#fff;"></iframe>

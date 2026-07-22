@@ -184,15 +184,38 @@ def literature_search_api():
             scholar_sort_by=sort_by,
             scholar_start_offset=start_offset,
         )
+        try:
+            prior_total_found = max(0, int(payload.get("prior_total_found") or 0))
+        except (TypeError, ValueError):
+            prior_total_found = 0
         if prior:
             records = dedupe_records(prior + list(new_records or []))
-            for d in details:
-                src = d.get("source") or ""
-                d["fetched"] = len([r for r in records if (r.get("source") or "") == src])
         else:
             records = new_records
+        # 统一修正每源的 fetched/totalFound：
+        # Scholar 的「约 N 条」估计会随翻页缩水，续抓时更明显；总数须取
+        # 「历史见过的最大值」，且任何来源的总数都不得小于实际已抓数，避免出现
+        # 「47/11」这类倒挂显示。
+        for d in details:
+            src = d.get("source") or ""
+            cnt = len([r for r in (records or []) if (r.get("source") or "") == src])
+            d["fetched"] = cnt
+            base_total = int(d.get("totalFound") or 0)
+            if src == "scholar":
+                d["totalFound"] = max(base_total, prior_total_found, cnt)
+            elif base_total < cnt:
+                d["totalFound"] = cnt
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
+
+    def _disp_total(d: dict[str, Any]) -> int:
+        """展示用分母：Scholar 的「约 N 条」估计不可靠，估计值不明显大于已抓时，
+        退回用用户填写的「每源条数」作目标；其它来源(如 PubMed)总数可信，原样用。"""
+        tf = int(d.get("totalFound") or 0)
+        ft = int(d.get("fetched") or len(d.get("records") or []))
+        if (d.get("source") or "") == "scholar":
+            return tf if tf > ft else max_per_source
+        return tf
 
     detail_msg = " | ".join(
         (
@@ -200,7 +223,7 @@ def literature_search_api():
             if d.get("error")
             else (
                 f"{d.get('source')}: {d.get('fetched') or len(d.get('records') or [])}"
-                + (f"/{d.get('totalFound')}" if d.get("totalFound") else "")
+                + (f"/{_disp_total(d)}" if _disp_total(d) else "")
             )
         )
         for d in details
@@ -216,7 +239,7 @@ def literature_search_api():
     totals = "；".join(
         (
             f"{d.get('source')}: {len([r for r in records if (r.get('source') or '') == d.get('source')])}"
-            + (f"/{d.get('totalFound')}" if d.get("totalFound") else "")
+            + (f"/{_disp_total(d)}" if _disp_total(d) else "")
         )
         for d in details
     )
@@ -236,6 +259,12 @@ def literature_search_api():
             status_note=detail_msg,
             details=details,
             records=records,
+            params={
+                "start_year": str(payload.get("start_year") or "").strip(),
+                "end_year": str(payload.get("end_year") or "").strip(),
+                "max_results_per_source": max_per_source,
+                "scholar_sort_by": sort_by,
+            },
         )
     except Exception as exc:
         # 检索成功但落库失败时仍返回结果，附带提示
@@ -249,6 +278,7 @@ def literature_search_api():
                 "needsCaptcha": bool(meta.get("needsCaptcha")),
                 "captchaSessionId": str(meta.get("captchaSessionId") or ""),
                 "captchaSource": str(meta.get("captchaSource") or ""),
+                "captchaSearchUrl": str(meta.get("captchaSearchUrl") or ""),
                 "batch": None,
                 "persistWarning": f"结果未落库：{exc}",
             }
@@ -264,6 +294,7 @@ def literature_search_api():
             "needsCaptcha": bool(meta.get("needsCaptcha")),
             "captchaSessionId": str(meta.get("captchaSessionId") or ""),
             "captchaSource": str(meta.get("captchaSource") or ""),
+            "captchaSearchUrl": str(meta.get("captchaSearchUrl") or ""),
             "batch": batch,
         }
     )

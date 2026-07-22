@@ -34,6 +34,7 @@ def serialize_batch(row: LiteratureSearchBatch) -> dict[str, Any]:
         "sources": list(row.sources_json or []),
         "summary": row.summary or "",
         "statusNote": row.status_note or "",
+        "params": dict(row.params_json or {}),
         "details": list(row.details_json or []),
         "records": list(row.records_json or []),
         "recordCount": int(row.record_count or 0),
@@ -67,6 +68,7 @@ def upsert_batch(
     status_note: str,
     details: list[dict[str, Any]] | None,
     records: list[dict[str, Any]],
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     uid = actor_user_id()
     if not uid:
@@ -107,6 +109,9 @@ def upsert_batch(
     row.sources_json = list(sources or [])
     row.summary = summary or ""
     row.status_note = status_note or ""
+    # 检索参数快照：仅在显式传入时更新，避免续抓时把已存的参数清空
+    if params is not None:
+        row.params_json = dict(params or {})
     row.details_json = detail_safe
     row.records_json = cleaned
     row.record_count = len(cleaned)

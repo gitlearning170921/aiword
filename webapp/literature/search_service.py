@@ -40,6 +40,7 @@ def _call_upstream_search(
         "needsCaptcha": False,
         "captchaSessionId": "",
         "captchaSource": "",
+        "captchaSearchUrl": "",
     }
     base = integration_api_base()
     if not base:
@@ -77,7 +78,8 @@ def _call_upstream_search(
             url,
             json=payload,
             headers=upstream_headers(for_multipart=False, organization_id=oid or None),
-            timeout=integration_requests_timeout(read_seconds=900),
+            # Scholar 放慢翻页后一次全量抓取更耗时；读超时须大于后端抓取预算(1500s)
+            timeout=integration_requests_timeout(read_seconds=1800),
         )
     except Exception as exc:
         err = format_upstream_request_error(exc, base)
@@ -200,6 +202,7 @@ def _call_upstream_search(
         "needsCaptcha": bool(body.get("needsCaptcha")),
         "captchaSessionId": str(body.get("captchaSessionId") or "").strip(),
         "captchaSource": str(body.get("captchaSource") or "").strip(),
+        "captchaSearchUrl": str(body.get("captchaSearchUrl") or "").strip(),
     }
     return aggregated, details, meta
 
@@ -227,6 +230,7 @@ def run_search(
         "needsCaptcha": False,
         "captchaSessionId": "",
         "captchaSource": "",
+        "captchaSearchUrl": "",
     }
 
     if auto_sources:
