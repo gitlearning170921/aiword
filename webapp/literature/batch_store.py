@@ -86,6 +86,8 @@ def upsert_batch(
                 "elapsed_ms": int(d.get("elapsed_ms") or 0),
                 "totalFound": int(d.get("totalFound") or 0),
                 "fetched": int(d.get("fetched") or 0),
+                # 原始翻页位置：续抓用它（而非去重条数），避免重复抓取
+                "nextOffset": int(d.get("nextOffset") or 0),
             }
         )
 

@@ -25,6 +25,7 @@ def _call_upstream_search(
     scholar_captcha_session_id: str = "",
     scholar_sort_by: str = "relevance",
     scholar_start_offset: int = 0,
+    scholar_prior_keys: list[str] | None = None,
 ) -> tuple[list[LiteratureRecord], list[LiteratureSearchResult], dict[str, Any]]:
     """经 aicheckword 出站检索，复用其 llm_http_proxy（与初稿/Cursor 同一配置）。"""
     from .._integration_common import (
@@ -70,6 +71,8 @@ def _call_upstream_search(
         "scholar_sort_by": (scholar_sort_by or "relevance").strip() or "relevance",
         "scholar_start_offset": max(0, int(scholar_start_offset or 0)),
     }
+    if scholar_prior_keys:
+        payload["scholar_prior_keys"] = list(scholar_prior_keys)
     if (scholar_captcha_session_id or "").strip():
         payload["scholar_captcha_session_id"] = scholar_captcha_session_id.strip()
     try:
@@ -174,6 +177,7 @@ def _call_upstream_search(
                 "elapsed_ms": int(item.get("elapsed_ms") or 0),
                 "totalFound": int(item.get("totalFound") or 0),
                 "fetched": int(item.get("fetched") or len(recs)),
+                "nextOffset": int(item.get("nextOffset") or 0),
             }
         )
 
@@ -217,6 +221,7 @@ def run_search(
     scholar_captcha_session_id: str = "",
     scholar_sort_by: str = "relevance",
     scholar_start_offset: int = 0,
+    scholar_prior_keys: list[str] | None = None,
 ) -> tuple[list[LiteratureRecord], list[LiteratureSearchResult], dict[str, Any]]:
     srcs = [s.strip().lower() for s in sources if s and s.strip()]
     srcs = [s for s in srcs if s in SUPPORTED_SOURCES]
@@ -243,6 +248,7 @@ def run_search(
             scholar_captcha_session_id=scholar_captcha_session_id,
             scholar_sort_by=scholar_sort_by,
             scholar_start_offset=scholar_start_offset,
+            scholar_prior_keys=scholar_prior_keys,
         )
         details.extend(auto_details)
         aggregated.extend(records)

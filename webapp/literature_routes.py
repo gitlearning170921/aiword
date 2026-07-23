@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
@@ -170,6 +171,22 @@ def literature_search_api():
         if prior:
             fetch_limit = max(1, max_per_source - len(prior))
 
+        # 续抓：把已抓的 Scholar 记录 key 传给上游，用于跳过重叠、只计真正新增，
+        # 并在连续零新增时判定该出口 IP 已不再提供更多结果（避免「序号一直加、
+        # 记录不增加」的空转）。key 归一化须与上游 search_scholar 内一致（\W+ + lower）。
+        scholar_prior_keys: list[str] = []
+        if prior:
+            for r in prior:
+                if str(r.get("source") or "").lower() != "scholar":
+                    continue
+                title = str(r.get("title") or "")
+                tkey = re.sub(r"\W+", "", title.lower())
+                if tkey:
+                    scholar_prior_keys.append(tkey)
+                url_key = str(r.get("source_url") or "").strip().lower()
+                if url_key:
+                    scholar_prior_keys.append(url_key)
+
         new_records, details, meta = run_search(
             query=query,
             sources=sources,
@@ -183,6 +200,7 @@ def literature_search_api():
             ).strip(),
             scholar_sort_by=sort_by,
             scholar_start_offset=start_offset,
+            scholar_prior_keys=scholar_prior_keys or None,
         )
         try:
             prior_total_found = max(0, int(payload.get("prior_total_found") or 0))

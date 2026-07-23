@@ -4,6 +4,7 @@
     captchaSessionId: "",
     pendingBatchId: "",
     lastSearchPayload: null,
+    batchPage: 0,
   };
 
   const el = {
@@ -128,8 +129,13 @@
 
   function upsertBatch(batch) {
     const idx = state.batches.findIndex((b) => b.id === batch.id);
-    if (idx >= 0) state.batches[idx] = batch;
-    else state.batches.unshift(batch);
+    if (idx >= 0) {
+      state.batches[idx] = batch;
+    } else {
+      state.batches.unshift(batch);
+      // 新批次插到最前（第 1 页），跳回首页让用户看到
+      state.batchPage = 0;
+    }
     renderBatches();
   }
 
@@ -159,6 +165,91 @@
     const src = String((rec && rec.source) || "").toLowerCase();
     if (src !== "scholar" && src !== "pubmed") return false;
     return !String((rec && rec.volume_issue_pages) || "").trim();
+  }
+
+  // 批次内记录分页：每页 100 条
+  const LIT_PAGE_SIZE = 100;
+  // 批次列表分页：每页 10 个批次
+  const LIT_BATCH_PER_PAGE = 10;
+
+  function batchTotalPages(b) {
+    const total = (b && b.records ? b.records.length : 0) || 0;
+    return Math.max(1, Math.ceil(total / LIT_PAGE_SIZE));
+  }
+
+  function clampBatchPage(b) {
+    const totalPages = batchTotalPages(b);
+    let p = Number(b._page || 0);
+    if (!(p >= 0)) p = 0;
+    if (p > totalPages - 1) p = totalPages - 1;
+    b._page = p;
+    return p;
+  }
+
+  // 当前页的记录行（每页 LIT_PAGE_SIZE 条；Item 编号跨页连续）
+  function batchRowsHtml(b) {
+    const recs = b.records || [];
+    const page = clampBatchPage(b);
+    const start = page * LIT_PAGE_SIZE;
+    const slice = recs.slice(start, start + LIT_PAGE_SIZE);
+    // 预计算每条按 Database 的连续序号（跨页一致）
+    const counters = {};
+    const itemNo = recs.map((r) => {
+      const db = dbLabel(r);
+      counters[db] = (counters[db] || 0) + 1;
+      return counters[db];
+    });
+    return slice
+      .map((r, j) => {
+        const ri = start + j;
+        const db = dbLabel(r);
+        const cite = citationOf(r);
+        const vipTag = vipMissing(r)
+          ? ' <span class="badge text-bg-warning" title="卷/期/页缺失，建议核对原文后手动补充">卷期页缺失</span>'
+          : "";
+        const link = r.source_url
+          ? `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开</a>`
+          : '<span class="text-muted">—</span>';
+        return `<tr class="lit-row" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" style="cursor:pointer;" title="点击查看完整详情">
+              <td class="text-nowrap">${escapeHtml(db)}</td>
+              <td class="text-nowrap">[${itemNo[ri]}]</td>
+              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}${vipTag}</td>
+              <td class="text-nowrap">${link}</td>
+              <td class="text-nowrap"><button type="button" class="btn btn-sm btn-link p-0 lit-detail-btn" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}">详情</button></td>
+            </tr>`;
+      })
+      .join("");
+  }
+
+  // 分页控件（记录超过每页条数才显示）
+  function batchPagerHtml(b) {
+    const total = (b.records || []).length;
+    const totalPages = batchTotalPages(b);
+    const page = clampBatchPage(b);
+    if (total <= LIT_PAGE_SIZE) {
+      return `<div id="litPager_${escapeHtml(b.id)}"></div>`;
+    }
+    const from = page * LIT_PAGE_SIZE + 1;
+    const to = Math.min(total, (page + 1) * LIT_PAGE_SIZE);
+    return `<div id="litPager_${escapeHtml(b.id)}" class="d-flex justify-content-between align-items-center px-3 py-2 border-top small text-muted">
+      <span>第 ${from}–${to} 条 / 共 ${total} 条 · 第 ${page + 1}/${totalPages} 页</span>
+      <span class="btn-group">
+        <button type="button" class="btn btn-sm btn-outline-secondary lit-page-prev" data-batch-id="${escapeHtml(b.id)}" ${page <= 0 ? "disabled" : ""}>上一页</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary lit-page-next" data-batch-id="${escapeHtml(b.id)}" ${page >= totalPages - 1 ? "disabled" : ""}>下一页</button>
+      </span>
+    </div>`;
+  }
+
+  // 就地翻页：只更新该批次的 tbody 与分页控件，避免整体重渲染导致折叠态被重置
+  function changeBatchPage(batchId, delta) {
+    const b = findBatch(batchId);
+    if (!b) return;
+    b._page = clampBatchPage(b) + delta;
+    clampBatchPage(b);
+    const tbody = document.getElementById(`litRows_${b.id}`);
+    if (tbody) tbody.innerHTML = batchRowsHtml(b);
+    const pager = document.getElementById(`litPager_${b.id}`);
+    if (pager) pager.outerHTML = batchPagerHtml(b);
   }
 
   function showDetail(batchId, index) {
@@ -211,33 +302,32 @@
         '<div class="text-muted text-center py-4 border rounded">暂无批次。请先检索或导入。</div>';
       return;
     }
-    el.batchList.innerHTML = state.batches
-      .map((b, i) => {
+    // 批次列表分页：每页 LIT_BATCH_PER_PAGE 个批次
+    const batchTotalPages = Math.max(1, Math.ceil(batchCount / LIT_BATCH_PER_PAGE));
+    if (!(state.batchPage >= 0)) state.batchPage = 0;
+    if (state.batchPage > batchTotalPages - 1) state.batchPage = batchTotalPages - 1;
+    const pageStart = state.batchPage * LIT_BATCH_PER_PAGE;
+    const pageBatches = state.batches.slice(pageStart, pageStart + LIT_BATCH_PER_PAGE);
+    const listPager =
+      batchCount > LIT_BATCH_PER_PAGE
+        ? `<div class="d-flex justify-content-between align-items-center mb-3 small text-muted">
+            <span>批次 ${pageStart + 1}–${pageStart + pageBatches.length} / 共 ${batchCount} 批 · 第 ${state.batchPage + 1}/${batchTotalPages} 页</span>
+            <span class="btn-group">
+              <button type="button" class="btn btn-sm btn-outline-secondary lit-batchlist-prev" ${state.batchPage <= 0 ? "disabled" : ""}>上一页</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary lit-batchlist-next" ${state.batchPage >= batchTotalPages - 1 ? "disabled" : ""}>下一页</button>
+            </span>
+          </div>`
+        : "";
+    el.batchList.innerHTML =
+      listPager +
+      pageBatches
+      .map((b, j) => {
+        const i = pageStart + j;
         const no = batchCount - i;
-        // 最近一批（列表第 0 项）默认展开，其余默认收起
+        // 最近一批（全局第 0 项）默认展开，其余默认收起
         const expanded = i === 0;
         const collapseId = `litBatchBody_${escapeHtml(b.id)}`;
-        const counters = {};
-        const rows = (b.records || [])
-          .map((r, ri) => {
-            const db = dbLabel(r);
-            counters[db] = (counters[db] || 0) + 1;
-            const cite = citationOf(r);
-            const vipTag = vipMissing(r)
-              ? ' <span class="badge text-bg-warning" title="卷/期/页缺失，建议核对原文后手动补充">卷期页缺失</span>'
-              : "";
-            const link = r.source_url
-              ? `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开</a>`
-              : '<span class="text-muted">—</span>';
-            return `<tr class="lit-row" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" style="cursor:pointer;" title="点击查看完整详情">
-              <td class="text-nowrap">${escapeHtml(db)}</td>
-              <td class="text-nowrap">[${counters[db]}]</td>
-              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}${vipTag}</td>
-              <td class="text-nowrap">${link}</td>
-              <td class="text-nowrap"><button type="button" class="btn btn-sm btn-link p-0 lit-detail-btn" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}">详情</button></td>
-            </tr>`;
-          })
-          .join("");
+        const rows = batchRowsHtml(b);
         const body =
           (b.records || []).length > 0
             ? `<div class="table-responsive" style="max-height:55vh;">
@@ -251,9 +341,9 @@
                       <th></th>
                     </tr>
                   </thead>
-                  <tbody>${rows}</tbody>
+                  <tbody id="litRows_${escapeHtml(b.id)}">${rows}</tbody>
                 </table>
-              </div>`
+              </div>${batchPagerHtml(b)}`
             : `<div class="p-3 text-muted small">${escapeHtml(b.statusNote || "本批次暂无记录")}</div>`;
         return `<div class="card mb-3" data-batch-id="${escapeHtml(b.id)}">
           <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
@@ -277,6 +367,11 @@
                   return `<button type="button" class="btn btn-sm btn-primary lit-continue-batch" data-batch-id="${escapeHtml(b.id)}" title="${escapeHtml(tip)}">继续抓取</button>`;
                 })()
               }
+              ${
+                b.type === "import"
+                  ? ""
+                  : `<button type="button" class="btn btn-sm btn-outline-primary lit-research-batch" data-batch-id="${escapeHtml(b.id)}" title="用相同检索式从头重新检索，结果覆盖本批次">重新检索</button>`
+              }
               <button type="button" class="btn btn-sm btn-outline-success lit-export-batch" data-batch-id="${escapeHtml(b.id)}" data-format="docx" ${(b.records || []).length ? "" : "disabled"}>导出 Word</button>
               <button type="button" class="btn btn-sm btn-outline-success lit-export-batch" data-batch-id="${escapeHtml(b.id)}" data-format="xlsx" ${(b.records || []).length ? "" : "disabled"}>导出 Excel</button>
               <button type="button" class="btn btn-sm btn-outline-danger lit-remove-batch" data-batch-id="${escapeHtml(b.id)}">删除</button>
@@ -285,7 +380,24 @@
           <div id="${collapseId}" class="collapse${expanded ? " show" : ""} card-body p-0">${body}</div>
         </div>`;
       })
-      .join("");
+      .join("") +
+      listPager;
+
+    // 批次列表翻页
+    el.batchList.querySelectorAll(".lit-batchlist-prev").forEach((btn) => {
+      btn.addEventListener("click", function () {
+        if (state.batchPage > 0) {
+          state.batchPage -= 1;
+          renderBatches();
+        }
+      });
+    });
+    el.batchList.querySelectorAll(".lit-batchlist-next").forEach((btn) => {
+      btn.addEventListener("click", function () {
+        state.batchPage += 1;
+        renderBatches();
+      });
+    });
 
     // 折叠态切换时更新箭头
     el.batchList.querySelectorAll(".lit-batch-toggle").forEach((btn) => {
@@ -436,7 +548,7 @@
     setStatus(
       `批次已更新：${data.count || 0} 条。${detailMsg ? " " + detailMsg : ""}${
         continueNoGain
-          ? " 本次续抓未获取到新记录：可能该出口 IP 暂时看不到更多结果，建议换 Clash 节点后再点「继续抓取」。"
+          ? " 本次续抓未获取到新记录：Scholar 对当前出口 IP 已停止提供更多结果（翻页被折叠/软封锁），续抓偏移不会再空转推进。建议①换 Clash 节点后再点「继续抓取」；②或在弹出的验证页里完成人机验证（同一出口 IP 通过后可恢复完整翻页）。若浏览器同一节点也翻不到更多，则该 IP 下确实没有更多结果。"
           : short
             ? " 未取满「每源条数」：可点「继续抓取」续抓，或完成 Scholar 验证后继续。"
             : ""
@@ -493,10 +605,14 @@
     const options = opts || {};
     // 续抓某历史批次：用该批次存下的检索式与参数（保证 offset 落在同一结果集）
     const resumeBatch = options.continueBatchId ? findBatch(options.continueBatchId) : null;
-    const query = resumeBatch ? resumeBatch.query || "" : (el.query.value || "").trim();
-    const sources = resumeBatch
-      ? Array.isArray(resumeBatch.sources) && resumeBatch.sources.length
-        ? resumeBatch.sources
+    // 重新检索：用该批次的检索式从头重跑，结果覆盖原批次（不带 prior_records / offset）
+    const rerunBatch = options.rerunBatchId ? findBatch(options.rerunBatchId) : null;
+    // 读取检索式与参数的来源批次（续抓或重新检索都从历史批次取）
+    const srcBatch = resumeBatch || rerunBatch;
+    const query = srcBatch ? srcBatch.query || "" : (el.query.value || "").trim();
+    const sources = srcBatch
+      ? Array.isArray(srcBatch.sources) && srcBatch.sources.length
+        ? srcBatch.sources
         : ["scholar"]
       : selectedSources();
     if (!query) {
@@ -507,16 +623,16 @@
       setStatus("至少选择 1 个来源。", "error");
       return;
     }
-    const rp = (resumeBatch && resumeBatch.params) || {};
+    const rp = (srcBatch && srcBatch.params) || {};
     const payload = {
       query,
       sources,
-      start_year: resumeBatch ? String(rp.start_year || "") : (el.startYear.value || "").trim(),
-      end_year: resumeBatch ? String(rp.end_year || "") : (el.endYear.value || "").trim(),
-      max_results_per_source: resumeBatch
+      start_year: srcBatch ? String(rp.start_year || "") : (el.startYear.value || "").trim(),
+      end_year: srcBatch ? String(rp.end_year || "") : (el.endYear.value || "").trim(),
+      max_results_per_source: srcBatch
         ? Number(rp.max_results_per_source || el.maxPerSource.value || 200)
         : Number(el.maxPerSource.value || 200),
-      scholar_sort_by: resumeBatch
+      scholar_sort_by: srcBatch
         ? rp.scholar_sort_by || "relevance"
         : (el.scholarSort && el.scholarSort.value) || "relevance",
     };
@@ -527,8 +643,20 @@
 
     let batchId = "";
     if (resumeBatch) batchId = resumeBatch.id;
+    else if (rerunBatch) batchId = rerunBatch.id;
     else if (options.withCaptcha && state.pendingBatchId) batchId = state.pendingBatchId;
-    if (!batchId) {
+    if (rerunBatch) {
+      // 重新检索：从头覆盖，保留同一 batch_id，清空展示中的旧记录（保留 createdAt/params 等原字段）
+      payload.batch_id = batchId;
+      upsertBatch(
+        Object.assign({}, rerunBatch, {
+          _page: 0,
+          records: [],
+          summary: `重新检索中… ${query}`,
+          statusNote: "正在从头重新检索并覆盖本批次，按真人节奏放慢翻页，请勿刷新…",
+        })
+      );
+    } else if (!batchId) {
       batchId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       upsertBatch({
         id: batchId,
@@ -549,11 +677,14 @@
         const scholarOffset = (existing.records || []).filter(
           (r) => (r.source || "") === "scholar"
         ).length;
+        const sd = (existing.details || []).find((d) => d && d.source === "scholar");
+        // 关键：续抓偏移必须用「原始翻页位置」nextOffset，而非去重后的条数；
+        // 否则去重会让 offset 落回已抓过的页 → 全被去重 → 误判「没有更多」。
+        const rawNext = sd && Number(sd.nextOffset) > 0 ? Number(sd.nextOffset) : scholarOffset;
         payload.batch_id = batchId;
         payload.prior_records = existing.records;
-        payload.scholar_start_offset = scholarOffset || existing.records.length;
+        payload.scholar_start_offset = rawNext;
         // 带上历史见过的最大总数，避免续抓时被本次缩水的估计覆盖成「47/11」
-        const sd = (existing.details || []).find((d) => d && d.source === "scholar");
         if (sd && Number(sd.totalFound) > 0) payload.prior_total_found = Number(sd.totalFound);
       } else if (batchId && !String(batchId).startsWith("tmp_")) {
         payload.batch_id = batchId;
@@ -565,6 +696,8 @@
     setStatus(
       resumeBatch
         ? `正在从上次结束处续抓（scholar 第 ${payload.scholar_start_offset + 1} 条起），按真人节奏放慢翻页，请耐心等待、不要刷新页面…`
+        : rerunBatch
+        ? "正在从头重新检索并覆盖本批次，按真人节奏放慢翻页，请耐心等待、不要刷新页面…"
         : "正在按真人节奏放慢翻页抓取（每页间隔十几~二十几秒，抗验证码），全量约需 5–12 分钟，请耐心等待、不要刷新页面…",
       "warn"
     );
@@ -769,6 +902,26 @@
     const continueBtn = t.closest(".lit-continue-batch");
     if (continueBtn) {
       doSearch({ continueBatchId: continueBtn.getAttribute("data-batch-id") || "" });
+      return;
+    }
+    const researchBtn = t.closest(".lit-research-batch");
+    if (researchBtn) {
+      const bid = researchBtn.getAttribute("data-batch-id") || "";
+      const bt = findBatch(bid);
+      const q = bt && bt.query ? `「${bt.query}」` : "该批次";
+      if (window.confirm(`将用相同检索式从头重新检索，结果会覆盖${q}的现有记录。确定继续？`)) {
+        doSearch({ rerunBatchId: bid });
+      }
+      return;
+    }
+    const pagePrev = t.closest(".lit-page-prev");
+    if (pagePrev) {
+      changeBatchPage(pagePrev.getAttribute("data-batch-id") || "", -1);
+      return;
+    }
+    const pageNext = t.closest(".lit-page-next");
+    if (pageNext) {
+      changeBatchPage(pageNext.getAttribute("data-batch-id") || "", 1);
       return;
     }
     const removeBtn = t.closest(".lit-remove-batch");
