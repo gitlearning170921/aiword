@@ -26,6 +26,9 @@ def _scope_org_id() -> Optional[str]:
 
 
 def serialize_batch(row: LiteratureSearchBatch) -> dict[str, Any]:
+    # 读取时再归一化一遍：清掉历史批次里残留的 HTML 标签（Literature/Title 乱码）
+    raw_records = list(row.records_json or [])
+    records = [normalize_record(x) for x in raw_records if isinstance(x, dict)]
     return {
         "id": row.id,
         "type": row.batch_type or "search",
@@ -36,11 +39,24 @@ def serialize_batch(row: LiteratureSearchBatch) -> dict[str, Any]:
         "statusNote": row.status_note or "",
         "params": dict(row.params_json or {}),
         "details": list(row.details_json or []),
-        "records": list(row.records_json or []),
-        "recordCount": int(row.record_count or 0),
+        "records": records,
+        "recordCount": int(row.record_count or len(records)),
         "createdAt": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else "",
         "updatedAt": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else "",
     }
+
+
+def get_batch(batch_id: str) -> dict[str, Any] | None:
+    uid = actor_user_id()
+    if not uid:
+        return None
+    bid = str(batch_id or "").strip()
+    if not bid:
+        return None
+    row = LiteratureSearchBatch.query.filter_by(id=bid, user_id=uid).first()
+    if not row:
+        return None
+    return serialize_batch(row)
 
 
 def list_batches(*, limit: int = 50) -> list[dict[str, Any]]:
@@ -117,6 +133,42 @@ def upsert_batch(
     row.details_json = detail_safe
     row.records_json = cleaned
     row.record_count = len(cleaned)
+    row.updated_at = now_local()
+    db.session.commit()
+    return serialize_batch(row)
+
+
+def update_record_marks(
+    batch_id: str,
+    *,
+    index: int,
+    selected: bool | None = None,
+    duplicate: bool | None = None,
+    no_fulltext: bool | None = None,
+) -> dict[str, Any] | None:
+    """更新单条记录的选用/重复/无法获取全文标记（字段相互独立）。"""
+    uid = actor_user_id()
+    if not uid:
+        raise PermissionError("未登录，无法保存标记")
+    bid = str(batch_id or "").strip()
+    if not bid:
+        return None
+    row = LiteratureSearchBatch.query.filter_by(id=bid, user_id=uid).first()
+    if not row:
+        return None
+    records = list(row.records_json or [])
+    if index < 0 or index >= len(records):
+        raise ValueError("记录序号越界")
+    rec = dict(records[index] or {})
+    if selected is not None:
+        rec["selected"] = bool(selected)
+    if duplicate is not None:
+        rec["duplicate"] = bool(duplicate)
+    if no_fulltext is not None:
+        rec["no_fulltext"] = bool(no_fulltext)
+    records[index] = normalize_record(rec)
+    row.records_json = records
+    row.record_count = len(records)
     row.updated_at = now_local()
     db.session.commit()
     return serialize_batch(row)

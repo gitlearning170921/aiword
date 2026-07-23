@@ -8,8 +8,15 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 from .authz import block_until_super_admin_or_user_id
-from .literature.batch_store import clear_batches, delete_batch, list_batches, upsert_batch
-from .literature.dedupe import dedupe_records
+from .literature.batch_store import (
+    clear_batches,
+    delete_batch,
+    get_batch,
+    list_batches,
+    update_record_marks,
+    upsert_batch,
+)
+from .literature.dedupe import dedupe_records, merge_import_update
 from .literature.export_docx import export_records_to_docx
 from .literature.export_excel import export_records_to_excel
 from .literature.importers.riscsv_importer import parse_import_file
@@ -262,7 +269,7 @@ def literature_search_api():
         for d in details
     )
     summary = (
-        f"检索式：{query} ｜ 来源：{', '.join(sources)} ｜ {year_part} ｜ "
+        f"来源：{', '.join(sources)} ｜ {year_part} ｜ "
         f"每源上限 {max_per_source} ｜ 已取 {len(records)}"
         + (f"（{totals}）" if totals else "")
     )
@@ -352,22 +359,67 @@ def literature_import_api():
     if f is None or not str(f.filename or "").strip():
         return jsonify({"ok": False, "message": "请上传 RIS/CSV 文件"}), 400
 
+    # 重新导入到已有批次：传入 batch_id 则按「原地更新 + 追加新条」合并，尽量复用序号
+    target_batch_id = str(request.form.get("batch_id") or "").strip() or None
+    prior: list[dict[str, Any]] = []
+    if target_batch_id:
+        existing = get_batch(target_batch_id)
+        if not existing:
+            return jsonify({"ok": False, "message": "目标批次不存在或无权更新"}), 404
+        prior = [x for x in (existing.get("records") or []) if isinstance(x, dict)]
+
     try:
         data = parse_import_file(str(f.filename), f.read(), source_name=source)
-        records = dedupe_records([normalize_record(x) for x in data if isinstance(x, dict)])
+        incoming = [normalize_record(x) for x in data if isinstance(x, dict)]
+        merge_stats: dict[str, int] = {}
+        if prior:
+            records, merge_stats = merge_import_update(prior, incoming)
+        else:
+            records = dedupe_records(incoming)
+            merge_stats = {
+                "updated": 0,
+                "kept": 0,
+                "added": len(records),
+                "incoming": len(records),
+                "total": len(records),
+            }
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
+
+    if prior:
+        summary = (
+            f"文件：{f.filename} ｜ 来源：{source} ｜ 更新 {merge_stats.get('updated', 0)} ｜ "
+            f"保留 {merge_stats.get('kept', 0)} ｜ 新增 {merge_stats.get('added', 0)} ｜ "
+            f"合计 {len(records)}"
+        )
+        status_note = (
+            f"重新导入已判重合并：文件内去重后 {merge_stats.get('incoming', 0)} 条；"
+            f"匹配更新 {merge_stats.get('updated', 0)}（序号复用），"
+            f"原批次保留未匹配 {merge_stats.get('kept', 0)}，"
+            f"追加新条 {merge_stats.get('added', 0)}。"
+        )
+    else:
+        summary = f"文件：{f.filename} ｜ 来源：{source} ｜ 命中 {len(records)}"
+        status_note = f"导入已按来源内去重（DOI/PMID/URL/标题），共 {len(records)} 条。"
 
     batch = None
     try:
         batch = upsert_batch(
-            batch_id=None,
+            batch_id=target_batch_id,
             batch_type="import",
             query=str(f.filename or ""),
             sources=[source],
-            summary=f"文件：{f.filename} ｜ 来源：{source} ｜ 命中 {len(records)}",
-            status_note="",
-            details=[{"source": source, "fetched": len(records), "totalFound": len(records), "error": ""}],
+            summary=summary,
+            status_note=status_note,
+            details=[
+                {
+                    "source": source,
+                    "fetched": len(records),
+                    "totalFound": len(records),
+                    "error": "",
+                    "mergeStats": merge_stats,
+                }
+            ],
             records=records,
         )
     except Exception as exc:
@@ -378,6 +430,7 @@ def literature_import_api():
                 "count": len(records),
                 "source": source,
                 "batch": None,
+                "mergeStats": merge_stats,
                 "persistWarning": f"结果未落库：{exc}",
             }
         )
@@ -389,6 +442,8 @@ def literature_import_api():
             "count": len(records),
             "source": source,
             "batch": batch,
+            "mergeStats": merge_stats,
+            "updatedExisting": bool(target_batch_id),
         }
     )
 
@@ -417,6 +472,43 @@ def literature_batch_delete_api(batch_id: str):
     if not ok:
         return jsonify({"ok": False, "message": "批次不存在或无权删除"}), 404
     return jsonify({"ok": True})
+
+
+@literature_bp.route("/api/batches/<batch_id>/record-marks", methods=["POST"])
+def literature_batch_record_marks_api(batch_id: str):
+    """更新单条文献的选用/重复/无法获取全文标记（字段相互独立）。"""
+    blocked = _login_wall(for_api=True)
+    if blocked is not None:
+        return blocked
+    payload = request.get_json(silent=True) or {}
+    try:
+        index = int(payload.get("index"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "index 无效"}), 400
+    selected = payload.get("selected", None)
+    duplicate = payload.get("duplicate", None)
+    no_fulltext = payload.get("no_fulltext", None)
+    if selected is None and duplicate is None and no_fulltext is None:
+        return jsonify(
+            {"ok": False, "message": "请至少提供 selected、duplicate 或 no_fulltext"}
+        ), 400
+    try:
+        batch = update_record_marks(
+            batch_id,
+            index=index,
+            selected=None if selected is None else bool(selected),
+            duplicate=None if duplicate is None else bool(duplicate),
+            no_fulltext=None if no_fulltext is None else bool(no_fulltext),
+        )
+    except PermissionError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 401
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"保存标记失败：{exc}"}), 500
+    if not batch:
+        return jsonify({"ok": False, "message": "批次不存在或无权修改"}), 404
+    return jsonify({"ok": True, "batch": batch})
 
 
 @literature_bp.route("/api/batches", methods=["DELETE"])

@@ -5,6 +5,7 @@
     pendingBatchId: "",
     lastSearchPayload: null,
     batchPage: 0,
+    reimportBatchId: "",
   };
 
   const el = {
@@ -65,6 +66,32 @@
       .replace(/'/g, "&#39;");
   }
 
+  // 剥掉 Scholar 残留 HTML（含损坏闭合如 </SPAN中>、及 &lt;span&gt; 实体转义形态）
+  function stripHtmlTags(v) {
+    let s = String(v || "");
+    for (let i = 0; i < 2; i++) {
+      s = s
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&#x27;/gi, "'")
+        .replace(/&#(\d+);/g, (_, n) => {
+          const code = Number(n);
+          return Number.isFinite(code) ? String.fromCharCode(code) : "";
+        })
+        .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+          const code = parseInt(h, 16);
+          return Number.isFinite(code) ? String.fromCharCode(code) : "";
+        })
+        .replace(/<[^>]*>/gi, " ");
+      if (!/[<>]/.test(s)) break;
+    }
+    return s.replace(/\s+/g, " ").trim();
+  }
+
   function nowLabel() {
     const d = new Date();
     const p = (n) => String(n).padStart(2, "0");
@@ -77,6 +104,25 @@
 
   function findBatch(id) {
     return state.batches.find((b) => b.id === id) || null;
+  }
+
+  // 批次摘要里去掉「检索式：…」段，检索式单独用库内原文展示（不由服务端译成中文；浏览器整页翻译仍可生效）
+  function summaryWithoutQuery(b) {
+    let s = String((b && b.summary) || "").trim();
+    if (!s) return "";
+    // 去掉前缀「检索式：xxx ｜」或「检索式：xxx」
+    s = s.replace(/^检索式：\s*/u, "");
+    const q = String((b && b.query) || "").trim();
+    if (q && s.startsWith(q)) {
+      s = s.slice(q.length).replace(/^\s*｜\s*/, "").trim();
+    } else {
+      // summary 中检索式可能被浏览器/历史数据改写，按「｜」劈掉首段更稳
+      const parts = s.split(/\s*｜\s*/);
+      if (parts.length > 1 && /来源|每源|已取|文件/.test(parts.slice(1).join("｜"))) {
+        s = parts.slice(1).join(" ｜ ").trim();
+      }
+    }
+    return s;
   }
 
   function fromServerBatch(b) {
@@ -155,8 +201,8 @@
   }
 
   function citationOf(rec) {
-    if (rec.citation) return String(rec.citation);
-    const bits = [rec.authors, rec.title, rec.source_info].filter(Boolean);
+    if (rec.citation) return stripHtmlTags(rec.citation);
+    const bits = [rec.authors, rec.title, rec.source_info].map(stripHtmlTags).filter(Boolean);
     return bits.join(". ");
   }
 
@@ -165,6 +211,11 @@
     const src = String((rec && rec.source) || "").toLowerCase();
     if (src !== "scholar" && src !== "pubmed") return false;
     return !String((rec && rec.volume_issue_pages) || "").trim();
+  }
+
+  // 无链接地址
+  function linkMissing(rec) {
+    return !String((rec && rec.source_url) || "").trim();
   }
 
   // 批次内记录分页：每页 100 条
@@ -204,16 +255,43 @@
         const ri = start + j;
         const db = dbLabel(r);
         const cite = citationOf(r);
+        const title = stripHtmlTags(r.title) || "—";
+        const abstractText = stripHtmlTags(r.abstract || r.snippet) || "—";
         const vipTag = vipMissing(r)
           ? ' <span class="badge text-bg-warning" title="卷/期/页缺失，建议核对原文后手动补充">卷期页缺失</span>'
           : "";
-        const link = r.source_url
-          ? `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开</a>`
-          : '<span class="text-muted">—</span>';
-        return `<tr class="lit-row" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" style="cursor:pointer;" title="点击查看完整详情">
+        const noLinkTag = linkMissing(r)
+          ? ' <span class="badge text-bg-danger" title="该文献没有链接地址">无链接</span>'
+          : "";
+        const link = linkMissing(r)
+          ? '<span class="badge text-bg-danger" title="该文献没有链接地址">无链接</span>'
+          : `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开</a>`;
+        const selected = !!r.selected;
+        const duplicate = !!r.duplicate;
+        const noFulltext = !!r.no_fulltext;
+        const rowClass = [
+          "lit-row",
+          selected ? "table-success" : "",
+          duplicate ? "table-secondary" : "",
+          noFulltext ? "table-warning" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return `<tr class="${rowClass}" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" style="cursor:pointer;" title="点击查看完整详情">
+              <td class="text-nowrap text-center" onclick="event.stopPropagation()">
+                <input type="checkbox" class="form-check-input lit-mark-selected" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" ${selected ? "checked" : ""} title="选用">
+              </td>
+              <td class="text-nowrap text-center" onclick="event.stopPropagation()">
+                <input type="checkbox" class="form-check-input lit-mark-duplicate" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" ${duplicate ? "checked" : ""} title="重复">
+              </td>
+              <td class="text-nowrap text-center" onclick="event.stopPropagation()">
+                <input type="checkbox" class="form-check-input lit-mark-nofulltext" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}" ${noFulltext ? "checked" : ""} title="无法获取全文">
+              </td>
               <td class="text-nowrap">${escapeHtml(db)}</td>
               <td class="text-nowrap">[${itemNo[ri]}]</td>
-              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}${vipTag}</td>
+              <td style="white-space:pre-wrap; min-width:260px; max-width:420px;">${escapeHtml(title)}</td>
+              <td style="white-space:pre-wrap; min-width:320px; max-width:560px;">${escapeHtml(abstractText)}</td>
+              <td style="white-space:pre-wrap; min-width:420px; max-width:720px;">${escapeHtml(cite)}${vipTag}${noLinkTag}</td>
               <td class="text-nowrap">${link}</td>
               <td class="text-nowrap"><button type="button" class="btn btn-sm btn-link p-0 lit-detail-btn" data-batch-id="${escapeHtml(b.id)}" data-index="${ri}">详情</button></td>
             </tr>`;
@@ -252,6 +330,51 @@
     if (pager) pager.outerHTML = batchPagerHtml(b);
   }
 
+  // 更新选用/重复/无法获取全文标记（字段相互独立），已落库批次同步到服务端
+  async function setRecordMark(batchId, index, field, value) {
+    const b = findBatch(batchId);
+    if (!b || !Array.isArray(b.records) || !b.records[index]) return;
+    if (field !== "selected" && field !== "duplicate" && field !== "no_fulltext") return;
+    b.records[index][field] = !!value;
+    // 就地刷新当前页行样式，避免整表闪烁
+    const tbody = document.getElementById(`litRows_${b.id}`);
+    if (tbody) tbody.innerHTML = batchRowsHtml(b);
+    if (!b.persisted || String(b.id || "").startsWith("tmp_")) {
+      setStatus("标记已更新（批次尚未落库，检索完成后会一并保存）。", "warn");
+      return;
+    }
+    try {
+      const payload = { index: Number(index) };
+      payload[field] = !!value;
+      const res = await fetch(`/literature/api/batches/${encodeURIComponent(b.id)}/record-marks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error(data.message || "保存标记失败");
+      }
+      if (data.batch && data.batch.id) {
+        const idx = state.batches.findIndex((x) => x.id === data.batch.id);
+        if (idx >= 0) {
+          const page = b._page;
+          state.batches[idx] = fromServerBatch(data.batch);
+          state.batches[idx]._page = page;
+        }
+      }
+      const tip =
+        field === "selected"
+          ? "选用标记已保存。"
+          : field === "duplicate"
+            ? "重复标记已保存。"
+            : "无法获取全文标记已保存。";
+      setStatus(tip, "ok");
+    } catch (err) {
+      setStatus(String(err && err.message ? err.message : err), "error");
+    }
+  }
+
   function showDetail(batchId, index) {
     const batch = findBatch(batchId);
     const rec = batch && Array.isArray(batch.records) ? batch.records[index] : null;
@@ -259,27 +382,40 @@
     const rows = [
       ["Database", dbLabel(rec)],
       ["Item", `[${index + 1}]`],
+      ["选用", rec.selected ? "是" : ""],
+      ["重复", rec.duplicate ? "是" : ""],
+      ["无法获取全文", rec.no_fulltext ? "是" : ""],
       ["Literature", citationOf(rec)],
-      ["Title", rec.title],
-      ["Authors", rec.authors],
-      ["Journal", rec.journal],
+      ["Title", stripHtmlTags(rec.title)],
+      ["Abstract", stripHtmlTags(rec.abstract || rec.snippet)],
+      ["Authors", stripHtmlTags(rec.authors)],
+      ["Journal", stripHtmlTags(rec.journal)],
       ["Year / Date", rec.pub_date || rec.year],
       ["Volume/Issue/Pages", rec.volume_issue_pages],
       ["DOI", rec.doi],
       ["PMID", rec.pmid],
       ["Source", rec.source],
-      ["Link", rec.source_url],
+      ["Link", rec.source_url || ""],
     ];
     const vipWarn = vipMissing(rec)
       ? '<div class="alert alert-warning py-2 px-3 mb-3 small">⚠ 卷/期/页缺失：Crossref 未能按该文献补全，建议核对原文后手动补充（工具不会虚构编号）。</div>'
       : "";
+    const linkWarn = linkMissing(rec)
+      ? '<div class="alert alert-danger py-2 px-3 mb-3 small">⚠ 无链接地址：该文献没有 Link / source_url。</div>'
+      : "";
     el.detailBody.innerHTML =
       vipWarn +
+      linkWarn +
       rows
       .map(([k, v]) => {
         const val = String(v || "").trim();
-        if (!val) return "";
+        const isMark = k === "选用" || k === "重复" || k === "无法获取全文" || k === "Link";
+        // 标记未勾选时显示空（不写「否」）；Link 无地址时也展示并标「无链接」
+        if (!val && !isMark) return "";
         if (k === "Link") {
+          if (!val) {
+            return `<div class="mb-2"><div class="text-muted small">${escapeHtml(k)}</div><div><span class="badge text-bg-danger">无链接</span></div></div>`;
+          }
           return `<div class="mb-2"><div class="text-muted small">${escapeHtml(k)}</div><a href="${escapeHtml(val)}" target="_blank" rel="noopener">${escapeHtml(val)}</a></div>`;
         }
         if (k === "Literature") {
@@ -334,8 +470,13 @@
                 <table class="table table-sm table-hover mb-0 align-middle">
                   <thead class="table-light sticky-top">
                     <tr>
+                      <th class="text-nowrap">选用</th>
+                      <th class="text-nowrap">重复</th>
+                      <th class="text-nowrap" title="无法获取文献全文">无全文</th>
                       <th>Database</th>
                       <th>Item</th>
+                      <th>Title</th>
+                      <th>Abstract</th>
                       <th>Literature</th>
                       <th>Link</th>
                       <th></th>
@@ -352,7 +493,12 @@
                 data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${collapseId}">
                 <span class="fw-semibold">${expanded ? "▼" : "▶"} 批次 #${no} · ${escapeHtml(b.typeLabel)} · ${escapeHtml(b.createdAt)}${b.persisted ? "" : " · 未落库"}</span>
               </button>
-              <div class="small text-muted mt-1">${escapeHtml(b.summary || "")}</div>
+              ${
+                b.query
+                  ? `<div class="small mt-1"><span class="text-muted">检索式：</span><span style="white-space:pre-wrap;">${escapeHtml(b.query)}</span></div>`
+                  : ""
+              }
+              <div class="small text-muted mt-1">${escapeHtml(summaryWithoutQuery(b))}</div>
               ${b.statusNote ? `<div class="small text-warning mt-1">${escapeHtml(b.statusNote)}</div>` : ""}
             </div>
             <div class="d-flex gap-2 align-items-center flex-wrap">
@@ -369,7 +515,7 @@
               }
               ${
                 b.type === "import"
-                  ? ""
+                  ? `<button type="button" class="btn btn-sm btn-outline-primary lit-reimport-batch" data-batch-id="${escapeHtml(b.id)}" title="选择文件后导入，将更新本批次：匹配条目复用序号并保留标记，新条目追加">重新导入更新</button>`
                   : `<button type="button" class="btn btn-sm btn-outline-primary lit-research-batch" data-batch-id="${escapeHtml(b.id)}" title="用相同检索式从头重新检索，结果覆盖本批次">重新检索</button>`
               }
               <button type="button" class="btn btn-sm btn-outline-success lit-export-batch" data-batch-id="${escapeHtml(b.id)}" data-format="docx" ${(b.records || []).length ? "" : "disabled"}>导出 Word</button>
@@ -737,36 +883,76 @@
     }
   }
 
+  function syncImportButtonLabel() {
+    if (!el.importBtn) return;
+    if (state.reimportBatchId) {
+      const bt = findBatch(state.reimportBatchId);
+      const tip = bt ? `更新到批次` : "更新已选批次";
+      el.importBtn.textContent = tip;
+      el.importBtn.classList.remove("btn-outline-primary");
+      el.importBtn.classList.add("btn-primary");
+    } else {
+      el.importBtn.textContent = "导入为新批次";
+      el.importBtn.classList.add("btn-outline-primary");
+      el.importBtn.classList.remove("btn-primary");
+    }
+  }
+
   async function doImport() {
     const file = el.importFile.files && el.importFile.files[0];
     if (!file) {
       setStatus("请选择需要导入的 RIS/CSV 文件。", "error");
       return;
     }
+    const reimportId = (state.reimportBatchId || "").trim();
+    const target = reimportId ? findBatch(reimportId) : null;
+    if (reimportId && !target) {
+      setStatus("要更新的批次已不存在，请重新点「重新导入更新」。", "error");
+      state.reimportBatchId = "";
+      syncImportButtonLabel();
+      return;
+    }
     const fd = new FormData();
     fd.append("source", el.importSource.value);
     fd.append("file", file);
-    const batchId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    upsertBatch({
-      id: batchId,
-      type: "import",
-      typeLabel: "导入",
-      createdAt: nowLabel(),
-      records: [],
-      summary: `导入中… ${file.name}（${el.importSource.value}）`,
-      statusNote: "正在导入…",
-      sources: [el.importSource.value],
-      persisted: false,
-    });
-    setBusy(el.importBtn, true, "导入中...");
-    setStatus("正在导入为新批次...", "warn");
+    if (reimportId) fd.append("batch_id", reimportId);
+
+    let batchId = reimportId;
+    if (!batchId) {
+      batchId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      upsertBatch({
+        id: batchId,
+        type: "import",
+        typeLabel: "导入",
+        createdAt: nowLabel(),
+        records: [],
+        summary: `导入中… ${file.name}（${el.importSource.value}）`,
+        statusNote: "正在导入…",
+        sources: [el.importSource.value],
+        persisted: false,
+      });
+    } else {
+      upsertBatch(
+        Object.assign({}, target, {
+          summary: `重新导入更新中… ${file.name}`,
+          statusNote: "正在合并更新（匹配条目复用序号、保留标记）…",
+        })
+      );
+    }
+    setBusy(el.importBtn, true, reimportId ? "更新中..." : "导入中...");
+    setStatus(
+      reimportId
+        ? "正在重新导入并更新该批次（文件内判重；匹配条目复用序号）..."
+        : "正在导入为新批次（文件内按 DOI/PMID/URL/标题判重）...",
+      "warn"
+    );
     try {
       const res = await fetch("/literature/api/import", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok || !data.ok) {
         throw new Error(data.message || `导入失败（HTTP ${res.status}）`);
       }
-      removeBatchLocal(batchId);
+      if (!reimportId) removeBatchLocal(batchId);
       if (data.batch && data.batch.id) {
         upsertBatch(fromServerBatch(data.batch));
       } else {
@@ -774,7 +960,7 @@
           id: batchId,
           type: "import",
           typeLabel: "导入",
-          createdAt: nowLabel(),
+          createdAt: (target && target.createdAt) || nowLabel(),
           records: Array.isArray(data.records) ? data.records : [],
           summary: `文件：${file.name} ｜ 来源：${el.importSource.value} ｜ 命中 ${data.count || 0}`,
           statusNote: data.persistWarning || "",
@@ -782,10 +968,17 @@
           persisted: false,
         });
       }
+      const ms = data.mergeStats || {};
+      const extra = reimportId
+        ? ` 更新 ${ms.updated || 0}，保留 ${ms.kept || 0}，新增 ${ms.added || 0}。`
+        : "";
       setStatus(
-        `导入完成：${data.count || 0} 条。${data.persistWarning ? " " + data.persistWarning : ""}`,
+        `导入完成：${data.count || 0} 条。${extra}${data.persistWarning ? " " + data.persistWarning : ""}`,
         data.persistWarning ? "warn" : "ok"
       );
+      state.reimportBatchId = "";
+      syncImportButtonLabel();
+      if (el.importFile) el.importFile.value = "";
     } catch (err) {
       const batch = findBatch(batchId);
       if (batch) {
@@ -794,7 +987,8 @@
       }
       setStatus(String(err && err.message ? err.message : err), "error");
     } finally {
-      setBusy(el.importBtn, false, "导入中...");
+      setBusy(el.importBtn, false, reimportId ? "更新中..." : "导入中...");
+      syncImportButtonLabel();
     }
   }
 
@@ -888,9 +1082,30 @@
       setStatus("已清空全部批次。", "ok");
     });
   }
+  el.batchList.addEventListener("change", function (ev) {
+    const t = ev.target;
+    if (!(t instanceof HTMLInputElement) || t.type !== "checkbox") return;
+    const bid = t.getAttribute("data-batch-id") || "";
+    const idx = Number(t.getAttribute("data-index") || -1);
+    if (!bid || !(idx >= 0)) return;
+    if (t.classList.contains("lit-mark-selected")) {
+      setRecordMark(bid, idx, "selected", t.checked);
+      return;
+    }
+    if (t.classList.contains("lit-mark-duplicate")) {
+      setRecordMark(bid, idx, "duplicate", t.checked);
+      return;
+    }
+    if (t.classList.contains("lit-mark-nofulltext")) {
+      setRecordMark(bid, idx, "no_fulltext", t.checked);
+    }
+  });
+
   el.batchList.addEventListener("click", function (ev) {
     const t = ev.target;
     if (!(t instanceof HTMLElement)) return;
+    // 勾选标记时不打开详情
+    if (t.closest(".lit-mark-selected, .lit-mark-duplicate, .lit-mark-nofulltext")) return;
     const exportBtn = t.closest(".lit-export-batch");
     if (exportBtn) {
       exportBatch(
@@ -912,6 +1127,19 @@
       if (window.confirm(`将用相同检索式从头重新检索，结果会覆盖${q}的现有记录。确定继续？`)) {
         doSearch({ rerunBatchId: bid });
       }
+      return;
+    }
+    const reimportBtn = t.closest(".lit-reimport-batch");
+    if (reimportBtn) {
+      const bid = reimportBtn.getAttribute("data-batch-id") || "";
+      state.reimportBatchId = bid;
+      syncImportButtonLabel();
+      setStatus(
+        "已选择该导入批次：请选好 RIS/CSV 后点「更新到批次」。匹配条目会复用原序号并保留选用/重复/无全文标记，新条目追加到末尾。",
+        "warn"
+      );
+      if (el.importCard) el.importCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      if (el.importFile) el.importFile.focus();
       return;
     }
     const pagePrev = t.closest(".lit-page-prev");
@@ -945,5 +1173,6 @@
   }
 
   renderBatches();
+  syncImportButtonLabel();
   loadBatches();
 })();

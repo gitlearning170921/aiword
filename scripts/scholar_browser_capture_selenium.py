@@ -213,18 +213,40 @@ def _build_driver(browser: str, proxy: str, headless: bool, driver_path: str) ->
         except Exception:
             pass
 
-        # Selenium 3.x 回退：webdriver.Edge 不支持 Chromium Edge 参数，
-        # 改走 Chrome 协议并指定 Edge 二进制 + msedgedriver。
-        copt = ChromeOptions()
-        for a in edge_args:
-            copt.add_argument(a)
-        edge_bin = _detect_edge_binary()
-        if edge_bin:
-            copt.binary_location = edge_bin
+        # Selenium 3.x 回退：优先使用旧版 webdriver.Edge(executable_path, capabilities)
+        # 并显式传 ms:edgeOptions，避免 "No matching capabilities found"。
+        edge_caps = {
+            "browserName": "MicrosoftEdge",
+            "ms:edgeOptions": {"args": edge_args},
+        }
         try:
-            return webdriver.Chrome(executable_path=edge_driver, options=copt)
+            return webdriver.Edge(executable_path=edge_driver, capabilities=edge_caps)
         except TypeError:
-            return webdriver.Chrome(executable_path=edge_driver, chrome_options=copt)
+            # 极老接口兼容（位置参数）
+            return webdriver.Edge(edge_driver, edge_caps)
+        except Exception:
+            # 最后兜底：走 Chrome 协议 + Edge binary
+            copt = ChromeOptions()
+            for a in edge_args:
+                copt.add_argument(a)
+            edge_bin = _detect_edge_binary()
+            if edge_bin:
+                copt.binary_location = edge_bin
+            caps = copt.to_capabilities()
+            caps["browserName"] = "MicrosoftEdge"
+            caps["ms:edgeOptions"] = {"args": edge_args}
+            try:
+                return webdriver.Chrome(
+                    executable_path=edge_driver,
+                    options=copt,
+                    desired_capabilities=caps,
+                )
+            except TypeError:
+                return webdriver.Chrome(
+                    executable_path=edge_driver,
+                    chrome_options=copt,
+                    desired_capabilities=caps,
+                )
 
     opts = ChromeOptions()
     if headless:

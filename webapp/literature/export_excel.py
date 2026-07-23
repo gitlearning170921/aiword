@@ -21,18 +21,22 @@ EXPORT_HEADERS = (
     "Volume/Issue/Pages",
     "DOI/PMID",
     "Source",
+    "选用",
+    "重复",
+    "无法获取全文",
     "Note",
 )
 
 
 def _vip_note(record: LiteratureRecord) -> str:
-    """卷/期/页缺失提示：仅对学术文献(scholar/pubmed)且确实缺失时给出。"""
+    """备注：卷期页缺失、无链接等提示。"""
+    notes: list[str] = []
     src = normalize_text(record.get("source")).lower()
-    if src not in ("scholar", "pubmed"):
-        return ""
-    if normalize_text(record.get("volume_issue_pages")):
-        return ""
-    return "卷期页缺失，建议核对原文后手动补充"
+    if src in ("scholar", "pubmed") and not normalize_text(record.get("volume_issue_pages")):
+        notes.append("卷期页缺失，建议核对原文后手动补充")
+    if not normalize_text(record.get("source_url")):
+        notes.append("无链接地址")
+    return "；".join(notes)
 
 
 def _id_column(record: LiteratureRecord) -> str:
@@ -59,7 +63,8 @@ def export_records_to_excel(records: list[LiteratureRecord]) -> tuple[bytes, str
         # 不要再套一层 source_display_label，否则 Google→GOOGLE 与列表不一致
         db = normalize_text(rec.get("database")) or source_display_label(rec.get("source"))
         counters[db] = counters.get(db, 0) + 1
-        citation = str(rec.get("citation") or "").strip() or build_citation(rec)
+        # 强制重建引用并清洗 HTML，避免导出 Literature/Title 残留 span 标签
+        citation = normalize_text(build_citation(rec)) or normalize_text(rec.get("citation"))
         ws.append(
             [
                 db,
@@ -73,6 +78,9 @@ def export_records_to_excel(records: list[LiteratureRecord]) -> tuple[bytes, str
                 normalize_text(rec.get("volume_issue_pages")),
                 _id_column(rec),
                 normalize_text(rec.get("source")),
+                "是" if rec.get("selected") else "",
+                "是" if rec.get("duplicate") else "",
+                "是" if rec.get("no_fulltext") else "",
                 _vip_note(rec),
             ]
         )
@@ -90,7 +98,10 @@ def export_records_to_excel(records: list[LiteratureRecord]) -> tuple[bytes, str
         "I": 18,
         "J": 26,
         "K": 12,
-        "L": 26,
+        "L": 8,
+        "M": 8,
+        "N": 12,
+        "O": 26,
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width

@@ -6,6 +6,7 @@ from typing import Any, TypedDict
 class LiteratureRecord(TypedDict, total=False):
     source: str
     title: str
+    abstract: str
     authors: str
     year: str
     pub_date: str
@@ -17,6 +18,10 @@ class LiteratureRecord(TypedDict, total=False):
     source_info: str
     citation: str
     database: str
+    # 人工标记（相互独立）：选用 / 重复 / 无法获取全文
+    selected: bool
+    duplicate: bool
+    no_fulltext: bool
 
 
 class LiteratureSearchResult(TypedDict, total=False):

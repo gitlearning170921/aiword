@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from typing import Iterable
 
@@ -7,6 +8,15 @@ from . import LiteratureRecord
 
 
 _MULTISPACE_RE = re.compile(r"\s+")
+# 剥掉 Scholar 等来源残留的 HTML（含损坏闭合标签如 </SPAN中>）
+_HTML_TAG_RE = re.compile(r"<[^<>]*>", re.I)
+# 剥掉标签剥离后仍残留的 style/font-variant 噪声
+_STYLE_NOISE_RE = re.compile(
+    r"""(?ix)
+    style\s*=\s*["'“”][^"'“”]*["'“”]
+    | font-variant\s*[：:]\s*small-?caps
+    """
+)
 _DOI_RE = re.compile(r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)", re.IGNORECASE)
 
 
@@ -22,10 +32,26 @@ def normalize_text(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    # 全角尖括号统一成半角，避免 ＜span＞ 剥不掉
+    text = text.replace("＜", "<").replace("＞", ">")
+    # 先实体解码再剥标签：文献 citation 常存成 &lt;span...&gt;OSA&lt;/span&gt;，
+    # 只剥原始 <tag> 清不掉；再剥一轮以防双重转义。
+    for _ in range(3):
+        try:
+            text = html.unescape(text)
+        except Exception:
+            pass
+        text = text.replace("＜", "<").replace("＞", ">")
+        if "<" in text:
+            text = _HTML_TAG_RE.sub(" ", text)
+        else:
+            break
+    # 再清一层残留 style / font-variant 噪声（标签损坏时常见）
+    text = _STYLE_NOISE_RE.sub(" ", text)
     # 解码失败的替换字符统一成省略号，避免展示/导出出现「Journal of Medical ��」
     if "\ufffd" in text:
         text = re.sub(r"\ufffd+", "…", text)
-    return _MULTISPACE_RE.sub(" ", text)
+    return _MULTISPACE_RE.sub(" ", text).strip()
 
 
 def normalize_authors(authors: str | Iterable[str] | None) -> str:
@@ -176,10 +202,21 @@ def build_citation(record: LiteratureRecord) -> str:
     return citation
 
 
+def _as_bool_mark(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value or "").strip().lower()
+    return s in ("1", "true", "yes", "y", "是", "选用", "重复")
+
+
 def normalize_record(record: LiteratureRecord) -> LiteratureRecord:
     normalized: LiteratureRecord = {
         "source": normalize_text(record.get("source")).lower(),
         "title": normalize_title(record.get("title")),
+        # 摘要字段：优先 abstract，兼容外部源常见的 snippet 命名
+        "abstract": normalize_text(record.get("abstract") or record.get("snippet")),
         "authors": normalize_authors(record.get("authors")),
         "year": normalize_year(record.get("year")),
         "pub_date": normalize_text(record.get("pub_date")),
@@ -188,10 +225,19 @@ def normalize_record(record: LiteratureRecord) -> LiteratureRecord:
         "doi": normalize_doi(record.get("doi")),
         "pmid": normalize_text(record.get("pmid")),
         "source_url": normalize_text(record.get("source_url")),
+        # 人工标记：选用 / 重复 / 无法获取全文（独立字段，归一化时保留）
+        "selected": _as_bool_mark(record.get("selected")),
+        "duplicate": _as_bool_mark(record.get("duplicate")),
+        "no_fulltext": _as_bool_mark(record.get("no_fulltext")),
     }
     if not normalized["pub_date"] and normalized["year"]:
         normalized["pub_date"] = normalized["year"]
     normalized["source_info"] = build_source_info(normalized)
-    normalized["citation"] = build_citation(normalized)
+    # 传入原始 citation，供 Embase/Cochrane 保留；build_citation 内部会再 normalize_text 清洗
+    normalized["citation"] = build_citation(
+        {**normalized, "citation": record.get("citation") or ""}
+    )
+    # 导出/展示最终再洗一遍，避免旧 citation 里残留 HTML
+    normalized["citation"] = normalize_text(normalized.get("citation"))
     normalized["database"] = source_display_label(normalized.get("source"))
     return normalized
