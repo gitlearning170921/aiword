@@ -14,8 +14,8 @@ from webapp.document_control.project_link import (
 from webapp.document_control.subtype_resolver import normalize_title_key
 from webapp.models import ControlledDocument, NumberAllocation, Project, UploadRecord, now_local
 from webapp.project_identity import (
+    canonical_project_identity_key,
     find_page1_project,
-    project_identity_key,
     registered_country_identity_part,
     scope_field_tokens,
 )
@@ -53,14 +53,64 @@ def project_code_tokens(value: Optional[str]) -> list[str]:
     return out
 
 
+_NAME_PAREN_RE = re.compile(r"[\(（].*$")
+
+
+def _project_name_keys(value: Optional[str]) -> set[str]:
+    """项目名归一化键集合：支持多项目逗号串、括号后缀（如「软件（CE, NMPA）」）。"""
+    keys: set[str] = set()
+    text = (value or "").strip()
+    if not text:
+        return keys
+    parts = scope_field_tokens(text)
+    # 括号内常含逗号，纯 split 会拆坏；对未配对片段做一次粘合回退
+    if not parts:
+        parts = [text]
+    for part in parts:
+        raw = (part or "").strip()
+        if not raw:
+            continue
+        k = normalize_title_key(raw)
+        if k:
+            keys.add(k)
+        base = _NAME_PAREN_RE.sub("", raw).strip()
+        if base and base != raw:
+            bk = normalize_title_key(base)
+            if bk:
+                keys.add(bk)
+    full = normalize_title_key(text)
+    if full:
+        keys.add(full)
+    return keys
+
+
 def _project_name_matches(target_name: Optional[str], stored_name: Optional[str]) -> bool:
-    target_key = normalize_title_key(target_name or "")
-    if not target_key:
+    """双向匹配：单项目名 ↔ 多项目逗号串中任一段。"""
+    left = _project_name_keys(target_name)
+    right = _project_name_keys(stored_name)
+    if not left or not right:
         return False
-    for part in scope_field_tokens(stored_name):
-        if normalize_title_key(part) == target_key:
-            return True
-    return normalize_title_key(stored_name or "") == target_key
+    return bool(left & right)
+
+
+def _countries_compatible(
+    left: Optional[str],
+    right: Optional[str],
+) -> bool:
+    """注册国家兼容：任一侧为空、完全相等、或集合有交集（多国家串）均可。"""
+    a = {
+        x
+        for x in registered_country_identity_part(left).split("|")
+        if x
+    }
+    b = {
+        x
+        for x in registered_country_identity_part(right).split("|")
+        if x
+    }
+    if not a or not b:
+        return True
+    return bool(a & b)
 
 
 def record_belongs_to_project(
@@ -72,8 +122,10 @@ def record_belongs_to_project(
     project_name: Optional[str],
     registered_country: Optional[str] = None,
 ) -> bool:
-    target_key = project_identity_key(project_id, project_name, registered_country)
-    row_key = project_identity_key(
+    target_key = canonical_project_identity_key(
+        project_id, project_name, registered_country
+    )
+    row_key = canonical_project_identity_key(
         record_project_id,
         record_project_name,
         record_registered_country,
@@ -85,8 +137,9 @@ def record_belongs_to_project(
         and (record_project_id or "").strip() == (project_id or "").strip()
     ):
         return True
-    if not (registered_country or "").strip():
-        return _project_name_matches(project_name, record_project_name)
+    # 多项目台账串 / 单项目名：名称命中且国家兼容即视为同项目作用域
+    if _project_name_matches(project_name, record_project_name):
+        return _countries_compatible(registered_country, record_registered_country)
     return False
 
 
@@ -171,24 +224,100 @@ def _load_code_rows(
     )
     if org:
         doc_q = doc_q.filter_by(organization_id=org)
-    doc_rows = [
-        (
-            row.id,
-            "doc",
-            row.project_id,
-            row.project_name,
-            row.registered_country,
-            row.project_code,
+    doc_rows: list[
+        tuple[str, str, Optional[str], Optional[str], Optional[str], Optional[str]]
+    ] = []
+    for row in doc_q.all():
+        # 台账常把多项目/多国家/多编号拼在同一字段；拆成作用域对再判重，
+        # 避免整串被当成「另一个项目」误拦同编号新增。
+        pairs = _expand_scope_code_pairs(
+            row.project_name or "",
+            row.registered_country or "",
+            row.project_code or "",
         )
-        for row in doc_q.all()
-    ]
+        if not pairs:
+            doc_rows.append(
+                (
+                    row.id,
+                    "doc",
+                    row.project_id,
+                    row.project_name,
+                    row.registered_country,
+                    row.project_code,
+                )
+            )
+            continue
+        for pn, rc, pc in pairs:
+            if not (pc or "").strip():
+                continue
+            doc_rows.append(
+                (
+                    row.id,
+                    "doc",
+                    row.project_id,
+                    pn or row.project_name,
+                    rc or row.registered_country,
+                    pc,
+                )
+            )
     return project_rows + upload_rows + doc_rows
+
+
+def _expand_scope_code_pairs(
+    project_name: str,
+    registered_country: str,
+    project_code: str,
+) -> list[tuple[str, str, str]]:
+    """将逗号分隔的项目名/国家/项目编号展开为对齐的三元组。"""
+    pn_tokens = [p for p in scope_field_tokens(project_name) if p]
+    rc_tokens = [p for p in scope_field_tokens(registered_country) if p]
+    pc_tokens = project_code_tokens(project_code)
+    # project_code_tokens 已规范化；展示仍用原始分段更利于名称匹配
+    raw_pc = [p for p in scope_field_tokens(project_code) if p] or [
+        (project_code or "").strip()
+    ]
+    raw_pc = [p for p in raw_pc if p]
+    if not pn_tokens and not rc_tokens and not raw_pc:
+        return []
+
+    if len(pn_tokens) > 1 and len(rc_tokens) > 1:
+        count = max(len(pn_tokens), len(rc_tokens), len(raw_pc) or 1)
+    elif len(pn_tokens) > 1:
+        count = max(len(pn_tokens), len(raw_pc) or 1)
+    elif len(rc_tokens) > 1:
+        count = max(len(rc_tokens), len(raw_pc) or 1)
+    elif len(raw_pc) > 1:
+        count = len(raw_pc)
+    else:
+        count = 1
+
+    def _at(tokens: list[str], index: int) -> str:
+        if not tokens:
+            return ""
+        if len(tokens) == 1:
+            return tokens[0]
+        return tokens[index] if index < len(tokens) else ""
+
+    pairs: list[tuple[str, str, str]] = []
+    for i in range(count):
+        pn = _at(pn_tokens, i)
+        rc = _at(rc_tokens, i)
+        pc = _at(raw_pc, i)
+        if not pc and pc_tokens:
+            pc = _at(list(pc_tokens), i) or (pc_tokens[0] if len(pc_tokens) == 1 else "")
+        if not pn and not rc and not pc:
+            continue
+        pairs.append((pn, rc, pc))
+    return pairs
 
 
 def _collect_existing_codes_for_project(
     rows: Iterable[tuple[str, str, Optional[str], Optional[str], Optional[str], Optional[str]]],
     *,
     current: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
     exclude_upload_id: Optional[str],
     exclude_document_id: Optional[str],
 ) -> set[str]:
@@ -198,7 +327,18 @@ def _collect_existing_codes_for_project(
             continue
         if record_kind == "doc" and exclude_document_id and record_id == exclude_document_id:
             continue
-        if project_identity_key(pid, pname, pcountry) != current:
+        row_key = canonical_project_identity_key(pid, pname, pcountry)
+        same = bool(current and row_key and row_key == current)
+        if not same:
+            same = record_belongs_to_project(
+                record_project_id=pid,
+                record_project_name=pname,
+                record_registered_country=pcountry,
+                project_id=project_id,
+                project_name=project_name,
+                registered_country=registered_country,
+            )
+        if not same:
             continue
         codes.update(project_code_tokens(pcode))
     return codes
@@ -328,12 +468,20 @@ def check_project_code_save(
         return ProjectCodeSaveCheck()
 
     resolved_country = registered_country
-    if not (resolved_country or "").strip() and project_id:
-        proj = find_page1_project(project_id=project_id, project_name=project_name)
-        if proj:
-            resolved_country = getattr(proj, "registered_country", None)
+    resolved_project = find_page1_project(
+        project_id=project_id,
+        project_name=project_name,
+        registered_country=registered_country,
+    )
+    if not (resolved_country or "").strip() and resolved_project:
+        resolved_country = getattr(resolved_project, "registered_country", None)
+    resolved_project_id = (project_id or "").strip() or (
+        str(getattr(resolved_project, "id", "") or "").strip() or None
+    )
 
-    current = project_identity_key(project_id, project_name, resolved_country)
+    current = canonical_project_identity_key(
+        resolved_project_id, project_name, resolved_country
+    )
     if not current:
         return ProjectCodeSaveCheck()
 
@@ -344,16 +492,73 @@ def check_project_code_save(
         )
 
     new_code = tokens[0]
+    eff_name = project_name or (
+        getattr(resolved_project, "name", None) if resolved_project else None
+    )
+
+    # 本项目在 Project 表已登记该编号：新增任务/台账记录一律放行（最常见业务路径）
+    if resolved_project and new_code in project_code_tokens(
+        getattr(resolved_project, "project_code", None)
+    ):
+        return ProjectCodeSaveCheck(new_code=new_code)
+
+    # 其他页面1项目已占用该编号 → 硬拦截（以 Project 表为准）
+    for other_proj in Project.query.filter(
+        Project.project_code.isnot(None),
+        Project.project_code != "",
+    ).all():
+        if organization_id:
+            other_org = str(getattr(other_proj, "organization_id", "") or "").strip()
+            if other_org and other_org != str(organization_id).strip():
+                continue
+        if new_code not in project_code_tokens(getattr(other_proj, "project_code", None)):
+            continue
+        if resolved_project_id and other_proj.id == resolved_project_id:
+            continue
+        if record_belongs_to_project(
+            record_project_id=other_proj.id,
+            record_project_name=other_proj.name,
+            record_registered_country=getattr(other_proj, "registered_country", None),
+            project_id=resolved_project_id,
+            project_name=eff_name,
+            registered_country=resolved_country,
+        ):
+            continue
+        other_label = (other_proj.name or "").strip() or other_proj.id
+        other_rc = (getattr(other_proj, "registered_country", None) or "").strip()
+        if other_rc:
+            other_label = f"{other_label}（{other_rc}）"
+        return ProjectCodeSaveCheck(
+            hard_error=(
+                f"项目编号「{new_code}」已被项目「{other_label}」使用，"
+                f"不同项目的项目编号不能重复"
+            )
+        )
+
     all_rows = _load_code_rows(organization_id)
 
     same_project_codes = _collect_existing_codes_for_project(
         all_rows,
         current=current,
+        project_id=resolved_project_id,
+        project_name=eff_name,
+        registered_country=resolved_country,
         exclude_upload_id=exclude_upload_id,
         exclude_document_id=exclude_document_id,
     )
+    if resolved_project:
+        same_project_codes.update(
+            project_code_tokens(getattr(resolved_project, "project_code", None))
+        )
+
+    # 同项目已有相同编号（任务/台账）：允许继续新增
+    if new_code in same_project_codes:
+        return ProjectCodeSaveCheck(new_code=new_code)
 
     for record_id, record_kind, pid, pname, pcountry, pcode in all_rows:
+        if record_kind == "project":
+            # 已在上方按 Project 表处理
+            continue
         if record_kind == "upload" and exclude_upload_id and record_id == exclude_upload_id:
             continue
         if record_kind == "doc" and exclude_document_id and record_id == exclude_document_id:
@@ -361,29 +566,42 @@ def check_project_code_save(
         row_tokens = project_code_tokens(pcode)
         if not row_tokens or new_code not in row_tokens:
             continue
-        other = project_identity_key(pid, pname, pcountry)
-        if other and other != current:
-            other_label = (pname or "").strip() or pid or "其他项目"
-            if (pcountry or "").strip():
-                other_label = f"{other_label}（{pcountry}）"
-            return ProjectCodeSaveCheck(
-                hard_error=(
-                    f"项目编号「{new_code}」已被项目「{other_label}」使用，"
-                    f"不同项目的项目编号不能重复"
-                )
+        if record_belongs_to_project(
+            record_project_id=pid,
+            record_project_name=pname,
+            record_registered_country=pcountry,
+            project_id=resolved_project_id,
+            project_name=eff_name,
+            registered_country=resolved_country,
+        ):
+            continue
+        other = canonical_project_identity_key(pid, pname, pcountry)
+        if other and other == current:
+            continue
+        # 台账多项目串：名称有任一命中即视为同作用域，不拦截新增
+        if _project_name_matches(eff_name, pname):
+            continue
+        other_label = (pname or "").strip() or pid or "其他项目"
+        if (pcountry or "").strip():
+            other_label = f"{other_label}（{pcountry}）"
+        return ProjectCodeSaveCheck(
+            hard_error=(
+                f"项目编号「{new_code}」已被项目「{other_label}」使用，"
+                f"不同项目的项目编号不能重复"
             )
+        )
 
     if same_project_codes and new_code not in same_project_codes:
         uploads_n, docs_n, allocs_n = _count_related_records(
             organization_id,
-            project_id=project_id,
+            project_id=resolved_project_id,
             project_name=project_name,
             registered_country=resolved_country,
             exclude_upload_id=exclude_upload_id,
             exclude_document_id=exclude_document_id,
         )
-        controlled_n = count_controlled_documents_for_project_id(project_id)
-        controlled_samples = controlled_document_labels_for_project_id(project_id)
+        controlled_n = count_controlled_documents_for_project_id(resolved_project_id)
+        controlled_samples = controlled_document_labels_for_project_id(resolved_project_id)
         old_show = ", ".join(sorted(same_project_codes))
         return ProjectCodeSaveCheck(
             needs_confirmation=True,
@@ -440,12 +658,24 @@ def gate_project_code_save(
     confirm_sync: bool = False,
 ) -> Optional[tuple[str, Any]]:
     """返回 None 表示可继续；('error', msg) 硬拦截；('confirm', payload) 需用户确认。"""
-    check = check_project_code_save(
-        organization_id,
-        project_code,
+    resolved = find_page1_project(
         project_id=project_id,
         project_name=project_name,
         registered_country=registered_country,
+    )
+    eff_pid = (project_id or "").strip() or (
+        str(getattr(resolved, "id", "") or "").strip() or None
+    )
+    eff_country = (registered_country or "").strip() or (
+        str(getattr(resolved, "registered_country", "") or "").strip() or None
+    )
+    check = check_project_code_save(
+        organization_id,
+        project_code,
+        project_id=eff_pid,
+        project_name=project_name
+        or (getattr(resolved, "name", None) if resolved else None),
+        registered_country=eff_country,
         exclude_upload_id=exclude_upload_id,
         exclude_document_id=exclude_document_id,
     )
@@ -457,9 +687,10 @@ def gate_project_code_save(
         sync_project_code_for_project(
             organization_id,
             check.new_code,
-            project_id=project_id,
-            project_name=project_name,
-            registered_country=registered_country,
+            project_id=eff_pid,
+            project_name=project_name
+            or (getattr(resolved, "name", None) if resolved else None),
+            registered_country=eff_country,
             old_codes=check.old_codes,
         )
     return None

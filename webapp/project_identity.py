@@ -46,6 +46,29 @@ def project_identity_key(
     return ""
 
 
+def canonical_project_identity_key(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
+) -> str:
+    """优先解析到页面1 Project.id，避免「id:…」与「name:…」被当成两个项目。
+
+    导入 Excel / 任务录入常只有项目名+国家，而库内 Project、任务已带 project_id；
+    若不做规范化，同项目同编号会被误判为「编号已被其他项目使用」。
+    """
+    pid = (project_id or "").strip()
+    if pid:
+        return f"id:{pid}"
+    proj = find_page1_project(
+        project_id=None,
+        project_name=project_name,
+        registered_country=registered_country,
+    )
+    if proj and (getattr(proj, "id", None) or "").strip():
+        return f"id:{proj.id}"
+    return project_identity_key(None, project_name, registered_country)
+
+
 def countries_identity_match(
     left: Optional[str],
     right: Optional[str],

@@ -4288,12 +4288,34 @@ def _import_project_code_block_reason(
     exclude_document_id: Optional[str] = None,
     confirm_sync: bool = False,
 ) -> Optional[str]:
-    gate = gate_project_code_save(
-        org_id,
-        project_code,
+    """导入场景：先解析页面1项目 id，再判唯一性。
+
+    同项目多条受控文件/任务共用同一项目编号是正常业务，不应拦截；
+    仅当编号已被「其他项目」占用时才返回错误。
+    """
+    from webapp.project_identity import find_page1_project
+
+    resolved = find_page1_project(
         project_id=project_id,
         project_name=project_name,
         registered_country=registered_country,
+    )
+    eff_pid = (project_id or "").strip() or (
+        str(getattr(resolved, "id", "") or "").strip() or None
+    )
+    eff_name = (project_name or "").strip() or (
+        str(getattr(resolved, "name", "") or "").strip() or None
+    )
+    eff_country = (registered_country or "").strip() or (
+        str(getattr(resolved, "registered_country", "") or "").strip() or None
+    )
+
+    gate = gate_project_code_save(
+        org_id,
+        project_code,
+        project_id=eff_pid,
+        project_name=eff_name,
+        registered_country=eff_country,
         exclude_document_id=exclude_document_id,
         confirm_sync=confirm_sync,
     )

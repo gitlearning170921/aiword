@@ -10499,16 +10499,31 @@ def api_uploads_import():
         proj = by_label.get(project_name) or by_name.get(project_name)
         import_org_id = resolve_organization_id_for_project_upload(project=proj)
 
+        from webapp.project_identity import find_page1_project
+
+        row_country = (d.get("country") or "").strip() or None
+        resolved_proj = proj or find_page1_project(
+            project_name=project_name,
+            registered_country=row_country,
+        )
+        # 任务行项目编号：优先 Project 表；Excel 有值时再做唯一性校验（同项目复用已有编号放行）
+        project_table_code = (
+            (getattr(resolved_proj, "project_code", None) or "").strip() or None
+            if resolved_proj
+            else None
+        )
         import_pcode = (d.get("project_code") or "").strip() or None
+        effective_pcode = project_table_code or import_pcode
         if import_pcode:
             from webapp.project_code_uniqueness import gate_project_code_save
 
             gate = gate_project_code_save(
                 import_org_id,
                 import_pcode,
-                project_id=getattr(proj, "id", None) if proj else None,
+                project_id=getattr(resolved_proj, "id", None) if resolved_proj else None,
                 project_name=project_name,
-                registered_country=(d.get("country") or "").strip() or getattr(proj, "registered_country", None),
+                registered_country=row_country
+                or getattr(resolved_proj, "registered_country", None),
                 exclude_upload_id=existing.id if existing else None,
                 confirm_sync=False,
             )
@@ -10520,11 +10535,13 @@ def api_uploads_import():
                 )
                 errors.append({"row": row_no, "message": msg})
                 continue
+            if not project_table_code:
+                effective_pcode = import_pcode
 
         try:
             if existing:
                 existing.organization_id = import_org_id
-                existing.project_code = (d.get("project_code") or "").strip() or None
+                existing.project_code = effective_pcode
                 existing.business_side = (d.get("business_side") or "").strip() or None
                 existing.product = (d.get("product") or "").strip() or None
                 existing.country = (d.get("country") or "").strip() or None
@@ -10550,7 +10567,8 @@ def api_uploads_import():
                 upload = UploadRecord(
                     project_name=project_name,
                     organization_id=import_org_id,
-                    project_code=(d.get("project_code") or "").strip() or None,
+                    project_id=getattr(resolved_proj, "id", None) if resolved_proj else None,
+                    project_code=effective_pcode,
                     file_name=file_name,
                     task_type=task_type,
                     author=author,
