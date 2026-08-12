@@ -10295,6 +10295,9 @@ def _parse_import_excel(raw: bytes, filename: str) -> tuple[list[dict], str]:
         return [], f"Excel 解析失败：{e}"
     if not rows:
         return [], "文件为空"
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
     headers = [str(h).strip() if h is not None else "" for h in rows[0]]
     out = []
     for row in rows[1:]:
@@ -10304,7 +10307,13 @@ def _parse_import_excel(raw: bytes, filename: str) -> tuple[list[dict], str]:
         for j, h in enumerate(headers):
             if j < len(row):
                 val = row[j]
-                val = (str(val).strip() if val is not None else "") or ""
+                # 日期单元格保留为 date/datetime，交给 parse_import_date；勿先 str 成「… 00:00:00」
+                if isinstance(val, (_datetime, _date)):
+                    pass
+                elif val is None:
+                    val = ""
+                else:
+                    val = str(val).strip()
                 key = _import_header_map().get(h) or _import_header_map().get(h.strip())
                 if key:
                     d[key] = val
@@ -10371,6 +10380,23 @@ def api_task_entry_import_schema():
     return jsonify({"ok": True, **import_schema_for_client()})
 
 
+def _content_disposition_attachment(filename: str, *, ascii_fallback: str = "download.bin") -> str:
+    """
+    HTTP 头只能 latin-1；中文文件名须用 RFC 5987 的 filename*=UTF-8''...
+    同时保留 ASCII filename= 供旧客户端回退。
+    """
+    from urllib.parse import quote
+
+    raw = (filename or "").strip() or ascii_fallback
+    ascii_name = "".join(c if ord(c) < 128 and c not in '"\\;' else "_" for c in raw)
+    ascii_name = ascii_name.strip("._ ") or (ascii_fallback or "download.bin")
+    # 全中文文件名经替换后常只剩扩展名（如 csv），改用稳定英文名
+    stem = ascii_name.rsplit(".", 1)[0] if "." in ascii_name else ascii_name
+    if not any(ch.isalnum() for ch in stem):
+        ascii_name = ascii_fallback or "download.bin"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(raw)}"
+
+
 @bp.get("/api/uploads/import-template")
 @page13_access_required
 def api_uploads_import_template():
@@ -10382,13 +10408,19 @@ def api_uploads_import_template():
         content = _build_import_template_csv(include_sample=include_sample, project_name=project_name)
         if include_sample and project_name:
             safe_name = "".join(c for c in project_name[:20] if c.isalnum() or c in " _-")
-            filename = f"待办导入模板_{safe_name}.csv"
+            filename = f"待办导入模板_{safe_name}.csv" if safe_name.strip() else "待办导入模板_含示例.csv"
+            ascii_fallback = "task_import_template_sample.csv"
         else:
             filename = "待办导入模板_含示例.csv" if include_sample else "待办导入模板_空.csv"
+            ascii_fallback = (
+                "task_import_template_sample.csv" if include_sample else "task_import_template_empty.csv"
+            )
         body = content.encode("utf-8-sig")
         resp = make_response(body)
         resp.headers["Content-Type"] = "text/csv; charset=utf-8"
-        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        resp.headers["Content-Disposition"] = _content_disposition_attachment(
+            filename, ascii_fallback=ascii_fallback
+        )
         return resp
     except Exception as e:
         return jsonify({"success": False, "message": f"生成模板失败：{e}"}), 500
@@ -10481,8 +10513,20 @@ def api_uploads_import():
         template_links = (d.get("template_links") or "").strip() or None
         if template_links:
             template_links = _normalize_template_links(template_links) or None
-        due_date = parse_import_date(d.get("due_date") or "")
-        document_display_date = parse_import_date(d.get("document_display_date") or "")
+        due_raw = d.get("due_date")
+        due_date = parse_import_date(due_raw)
+        if due_raw not in (None, "") and due_date is None:
+            errors.append({
+                "row": row_no,
+                "message": f"截止日期「{due_raw}」无法识别，已忽略该日期（请用 YYYY-MM-DD）",
+            })
+        doc_disp_raw = d.get("document_display_date")
+        document_display_date = parse_import_date(doc_disp_raw)
+        if doc_disp_raw not in (None, "") and document_display_date is None:
+            errors.append({
+                "row": row_no,
+                "message": f"文档体现日期「{doc_disp_raw}」无法识别，已忽略该日期（请用 YYYY-MM-DD）",
+            })
 
         existing = UploadRecord.query.filter_by(
             project_name=project_name,
@@ -10506,7 +10550,7 @@ def api_uploads_import():
             project_name=project_name,
             registered_country=row_country,
         )
-        # 任务行项目编号：优先 Project 表；Excel 有值时再做唯一性校验（同项目复用已有编号放行）
+        # 任务行项目编号：优先 Project 表；仅当项目尚无编号且 Excel 有值时才做唯一性校验并写入
         project_table_code = (
             (getattr(resolved_proj, "project_code", None) or "").strip() or None
             if resolved_proj
@@ -10514,7 +10558,7 @@ def api_uploads_import():
         )
         import_pcode = (d.get("project_code") or "").strip() or None
         effective_pcode = project_table_code or import_pcode
-        if import_pcode:
+        if import_pcode and not project_table_code:
             from webapp.project_code_uniqueness import gate_project_code_save
 
             gate = gate_project_code_save(
@@ -10528,19 +10572,24 @@ def api_uploads_import():
                 confirm_sync=False,
             )
             if gate:
-                msg = (
-                    gate[1].get("message")
-                    if gate[0] == "confirm" and isinstance(gate[1], dict)
-                    else gate[1]
-                )
-                errors.append({"row": row_no, "message": msg})
+                kind, payload = gate
+                if kind == "confirm" and isinstance(payload, dict):
+                    msg = payload.get("message") or "项目编号需在项目管理中确认后再导入"
+                else:
+                    msg = payload
+                errors.append({"row": row_no, "message": f"项目编号：{msg}"})
                 continue
-            if not project_table_code:
-                effective_pcode = import_pcode
+            effective_pcode = import_pcode
+
+        document_number = (d.get("document_number") or "").strip() or None
+        has_document_number_col = "document_number" in d
+        assignee_name = (d.get("assignee_name") or "").strip() or author
 
         try:
             if existing:
                 existing.organization_id = import_org_id
+                if resolved_proj and not getattr(existing, "project_id", None):
+                    existing.project_id = resolved_proj.id
                 existing.project_code = effective_pcode
                 existing.business_side = (d.get("business_side") or "").strip() or None
                 existing.product = (d.get("product") or "").strip() or None
@@ -10548,8 +10597,10 @@ def api_uploads_import():
                 existing.project_notes = (d.get("project_notes") or "").strip() or None
                 existing.template_links = template_links
                 existing.notes = notes_val
-                existing.assignee_name = (d.get("assignee_name") or "").strip() or None
+                existing.assignee_name = assignee_name
                 existing.due_date = due_date
+                if has_document_number_col:
+                    existing.document_number = document_number
                 existing.file_version = (d.get("file_version") or "").strip() or None
                 existing.document_display_date = document_display_date
                 existing.reviewer = (d.get("reviewer") or "").strip() or None
@@ -10575,11 +10626,12 @@ def api_uploads_import():
                     template_links=template_links,
                     notes=notes_val,
                     project_notes=(d.get("project_notes") or "").strip() or None,
-                    assignee_name=(d.get("assignee_name") or "").strip() or None,
+                    assignee_name=assignee_name,
                     due_date=due_date,
                     business_side=(d.get("business_side") or "").strip() or None,
                     product=(d.get("product") or "").strip() or None,
                     country=(d.get("country") or "").strip() or None,
+                    document_number=document_number,
                     file_version=(d.get("file_version") or "").strip() or None,
                     document_display_date=document_display_date,
                     reviewer=(d.get("reviewer") or "").strip() or None,
@@ -10756,8 +10808,37 @@ def api_upload_delete(upload_id: str):
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
-    
-    uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
+
+    _delete_upload_record_files_and_row(upload)
+    db.session.commit()
+    return jsonify({"message": "已删除"})
+
+
+def _upload_same_project_key(upload: UploadRecord) -> str:
+    """同项目判定：优先 project_id；否则解析项目管理同名项目；再回退项目名。"""
+    pid = (getattr(upload, "project_id", None) or "").strip()
+    if pid:
+        return f"id:{pid}"
+    name = (upload.project_name or "").strip()
+    if name:
+        try:
+            from webapp.project_identity import find_page1_project
+
+            resolved = find_page1_project(
+                project_name=name,
+                registered_country=getattr(upload, "country", None),
+            )
+            rid = (getattr(resolved, "id", None) or "").strip() if resolved else ""
+            if rid:
+                return f"id:{rid}"
+        except Exception:
+            pass
+    return f"name:{name}"
+
+
+def _delete_upload_record_files_and_row(upload: UploadRecord) -> None:
+    """删除任务关联文件/FTP 并 session.delete；调用方负责 commit。"""
+    upload_id = upload.id
     _unlink_task_template_cache_files(upload_id)
     old_ftp = (getattr(upload, "ftp_path", None) or "").strip()
     if old_ftp:
@@ -10772,10 +10853,67 @@ def api_upload_delete(upload_id: str):
             Path(upload.storage_path).unlink(missing_ok=True)
         except Exception:
             pass
-
     db.session.delete(upload)
-    db.session.commit()
-    return jsonify({"message": "已删除"})
+
+
+@bp.post("/api/uploads/batch-delete")
+@page13_access_required
+def api_uploads_batch_delete():
+    """批量删除任务：仅允许同一项目内的任务。"""
+    data = request.get_json(force=True, silent=True) or {}
+    raw_ids = data.get("ids") or data.get("uploadIds") or []
+    if not isinstance(raw_ids, list):
+        return jsonify({"success": False, "message": "请提供要删除的任务 id 列表"}), 400
+    ids = []
+    seen = set()
+    for x in raw_ids:
+        sid = str(x or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        ids.append(sid)
+    if not ids:
+        return jsonify({"success": False, "message": "请先勾选要删除的任务"}), 400
+
+    uploads = UploadRecord.query.filter(UploadRecord.id.in_(ids)).all()
+    found = {u.id: u for u in uploads}
+    missing = [i for i in ids if i not in found]
+    if missing:
+        return jsonify({
+            "success": False,
+            "message": f"有 {len(missing)} 条任务不存在或已删除，请刷新后重试",
+        }), 404
+
+    keys = {_upload_same_project_key(found[i]) for i in ids}
+    if len(keys) > 1:
+        return jsonify({
+            "success": False,
+            "message": "只能批量删除同一项目下的任务，请取消跨项目勾选后再试",
+        }), 400
+
+    deleted = 0
+    errors = []
+    for sid in ids:
+        try:
+            _delete_upload_record_files_and_row(found[sid])
+            deleted += 1
+        except Exception as e:
+            errors.append({"id": sid, "message": str(e)})
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"删除失败：{e}"}), 500
+
+    msg = f"已删除 {deleted} 条任务"
+    if errors:
+        msg += f"，{len(errors)} 条失败"
+    return jsonify({
+        "success": True,
+        "deleted": deleted,
+        "errors": errors[:20],
+        "message": msg,
+    })
 
 
 @bp.patch("/api/uploads/<upload_id>")

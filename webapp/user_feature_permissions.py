@@ -98,6 +98,8 @@ USER_FEATURE_LABELS: dict[str, str] = {
     "FEATURE_PAGE2_AUDIT_MODIFY": "页面2 · 审核后修改",
     "FEATURE_PAGE2_TRANSLATE": "页面2 · 文档翻译",
     "FEATURE_PAGE2_EXAM_CENTER": "页面2 · 考试训练中心",
+    "FEATURE_DOCUMENT_CONTROL": "文控中心",
+    "FEATURE_LITERATURE_SEARCH": "文献检索",
 }
 
 # 旧版账号 JSON 键 → 新键（读取时复制，写入时不再使用旧键）

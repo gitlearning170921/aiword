@@ -181,7 +181,12 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ),
     (
         "FEATURE_DOCUMENT_CONTROL",
-        "受控编号管理（文控中心）开关（1=开启；空或0=关闭）",
+        "受控编号管理（文控中心 / 版本任务清单生成）开关（1=开启；空或0=关闭）",
+        False,
+    ),
+    (
+        "FEATURE_LITERATURE_SEARCH",
+        "文献检索（注册工具）开关（1=开启；空或0=关闭；未保存过时默认开启）",
         False,
     ),
     (
@@ -222,6 +227,7 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
     "FEATURE_DOCUMENT_CONTROL",
+    "FEATURE_LITERATURE_SEARCH",
     "FEATURE_ENV_SEPARATION",
     "FEATURE_PAGE0_AUDIT_TODO",
 )
@@ -277,6 +283,7 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
             "FEATURE_DOCUMENT_CONTROL",
+            "FEATURE_LITERATURE_SEARCH",
             "FEATURE_ENV_SEPARATION",
             "FEATURE_PAGE0_AUDIT_TODO",
             "FEATURE_PAGE1_AUDIT_TODO",
@@ -516,6 +523,18 @@ def _apply_audit_todo_default_flags(
             flags[todo_key] = bool(flags.get(audit_key))
 
 
+def _apply_literature_default_flags(
+    flags: dict[str, bool], app: Optional["Flask"] = None
+) -> None:
+    """未在系统配置中保存过文献检索开关时默认开启（与改前顶栏对登录用户开放一致）。"""
+    if _feature_flag_configured_in_db("FEATURE_LITERATURE_SEARCH", app):
+        flags["FEATURE_LITERATURE_SEARCH"] = _parse_flag(
+            get_setting("FEATURE_LITERATURE_SEARCH", default="", app=app)
+        )
+    else:
+        flags["FEATURE_LITERATURE_SEARCH"] = True
+
+
 def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]:
     """返回当前数据库内功能开关布尔值，便于注入 Jinja / 前端。"""
     out: dict[str, bool] = {}
@@ -528,6 +547,7 @@ def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]
     for key in PAGE0_DERIVED_FLAG_KEYS:
         out.setdefault(key, False)
     _apply_audit_todo_default_flags(out, app)
+    _apply_literature_default_flags(out, app)
     return out
 
 
@@ -650,6 +670,8 @@ def register_exam_center_feature_gate(app: "Flask") -> None:
                 "FEATURE_PAGE1_TRANSLATE",
                 "FEATURE_PAGE2_TRANSLATE",
             )
+        if rel.startswith("/literature"):
+            return feature_gate_response("FEATURE_LITERATURE_SEARCH")
         if rel.startswith("/go/sign") or rel.startswith("/api/go/batch-sign"):
             return feature_gate_response("FEATURE_PAGE1_SIGN")
         if rel.startswith("/go/print") or rel.startswith("/api/go/batch-print"):

@@ -2501,6 +2501,7 @@ def _prepare_issue_number_inputs(
     data: dict[str, Any],
     *,
     session_cache: Optional[dict[str, tuple[str, str]]] = None,
+    exact_title_match: bool = False,
 ) -> dict[str, Any]:
     title = (data.get("title") or "").strip()
     project_code = (data.get("projectCode") or "").strip() or None
@@ -2518,6 +2519,7 @@ def _prepare_issue_number_inputs(
             prefix=prefix,
             title=title,
             project_id=project_id,
+            exact_title=exact_title_match,
         )
     title_en = None
     title_en_source = None
@@ -2550,8 +2552,16 @@ def _prepare_issue_number_inputs(
 
 
 def _duplicate_issue_message(title: str, existing: ControlledDocument) -> str:
+    from .subtype_resolver import normalize_title_key
+
+    existing_title = (existing.title or "").strip() or "-"
+    if normalize_title_key(title) == normalize_title_key(existing_title):
+        return (
+            f"台账中已有同名受控文件「{existing_title}」，"
+            f"编号 {existing.document_number or '-'}。请确认是否为同一份文件。"
+        )
     return (
-        f"台账中已有名称包含「{title}」的受控文件「{existing.title or '-'}」，"
+        f"台账中已有名称包含「{title}」的受控文件「{existing_title}」，"
         f"编号 {existing.document_number or '-'}。请确认是否为同一份文件。"
     )
 
@@ -2564,13 +2574,21 @@ def _allocate_preview_item(
     data: dict[str, Any],
     *,
     session_cache: Optional[dict[str, tuple[str, str]]] = None,
+    exact_title_match: bool = False,
+    extra_blocked_norms: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     title = (data.get("title") or "").strip()
     if not title:
         return {"title": "", "error": "文件名称不能为空"}
     try:
         ctx = _prepare_issue_number_inputs(
-            org_id, collection, scheme, cfg, data, session_cache=session_cache
+            org_id,
+            collection,
+            scheme,
+            cfg,
+            data,
+            session_cache=session_cache,
+            exact_title_match=exact_title_match,
         )
     except ValueError as exc:
         return {"title": title, "error": str(exc)}
@@ -2595,6 +2613,7 @@ def _allocate_preview_item(
             title=ctx["title"],
             title_en=ctx["title_en"],
             subtype_from_title=ctx["subtype_from_title"],
+            extra_blocked_norms=extra_blocked_norms,
         )
     except SubtypeChoiceRequired as exc:
         return {
@@ -2629,13 +2648,20 @@ def _allocate_apply_item(
     sheet_cat: str,
     project_name: Optional[str],
     session_cache: Optional[dict[str, tuple[str, str]]] = None,
+    exact_title_match: bool = False,
 ) -> dict[str, Any]:
     title = (data.get("title") or "").strip()
     if not title:
         return {"title": "", "ok": False, "error": "文件名称不能为空"}
     try:
         ctx = _prepare_issue_number_inputs(
-            org_id, collection, scheme, cfg, data, session_cache=session_cache
+            org_id,
+            collection,
+            scheme,
+            cfg,
+            data,
+            session_cache=session_cache,
+            exact_title_match=exact_title_match,
         )
     except ValueError as exc:
         return {"title": title, "ok": False, "error": str(exc)}
@@ -2723,6 +2749,13 @@ def _allocate_apply_item(
     except ValueError as exc:
         db.session.rollback()
         return {"title": title, "ok": False, "error": str(exc)}
+    except IntegrityError:
+        db.session.rollback()
+        return {"title": title, "ok": False, "error": "编号冲突，请重试"}
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("document-control allocate item failed title=%s", title)
+        return {"title": title, "ok": False, "error": "申请编号失败，请稍后重试"}
 
 
 def _parse_batch_titles(data: dict[str, Any]) -> list[str]:
@@ -3169,6 +3202,8 @@ def api_document_control_allocate_batch_preview():
     err_count = 0
     ready_count = 0
     subtype_choice_count = 0
+    # 预览阶段虚拟占用：同批内建议编号递增，避免多行显示同一个号
+    preview_blocked_norms: set[str] = set()
     for title in titles:
         row = _allocate_preview_item(
             org_id,
@@ -3177,6 +3212,8 @@ def api_document_control_allocate_batch_preview():
             cfg,
             {**base, "title": title},
             session_cache=session_cache,
+            exact_title_match=True,
+            extra_blocked_norms=preview_blocked_norms,
         )
         items.append(row)
         if row.get("error"):
@@ -3187,6 +3224,11 @@ def api_document_control_allocate_batch_preview():
             subtype_choice_count += 1
         else:
             ready_count += 1
+            norm = normalize_document_number(
+                str(row.get("documentNumber") or (row.get("preview") or {}).get("document_number") or "")
+            )
+            if norm:
+                preview_blocked_norms.add(norm)
     try:
         db.session.commit()
     except Exception:
@@ -3268,16 +3310,24 @@ def api_document_control_allocate_batch_apply():
             "forceNew": bool(raw.get("forceNew")),
             "confirmSameDocument": bool(raw.get("confirmSameDocument")),
         }
-        row = _allocate_apply_item(
-            org_id,
-            collection,
-            scheme,
-            cfg,
-            item_data,
-            sheet_cat=sheet_cat,
-            project_name=project_name,
-            session_cache=session_cache,
-        )
+        try:
+            row = _allocate_apply_item(
+                org_id,
+                collection,
+                scheme,
+                cfg,
+                item_data,
+                sheet_cat=sheet_cat,
+                project_name=project_name,
+                session_cache=session_cache,
+                exact_title_match=True,
+            )
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "document-control batch apply unexpected failure title=%s", title
+            )
+            row = {"title": title, "ok": False, "error": "申请编号失败，请稍后重试"}
         results.append(row)
         if row.get("ok"):
             ok_count += 1
@@ -4737,6 +4787,50 @@ def _import_excel_rows(
 
     db.session.commit()
     return imported, updated, registration_updated, skipped
+
+
+@document_control_bp.get("/api/document-control/import/template")
+def api_document_control_import_template():
+    """下载文控台账 Excel 导入模板（多 Sheet，对齐历史导入表头）。"""
+    from flask import Response
+
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+
+    include_sample = str(request.args.get("type") or "with_sample").strip().lower() not in (
+        "empty",
+        "blank",
+        "0",
+        "false",
+        "no",
+    )
+    from .import_template import build_document_control_import_template_bytes
+
+    raw = build_document_control_import_template_bytes(include_sample=include_sample)
+    filename = (
+        "文控台账导入模板_含示例.xlsx" if include_sample else "文控台账导入模板_空.xlsx"
+    )
+    ascii_name = (
+        "document_control_import_template_sample.xlsx"
+        if include_sample
+        else "document_control_import_template_empty.xlsx"
+    )
+    # RFC 5987：中文文件名 + ASCII 回退
+    from urllib.parse import quote
+
+    disposition = (
+        f"attachment; filename=\"{ascii_name}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        raw,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @document_control_bp.post("/api/document-control/import/excel")

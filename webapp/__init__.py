@@ -1016,6 +1016,10 @@ def ensure_schema(app: Flask):
         from .models import CompanyProject
 
         CompanyProject.__table__.create(bind=engine, checkfirst=True)
+    if "deficiency_import_logs" not in rbac_tables:
+        from .models import DeficiencyImportLog
+
+        DeficiencyImportLog.__table__.create(bind=engine, checkfirst=True)
 
     ensure_column(
         "company_projects",

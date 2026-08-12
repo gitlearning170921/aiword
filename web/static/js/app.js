@@ -1978,6 +1978,20 @@ async function initUploadPage() {
         });
     }
 
+    function _parseContentDispositionFilename(cd) {
+        const header = String(cd || "");
+        const star = /filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)/i.exec(header);
+        if (star && star[1]) {
+            try {
+                return decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, ""));
+            } catch (_e) { /* ignore */ }
+        }
+        const quoted = /filename\s*=\s*"([^"]+)"/i.exec(header);
+        if (quoted && quoted[1]) return quoted[1];
+        const plain = /filename\s*=\s*([^;]+)/i.exec(header);
+        return plain && plain[1] ? plain[1].trim().replace(/^"+|"+$/g, "") : "";
+    }
+
     async function _downloadImportTemplate({ includeSample, projectName }) {
         const params = new URLSearchParams();
         params.set("type", includeSample ? "with_sample" : "empty");
@@ -1994,8 +2008,8 @@ async function initUploadPage() {
         }
         const blob = await resp.blob();
         const cd = resp.headers.get("Content-Disposition") || "";
-        const m = /filename="([^"]+)"/i.exec(cd);
-        const filename = m ? m[1] : (includeSample ? "待办导入模板_含示例.csv" : "待办导入模板_空.csv");
+        const parsed = _parseContentDispositionFilename(cd);
+        const filename = parsed || (includeSample ? "待办导入模板_含示例.csv" : "待办导入模板_空.csv");
         const objectUrl = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = objectUrl;
@@ -3395,6 +3409,7 @@ function initBatchEditRecords() {
     const table = document.getElementById("recordsTable");
     const selectAll = document.getElementById("recordSelectAll");
     const batchEditBtn = document.getElementById("batchEditRecordsBtn");
+    const batchDeleteBtn = document.getElementById("batchDeleteRecordsBtn");
     const batchGoSignBtn = document.getElementById("batchGoSignBtn");
     const batchGoPrintBtn = document.getElementById("batchGoPrintBtn");
     const batchEditModal = document.getElementById("batchEditRecordModal");
@@ -3714,6 +3729,57 @@ function initBatchEditRecords() {
         batchGoPrintBtn.addEventListener("click", () => runBatchAiprintword("print"));
     }
 
+    batchDeleteBtn?.addEventListener("click", () => {
+        const sel = _collectSelectedRecordsForSameProject();
+        if (!sel.ids.length) {
+            App.notify("请先勾选要删除的任务", "warning");
+            return;
+        }
+        if (!sel.sameProject) {
+            App.notify("只能批量删除同一项目下的任务，请取消跨项目勾选后再试", "warning");
+            return;
+        }
+        const modalEl = document.getElementById("batchDeleteRecordsModal");
+        const projectEl = document.getElementById("batchDeleteConfirmProject");
+        const countEl = document.getElementById("batchDeleteConfirmCount");
+        const checkEl = document.getElementById("batchDeleteConfirmCheck");
+        const confirmBtn = document.getElementById("batchDeleteConfirmBtn");
+        if (!modalEl || !confirmBtn) {
+            // 模板未加载时回退：仍展示项目与条数
+            const projLabel = sel.projectLabel || "当前项目";
+            if (!confirm(`确定删除项目「${projLabel}」下的 ${sel.ids.length} 条任务？此操作不可恢复。`)) return;
+            _runBatchDeleteRecords(sel.ids, batchDeleteBtn);
+            return;
+        }
+        if (projectEl) projectEl.textContent = sel.projectLabel || "当前项目";
+        if (countEl) countEl.textContent = String(sel.ids.length);
+        if (checkEl) checkEl.checked = false;
+        confirmBtn.disabled = true;
+        modalEl.dataset.batchDeleteIds = sel.ids.join(",");
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    });
+
+    const batchDeleteConfirmCheck = document.getElementById("batchDeleteConfirmCheck");
+    const batchDeleteConfirmBtn = document.getElementById("batchDeleteConfirmBtn");
+    batchDeleteConfirmCheck?.addEventListener("change", () => {
+        if (batchDeleteConfirmBtn) batchDeleteConfirmBtn.disabled = !batchDeleteConfirmCheck.checked;
+    });
+    batchDeleteConfirmBtn?.addEventListener("click", async () => {
+        const modalEl = document.getElementById("batchDeleteRecordsModal");
+        const idsStr = modalEl?.dataset.batchDeleteIds || "";
+        const ids = idsStr.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!ids.length) {
+            App.notify("没有可删除的任务", "warning");
+            return;
+        }
+        if (!batchDeleteConfirmCheck?.checked) {
+            App.notify("请先勾选确认项目与条数", "warning");
+            return;
+        }
+        bootstrap.Modal.getInstance(modalEl)?.hide();
+        await _runBatchDeleteRecords(ids, batchDeleteBtn);
+    });
+
     ensureBatchEditAuthorPicker();
 
     batchEditSaveBtn?.addEventListener("click", async () => {
@@ -3924,9 +3990,66 @@ function initRecordsFilter() {
     applyFilter();
 }
 
+function _collectSelectedRecordsForSameProject() {
+    const tbody = document.getElementById("recordsTableBody");
+    const ids = [];
+    if (!tbody) return { ids, sameProject: true, projectLabel: "" };
+    tbody.querySelectorAll(".record-checkbox:checked").forEach((cb) => {
+        const id = cb.dataset.id;
+        if (id) ids.push(id);
+    });
+    const keys = new Set();
+    let projectLabel = "";
+    ids.forEach((id) => {
+        const r = (allRecordsCache || []).find((x) => String(x.id) === String(id));
+        if (!r) {
+            keys.add(`missing:${id}`);
+            return;
+        }
+        const canon = _canonicalProjectKeyForPick(r.projectName, r.projectId)
+            || String(r.projectName || "").trim()
+            || (r.projectId != null ? `id:${r.projectId}` : "");
+        keys.add(canon || "");
+        if (!projectLabel) projectLabel = String(r.projectName || canon || "").trim();
+    });
+    return {
+        ids,
+        sameProject: keys.size <= 1,
+        projectLabel,
+    };
+}
+
+async function _runBatchDeleteRecords(ids, batchDeleteBtn) {
+    const list = Array.isArray(ids) ? ids.filter(Boolean) : [];
+    if (!list.length) return;
+    const original = batchDeleteBtn ? batchDeleteBtn.innerHTML : "";
+    try {
+        if (batchDeleteBtn) {
+            batchDeleteBtn.disabled = true;
+            batchDeleteBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>删除中`;
+        }
+        const res = await App.request("/api/uploads/batch-delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: list }),
+        });
+        App.notify(res.message || `已删除 ${list.length} 条任务`, res.success === false ? "danger" : "success");
+        if (typeof loadRecordsList === "function") loadRecordsList();
+        if (window.loadMyTasks) window.loadMyTasks();
+        if (window.loadSummary) window.loadSummary();
+    } catch (e) {
+        const data = e.data || {};
+        App.notify(data.message || e.message || "批量删除失败", "danger");
+    } finally {
+        if (batchDeleteBtn) batchDeleteBtn.innerHTML = original || "批量删除";
+        updateBatchEditButtonState();
+    }
+}
+
 function updateBatchEditButtonState() {
     const tbody = document.getElementById("recordsTableBody");
     const btn = document.getElementById("batchEditRecordsBtn");
+    const btnDelete = document.getElementById("batchDeleteRecordsBtn");
     const btnGoSign = document.getElementById("batchGoSignBtn");
     const btnGoPrint = document.getElementById("batchGoPrintBtn");
     if (!tbody || !btn) return;
@@ -3936,6 +4059,14 @@ function updateBatchEditButtonState() {
     if (btnGoPrint) btnGoPrint.disabled = checked < 2;
     const btnBatchAudit = document.getElementById("batchAuditBtn");
     if (btnBatchAudit) btnBatchAudit.disabled = checked === 0;
+    if (btnDelete) {
+        const sel = checked === 0 ? { sameProject: true } : _collectSelectedRecordsForSameProject();
+        const canDelete = checked > 0 && !!sel.sameProject;
+        btnDelete.disabled = !canDelete;
+        btnDelete.title = checked === 0
+            ? "请先勾选同一项目下的任务"
+            : (sel.sameProject ? "删除勾选的同项目任务" : "跨项目不可批量删除，请只勾选同一项目");
+    }
 }
 
 function _collectSelectedRecordIdsForAudit() {

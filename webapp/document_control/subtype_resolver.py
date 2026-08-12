@@ -322,14 +322,27 @@ def find_existing_controlled_doc_by_title(
     prefix: str,
     title: str,
     project_id: Optional[str] = None,
+    exact_title: bool = False,
 ) -> Optional[ControlledDocument]:
-    """同组织内同名或名称包含关系的受控文件（用于申请前确认）。"""
-    matches = find_controlled_docs_for_issue_title(
-        organization_id=organization_id,
-        prefix=prefix,
-        title=title,
-        project_id=project_id,
-    )
+    """同组织内同名受控文件（用于申请前确认）。
+
+    exact_title=False：精确同名或名称包含关系（单条申请确认流）。
+    exact_title=True：仅精确同名（批量申请，避免短名/子串误伤同批其它文件）。
+    """
+    if exact_title:
+        matches = find_controlled_docs_for_exact_title(
+            organization_id=organization_id,
+            prefix=prefix,
+            title=title,
+            project_id=project_id,
+        )
+    else:
+        matches = find_controlled_docs_for_issue_title(
+            organization_id=organization_id,
+            prefix=prefix,
+            title=title,
+            project_id=project_id,
+        )
     return matches[0] if matches else None
 
 

@@ -416,6 +416,23 @@ class DocumentControlImportLog(db.Model):
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
+class DeficiencyImportLog(db.Model):
+    """发补记录 Excel 导入操作日志（成功/跳过/失败）。"""
+    __tablename__ = "deficiency_import_logs"
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    import_batch_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(db.String(32), nullable=False)
+    project_name: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    source_filename: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
+    row_index: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    row_payload_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+
+
 class DocumentTitleTranslationCache(db.Model):
     """文件名称 → 英文名缓存（AI 翻译结果复用，按组织隔离）。"""
     __tablename__ = "document_title_translation_cache"

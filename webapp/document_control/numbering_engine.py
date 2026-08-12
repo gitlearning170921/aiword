@@ -284,9 +284,16 @@ def _extract_trailing_seq(number: str) -> Optional[int]:
         return None
 
 
-def _normalized_allocated_number_blocked(org_id: str, norm: str) -> bool:
+def _normalized_allocated_number_blocked(
+    org_id: str,
+    norm: str,
+    *,
+    extra_blocked_norms: Optional[set[str]] = None,
+) -> bool:
     """完整受控编号（规范化后）是否已被台账或有效预留占用。"""
     if not norm:
+        return True
+    if extra_blocked_norms and norm in extra_blocked_norms:
         return True
     if find_controlled_document_by_norm(org_id, norm):
         return True
@@ -307,6 +314,7 @@ def _next_sequence_for_issue(
     project_id: Optional[str] = None,
     project_code: Optional[str] = None,
     project_name: Optional[str] = None,
+    extra_blocked_norms: Optional[set[str]] = None,
 ) -> int:
     """从 seq_start 起取首个「规范化完整编号」未被占用的流水号。"""
     del title, project_id, project_code, project_name  # 完整编号全局唯一，不按项目推算流水号
@@ -334,7 +342,9 @@ def _next_sequence_for_issue(
         except ValueError:
             break
         norm = normalize_document_number(number)
-        if not _normalized_allocated_number_blocked(org, norm):
+        if not _normalized_allocated_number_blocked(
+            org, norm, extra_blocked_norms=extra_blocked_norms
+        ):
             return candidate
     raise ValueError("无可用流水号：当前前缀与子类组合下编号已用尽，请检查台账或联系管理员")
 
@@ -350,6 +360,7 @@ def preview_next_number(
     title: Optional[str] = None,
     title_en: Optional[str] = None,
     subtype_from_title: bool = False,
+    extra_blocked_norms: Optional[set[str]] = None,
 ) -> dict:
     prefix = (
         _prefix_from_project_code(project_code, scheme.fixed_prefix)
@@ -382,6 +393,7 @@ def preview_next_number(
         project_id=project_id,
         project_code=project_code,
         project_name=project_name,
+        extra_blocked_norms=extra_blocked_norms,
     )
     number = _render_number(scheme, prefix=prefix, seq=seq, subtype=sub)
     return {

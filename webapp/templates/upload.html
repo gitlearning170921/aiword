@@ -15,30 +15,66 @@
     </div>
 </div>
 
+{% set page1_has_doc_tools = feature_flags.FEATURE_PAGE1_DRAFT_GEN or feature_flags.FEATURE_PAGE1_AUDIT or feature_flags.FEATURE_PAGE1_AUDIT_MODIFY or feature_flags.FEATURE_PAGE1_TRANSLATE %}
+{% set page1_has_reg_tools = feature_flags.FEATURE_LITERATURE_SEARCH %}
+{% set page1_has_qms_tools = feature_flags.FEATURE_DOCUMENT_CONTROL %}
+{% set page1_has_pm_tools = feature_flags.FEATURE_DOCUMENT_CONTROL %}
+{% if page1_has_doc_tools or page1_has_reg_tools or page1_has_qms_tools or page1_has_pm_tools %}
 <div class="card mb-4">
-    <div class="card-header">文档工具</div>
+    <div class="card-header">工具入口</div>
     <div class="card-body">
-        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，不从本页任务列表带入{% if is_page13_super_admin %}（与页面0 文档工具相同）{% endif %}。</p>
-        <div class="d-flex flex-wrap gap-2">
-            {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
-            <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+        <div class="row g-3">
+            {% if page1_has_doc_tools %}
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="fw-semibold mb-1">文档工具</div>
+                <p class="small text-muted mb-2">通过<strong>手动上传</strong>文档使用，不从本页任务列表带入{% if is_page13_super_admin %}（与页面0 相同）{% endif %}。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    {% if feature_flags.FEATURE_PAGE1_DRAFT_GEN %}
+                    <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE1_AUDIT %}
+                    <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE1_AUDIT_MODIFY %}
+                    <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
+                    <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
+                    {% endif %}
+                </div>
+            </div>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_AUDIT %}
-            <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
+            {% if page1_has_reg_tools %}
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="fw-semibold mb-1">注册工具</div>
+                <p class="small text-muted mb-2">注册资料相关检索与整理。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    <a href="{{ url_for('literature.literature_page') }}" class="btn btn-outline-primary">文献检索</a>
+                </div>
+            </div>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_AUDIT_MODIFY %}
-            <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
+            {% if page1_has_qms_tools %}
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="fw-semibold mb-1">体系工具</div>
+                <p class="small text-muted mb-2">受控文件编号与文控台账。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
+                </div>
+            </div>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE1_TRANSLATE %}
-            <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
-            {% endif %}
-            {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
-            <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
-            <a href="{{ url_for('document_control.version_task_generator_page') }}" class="btn btn-outline-secondary">版本任务清单生成</a>
+            {% if page1_has_pm_tools %}
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="fw-semibold mb-1">项目管理工具</div>
+                <p class="small text-muted mb-2">按版本生成任务清单。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    <a href="{{ url_for('document_control.version_task_generator_page') }}" class="btn btn-outline-secondary">版本任务清单生成</a>
+                </div>
+            </div>
             {% endif %}
         </div>
     </div>
 </div>
+{% endif %}
 
 <div class="card mb-4 page1-projects-card">
     <div class="card-header page1-projects-card-header">
@@ -363,6 +399,7 @@
                 <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
             </div>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
+            <button type="button" class="btn btn-sm btn-outline-danger ms-2" id="batchDeleteRecordsBtn" disabled title="仅支持同一项目内批量删除">批量删除</button>
             {% if feature_flags.FEATURE_PAGE1_SIGN %}
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchGoSignBtn" disabled>批量去签字</button>
             {% endif %}
@@ -752,6 +789,33 @@
                     </div>
                     <button type="submit" class="btn btn-success btn-sm w-100">创建</button>
                 </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 批量删除二次确认 -->
+<div class="modal fade" id="batchDeleteRecordsModal" tabindex="-1" aria-labelledby="batchDeleteRecordsModalTitle">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="batchDeleteRecordsModalTitle">确认批量删除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">即将删除以下项目中的任务，此操作<strong>不可恢复</strong>：</p>
+                <div class="border rounded p-3 bg-light mb-3">
+                    <div class="mb-1"><span class="text-muted">项目：</span><strong id="batchDeleteConfirmProject">—</strong></div>
+                    <div><span class="text-muted">条数：</span><strong id="batchDeleteConfirmCount" class="text-danger">0</strong> 条</div>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="batchDeleteConfirmCheck">
+                    <label class="form-check-label" for="batchDeleteConfirmCheck">我已核对项目与条数，确认删除</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="batchDeleteConfirmBtn" disabled>确认删除</button>
             </div>
         </div>
     </div>

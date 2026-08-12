@@ -41,6 +41,7 @@ TASK_ENTRY_IMPORT_COLUMNS: Sequence[Dict[str, str]] = (
     {"key": "assignee_name", "label": "负责人", "layer": "task"},
     {"key": "due_date", "label": "截止日期", "layer": "task"},
     {"key": "notes", "label": "下发任务备注", "layer": "task"},
+    {"key": "document_number", "label": "文件编号", "layer": "task"},
     {"key": "file_version", "label": "文件版本号", "layer": "task"},
     {"key": "document_display_date", "label": "文档体现日期", "layer": "task"},
     {"key": "reviewer", "label": "审核人员", "layer": "task"},
@@ -68,6 +69,10 @@ _IMPORT_HEADER_ALIASES: Dict[str, str] = {
     "assigneeName": "assignee_name",
     "dueDate": "due_date",
     "notes": "notes",
+    "任务备注": "notes",
+    "下发任务备注": "notes",
+    "documentNumber": "document_number",
+    "document_number": "document_number",
     "documentDisplayDate": "document_display_date",
     "reviewer": "reviewer",
     "approver": "approver",
@@ -128,13 +133,26 @@ def format_date_for_import(obj: Any) -> str:
     return str(obj)[:10] if obj else ""
 
 
+def _project_code_for_export(record: UploadRecord) -> str:
+    """导出优先用项目管理中的项目编号，兼容任务行上的旧落库值。"""
+    from .models import Project
+
+    pid = (getattr(record, "project_id", None) or "").strip()
+    if pid:
+        p = Project.query.get(pid)
+        code = (getattr(p, "project_code", None) or "").strip() if p else ""
+        if code:
+            return code
+    return str(getattr(record, "project_code", None) or "").strip()
+
+
 def _values_from_upload_record(record: UploadRecord) -> Dict[str, str]:
     from .notify_content import task_type_category_of_upload
 
     cat = task_type_category_of_upload(record)
     return {
         "project_name": record.project_name or "",
-        "project_code": record.project_code or "",
+        "project_code": _project_code_for_export(record),
         "business_side": record.business_side or "",
         "product": record.product or "",
         "country": record.country or "",
@@ -151,6 +169,7 @@ def _values_from_upload_record(record: UploadRecord) -> Dict[str, str]:
         "assignee_name": record.assignee_name or record.author or "",
         "due_date": format_date_for_import(record.due_date),
         "notes": record.notes or "",
+        "document_number": str(getattr(record, "document_number", None) or ""),
         "file_version": str(getattr(record, "file_version", None) or ""),
         "document_display_date": format_date_for_import(getattr(record, "document_display_date", None)),
         "reviewer": str(getattr(record, "reviewer", None) or ""),
@@ -185,6 +204,7 @@ def default_sample_import_row() -> List[str]:
         "assignee_name": "张三",
         "due_date": today,
         "notes": "下发任务备注示例",
+        "document_number": "DOC-001",
         "file_version": "V1.0",
         "document_display_date": today,
         "reviewer": "审核人",
@@ -241,13 +261,66 @@ def validate_import_row_task_category(row: dict) -> Optional[str]:
     return None
 
 
-def parse_import_date(s: str) -> Optional[date]:
-    if not s or not (s or "").strip():
+def parse_import_date(value: Any) -> Optional[date]:
+    """
+    解析导入截止日期/文档体现日期。
+    Excel 日期单元格经 openpyxl 常为 datetime，str 后形如「2026-07-29 00:00:00」，
+    须一并支持；也兼容纯日期串与常见中文日期。
+    """
+    import re
+    from datetime import timedelta
+
+    if value is None:
         return None
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y"):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    # Excel 有时以序列号浮点给出日期
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
-            return datetime.strptime(s, fmt).date()
+            serial = float(value)
+            if 20000 <= serial <= 80000:  # 约 1954–2119
+                return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
+        except (ValueError, OverflowError, OSError):
+            pass
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    # 中文：2026年7月29日
+    m = re.fullmatch(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", raw)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
-            continue
+            return None
+
+    # 先试完整串（含时间），再试去掉时间部分
+    candidates = [raw]
+    if "T" in raw:
+        candidates.append(raw.split("T", 1)[0].strip())
+    elif " " in raw:
+        candidates.append(raw.split(" ", 1)[0].strip())
+
+    formats = (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%Y%m%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+    )
+    for candidate in candidates:
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     return None

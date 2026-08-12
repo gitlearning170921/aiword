@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 from flask import Blueprint, current_app, jsonify, render_template, request, session
-from sqlalchemy import or_
+from sqlalchemy import case, func, or_
 
 from . import db
 from ._integration_common import integration_api_base, integration_requests_timeout, msg_upstream_not_configured_env, upstream_headers, user_facing_text, user_facing_upstream_error
@@ -30,6 +30,7 @@ from .authz import (
 from .models import (
     AuditJob,
     CompanyProject,
+    DeficiencyImportLog,
     DraftGenerationJob,
     ExamAttempt,
     ExamCenterActivity,
@@ -1196,7 +1197,7 @@ def api_company_deficiency_list():
         "collection": collection,
         "remediation_status": str(request.args.get("remediationStatus") or "").strip(),
         "deficiency_type": str(request.args.get("deficiencyType") or "").strip(),
-        "limit": str(request.args.get("limit") or "200"),
+        "limit": str(request.args.get("limit") or "1000"),
     }
     resp, code = upstream_get(
         "api/deficiency/records",
@@ -1208,8 +1209,89 @@ def api_company_deficiency_list():
         return resp, code
     data = resp.get_json() if hasattr(resp, "get_json") else {}
     upstream = data.get("upstream") if isinstance(data, dict) else {}
-    rows = upstream.get("data") if isinstance(upstream, dict) else []
-    return jsonify({"ok": True, "records": rows or [], "organizationId": organization_id, "collection": collection})
+    rows = list(upstream.get("data") if isinstance(upstream, dict) else []) or []
+
+    # 富化项目名称，并按前端筛选条件过滤（关键词/项目/优先级/训练状态）
+    project_ids = {
+        str(r.get("linked_company_project_id") or "").strip()
+        for r in rows
+        if isinstance(r, dict) and str(r.get("linked_company_project_id") or "").strip()
+    }
+    project_map: dict[str, CompanyProject] = {}
+    if project_ids:
+        for cp in CompanyProject.query.filter(CompanyProject.id.in_(list(project_ids))).all():
+            if _company_project_in_active_org(cp):
+                project_map[str(cp.id)] = cp
+
+    keyword = str(request.args.get("keyword") or "").strip().lower()
+    project_filter = str(request.args.get("projectId") or "").strip()
+    priority_filter = str(request.args.get("priority") or "").strip()
+    train_filter = str(request.args.get("trainStatus") or "").strip()
+
+    enriched = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        pid = str(r.get("linked_company_project_id") or "").strip()
+        cp = project_map.get(pid)
+        stored_name = str(r.get("project_name") or r.get("projectName") or "").strip()
+        project_name = str(cp.name if cp else "").strip() or stored_name or (pid if pid else "") or "—"
+        row = dict(r)
+        row["projectName"] = project_name
+        row["project_name"] = project_name
+        if project_filter:
+            # 按总览项目筛选时：仅保留已关联且 id 匹配的记录
+            if pid != project_filter:
+                continue
+        if priority_filter and str(row.get("priority") or "") != priority_filter:
+            continue
+        if train_filter and str(row.get("train_status") or "") != train_filter:
+            continue
+        if keyword:
+            hay = " ".join(
+                [
+                    project_name,
+                    stored_name,
+                    str(row.get("opinion_text") or ""),
+                    str(row.get("remediation_plan") or ""),
+                    str(row.get("deficiency_source") or ""),
+                    str(row.get("registration_country") or ""),
+                    str(row.get("registration_category") or ""),
+                ]
+            ).lower()
+            if keyword not in hay:
+                continue
+        enriched.append(row)
+
+    return jsonify(
+        {
+            "ok": True,
+            "records": enriched,
+            "total": len(enriched),
+            "organizationId": organization_id,
+            "collection": collection,
+        }
+    )
+
+
+@company_bp.delete("/api/company/deficiency/records/<int:record_id>")
+@company_admin_write_required
+def api_company_deficiency_delete(record_id: int):
+    try:
+        organization_id, collection = _deficiency_proxy_org()
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    from .aicheckword_core_proxy import upstream_delete
+
+    resp, code = upstream_delete(
+        f"api/deficiency/records/{int(record_id)}",
+        params={"collection": collection},
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return resp, code
+    return jsonify({"ok": True, "message": "已删除（归档）发补记录", "organizationId": organization_id})
 
 
 @company_bp.post("/api/company/deficiency/records")
@@ -1238,6 +1320,7 @@ def api_company_deficiency_create():
     body = {
         "collection": collection,
         "linked_company_project_id": project_id,
+        "project_name": str(cp.name or "").strip(),
         "registration_country": country,
         "registration_category": category,
         "opinion_text": str(data.get("opinionText") or data.get("opinion_text") or "").strip(),
@@ -1312,6 +1395,7 @@ def api_company_deficiency_patch(record_id: int):
         if not cp or not _company_project_in_active_org(cp):
             return jsonify({"message": "所属项目无效或不在当前公司范围"}), 400
         body["linked_company_project_id"] = project_id
+        body["project_name"] = str(cp.name or "").strip()
         body["registration_country"] = str(cp.registered_country or "").strip()
         body["registration_category"] = str(cp.registered_category or "").strip()
         if not body["registration_country"] or not body["registration_category"]:
@@ -1348,6 +1432,152 @@ def api_company_deficiency_patch(record_id: int):
             "message": "已保存",
             "record": upstream.get("data") if isinstance(upstream, dict) else None,
             **api_debug_fields(upstream=upstream),
+        }
+    )
+
+
+@company_bp.post("/api/company/deficiency/records/batch-update")
+@company_admin_write_required
+def api_company_deficiency_batch_update():
+    """批量更新发补字段（对齐文控批量编辑：仅更新勾选字段）。"""
+    data = request.get_json(force=True) or {}
+    explicit_org = str(data.get("organizationId") or data.get("organization_id") or "").strip()
+    try:
+        organization_id, collection = resolve_organization_context(
+            explicit_organization_id=explicit_org or None
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    ids_raw = data.get("ids") or []
+    if not isinstance(ids_raw, list) or not ids_raw:
+        return jsonify({"message": "请先勾选要编辑的记录"}), 400
+    ids: list[int] = []
+    for x in ids_raw:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return jsonify({"message": "无效的记录 ID"}), 400
+
+    patch: dict[str, Any] = {"collection": collection}
+    if "remediationStatus" in data or "remediation_status" in data:
+        patch["remediation_status"] = str(
+            data.get("remediationStatus") or data.get("remediation_status") or "open"
+        ).strip() or "open"
+        if patch["remediation_status"] == "done" and not data.get("completedOn") and not data.get("completed_on"):
+            patch["completed_on"] = now_local().date().isoformat()
+        if patch["remediation_status"] == "open":
+            patch["completed_on"] = None
+    if "priority" in data:
+        patch["priority"] = str(data.get("priority") or "medium").strip() or "medium"
+    if "deficiencyType" in data or "deficiency_type" in data:
+        patch["deficiency_type"] = str(
+            data.get("deficiencyType") or data.get("deficiency_type") or "registration_review"
+        ).strip() or "registration_review"
+    if "deficiencySource" in data or "deficiency_source" in data:
+        patch["deficiency_source"] = str(
+            data.get("deficiencySource") or data.get("deficiency_source") or ""
+        ).strip()
+
+    project_id = str(data.get("companyProjectId") or data.get("linked_company_project_id") or "").strip()
+    if project_id:
+        cp = CompanyProject.query.get(project_id)
+        if not cp or not _company_project_in_active_org(cp):
+            return jsonify({"message": "所属项目无效或不在当前公司范围"}), 400
+        country = str(cp.registered_country or "").strip()
+        category = str(cp.registered_category or "").strip()
+        if not country or not category:
+            return jsonify({"message": "所属项目缺少注册国家或注册类别"}), 400
+        patch["linked_company_project_id"] = project_id
+        patch["project_name"] = str(cp.name or "").strip()
+        patch["registration_country"] = country
+        patch["registration_category"] = category
+
+    # 仅 collection + 至少一项业务字段
+    if len(patch) <= 1:
+        return jsonify({"message": "请至少勾选一项要修改的字段"}), 400
+
+    from ._integration_common import integration_request
+
+    base = integration_api_base()
+    if not base:
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
+    ok = 0
+    fail = 0
+    errors: list[dict[str, Any]] = []
+    headers = upstream_headers(for_multipart=False, organization_id=organization_id or None)
+    for rid in ids:
+        try:
+            resp = integration_request(
+                "PATCH",
+                f"{base.rstrip('/')}/api/deficiency/records/{int(rid)}",
+                json=patch,
+                headers=headers,
+                timeout=integration_requests_timeout(read_seconds=60),
+            )
+            if resp.status_code >= 400:
+                fail += 1
+                errors.append({"id": rid, "message": f"HTTP {resp.status_code}"})
+            else:
+                ok += 1
+        except Exception as exc:
+            fail += 1
+            errors.append({"id": rid, "message": str(exc)[:200]})
+    return jsonify(
+        {
+            "ok": fail == 0,
+            "message": f"批量更新完成：成功 {ok}，失败 {fail}",
+            "updated": ok,
+            "failed": fail,
+            "errors": errors[:20],
+            "organizationId": organization_id,
+        }
+    )
+
+
+@company_bp.get("/api/company/deficiency/records/duplicates")
+@company_registry_api_required
+def api_company_deficiency_duplicates():
+    """新增前查重：按意见正文匹配，并按导入批次汇总。"""
+    try:
+        organization_id, collection = _deficiency_proxy_org()
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    opinion = str(request.args.get("opinionText") or request.args.get("opinion_text") or "").strip()
+    if not opinion:
+        return jsonify({"ok": True, "total": 0, "batches": [], "records": [], "organizationId": organization_id})
+    exclude_id = str(request.args.get("excludeId") or "").strip()
+    from .aicheckword_core_proxy import upstream_get
+
+    params: dict[str, Any] = {
+        "collection": collection,
+        "opinion_text": opinion,
+        "limit": str(request.args.get("limit") or "50"),
+    }
+    if exclude_id.isdigit():
+        params["exclude_id"] = exclude_id
+    resp, code = upstream_get(
+        "api/deficiency/records/duplicates",
+        params=params,
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return resp, code
+    payload = resp.get_json(silent=True) if hasattr(resp, "get_json") else None
+    upstream = (payload or {}).get("upstream") if isinstance(payload, dict) else None
+    data = (upstream or {}).get("data") if isinstance(upstream, dict) else None
+    if not isinstance(data, dict):
+        data = {}
+    return jsonify(
+        {
+            "ok": True,
+            "total": int(data.get("total") or 0),
+            "batches": data.get("batches") or [],
+            "records": data.get("records") or [],
+            "organizationId": organization_id,
+            "collection": collection,
         }
     )
 
@@ -1452,30 +1682,340 @@ def api_company_deficiency_train(record_id: int):
     )
 
 
+def _build_company_project_name_index(organization_id: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """一次加载当前公司项目，供导入按名称匹配（避免逐行查库）。"""
+    q = CompanyProject.query
+    if organization_id:
+        q = q.filter(CompanyProject.organization_id == organization_id)
+    by_name: dict[str, Any] = {}
+    by_compact: dict[str, Any] = {}
+    for cp in q.all():
+        if not _company_project_in_active_org(cp):
+            continue
+        name = str(cp.name or "").strip()
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = cp
+        compact = re.sub(r"\s+", "", name)
+        if compact and compact not in by_compact:
+            by_compact[compact] = cp
+    return by_name, by_compact
+
+
 def _resolve_company_project_by_name(organization_id: str | None, project_name: str):
     name = (project_name or "").strip()
     if not name:
         return None
-    q = CompanyProject.query.filter(CompanyProject.name == name)
-    if organization_id:
-        q = q.filter(CompanyProject.organization_id == organization_id)
-    rows = q.all()
-    rows = [cp for cp in rows if _company_project_in_active_org(cp)]
-    if len(rows) == 1:
-        return rows[0]
-    if len(rows) > 1:
-        return rows[0]  # 同名取第一条；导入结果里会提示
-    # 宽松：去空白后匹配
+    by_name, by_compact = _build_company_project_name_index(organization_id)
+    if name in by_name:
+        return by_name[name]
     compact = re.sub(r"\s+", "", name)
-    all_q = CompanyProject.query
-    if organization_id:
-        all_q = all_q.filter(CompanyProject.organization_id == organization_id)
-    for cp in all_q.all():
-        if not _company_project_in_active_org(cp):
+    return by_compact.get(compact)
+
+
+def _deficiency_import_fingerprint(row: dict[str, Any]) -> str:
+    """与 aicheckword deficiency_import_fingerprint 对齐：项目+日期+类型+意见。"""
+    project = re.sub(r"\s+", "", str(row.get("project_name") or row.get("_project_name") or "").strip().lower())
+    issued = str(row.get("issued_on") or "")[:10]
+    dtype = str(row.get("deficiency_type") or "registration_review").strip() or "registration_review"
+    opinion = re.sub(r"\s+", " ", str(row.get("opinion_text") or "").strip().lower())
+    return f"{project}|{issued}|{dtype}|{opinion}"
+
+
+def _fetch_deficiency_fingerprint_index(
+    *, collection: str, organization_id: str | None
+) -> dict[str, int]:
+    from .aicheckword_core_proxy import upstream_get
+
+    resp, code = upstream_get(
+        "api/deficiency/records/import-fingerprints",
+        params={"collection": collection},
+        organization_id=organization_id or None,
+        read_seconds=60,
+    )
+    if code != 200:
+        return {}
+    payload = resp.get_json(silent=True) if hasattr(resp, "get_json") else None
+    upstream = (payload or {}).get("upstream") if isinstance(payload, dict) else None
+    data = (upstream or {}).get("data") if isinstance(upstream, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in data.items():
+        try:
+            out[str(k)] = int(v)
+        except (TypeError, ValueError):
             continue
-        if re.sub(r"\s+", "", str(cp.name or "")) == compact:
-            return cp
-    return None
+    return out
+
+
+def _classify_deficiency_import_rows(
+    importable: list[dict[str, Any]],
+    *,
+    fp_index: dict[str, int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int, int]:
+    """全部按新增处理（允许重复）；返回 (ready, skipped, new_count, update_count, system_dup_count)。
+
+    system_dup_count：与系统已有指纹相同、仍将再插入的行数（用于提示重复次数将增加）。
+    """
+    ready: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    new_count = 0
+    update_count = 0
+    system_dup_count = 0
+    for item in importable:
+        fp = _deficiency_import_fingerprint(item)
+        if not fp or fp.startswith("|") or not str(item.get("opinion_text") or "").strip():
+            skipped.append(
+                {
+                    "excelRow": item.get("_excel_row"),
+                    "projectName": item.get("_project_name"),
+                    "message": "无法匹配导入键（项目/日期/意见不完整）",
+                    "status": "skip",
+                }
+            )
+            continue
+        is_system_dup = fp in fp_index
+        if is_system_dup:
+            system_dup_count += 1
+        # 允许重复：一律新增，不做增量更新
+        status = "new"
+        item = {
+            **item,
+            "_import_status": status,
+            "_fingerprint": fp,
+            "_match_id": fp_index.get(fp),
+            "_system_dup": is_system_dup,
+        }
+        ready.append(item)
+        new_count += 1
+    return ready, skipped, new_count, update_count, system_dup_count
+
+
+def _prepare_deficiency_import_rows(
+    rows: list[dict[str, Any]],
+    *,
+    organization_id: str | None,
+    collection: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """将 Excel 解析行映射为可入库 payload；返回 (importable, failed)。
+
+    总览中无同名项目时仍可导入：不关联 company_project，保留 Excel 项目名与可选注册维度。
+    """
+    importable: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    by_name, by_compact = _build_company_project_name_index(organization_id)
+    project_cache: dict[str, Any] = {}
+    for row in rows:
+        excel_row = row.get("_excel_row")
+        project_name = str(row.get("project_name") or "").strip()
+        if not project_name:
+            failed.append(
+                {
+                    "excelRow": excel_row,
+                    "projectName": project_name,
+                    "message": "缺少所属项目名称",
+                }
+            )
+            continue
+        if project_name in project_cache:
+            cp = project_cache[project_name]
+        else:
+            cp = by_name.get(project_name)
+            if not cp:
+                compact = re.sub(r"\s+", "", project_name)
+                cp = by_compact.get(compact) if compact else None
+            project_cache[project_name] = cp
+
+        excel_country = str(row.get("registration_country") or "").strip()
+        excel_category = str(row.get("registration_category") or "").strip()
+        if cp:
+            country = excel_country or str(cp.registered_country or "").strip()
+            category = excel_category or str(cp.registered_category or "").strip()
+            linked_id = str(cp.id)
+        else:
+            country = excel_country
+            category = excel_category
+            linked_id = ""
+
+        importable.append(
+            {
+                "collection": collection,
+                "linked_company_project_id": linked_id,
+                "project_name": project_name,
+                "registration_country": country,
+                "registration_category": category,
+                "opinion_text": row["opinion_text"],
+                "priority": row["priority"],
+                "remediation_plan": row.get("remediation_plan") or "",
+                "issued_on": row["issued_on"],
+                "remediation_status": row["remediation_status"],
+                "completed_on": row.get("completed_on"),
+                "deficiency_type": row["deficiency_type"],
+                "deficiency_source": row.get("deficiency_source") or "",
+                "_excel_row": excel_row,
+                "_project_name": project_name,
+                "_unlinked": not bool(cp),
+            }
+        )
+    return importable, failed
+
+
+def _append_deficiency_import_log(
+    *,
+    org_id: str | None,
+    batch_id: str,
+    user_id: str | None,
+    event_type: str,
+    project_name: str = "",
+    source_filename: str = "",
+    row_index: Any = None,
+    reason: str = "",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        ri = int(row_index) if row_index not in (None, "") else None
+    except (TypeError, ValueError):
+        ri = None
+    db.session.add(
+        DeficiencyImportLog(
+            organization_id=str(org_id or "").strip() or None,
+            import_batch_id=batch_id,
+            event_type=event_type,
+            project_name=(project_name or "").strip()[:128] or None,
+            source_filename=(source_filename or "").strip()[:255] or None,
+            row_index=ri,
+            reason=(reason or "")[:512] or None,
+            row_payload_json=payload or None,
+            created_by_user_id=str(user_id or "").strip() or None,
+        )
+    )
+
+
+def _serialize_deficiency_import_log(row: DeficiencyImportLog) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "batchId": row.import_batch_id,
+        "eventType": row.event_type,
+        "projectName": row.project_name,
+        "sourceFilename": row.source_filename,
+        "rowIndex": row.row_index,
+        "reason": row.reason,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+_DEF_IMPORT_LOG_MAX_BATCHES = 100
+
+
+def _deficiency_import_log_batch_summaries(
+    org_id: str, *, batch_id: str | None = None
+) -> list[dict[str, Any]]:
+    q = DeficiencyImportLog.query.filter_by(organization_id=org_id)
+    if batch_id:
+        q = q.filter(DeficiencyImportLog.import_batch_id == batch_id)
+    q = q.filter(DeficiencyImportLog.import_batch_id.isnot(None))
+    q = q.filter(DeficiencyImportLog.import_batch_id != "")
+    q = (
+        q.with_entities(
+            DeficiencyImportLog.import_batch_id.label("batch_id"),
+            func.min(DeficiencyImportLog.created_at).label("started_at"),
+            func.count().label("total"),
+            func.sum(
+                case((DeficiencyImportLog.event_type == "import_success", 1), else_=0)
+            ).label("success"),
+            func.sum(
+                case((DeficiencyImportLog.event_type == "import_skip", 1), else_=0)
+            ).label("skip"),
+            func.sum(
+                case((DeficiencyImportLog.event_type == "import_fail", 1), else_=0)
+            ).label("fail"),
+            func.sum(
+                case((DeficiencyImportLog.event_type == "import_update", 1), else_=0)
+            ).label("updated"),
+            func.max(DeficiencyImportLog.source_filename).label("source_filename"),
+        )
+        .group_by(DeficiencyImportLog.import_batch_id)
+        .order_by(func.min(DeficiencyImportLog.created_at).desc())
+        .limit(_DEF_IMPORT_LOG_MAX_BATCHES)
+    )
+    out = []
+    for row in q.all():
+        success = int(row.success or 0)
+        skip = int(row.skip or 0)
+        fail = int(row.fail or 0)
+        updated = int(row.updated or 0)
+        out.append(
+            {
+                "batchId": row.batch_id,
+                "startedAt": row.started_at.isoformat() if row.started_at else None,
+                "total": int(row.total or 0),
+                "success": success,
+                "updated": updated,
+                "skip": skip,
+                "fail": fail,
+                "sourceFilename": row.source_filename or "",
+            }
+        )
+    return out
+
+
+@company_bp.get("/company/deficiency/import-logs")
+@company_registry_page_required
+def company_deficiency_import_logs_page():
+    return render_template(
+        "deficiency_import_logs.html",
+        hide_main_nav=False,
+        gate_page=False,
+    )
+
+
+@company_bp.get("/api/company/deficiency/import/logs")
+@company_registry_api_required
+def api_company_deficiency_import_logs():
+    try:
+        organization_id, _collection = _deficiency_proxy_org()
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 403
+    org_id = str(organization_id or "").strip()
+    if not org_id:
+        return jsonify({"message": "请先选择公司"}), 400
+    batch_id = str(request.args.get("batchId") or "").strip()
+    event_type = str(request.args.get("eventType") or "").strip()
+    try:
+        page = max(1, int(request.args.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(200, int(request.args.get("pageSize") or 100)))
+    except (TypeError, ValueError):
+        page_size = 100
+
+    q = DeficiencyImportLog.query.filter_by(organization_id=org_id)
+    if batch_id:
+        q = q.filter(DeficiencyImportLog.import_batch_id == batch_id)
+    if event_type:
+        q = q.filter(DeficiencyImportLog.event_type == event_type)
+    total = q.count()
+    rows = (
+        q.order_by(DeficiencyImportLog.created_at.desc(), DeficiencyImportLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    batches = _deficiency_import_log_batch_summaries(org_id, batch_id=batch_id or None)
+    return jsonify(
+        {
+            "ok": True,
+            "items": [_serialize_deficiency_import_log(r) for r in rows],
+            "batches": batches,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+            "organizationId": org_id,
+        }
+    )
 
 
 @company_bp.get("/api/company/deficiency/import-template")
@@ -1498,11 +2038,23 @@ def api_company_deficiency_import_template():
 @company_bp.post("/api/company/deficiency/import-excel")
 @company_admin_write_required
 def api_company_deficiency_import_excel():
-    """批量导入发补记录（xlsx）。所属项目按名称匹配当前公司下的公司总览项目。"""
+    """发补 Excel 导入（对齐文控中心：先预览确认，再批量写入）。
+
+    - 无 confirm：仅解析+校验，返回可导入/失败摘要，不写库。
+    - confirm=1：一次请求内按块调用上游 batch API 写入（避免逐条 HTTP），并写导入日志。
+    """
     f = request.files.get("file") or (request.files.getlist("file") or [None])[0]
     if f is None:
         return jsonify({"message": "请上传 Excel 文件（.xlsx）"}), 400
+    source_filename = str(getattr(f, "filename", None) or "").strip() or "upload.xlsx"
     explicit_org = str(request.form.get("organizationId") or request.form.get("organization_id") or "").strip()
+    confirm = str(request.form.get("confirm") or "").strip().lower() in ("1", "true", "yes")
+    dup_mode = str(
+        request.form.get("duplicateMode") or request.form.get("dupMode") or "create"
+    ).strip().lower()
+    if dup_mode not in ("create", "update"):
+        dup_mode = "create"
+
     try:
         organization_id, collection = resolve_organization_context(
             explicit_organization_id=explicit_org or None
@@ -1520,75 +2072,302 @@ def api_company_deficiency_import_excel():
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
 
-    created = 0
-    failed: list[dict[str, Any]] = []
+    importable, resolve_failed = _prepare_deficiency_import_rows(
+        rows, organization_id=organization_id, collection=collection
+    )
     warnings = list(parse_warnings)
-    for row in rows:
-        excel_row = row.get("_excel_row")
-        cp = _resolve_company_project_by_name(organization_id, str(row.get("project_name") or ""))
-        if not cp:
-            failed.append(
+    fp_index = _fetch_deficiency_fingerprint_index(
+        collection=collection, organization_id=organization_id
+    )
+    ready, dup_skipped, new_count, update_count, system_dup_count = _classify_deficiency_import_rows(
+        importable, fp_index=fp_index
+    )
+    resolve_failed = list(resolve_failed) + list(dup_skipped)
+
+    if not confirm:
+        unlinked = sum(1 for x in ready if x.get("_unlinked"))
+        linked = len(ready) - unlinked
+        preview_rows = []
+        for item in ready[:30]:
+            preview_rows.append(
                 {
-                    "excelRow": excel_row,
-                    "projectName": row.get("project_name"),
-                    "message": "未找到同名所属项目（须与公司总览项目名称一致）",
+                    "excelRow": item.get("_excel_row"),
+                    "projectName": item.get("_project_name"),
+                    "issuedOn": item.get("issued_on"),
+                    "priority": item.get("priority"),
+                    "remediationStatus": item.get("remediation_status"),
+                    "opinionPreview": str(item.get("opinion_text") or "")[:80],
+                    "unlinked": bool(item.get("_unlinked")),
+                    "status": item.get("_import_status") or "new",
+                    "systemDup": bool(item.get("_system_dup")),
+                    "registrationCountry": item.get("registration_country") or "",
+                    "registrationCategory": item.get("registration_category") or "",
                 }
             )
-            continue
-        country = str(cp.registered_country or "").strip()
-        category = str(cp.registered_category or "").strip()
-        if not country or not category:
-            failed.append(
-                {
-                    "excelRow": excel_row,
-                    "projectName": row.get("project_name"),
-                    "message": "项目缺少注册国家或注册类别",
-                }
-            )
-            continue
-        body = {
-            "collection": collection,
-            "linked_company_project_id": str(cp.id),
-            "registration_country": country,
-            "registration_category": category,
-            "opinion_text": row["opinion_text"],
-            "priority": row["priority"],
-            "remediation_plan": row.get("remediation_plan") or "",
-            "issued_on": row["issued_on"],
-            "remediation_status": row["remediation_status"],
-            "completed_on": row.get("completed_on"),
-            "deficiency_type": row["deficiency_type"],
-            "deficiency_source": row.get("deficiency_source") or "",
-        }
-        resp, code = upstream_json_post(
-            "api/deficiency/records",
-            body=body,
-            organization_id=organization_id or None,
-            read_seconds=60,
+        msg = (
+            f"解析完成：共 {len(rows)} 行，可新增 {len(ready)} 条"
+            f"（已关联总览 {linked}，未登记项目 {unlinked}）"
         )
+        if resolve_failed:
+            msg += f"，跳过 {len(resolve_failed)} 条"
+        if system_dup_count:
+            msg += (
+                f"。其中 {system_dup_count} 条与系统已有记录意见/键相同；"
+                "确认导入时可选择「覆盖更新」或「新增重复」"
+            )
+        if unlinked:
+            msg += "。未登记项目将按名称归档；建议 Excel 填写注册国家/类别以便下游注入"
+        return jsonify(
+            {
+                "ok": True,
+                "mode": "preview",
+                "message": msg,
+                "summary": {
+                    "total": len(rows),
+                    "importable": len(ready),
+                    "new": new_count,
+                    "update": 0,
+                    "systemDup": system_dup_count,
+                    "failed": len(resolve_failed),
+                    "linked": linked,
+                    "unlinked": unlinked,
+                },
+                "preview": preview_rows,
+                "failed": resolve_failed[:50],
+                "warnings": warnings[:50],
+                "organizationId": organization_id,
+                "collection": collection,
+            }
+        )
+
+    batch_id = str(uuid.uuid4())
+    user_id = str(session.get("user_id") or "").strip() or None
+    created = 0
+    updated = 0
+    write_failed: list[dict[str, Any]] = []
+
+    for item in resolve_failed:
+        _append_deficiency_import_log(
+            org_id=organization_id,
+            batch_id=batch_id,
+            user_id=user_id,
+            event_type="import_skip",
+            project_name=str(item.get("projectName") or ""),
+            source_filename=source_filename,
+            row_index=item.get("excelRow"),
+            reason=str(item.get("message") or "跳过"),
+        )
+
+    if not ready:
+        db.session.commit()
+        return jsonify(
+            {
+                "ok": True,
+                "mode": "import",
+                "done": True,
+                "message": "无可导入记录",
+                "created": 0,
+                "updated": 0,
+                "failedCount": len(resolve_failed),
+                "failed": resolve_failed[:50],
+                "warnings": warnings[:50],
+                "importBatchId": batch_id,
+                "progress": {"processed": 0, "total": 0, "percent": 100},
+                "organizationId": organization_id,
+                "collection": collection,
+            }
+        )
+
+    batch_size = 100
+    for offset in range(0, len(ready), batch_size):
+        chunk = ready[offset : offset + batch_size]
+        records_body = []
+        for item in chunk:
+            payload = {k: v for k, v in item.items() if not str(k).startswith("_")}
+            payload["import_batch_id"] = batch_id
+            excel_row = item.get("_excel_row")
+            try:
+                er = int(excel_row) if excel_row not in (None, "") else None
+            except (TypeError, ValueError):
+                er = None
+            if er and er > 0:
+                payload["excel_row_index"] = er
+            records_body.append(payload)
+        resp, code = upstream_json_post(
+            "api/deficiency/records/batch",
+            body=(
+                {
+                    "collection": collection,
+                    "records": records_body,
+                    "mode": "upsert",
+                    "match_fingerprints": fp_index,
+                }
+                if dup_mode == "update"
+                else {
+                    "collection": collection,
+                    "records": records_body,
+                    "mode": "create",
+                }
+            ),
+            organization_id=organization_id or None,
+            read_seconds=180,
+        )
+        payload = resp.get_json(silent=True) if hasattr(resp, "get_json") else None
         if code != 200:
-            payload = resp.get_json(silent=True) if hasattr(resp, "get_json") else None
             msg = ""
             if isinstance(payload, dict):
                 msg = str(payload.get("message") or "")[:300]
-            failed.append(
-                {
-                    "excelRow": excel_row,
-                    "projectName": row.get("project_name"),
-                    "message": msg or f"上游创建失败（HTTP {code}）",
+            for item in chunk:
+                fail_item = {
+                    "excelRow": item.get("_excel_row"),
+                    "projectName": item.get("_project_name"),
+                    "message": msg or f"上游批量写入失败（HTTP {code}）",
                 }
-            )
+                write_failed.append(fail_item)
+                _append_deficiency_import_log(
+                    org_id=organization_id,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                    event_type="import_fail",
+                    project_name=str(fail_item.get("projectName") or ""),
+                    source_filename=source_filename,
+                    row_index=fail_item.get("excelRow"),
+                    reason=str(fail_item.get("message") or "写入失败"),
+                    payload={
+                        "issuedOn": item.get("issued_on"),
+                        "priority": item.get("priority"),
+                        "opinionPreview": str(item.get("opinion_text") or "")[:120],
+                    },
+                )
             continue
-        created += 1
+        upstream = (payload or {}).get("upstream") if isinstance(payload, dict) else None
+        data = (upstream or {}).get("data") if isinstance(upstream, dict) else None
+        if not isinstance(data, dict):
+            data = {}
+        created += int(data.get("created") or 0)
+        updated += int(data.get("updated") or 0)
+        failed_indices: set[int] = set()
+        skipped_indices: set[int] = set()
+        for fail in data.get("failed") or []:
+            if not isinstance(fail, dict):
+                continue
+            idx = fail.get("index")
+            excel_row = fail.get("excelRow")
+            project_name = ""
+            is_skip = bool(fail.get("skipped"))
+            if isinstance(idx, int) and 0 <= idx < len(chunk):
+                if is_skip:
+                    skipped_indices.add(idx)
+                else:
+                    failed_indices.add(idx)
+                excel_row = excel_row or chunk[idx].get("_excel_row")
+                project_name = str(chunk[idx].get("_project_name") or "")
+            fail_item = {
+                "excelRow": excel_row,
+                "projectName": project_name,
+                "message": str(fail.get("message") or ("跳过" if is_skip else "写入失败"))[:300],
+            }
+            if is_skip:
+                resolve_failed.append(fail_item)
+                _append_deficiency_import_log(
+                    org_id=organization_id,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                    event_type="import_skip",
+                    project_name=project_name,
+                    source_filename=source_filename,
+                    row_index=excel_row,
+                    reason=str(fail_item.get("message") or "跳过"),
+                )
+            else:
+                write_failed.append(fail_item)
+                _append_deficiency_import_log(
+                    org_id=organization_id,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                    event_type="import_fail",
+                    project_name=project_name,
+                    source_filename=source_filename,
+                    row_index=excel_row,
+                    reason=str(fail_item.get("message") or "写入失败"),
+                )
+        for i, item in enumerate(chunk):
+            if i in failed_indices or i in skipped_indices:
+                continue
+            unlinked = bool(item.get("_unlinked"))
+            system_dup = bool(item.get("_system_dup"))
+            action = "created"
+            if dup_mode == "update":
+                # 覆盖模式：有系统重复指纹的按更新记；其余新增
+                action = "updated" if system_dup else "created"
+                for row_res in data.get("results") or []:
+                    if not isinstance(row_res, dict):
+                        continue
+                    if row_res.get("index") == i:
+                        act = str(row_res.get("action") or "").strip().lower()
+                        if act in ("created", "updated"):
+                            action = act
+                        break
+            is_update = action == "updated"
+            _append_deficiency_import_log(
+                org_id=organization_id,
+                batch_id=batch_id,
+                user_id=user_id,
+                event_type="import_update" if is_update else "import_success",
+                project_name=str(item.get("_project_name") or ""),
+                source_filename=source_filename,
+                row_index=item.get("_excel_row"),
+                reason=(
+                    ("增量更新（未关联总览项目）" if unlinked else "增量更新")
+                    if is_update
+                    else (
+                        "导入成功（重复新增）"
+                        if system_dup and dup_mode == "create"
+                        else ("导入成功（未关联总览项目）" if unlinked else "导入成功")
+                    )
+                ),
+                payload={
+                    "issuedOn": item.get("issued_on"),
+                    "priority": item.get("priority"),
+                    "remediationStatus": item.get("remediation_status"),
+                    "opinionPreview": str(item.get("opinion_text") or "")[:120],
+                    "unlinked": unlinked,
+                    "systemDup": system_dup,
+                    "duplicateMode": dup_mode,
+                    "status": "update" if is_update else "new",
+                    "action": action,
+                    "registrationCountry": item.get("registration_country") or "",
+                    "registrationCategory": item.get("registration_category") or "",
+                },
+            )
 
+    all_failed = list(resolve_failed) + write_failed
+    # resolve_failed 在循环中可能被追加上游 skip，去重保持顺序
+    # 上面 resolve_failed 已含预览期 skip；write_failed 为硬失败
+    db.session.commit()
     return jsonify(
         {
             "ok": True,
-            "message": f"导入完成：成功 {created}，失败 {len(failed)}",
+            "mode": "import",
+            "done": True,
+            "message": (
+                f"导入完成：新增 {created}"
+                + (f"，更新 {updated}" if updated else "")
+                + f"，失败/跳过 {len(all_failed)}"
+                + (f"（重复策略：{'覆盖更新' if dup_mode == 'update' else '新增重复'}）")
+            ),
             "created": created,
-            "failedCount": len(failed),
-            "failed": failed[:50],
+            "updated": updated,
+            "duplicateMode": dup_mode,
+            "failedCount": len(all_failed),
+            "failed": all_failed[:50],
             "warnings": warnings[:50],
+            "importBatchId": batch_id,
+            "progress": {
+                "processed": len(ready),
+                "total": len(ready),
+                "percent": 100,
+            },
             "organizationId": organization_id,
             "collection": collection,
         }
@@ -1618,19 +2397,27 @@ def api_company_projects_list():
     synced = 0
     sync_arg = (request.args.get("syncLegacy") or "").strip().lower()
     force_sync = sync_arg in ("1", "true", "yes", "on")
+    # 下拉选择等场景：跳过重同步，仅读库（显著加速发补编辑弹窗等）
+    light = str(request.args.get("light") or request.args.get("forSelect") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     scope_org_ids, scope_err = _requested_company_scope_org_ids()
     if scope_err:
         return jsonify({"message": scope_err}), 403
-    if force_sync:
+    if force_sync and not light:
         synced = _sync_unlinked_page1_one_to_one(scope_org_ids=scope_org_ids)
 
-    from .project_registry_sync import sync_all_linked_page1_from_company
+    if not light:
+        from .project_registry_sync import sync_all_linked_page1_from_company
 
-    pushed = sync_all_linked_page1_from_company()
-    if pushed:
-        db.session.commit()
+        pushed = sync_all_linked_page1_from_company()
+        if pushed:
+            db.session.commit()
 
-    _project_meta_map(auto_create_from_uploads=True)
+        _project_meta_map(auto_create_from_uploads=True)
     q = CompanyProject.query
     if is_multi_tenant_enabled():
         if scope_org_ids:
@@ -1639,6 +2426,10 @@ def api_company_projects_list():
             from sqlalchemy import false as sql_false
 
             q = q.filter(sql_false())
+    # 发补等下拉：可按单公司收窄
+    org_only = str(request.args.get("organizationId") or request.args.get("organization_id") or "").strip()
+    if org_only and (not is_multi_tenant_enabled() or org_only in (scope_org_ids or []) or not scope_org_ids):
+        q = q.filter(CompanyProject.organization_id == org_only)
     starred_only = (request.args.get("starredOnly") or "").strip().lower()
     if starred_only in ("1", "true", "yes", "on"):
         q = q.filter(CompanyProject.is_starred.is_(True))
@@ -1657,7 +2448,7 @@ def api_company_projects_list():
     }
     org_names = _organization_name_map(org_ids)
     projects = [_serialize_company_project(cp, org_names=org_names) for cp in rows]
-    return jsonify({"projects": projects, "synced": synced, "total": len(projects)})
+    return jsonify({"projects": projects, "synced": synced, "total": len(projects), "light": light})
 
 
 @company_bp.get("/api/company/page1-project-candidates")

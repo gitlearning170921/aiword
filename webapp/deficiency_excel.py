@@ -42,6 +42,15 @@ _HEADER_MAP: dict[str, str] = {
     "发补来源": "deficiency_source",
     "来源": "deficiency_source",
     "source": "deficiency_source",
+    "注册国家": "registration_country",
+    "注册国": "registration_country",
+    "国家": "registration_country",
+    "registration_country": "registration_country",
+    "registered country": "registration_country",
+    "注册类别": "registration_category",
+    "类别": "registration_category",
+    "registration_category": "registration_category",
+    "registered category": "registration_category",
 }
 
 _TEMPLATE_HEADERS = [
@@ -54,6 +63,8 @@ _TEMPLATE_HEADERS = [
     "整改完成日期",
     "发补类型",
     "发补来源",
+    "注册国家",
+    "注册类别",
 ]
 
 _TEMPLATE_EXAMPLE = [
@@ -66,6 +77,8 @@ _TEMPLATE_EXAMPLE = [
     "",
     "注册审评发补",
     "器审中心",
+    "中国",
+    "第二类",
 ]
 
 
@@ -97,13 +110,17 @@ def build_deficiency_import_template_bytes() -> bytes:
     ws2 = wb.create_sheet("填写说明")
     notes = [
         "1. 请从「发补记录」Sheet 第 2 行起填写；第 1 行为表头，勿改列名。",
-        "2. 「所属项目」须与页面0 公司总览中的项目名称一致（同一公司下）。",
-        "3. 注册国家/类别由所属项目自动带出，Excel 中不必填写。",
-        "4. 优先级：高 / 中 / 低（或 high / medium / low）。",
-        "5. 整改状态：未完成 / 已完成（或 open / done）。已完成时建议填写整改完成日期，缺省为导入当天。",
-        "6. 发补类型：注册审评发补 / 体考发补（或 registration_review / type_testing）。",
-        "7. 日期格式：YYYY-MM-DD，或 Excel 日期单元格。",
-        "8. 示例行可删除后导入。",
+        "2. 「所属项目」建议填写项目名称；若已在公司总览登记，将自动关联并带出注册国家/类别。",
+        "3. 总览中尚无该项目时仍可导入：将按「所属项目」原文归档；建议同时填写「注册国家」「注册类别」，否则下游暂无法按维度注入。",
+        "4. 若既匹配到总览项目、Excel 又填写了注册国家/类别：以 Excel 为准（可覆盖项目带出值）。",
+        "5. 若与系统已有记录重复：导入时可选择「覆盖更新」或「新增重复」；手工新增时同样可选。",
+        "6. 列表默认按 Excel 行序展示（与文控台账导入顺序一致）；手工新增记录排在导入记录之后。",
+        "5. 优先级：高 / 中 / 低（或 high / medium / low）。",
+        "6. 整改状态：未完成 / 已完成（或 open / done）。已完成时建议填写整改完成日期，缺省为导入当天。",
+        "7. 发补类型：注册审评发补 / 受理发补 / 体考发补（受理/审评均按注册审评类入库）。",
+        "8. 日期格式：优先 YYYY-MM-DD 或 Excel 日期；若只填年份（如 2025）将按该年 12 月 31 日导入。",
+        "9. 优先级数字：1=高，2=中，3=低。",
+        "10. 可增加「序号」列（导入时忽略）。示例行可删除后导入。",
     ]
     for line in notes:
         ws2.append([line])
@@ -113,14 +130,45 @@ def build_deficiency_import_template_bytes() -> bytes:
 
 
 def _parse_date_cell(val: Any) -> Optional[str]:
+    """解析日期：支持 datetime/date、YYYY-MM-DD、YYYY/M/D、仅年份 YYYY、Excel 序列号。"""
     if val is None or val == "":
         return None
     if isinstance(val, datetime):
         return val.date().isoformat()
     if isinstance(val, date):
         return val.isoformat()
+    # Excel 有时把日期存成 float 序列号（data_only 时）
+    if isinstance(val, int):
+        # 仅年份：2025 → 2025-12-31
+        if 1900 <= val <= 2100:
+            return date(val, 12, 31).isoformat()
+        # Excel 序列号整数
+        if 1 <= val <= 100000:
+            try:
+                from openpyxl.utils.datetime import from_excel
+
+                return from_excel(val).date().isoformat()
+            except Exception:
+                return None
+        return None
+    if isinstance(val, float):
+        # 纯年份浮点（如 2025.0）优先按年末处理，避免被当成 Excel 序列号
+        if val == int(val) and 1900 <= int(val) <= 2100:
+            return date(int(val), 12, 31).isoformat()
+        try:
+            from openpyxl.utils.datetime import from_excel
+
+            return from_excel(val).date().isoformat()
+        except Exception:
+            return None
     s = str(val).strip()
     if not s:
+        return None
+    # 纯四位年份 → 该年最后一天（与业务约定：2025 表示 2025-12-31）
+    if re.fullmatch(r"\d{4}", s):
+        y = int(s)
+        if 1900 <= y <= 2100:
+            return date(y, 12, 31).isoformat()
         return None
     # 2024/6/12 or 2024-06-12
     m = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
@@ -139,10 +187,18 @@ def _parse_date_cell(val: Any) -> Optional[str]:
 
 
 def _parse_priority(val: Any) -> str:
+    """优先级：高/中/低；数字 1=高、2=中、3=低（常见台账习惯）。"""
+    if isinstance(val, (int, float)) and val == int(val):
+        n = int(val)
+        if n == 1:
+            return "high"
+        if n == 3:
+            return "low"
+        return "medium"
     s = str(val or "").strip().lower()
-    if s in ("高", "high", "h", "3"):
+    if s in ("高", "high", "h", "1"):
         return "high"
-    if s in ("低", "low", "l", "1"):
+    if s in ("低", "low", "l", "3"):
         return "low"
     return "medium"
 
@@ -160,10 +216,14 @@ def _parse_type(val: Any) -> str:
         return "registration_review"
     if "体考" in s or "型检" in s or s in ("type_testing", "typetesting", "tt"):
         return "type_testing"
-    if "审评" in s or "注册" in s or s in ("registration_review", "registrationreview", "rr"):
+    # 受理发补 / 审评发补 / 注册审评 等均归入注册审评类
+    if (
+        "受理" in s
+        or "审评" in s
+        or "注册" in s
+        or s in ("registration_review", "registrationreview", "rr")
+    ):
         return "registration_review"
-    if s == "type_testing":
-        return "type_testing"
     return "registration_review"
 
 
@@ -208,11 +268,33 @@ def parse_deficiency_excel(file_bytes: bytes) -> tuple[list[dict[str, Any]], lis
             continue
         issued = _parse_date_cell(item.get("issued_on"))
         completed = _parse_date_cell(item.get("completed_on"))
+        # 仅填年份时提示
+        raw_issued = item.get("issued_on")
+        if issued and (
+            (isinstance(raw_issued, int) and 1900 <= raw_issued <= 2100)
+            or (isinstance(raw_issued, str) and re.fullmatch(r"\d{4}", str(raw_issued).strip()))
+        ):
+            warnings.append(
+                f"第 {excel_row_no} 行：发补日期仅有年份，已按 {issued} 导入（建议改为完整 YYYY-MM-DD）"
+            )
         status = _parse_status(item.get("remediation_status"))
         if status == "done" and not completed:
             completed = date.today().isoformat()
+            # 完成日也是纯年份时上面已解析；若无完成日则用今天
         if status == "open":
             completed = None
+        # 完成日仅年份时同样提示
+        raw_completed = item.get("completed_on")
+        if completed and status == "done" and (
+            (isinstance(raw_completed, int) and 1900 <= raw_completed <= 2100)
+            or (
+                isinstance(raw_completed, str)
+                and re.fullmatch(r"\d{4}", str(raw_completed).strip())
+            )
+        ):
+            warnings.append(
+                f"第 {excel_row_no} 行：整改完成日期仅有年份，已按 {completed} 导入"
+            )
         parsed = {
             "_excel_row": excel_row_no,
             "project_name": project_name,
@@ -224,6 +306,8 @@ def parse_deficiency_excel(file_bytes: bytes) -> tuple[list[dict[str, Any]], lis
             "completed_on": completed,
             "deficiency_type": _parse_type(item.get("deficiency_type")),
             "deficiency_source": str(item.get("deficiency_source") or "").strip(),
+            "registration_country": str(item.get("registration_country") or "").strip(),
+            "registration_category": str(item.get("registration_category") or "").strip(),
         }
         if not parsed["project_name"]:
             warnings.append(f"第 {excel_row_no} 行：缺少所属项目，已跳过")
@@ -240,5 +324,6 @@ def parse_deficiency_excel(file_bytes: bytes) -> tuple[list[dict[str, Any]], lis
     except Exception:
         pass
     if not out:
-        raise ValueError("未解析到有效发补行（请确认表头与数据行）")
+        hint = "；".join(warnings[:8]) if warnings else "请确认表头与数据行"
+        raise ValueError(f"未解析到有效发补行（{hint}）")
     return out, warnings

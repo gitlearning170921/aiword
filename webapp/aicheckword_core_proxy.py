@@ -127,6 +127,38 @@ def upstream_get(
     return jsonify({"ok": True, "upstream": payload, "organizationId": organization_id}), 200
 
 
+def upstream_delete(
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    organization_id: str | None = None,
+    read_seconds: int = 60,
+) -> tuple[Any, int]:
+    base = integration_api_base()
+    if not base:
+        return upstream_unconfigured_response()
+    url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        resp = integration_request(
+            "DELETE",
+            url,
+            params=params or {},
+            headers=upstream_headers(for_multipart=False, organization_id=organization_id),
+            timeout=integration_requests_timeout(read_seconds=read_seconds),
+        )
+    except requests.RequestException as exc:
+        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {"raw": (resp.text or "")[:8000]}
+    if resp.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        msg = detail or (payload.get("message") if isinstance(payload, dict) else None) or f"上游 HTTP {resp.status_code}"
+        return jsonify({"message": msg, "upstream": payload}), resp.status_code
+    return jsonify({"ok": True, "upstream": payload, "organizationId": organization_id}), 200
+
+
 def parse_checklist_json(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, list):
         return [x for x in raw if isinstance(x, dict)]

@@ -109,6 +109,7 @@
                         <button type="button" id="dcResetBtn" class="btn btn-outline-secondary btn-sm">重置</button>
                         <button type="button" id="dcBatchAddDocBtn" class="btn btn-outline-success btn-sm">新增</button>
                         <button type="button" id="dcOpenIssueModalBtn" class="btn btn-outline-primary btn-sm">申请编号</button>
+                        <a id="dcDownloadImportTemplateBtn" class="btn btn-outline-secondary btn-sm" href="#" title="按历史多 Sheet 台账格式下载空表/含示例模板">下载导入模板</a>
                         <input id="dcExcelInput" type="file" accept=".xlsx,.xls" class="d-none">
                         <label id="dcExcelImportBtn" class="btn btn-outline-secondary btn-sm mb-0" for="dcExcelInput">
                             <span id="dcExcelImportBtnText">导入Excel</span>
@@ -382,7 +383,7 @@
                 </div>
                 <details class="mb-2">
                     <summary class="small text-primary" style="cursor:pointer">批量申请（多行文件名称）</summary>
-                    <p class="small text-muted mb-1 mt-2">每行一个文件名称；移出输入框后点「批量预览」判重并取号。英文名优先取自台账同名，其次翻译缓存，最后才请求 AI。</p>
+                    <p class="small text-muted mb-1 mt-2">每行一个文件名称。可先「批量预览」，再点「批量申请编号」或底部「申请编号并登记」（批量区有内容时两者都会按当前多行全部提交）。英文名优先取自台账同名，其次翻译缓存，最后才请求 AI。</p>
                     <textarea id="dcIssueBatchTitles" class="form-control form-control-sm font-monospace" rows="4" placeholder="软件需求规范&#10;架构设计规范&#10;…"></textarea>
                     <div class="d-flex gap-2 mt-2 flex-wrap">
                         <button type="button" id="dcIssueBatchPreviewBtn" class="btn btn-outline-secondary btn-sm">批量预览</button>

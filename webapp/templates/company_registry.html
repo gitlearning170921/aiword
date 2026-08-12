@@ -16,26 +16,46 @@
     </div>
 </div>
 
+{% set page0_has_doc_tools = feature_flags.FEATURE_PAGE0_DRAFT_GEN or feature_flags.FEATURE_PAGE0_AUDIT or feature_flags.FEATURE_PAGE0_AUDIT_MODIFY or feature_flags.FEATURE_PAGE0_TRANSLATE %}
+{% set page0_has_reg_tools = feature_flags.FEATURE_LITERATURE_SEARCH %}
+{% if page0_has_doc_tools or page0_has_reg_tools %}
 <div class="card mb-4">
-    <div class="card-header">文档工具</div>
+    <div class="card-header">工具入口</div>
     <div class="card-body">
-        <p class="small text-muted mb-3">以下功能均通过<strong>手动上传</strong>文档，{% if is_page13_super_admin %}不从页面1/2 任务带入{% else %}不从任务列表带入{% endif %}。</p>
-        <div class="d-flex flex-wrap gap-2">
-            {% if feature_flags.FEATURE_PAGE0_DRAFT_GEN %}
-            <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+        <div class="row g-3">
+            {% if page0_has_doc_tools %}
+            <div class="col-12 col-md-6">
+                <div class="fw-semibold mb-1">文档工具</div>
+                <p class="small text-muted mb-2">通过<strong>手动上传</strong>文档使用，{% if is_page13_super_admin %}不从页面1/2 任务带入{% else %}不从任务列表带入{% endif %}。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    {% if feature_flags.FEATURE_PAGE0_DRAFT_GEN %}
+                    <a href="{{ url_for('draft_gen.draft_gen_page', manual=1) }}" class="btn btn-outline-primary">初稿生成</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE0_AUDIT %}
+                    <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE0_AUDIT_MODIFY %}
+                    <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PAGE0_TRANSLATE %}
+                    <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
+                    {% endif %}
+                </div>
+            </div>
             {% endif %}
-            {% if feature_flags.FEATURE_PAGE0_AUDIT %}
-            <a href="{{ url_for('audit.audit_page', manual=1) }}" class="btn btn-outline-info">文档审核</a>
-            {% endif %}
-            {% if feature_flags.FEATURE_PAGE0_AUDIT_MODIFY %}
-            <a href="{{ url_for('audit_modify.audit_modify_page', manual=1) }}" class="btn btn-outline-info">审核后修改</a>
-            {% endif %}
-            {% if feature_flags.FEATURE_PAGE0_TRANSLATE %}
-            <a href="{{ url_for('translation.translate_page', manual=1) }}" class="btn btn-outline-info">文档翻译</a>
+            {% if page0_has_reg_tools %}
+            <div class="col-12 col-md-6">
+                <div class="fw-semibold mb-1">注册工具</div>
+                <p class="small text-muted mb-2">注册资料相关检索与整理。</p>
+                <div class="d-flex flex-wrap gap-2">
+                    <a href="{{ url_for('literature.literature_page') }}" class="btn btn-outline-primary">文献检索</a>
+                </div>
+            </div>
             {% endif %}
         </div>
     </div>
 </div>
+{% endif %}
 
 <div class="card mb-4" id="companyKnowledgeTrainCard">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
@@ -227,129 +247,269 @@
             </div>
         </div>
         <div class="tab-pane fade" id="trainTabDeficiency" role="tabpanel">
+            <style>
+                .def-group-scroll { max-height: 26rem; overflow-y: auto; }
+                .def-group-scroll thead th {
+                    position: sticky; top: 0; z-index: 1;
+                    background: var(--bs-table-bg, #f8f9fa);
+                }
+                .def-cell-ellipsis {
+                    display: inline-block; max-width: 14rem;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+                }
+                .def-project-col { max-width: 10rem; }
+                .def-group-collapsed .def-group-content { display: none; }
+                .def-group-collapsed .def-group-pager { display: none; }
+                .def-dup-badge { font-size: 0.7rem; vertical-align: middle; }
+                .def-stats-chips span {
+                    display: inline-block; margin: 0 0.35rem 0.25rem 0;
+                    padding: 0.1rem 0.45rem; border: 1px solid #dee2e6; border-radius: 0.25rem;
+                    background: #f8f9fa;
+                }
+            </style>
             <p class="small text-muted mb-3">
                 先录入发补记录（意见、方案、状态等），整改前/后文档可后续补充再训练入库。
                 下游初稿/审核等将按同一注册国家+类别自动注入修正意见（含未完成发补）。
             </p>
-            <div class="row g-2 align-items-end mb-3">
-                <div class="col-md-4">
-                    <label class="form-label small mb-1" for="defOrgSelect">所属公司</label>
-                    <select class="form-select form-select-sm" id="defOrgSelect"></select>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small mb-1" for="defStatusFilter">整改状态</label>
-                    <select class="form-select form-select-sm" id="defStatusFilter">
-                        <option value="">全部</option>
-                        <option value="open">未完成</option>
-                        <option value="done">已完成</option>
-                    </select>
-                </div>
-                <div class="col-md-5 d-flex gap-2 flex-wrap">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnDefRefresh">刷新列表</button>
-                    <button type="button" class="btn btn-sm btn-primary" id="btnDefNew">新建发补</button>
-                    <a class="btn btn-sm btn-outline-primary" id="btnDefDownloadTemplate" href="#">下载导入模板</a>
-                    <label class="btn btn-sm btn-outline-success mb-0" for="defExcelFile">导入 Excel</label>
-                    <input type="file" class="d-none" id="defExcelFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
-                </div>
+            <div class="card mb-3">
+                <form id="defFilterForm" class="card-body" autocomplete="off">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1" for="defOrgSelect">所属公司</label>
+                            <select class="form-select form-select-sm" id="defOrgSelect"></select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1" for="defKeyword">关键词</label>
+                            <input type="text" class="form-control form-control-sm" id="defKeyword" placeholder="意见/方案/来源/项目">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1" for="defProjectFilter">所属项目</label>
+                            <select class="form-select form-select-sm" id="defProjectFilter">
+                                <option value="">全部项目</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small mb-1" for="defStatusFilter">整改状态</label>
+                            <select class="form-select form-select-sm" id="defStatusFilter">
+                                <option value="">全部</option>
+                                <option value="open">未完成</option>
+                                <option value="done">已完成</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1" for="defTypeFilter">发补类型</label>
+                            <select class="form-select form-select-sm" id="defTypeFilter">
+                                <option value="">全部</option>
+                                <option value="registration_review">注册审评</option>
+                                <option value="type_testing">体考</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1" for="defPriorityFilter">优先级</label>
+                            <select class="form-select form-select-sm" id="defPriorityFilter">
+                                <option value="">全部</option>
+                                <option value="high">高</option>
+                                <option value="medium">中</option>
+                                <option value="low">低</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1" for="defTrainFilter">训练状态</label>
+                            <select class="form-select form-select-sm" id="defTrainFilter">
+                                <option value="">全部</option>
+                                <option value="not_trained">未训练</option>
+                                <option value="trained">已训练</option>
+                                <option value="stale">待重训</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small mb-1" for="defSortBy">排序</label>
+                            <select class="form-select form-select-sm" id="defSortBy">
+                                <option value="import" selected>导入顺序（与Excel一致）</option>
+                                <option value="issued">发补日期</option>
+                                <option value="dup">意见重复次数</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 d-flex gap-2 flex-wrap">
+                            <button type="submit" class="btn btn-sm btn-primary" id="btnDefSearch">查询</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnDefReset">重置</button>
+                            <button type="button" class="btn btn-sm btn-outline-success" id="btnDefNew">新增</button>
+                            <a class="btn btn-sm btn-outline-primary" id="btnDefDownloadTemplate" href="#">下载导入模板</a>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="defExcelImportBtn">
+                                <span id="defExcelImportBtnText">导入Excel</span>
+                            </button>
+                            <a class="btn btn-sm btn-outline-secondary" href="/company/deficiency/import-logs" id="btnDefImportLogs">导入操作日志</a>
+                        </div>
+                    </div>
+                </form>
             </div>
+            <input type="file" class="d-none" id="defExcelFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
             <div class="small text-muted mb-2" id="defImportHint"></div>
-            <div class="table-responsive mb-3">
-                <table class="table table-sm table-hover align-middle">
-                    <thead class="table-light">
-                    <tr>
-                        <th>发补日期</th>
-                        <th>项目</th>
-                        <th>类型</th>
-                        <th>来源</th>
-                        <th>优先级</th>
-                        <th>状态</th>
-                        <th>训练</th>
-                        <th class="text-end">操作</th>
-                    </tr>
-                    </thead>
-                    <tbody id="defRecordsBody">
-                    <tr><td colspan="8" class="text-muted small p-3">请选择公司后刷新</td></tr>
-                    </tbody>
-                </table>
+            <div class="mb-3 d-none" id="defImportProgressWrap">
+                <div class="d-flex justify-content-between small text-muted mb-1">
+                    <span id="defImportProgressLabel">导入中…</span>
+                    <span id="defImportProgressPct">0%</span>
+                </div>
+                <div class="progress" style="height: 8px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" id="defImportProgressBar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
             </div>
-            <div class="border rounded p-3 bg-white" id="defEditorPanel" style="display:none">
-                <h6 class="mb-3" id="defEditorTitle">新建发补记录</h6>
-                <input type="hidden" id="defEditId">
-                <div class="row g-2">
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1" for="defProjectId">所属项目 *</label>
-                        <select class="form-select form-select-sm" id="defProjectId"></select>
+            <div id="defListSummary" class="small text-muted mb-1"></div>
+            <div id="defStatsBar" class="def-stats-chips small text-muted mb-2"></div>
+            <div id="defBatchBar" class="alert alert-light border py-2 px-3 mb-2 d-none d-flex flex-wrap align-items-center gap-2">
+                <span class="small">已选 <strong id="defBatchCount">0</strong> 条</span>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="btnDefBatchEdit">批量编辑</button>
+                <button type="button" class="btn btn-sm btn-outline-danger" id="btnDefBatchDelete">批量删除</button>
+                <button type="button" class="btn btn-sm btn-link" id="btnDefBatchClear">取消选择</button>
+            </div>
+            <div id="defGroupSections"></div>
+
+            <div class="modal fade" id="defBatchModal" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h6 class="modal-title">批量编辑发补</h6>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="small text-muted mb-3">已选 <span id="defBatchModalCount">0</span> 条；仅勾选要修改的项，未勾选项保持原值。</p>
+                            <div class="mb-2 form-check">
+                                <input class="form-check-input" type="checkbox" id="defBatchChkProject">
+                                <label class="form-check-label small" for="defBatchChkProject">修改所属项目</label>
+                                <select id="defBatchProjectId" class="form-select form-select-sm mt-1" disabled></select>
+                                <div class="form-text small">将统一关联到所选公司总览项目（含注册国家/类别）</div>
+                            </div>
+                            <div class="mb-2 form-check">
+                                <input class="form-check-input" type="checkbox" id="defBatchChkStatus">
+                                <label class="form-check-label small" for="defBatchChkStatus">修改整改状态</label>
+                                <select id="defBatchStatus" class="form-select form-select-sm mt-1" disabled>
+                                    <option value="open">未完成</option>
+                                    <option value="done">已完成</option>
+                                </select>
+                            </div>
+                            <div class="mb-2 form-check">
+                                <input class="form-check-input" type="checkbox" id="defBatchChkPriority">
+                                <label class="form-check-label small" for="defBatchChkPriority">修改优先级</label>
+                                <select id="defBatchPriority" class="form-select form-select-sm mt-1" disabled>
+                                    <option value="high">高</option>
+                                    <option value="medium">中</option>
+                                    <option value="low">低</option>
+                                </select>
+                            </div>
+                            <div class="mb-2 form-check">
+                                <input class="form-check-input" type="checkbox" id="defBatchChkType">
+                                <label class="form-check-label small" for="defBatchChkType">修改发补类型</label>
+                                <select id="defBatchType" class="form-select form-select-sm mt-1" disabled>
+                                    <option value="registration_review">注册审评发补</option>
+                                    <option value="type_testing">体考发补</option>
+                                </select>
+                            </div>
+                            <div class="mb-2 form-check">
+                                <input class="form-check-input" type="checkbox" id="defBatchChkSource">
+                                <label class="form-check-label small" for="defBatchChkSource">修改发补来源</label>
+                                <input type="text" id="defBatchSource" class="form-control form-control-sm mt-1" disabled placeholder="发补来源">
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                            <button type="button" class="btn btn-sm btn-primary" id="btnDefBatchSave">保存</button>
+                        </div>
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label small mb-1" for="defType">发补类型 *</label>
-                        <select class="form-select form-select-sm" id="defType">
-                            <option value="registration_review">注册审评发补</option>
-                            <option value="type_testing">体考发补</option>
-                        </select>
-                    </div>
-                    <div class="col-md-3">
-                        <label class="form-label small mb-1" for="defPriority">优先级</label>
-                        <select class="form-select form-select-sm" id="defPriority">
-                            <option value="high">高</option>
-                            <option value="medium" selected>中</option>
-                            <option value="low">低</option>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label small mb-1" for="defIssuedOn">发补日期 *</label>
-                        <input type="date" class="form-control form-control-sm" id="defIssuedOn">
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label small mb-1" for="defRemediationStatus">整改状态</label>
-                        <select class="form-select form-select-sm" id="defRemediationStatus">
-                            <option value="open">未完成</option>
-                            <option value="done">已完成</option>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label small mb-1" for="defCompletedOn">整改完成日期</label>
-                        <input type="date" class="form-control form-control-sm" id="defCompletedOn">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1" for="defSource">发补来源</label>
-                        <input type="text" class="form-control form-control-sm" id="defSource" list="defSourceList" placeholder="如：器审中心 / 省局 / 检验所">
-                        <datalist id="defSourceList">
-                            <option value="器审中心"></option>
-                            <option value="省局"></option>
-                            <option value="检验所"></option>
-                            <option value="体考机构"></option>
-                        </datalist>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1">注册维度（由项目带出）</label>
-                        <div class="form-control form-control-sm bg-light" id="defDimReadonly">—</div>
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label small mb-1" for="defOpinion">发补意见 *</label>
-                        <textarea class="form-control form-control-sm" id="defOpinion" rows="4" placeholder="审评/体考意见原文"></textarea>
-                    </div>
-                    <div class="col-12">
-                        <label class="form-label small mb-1" for="defPlan">整改方案</label>
-                        <textarea class="form-control form-control-sm" id="defPlan" rows="3" placeholder="应对思路与拟修改范围"></textarea>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1" for="defBeforeFiles">整改前文档（可后补）</label>
-                        <input type="file" class="form-control form-control-sm" id="defBeforeFiles" multiple>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1" for="defAfterFiles">整改后文档（可后补）</label>
-                        <input type="file" class="form-control form-control-sm" id="defAfterFiles" multiple>
-                    </div>
-                    <div class="col-12 small text-muted" id="defAssetsHint"></div>
-                    <div class="col-12 d-flex flex-wrap gap-2 mt-2">
-                        <button type="button" class="btn btn-sm btn-primary" id="btnDefSave">保存</button>
-                        <button type="button" class="btn btn-sm btn-success" id="btnDefTrain">训练入库</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnDefCancel">取消</button>
-                        <span class="small text-muted align-self-center" id="defTrainHint"></span>
-                    </div>
-                    <div class="col-12">
-                        <div class="progress mt-2" style="height:8px;display:none" id="defTrainProgressWrap">
-                            <div class="progress-bar" id="defTrainProgressBar" style="width:0%"></div>
+                </div>
+            </div>
+
+            <div class="modal fade" id="defDocModal" tabindex="-1" aria-labelledby="defDocModalTitle" aria-hidden="true">
+                <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h6 class="modal-title" id="defDocModalTitle">新建发补记录</h6>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                        </div>
+                        <div class="modal-body">
+                            <input type="hidden" id="defEditId">
+                            <div class="row g-2">
+                                <div class="col-md-6" id="defProjectSelectWrap">
+                                    <label class="form-label small mb-1" for="defProjectId">所属项目 *</label>
+                                    <select class="form-select form-select-sm" id="defProjectId"></select>
+                                </div>
+                                <div class="col-md-6 d-none" id="defProjectReadonlyWrap">
+                                    <label class="form-label small mb-1">所属项目</label>
+                                    <div class="form-control form-control-sm bg-light" id="defProjectReadonly">—</div>
+                                    <div class="form-text small">未关联公司总览项目，项目信息仅只读展示</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1" for="defType">发补类型 *</label>
+                                    <select class="form-select form-select-sm" id="defType">
+                                        <option value="registration_review">注册审评发补</option>
+                                        <option value="type_testing">体考发补</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-1" for="defPriority">优先级</label>
+                                    <select class="form-select form-select-sm" id="defPriority">
+                                        <option value="high">高</option>
+                                        <option value="medium" selected>中</option>
+                                        <option value="low">低</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1" for="defIssuedOn">发补日期 *</label>
+                                    <input type="date" class="form-control form-control-sm" id="defIssuedOn">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1" for="defRemediationStatus">整改状态</label>
+                                    <select class="form-select form-select-sm" id="defRemediationStatus">
+                                        <option value="open">未完成</option>
+                                        <option value="done">已完成</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1" for="defCompletedOn">整改完成日期</label>
+                                    <input type="date" class="form-control form-control-sm" id="defCompletedOn">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1" for="defSource">发补来源</label>
+                                    <input type="text" class="form-control form-control-sm" id="defSource" list="defSourceList" placeholder="如：器审中心 / 省局 / 检验所">
+                                    <datalist id="defSourceList">
+                                        <option value="器审中心"></option>
+                                        <option value="省局"></option>
+                                        <option value="检验所"></option>
+                                        <option value="体考机构"></option>
+                                    </datalist>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1">注册维度</label>
+                                    <div class="form-control form-control-sm bg-light" id="defDimReadonly">—</div>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small mb-1" for="defOpinion">发补意见 *</label>
+                                    <textarea class="form-control form-control-sm" id="defOpinion" rows="4" placeholder="审评/体考意见原文"></textarea>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small mb-1" for="defPlan">整改方案</label>
+                                    <textarea class="form-control form-control-sm" id="defPlan" rows="3" placeholder="应对思路与拟修改范围"></textarea>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1" for="defBeforeFiles">整改前文档（可后补）</label>
+                                    <input type="file" class="form-control form-control-sm" id="defBeforeFiles" multiple>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-1" for="defAfterFiles">整改后文档（可后补）</label>
+                                    <input type="file" class="form-control form-control-sm" id="defAfterFiles" multiple>
+                                </div>
+                                <div class="col-12 small text-muted" id="defAssetsHint"></div>
+                                <div class="col-12">
+                                    <div class="progress mt-1" style="height:8px;display:none" id="defTrainProgressWrap">
+                                        <div class="progress-bar" id="defTrainProgressBar" style="width:0%"></div>
+                                    </div>
+                                    <span class="small text-muted" id="defTrainHint"></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer flex-wrap gap-2">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal" id="btnDefCancel">取消</button>
+                            <button type="button" class="btn btn-sm btn-success" id="btnDefTrain">训练入库</button>
+                            <button type="button" class="btn btn-sm btn-primary" id="btnDefSave">保存</button>
                         </div>
                     </div>
                 </div>

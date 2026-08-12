@@ -202,6 +202,7 @@ _INTEGRATION_PAGE_PREFIXES: tuple[str, ...] = (
     "/audit-modify",
     "/audit",
     "/translate",
+    "/literature",
 )
 
 
@@ -228,6 +229,8 @@ def _integration_feature_keys_for_path(path: str) -> tuple[str, ...]:
             "FEATURE_PAGE1_TRANSLATE",
             "FEATURE_PAGE2_TRANSLATE",
         )
+    if p.startswith("/literature"):
+        return ("FEATURE_LITERATURE_SEARCH",)
     return ()
 
 
@@ -276,6 +279,8 @@ def path_allowed_for_current_user(path: str) -> bool:
                 "/audit",
                 "/translate",
                 "/audit-modify",
+                "/literature",
+                "/document-control",
             ),
         )
     return _path_matches_prefixes(

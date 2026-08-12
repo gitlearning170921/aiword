@@ -95,6 +95,59 @@
         return App.request(url, options);
     }
 
+    function appPath(path) {
+        const root = (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
+        if (!root) return path;
+        if (path.startsWith("/") && !path.startsWith(root + "/")) return root + path;
+        return path;
+    }
+
+    function parseContentDispositionFilename(header) {
+        if (!header) return "";
+        const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+        if (star && star[1]) {
+            try {
+                return decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, ""));
+            } catch (_e) { /* ignore */ }
+        }
+        const quoted = /filename\s*=\s*"([^"]+)"/i.exec(header);
+        if (quoted && quoted[1]) return quoted[1];
+        const plain = /filename\s*=\s*([^;]+)/i.exec(header);
+        return plain && plain[1] ? plain[1].trim().replace(/^"+|"+$/g, "") : "";
+    }
+
+    async function downloadImportTemplate(includeSample) {
+        const params = new URLSearchParams();
+        params.set("type", includeSample ? "with_sample" : "empty");
+        const url = appPath(`/api/document-control/import/template?${params.toString()}`);
+        const resp = await fetch(url, { credentials: "same-origin" });
+        if (!resp.ok) {
+            let msg = `下载失败（HTTP ${resp.status}）`;
+            try {
+                const data = await resp.json();
+                if (data && data.message) msg = data.message;
+            } catch (_e) { /* ignore */ }
+            throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const cd = resp.headers.get("Content-Disposition") || "";
+        const parsed = parseContentDispositionFilename(cd);
+        const filename =
+            parsed ||
+            (includeSample ? "文控台账导入模板_含示例.xlsx" : "文控台账导入模板_空.xlsx");
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = filename;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+            if (a.parentNode) document.body.removeChild(a);
+            URL.revokeObjectURL(objectUrl);
+        }, 300);
+    }
+
     async function reqJson(url, options) {
         const root = (window.__SCRIPT_ROOT__ != null ? String(window.__SCRIPT_ROOT__) : "").replace(/\/+$/, "");
         let fullUrl = url;
@@ -1796,83 +1849,146 @@
             .join("");
     }
 
-    async function batchIssuePreview(busyBtn) {
-        const cfg = selectedIssueCategory();
+    function batchPreviewTitlesKey(titles) {
+        return (titles || [])
+            .map((t) => String(t || "").trim().toLowerCase())
+            .filter(Boolean)
+            .join("\n");
+    }
+
+    function issueBatchItemsMatchTitles(titles) {
+        if (!issueBatchItems.length || !titles.length) return false;
+        if (issueBatchItems.length !== titles.length) return false;
+        return batchPreviewTitlesKey(issueBatchItems.map((r) => r.title)) === batchPreviewTitlesKey(titles);
+    }
+
+    function validateBatchIssueContext(cfg) {
         if (!cfg) {
             notify("请选择台账分类", "warning");
-            return;
+            return false;
         }
         if (!cfg.autoAllocatable || cfg.disabledReason) {
-            notify(cfg.manualHint || cfg.disabledReason || "该分类不支持自动取号", "warning");
-            return;
+            notify(cfg.manualHint || cfg.disabledReason || cfg.kbRuleExcerpt || "该分类不支持自动取号", "warning");
+            return false;
         }
         if (cfg.needsProjectCode && !(document.getElementById("dcIssueProjectCode")?.value || "").trim()) {
             notify("请选择含项目编号的页面1项目", "warning");
-            return;
+            return false;
         }
+        return true;
+    }
+
+    async function runBatchIssuePreviewRequest(cfg) {
+        const res = await reqJson("/api/document-control/allocate/batch/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                ...buildIssuePayload(cfg),
+                titlesText: document.getElementById("dcIssueBatchTitles")?.value || "",
+            }),
+        });
+        renderIssueBatchResults(res.items || []);
+        const el = document.getElementById("dcPreviewResult");
+        if (el) {
+            el.textContent = `批量预览：共 ${res.total || 0} 条，可申请 ${res.readyCount || 0} 条，同名 ${res.duplicateCount || 0} 条，失败 ${res.errorCount || 0} 条`;
+        }
+        return res;
+    }
+
+    async function batchIssuePreview(busyBtn) {
+        const cfg = selectedIssueCategory();
+        if (!validateBatchIssueContext(cfg)) return false;
+        const titles = parseBatchTitlesText();
+        if (!titles.length) {
+            notify("请在批量区域填写至少一个文件名称", "warning");
+            return false;
+        }
+        try {
+            await withButtonBusy(busyBtn, "预览中…", async () => {
+                await runBatchIssuePreviewRequest(cfg);
+            });
+            return true;
+        } catch (e) {
+            notify(e.message || "批量预览失败", "danger");
+            return false;
+        }
+    }
+
+    async function batchIssueApply(busyBtn) {
+        const cfg = selectedIssueCategory();
+        if (!validateBatchIssueContext(cfg)) return;
         const titles = parseBatchTitlesText();
         if (!titles.length) {
             notify("请在批量区域填写至少一个文件名称", "warning");
             return;
         }
-        await withButtonBusy(busyBtn, "预览中…", async () => {
-            const res = await reqJson("/api/document-control/allocate/batch/preview", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    ...buildIssuePayload(cfg),
-                    titlesText: document.getElementById("dcIssueBatchTitles")?.value || "",
-                }),
-            });
-            renderIssueBatchResults(res.items || []);
-            const el = document.getElementById("dcPreviewResult");
-            if (el) {
-                el.textContent = `批量预览：共 ${res.total || 0} 条，可申请 ${res.readyCount || 0} 条，同名 ${res.duplicateCount || 0} 条，失败 ${res.errorCount || 0} 条`;
-            }
-        });
-    }
-
-    async function batchIssueApply(busyBtn) {
-        const cfg = selectedIssueCategory();
-        if (!cfg) return;
-        if (!cfg.autoAllocatable || cfg.disabledReason) {
-            notify(cfg.manualHint || cfg.kbRuleExcerpt || "该分类须手工编号", "warning");
-            return;
-        }
-        let items = issueBatchItems;
-        if (!items.length) {
-            await batchIssuePreview(document.getElementById("dcIssueBatchPreviewBtn"));
-            items = issueBatchItems;
-        }
-        const applyItems = items.filter(
-            (r) => !r.error && !r.duplicateTitle && !r.subtypeChoiceRequired
-        );
-        if (!applyItems.length) {
-            notify("没有可直接申请的项目（请先批量预览，或处理同名项）", "warning");
-            return;
-        }
         const modalEl = document.getElementById("dcIssueModal");
         const modal = modalEl ? bootstrap.Modal.getOrCreateInstance(modalEl) : null;
         await withButtonBusy(busyBtn, "提交中…", async () => {
-            const res = await reqJson("/api/document-control/allocate/batch/apply", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    ...buildIssuePayload(cfg),
-                    items: applyItems.map((r) => ({
-                        title: r.title,
-                        titleEn: r.titleEn,
-                    })),
-                }),
-            });
-            notify(res.message || "批量申请完成", res.failCount ? "warning" : "success");
-            issueBatchItems = [];
-            renderIssueBatchResults([]);
-            const batchTa = document.getElementById("dcIssueBatchTitles");
-            if (batchTa) batchTa.value = "";
-            modal?.hide();
-            resetCategoryPages();
-            await loadGroupedLedger();
+            try {
+                // 文本有改动或尚未预览时，必须按当前多行重新预览，避免只提交旧的一条
+                if (!issueBatchItemsMatchTitles(titles)) {
+                    setButtonBusy(busyBtn, true, "预览中…");
+                    await runBatchIssuePreviewRequest(cfg);
+                    setButtonBusy(busyBtn, true, "提交中…");
+                }
+                const applyItems = issueBatchItems.filter(
+                    (r) => !r.error && !r.duplicateTitle && !r.subtypeChoiceRequired
+                );
+                if (!applyItems.length) {
+                    notify("没有可直接申请的项目（请先批量预览，或处理同名项）", "warning");
+                    return;
+                }
+                const res = await reqJson("/api/document-control/allocate/batch/apply", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        ...buildIssuePayload(cfg),
+                        items: applyItems.map((r) => ({
+                            title: r.title,
+                            titleEn: r.titleEn,
+                        })),
+                    }),
+                });
+                const okCount = Number(res.okCount || 0);
+                const failCount = Number(res.failCount || 0);
+                const skipCount = Number(res.skipCount || 0);
+                notify(
+                    res.message || `成功 ${okCount} 条，跳过 ${skipCount} 条，失败 ${failCount} 条`,
+                    failCount || skipCount ? "warning" : "success"
+                );
+                if (Array.isArray(res.items) && res.items.length) {
+                    renderIssueBatchResults(
+                        res.items.map((row) => ({
+                            title: row.title,
+                            titleEn: row.titleEn,
+                            titleEnSource: row.titleEnSource,
+                            documentNumber: row.documentNumber,
+                            error: row.ok ? null : row.error || row.message,
+                            duplicateTitle: !!row.duplicateTitle && !row.ok,
+                            subtypeChoiceRequired: !!row.subtypeChoiceRequired,
+                            existingDocument: row.existingDocument,
+                            preview: row.documentNumber
+                                ? { document_number: row.documentNumber }
+                                : null,
+                        }))
+                    );
+                    const el = document.getElementById("dcPreviewResult");
+                    if (el) {
+                        el.textContent = `批量申请结果：成功 ${okCount} 条，跳过 ${skipCount} 条，失败 ${failCount} 条`;
+                    }
+                }
+                if (okCount > 0) {
+                    const batchTa = document.getElementById("dcIssueBatchTitles");
+                    if (batchTa) batchTa.value = "";
+                    issueBatchItems = [];
+                    modal?.hide();
+                    resetCategoryPages();
+                    await loadGroupedLedger();
+                }
+            } catch (e) {
+                notify(e.message || "批量申请失败", "danger");
+            }
         });
     }
 
@@ -2136,6 +2252,12 @@
         });
         document.getElementById("dcApplyBtn")?.addEventListener("click", async () => {
             const cfg = selectedIssueCategory();
+            const batchTitles = parseBatchTitlesText();
+            // 批量区有内容时，「申请编号并登记」走批量申请，避免只登记单行空标题
+            if (batchTitles.length) {
+                await batchIssueApply(document.getElementById("dcApplyBtn"));
+                return;
+            }
             const title = (document.getElementById("dcIssueTitle")?.value || "").trim();
             if (!cfg?.sheetCategory || !title) {
                 notify("请选择台账分类并填写文件名称", "warning");
@@ -2163,6 +2285,13 @@
         document.getElementById("dcIssueBatchApplyBtn")?.addEventListener("click", () => {
             batchIssueApply(document.getElementById("dcIssueBatchApplyBtn"));
         });
+        document.getElementById("dcIssueBatchTitles")?.addEventListener("input", () => {
+            // 文本变更后清空旧预览，强制按最新多行重新预览/申请
+            if (issueBatchItems.length) {
+                issueBatchItems = [];
+                renderIssueBatchResults([]);
+            }
+        });
     }
 
     function bindActions() {
@@ -2170,6 +2299,18 @@
             e.preventDefault();
             resetCategoryPages();
             loadGroupedLedger({ busySearch: true });
+        });
+        document.getElementById("dcDownloadImportTemplateBtn")?.addEventListener("click", async (e) => {
+            e.preventDefault();
+            const withSample = window.confirm(
+                "下载文控台账导入模板。\n\n确定 = 含示例行（可删后导入）\n取消 = 仅空表头"
+            );
+            try {
+                await downloadImportTemplate(!!withSample);
+                notify(withSample ? "已下载含示例模板" : "已下载空表头模板", "success");
+            } catch (err) {
+                notify(err.message || "下载模板失败", "danger");
+            }
         });
         document.getElementById("dcResetBtn")?.addEventListener("click", () => {
             ["dcKeyword", "dcSheetCategory", "dcProjectCode", "dcProjectName", "dcRegisteredCountry"].forEach((id) => {
