@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}项目知识库协同{% endblock %}
+{% block content %}
+<div class="container-fluid px-3 px-lg-4">
+  <div class="hero-bar d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">项目知识库协同</h1>
+      <p class="text-muted mb-0">统计按页面1任务全量分区。已同步/失败/待同步是指写入<strong>本项目知识库</strong>（供初稿、审核、翻译共用），不是文控中心。</p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('document_control.document_control_page') }}">文控中心</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pages.upload_page') }}">返回页面1</a>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body row g-2 align-items-end">
+      <div class="col-md-5">
+        <label class="form-label small">项目</label>
+        <select id="pkbProjectId" class="form-select form-select-sm">
+          <option value="">全部项目（统计概览）</option>
+        </select>
+      </div>
+      <div class="col-md-7 d-flex gap-2 flex-wrap">
+        <button id="pkbBackToStatsBtn" type="button" class="btn btn-outline-secondary btn-sm d-none">返回统计</button>
+        <button id="pkbRefreshBtn" type="button" class="btn btn-outline-secondary btn-sm">刷新统计</button>
+        <button id="pkbIngestAllBtn" type="button" class="btn btn-primary btn-sm">全部入库并同步</button>
+        <button id="pkbRetryBtn" type="button" class="btn btn-outline-warning btn-sm" disabled>重试失败同步</button>
+        <button id="pkbBackfillBtn" type="button" class="btn btn-outline-primary btn-sm" disabled>入库并同步</button>
+        <button id="pkbPromoteBtn" type="button" class="btn btn-success btn-sm" disabled>同步到文控中心</button>
+        <label class="form-check small mt-1 mb-0">
+          <input id="pkbTrainHistorical" class="form-check-input" type="checkbox" disabled>
+          <span class="form-check-label">同步时训练历史知识库</span>
+        </label>
+        <span id="pkbSyncMsg" class="small text-muted align-self-center"></span>
+      </div>
+    </div>
+  </div>
+  <div class="alert alert-light border small mb-3">
+    <div class="fw-semibold mb-1">状态说明</div>
+    <ul class="mb-1 ps-3">
+      <li><strong>已同步</strong>：已写入本项目知识库，初稿 / 审核 / 审核后修改 / 翻译会共用同一套资料。</li>
+      <li><strong>失败</strong>：写入项目知识库失败，可在本页点「重试同步」。</li>
+      <li><strong>待同步</strong>：已登记，等待写入项目知识库。</li>
+      <li><strong>待入库</strong>：页面1 已有文件和文件编号，但还没写入项目知识库；点「入库并同步」即可。</li>
+      <li><strong>缺编号</strong>：有文件但没有文件编号，需先在页面1 或文控中心补编号，不能入库。</li>
+      <li><strong>无文件</strong>：还没有任务文件，需先在页面1 / 页面2 上传。</li>
+    </ul>
+    <div class="text-muted">「同步到文控中心」是定稿后转入文控台账，和上面写入项目知识库不是同一条链路。</div>
+  </div>
+  <div id="pkbMissingDocHint" class="alert alert-warning small d-none"></div>
+
+  <div id="pkbStatsCard" class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span>各项目知识库统计</span>
+      <span id="pkbStatsCount" class="badge text-bg-secondary">0 个项目</span>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-bordered table-hover mb-0 align-middle">
+          <thead class="table-light">
+            <tr>
+              <th>项目</th>
+              <th>状态</th>
+              <th>任务总数</th>
+              <th title="已写入本项目知识库">已同步</th>
+              <th title="写入项目知识库失败">失败</th>
+              <th title="已登记，等待写入项目知识库">待同步</th>
+              <th title="有文件和编号，尚未写入项目知识库">待入库</th>
+              <th title="有文件但缺文件编号，需先补编号">缺编号</th>
+              <th title="还没有任务文件">无文件</th>
+              <th>最近更新</th>
+              <th style="min-width:168px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="pkbStatsBody">
+            <tr><td colspan="11" class="text-muted small text-center py-3">正在加载统计…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="pkbDetailCard" class="card mb-3 d-none">
+    <div class="card-header d-flex justify-content-between">
+      <span>项目任务记录</span>
+      <span id="pkbCount" class="badge text-bg-secondary">0 条</span>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-bordered mb-0 align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width:18%">文件编号</th>
+              <th style="width:18%">文件名称</th>
+              <th style="width:10%">版本</th>
+              <th style="width:10%">状态</th>
+              <th style="width:12%">同步状态</th>
+              <th style="width:12%">文控更新时间</th>
+              <th style="width:8%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="pkbBody">
+            <tr><td colspan="7" class="text-muted small text-center py-3">请选择项目后查看</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="pkbHistoryWrap" class="card d-none">
+    <div class="card-header">文档版本历史</div>
+    <div class="card-body">
+      <pre id="pkbHistory" class="small bg-light border rounded p-2 mb-0" style="max-height:260px; overflow:auto;"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block body_extra %}
+<script src="{{ url_for('static', filename='js/project_kb.js', v=static_version) }}"></script>
+{% endblock %}

@@ -556,6 +556,67 @@ class ProjectVersionRecord(db.Model):
     )
 
 
+class ProjectKnowledgeDocumentVersion(db.Model):
+    """项目知识库文档真源快照（文控真源）。"""
+
+    __tablename__ = "project_kb_document_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "project_id",
+            "normalized_document_number",
+            "version",
+            name="uq_project_kb_doc_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    document_number: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    normalized_document_number: Mapped[str] = mapped_column(db.String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(db.String(255), nullable=False, default="")
+    version: Mapped[str] = mapped_column(db.String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="controlled")
+    file_uri: Mapped[Optional[str]] = mapped_column(db.String(1024), nullable=True)
+    source_checksum: Mapped[str] = mapped_column(db.String(128), nullable=False, default="")
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    is_latest: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False, index=True)
+    sync_state: Mapped[str] = mapped_column(db.String(32), nullable=False, default="pending")
+    sync_error: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    synced_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    metadata_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
+class ProjectKnowledgeSyncOutbox(db.Model):
+    """项目知识库同步事件（Outbox）。"""
+
+    __tablename__ = "project_kb_sync_outbox"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_project_kb_sync_event_key"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    event_key: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(db.String(32), nullable=False, default="UPSERT")
+    payload_json: Mapped[dict] = mapped_column(db.JSON, nullable=False)
+    status: Mapped[str] = mapped_column(db.String(32), nullable=False, default="pending", index=True)
+    retries: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class UploadRecord(db.Model):
     """
     上传记录：支持文件上传或多行文档链接。

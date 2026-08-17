@@ -1437,6 +1437,81 @@
                 return;
             }
             const category = String(categorySel.value || "regulation");
+            let overwriteMode = String(
+                document.getElementById("companyTrainOverwriteMode")?.value || "overwrite"
+            ).trim();
+            if (overwriteMode !== "skip" && overwriteMode !== "overwrite") {
+                overwriteMode = "overwrite";
+            }
+
+            // 覆盖前弹窗确认：查询同名已存在文件
+            const resolveDisplayName = (f) => {
+                const n = String(f?.name || "upload.bin").replace(/\\/g, "/");
+                const parts = n.split("/");
+                return parts[parts.length - 1] || "upload.bin";
+            };
+            const selectedNames = selected.map(resolveDisplayName);
+            const hasArchive = selected.some((f) =>
+                /\.(zip|tar|tgz|gz|rar)$/i.test(String(f?.name || ""))
+            );
+            let existingCaseIdForCheck = 0;
+            if (category === "project_case") {
+                const mode0 = String(caseModeSel?.value || "new").trim() || "new";
+                if (mode0 === "existing") {
+                    existingCaseIdForCheck = Number(String(existingCaseSel?.value || "").trim()) || 0;
+                }
+            }
+            try {
+                const q = new URLSearchParams({
+                    organizationId: String(orgSel.value || "").trim(),
+                    category,
+                });
+                if (existingCaseIdForCheck) q.set("caseId", String(existingCaseIdForCheck));
+                const existRes = await apiRequest(
+                    `/api/company/training/existing-files?${q.toString()}`
+                );
+                const existing = new Set(
+                    (Array.isArray(existRes?.fileNames) ? existRes.fileNames : []).map((x) =>
+                        String(x || "").trim()
+                    )
+                );
+                const dups = selectedNames.filter((n) => existing.has(n));
+                if (dups.length || (overwriteMode === "overwrite" && hasArchive)) {
+                    let msg = "";
+                    if (dups.length) {
+                        const shown = dups.slice(0, 15).join("\n");
+                        const more = dups.length > 15 ? `\n…（共 ${dups.length} 个）` : "";
+                        msg =
+                            `以下文件已在知识库中存在，是否用本次上传覆盖旧版？\n\n${shown}${more}\n\n` +
+                            `【确定】覆盖（最新替换旧版）\n【取消】跳过重名，仅训练其余文件`;
+                    } else {
+                        msg =
+                            `压缩包内若有与知识库同名的文件，将覆盖旧版。\n\n` +
+                            `【确定】允许覆盖\n【取消】同名时跳过`;
+                    }
+                    if (window.confirm(msg)) {
+                        overwriteMode = "overwrite";
+                    } else {
+                        overwriteMode = "skip";
+                        if (dups.length && dups.length >= selectedNames.length && !hasArchive) {
+                            notify("已取消：全部为重名且选择跳过，无需训练", "warning");
+                            return;
+                        }
+                    }
+                }
+            } catch (_) {
+                // 查重失败时仍允许训练，但覆盖模式再确认一次
+                if (overwriteMode === "overwrite") {
+                    if (
+                        !window.confirm(
+                            "无法确认知识库中是否已有同名文件。\n\n【确定】仍按覆盖模式训练\n【取消】改为跳过同名"
+                        )
+                    ) {
+                        overwriteMode = "skip";
+                    }
+                }
+            }
+
             uploadBtn.disabled = true;
             setHint("训练中，请稍候...");
             try {
@@ -1470,6 +1545,7 @@
                     const fd = new FormData();
                     fd.append("organizationId", String(orgSel.value || "").trim());
                     fd.append("caseId", String(caseId));
+                    fd.append("overwriteMode", overwriteMode);
                     selected.forEach((f) => fd.append("files", f));
                     res = await apiRequest("/api/company/training/project-cases/upload", {
                         method: "POST",
@@ -1480,9 +1556,6 @@
                     const fd = new FormData();
                     fd.append("organizationId", String(orgSel.value || "").trim());
                     fd.append("category", category);
-                    const overwriteMode = String(
-                        document.getElementById("companyTrainOverwriteMode")?.value || "overwrite"
-                    ).trim();
                     fd.append("overwriteMode", overwriteMode);
                     selected.forEach((f) => fd.append("files", f));
                     res = await apiRequest("/api/company/training/upload", {
@@ -1649,7 +1722,6 @@
     function initTrainingHubExtras() {
         const checklistEditor = document.getElementById("checklistJsonEditor");
         const checklistHint = document.getElementById("checklistHint");
-        const knowledgeBox = document.getElementById("knowledgeStatusBox");
         const orgSel = document.getElementById("companyActiveOrgSelect");
 
         const readHubOrg = () => {
@@ -1722,29 +1794,132 @@
         });
 
         async function refreshKnowledgeStatus() {
+            const box = document.getElementById("knowledgeStatusBox");
             const orgId = readHubOrg();
-            if (!orgId || !knowledgeBox) return;
-            knowledgeBox.textContent = "加载中…";
+            if (!orgId || !box) return;
+            box.innerHTML = `<p class="small text-muted mb-0">加载中…</p>`;
             try {
                 const res = await apiRequest(
                     `/api/company/training/status?organizationId=${encodeURIComponent(orgId)}`
                 );
-                knowledgeBox.textContent = JSON.stringify(res.status || res, null, 2);
+                box.innerHTML = renderKnowledgeStatusHtml(res?.status || res);
             } catch (e) {
-                knowledgeBox.textContent = e.message || "加载失败";
+                box.innerHTML = `<p class="small text-danger mb-0">${esc(e.message || "加载失败")}</p>`;
             }
+        }
+
+        function renderKnowledgeStatusHtml(raw) {
+            const st = raw && typeof raw === "object" ? raw : {};
+            const kb = st.knowledge_stats && typeof st.knowledge_stats === "object" ? st.knowledge_stats : {};
+            const byCat = kb.by_category && typeof kb.by_category === "object" ? kb.by_category : {};
+            const reg = st.regulations_kb && typeof st.regulations_kb === "object" ? st.regulations_kb : {};
+            const cp = st.checkpoints_kb && typeof st.checkpoints_kb === "object" ? st.checkpoints_kb : {};
+            const fb = st.audit_feedback_kb && typeof st.audit_feedback_kb === "object" ? st.audit_feedback_kb : {};
+            const n = (v) => {
+                const x = Number(v);
+                return Number.isFinite(x) ? x : 0;
+            };
+            const totalFiles = n(kb.total_files != null ? kb.total_files : reg.file_count);
+            const totalChunks = n(kb.total_chunks != null ? kb.total_chunks : reg.document_count);
+            const catRows = [
+                ["regulation", "法规文件"],
+                ["program", "程序文件"],
+                ["project_case", "项目案例文件"],
+                ["glossary", "词条"],
+                ["internal_control", "内部管控文件"],
+            ];
+            const isAdmin = Boolean(window.__PAGE13_SUPER_ADMIN__);
+            const collName = String(st.collection_name || reg.collection_name || "").trim();
+            const caption = isAdmin && collName
+                ? (typeof window.ufText === "function"
+                    ? window.ufText(`当前知识库 collection：${collName}`, "当前知识库")
+                    : `当前知识库 collection：${collName}`)
+                : "当前知识库（以数据库为准）";
+            const metric = (title, value, sub) =>
+                `<div class="col-sm-6 col-lg-3">
+                    <div class="border rounded p-3 h-100 bg-white">
+                        <div class="small text-muted">${esc(title)}</div>
+                        <div class="fs-4 fw-semibold">${esc(String(value))}</div>
+                        ${sub ? `<div class="small text-muted">${esc(sub)}</div>` : ""}
+                    </div>
+                </div>`;
+            const catTableRows = catRows
+                .map(([key, label]) => {
+                    const c = byCat[key] && typeof byCat[key] === "object" ? byCat[key] : {};
+                    return `<tr>
+                        <td>${esc(label)}</td>
+                        <td class="text-end">${n(c.files)}</td>
+                        <td class="text-end">${n(c.chunks)}</td>
+                    </tr>`;
+                })
+                .join("");
+            const extraCatLabels = {
+                project_doc: "初稿产出文档（主知识库，不是项目知识库）",
+                project_kb: "误写入主库的项目知识库条目",
+                deficiency: "缺陷记录",
+            };
+            const extraCats = Object.keys(byCat).filter(
+                (k) => !catRows.some(([key]) => key === k) && k
+            );
+            const extraRows = extraCats
+                .map((key) => {
+                    const c = byCat[key] && typeof byCat[key] === "object" ? byCat[key] : {};
+                    const label = extraCatLabels[key] || key;
+                    return `<tr>
+                        <td>${esc(label)}</td>
+                        <td class="text-end">${n(c.files)}</td>
+                        <td class="text-end">${n(c.chunks)}</td>
+                    </tr>`;
+                })
+                .join("");
+            return `
+                <p class="small text-muted mb-2">${esc(caption)}</p>
+                <div class="row g-2 mb-3">
+                    ${metric("法规知识库", `${totalFiles} 文件 / ${totalChunks} 块`, "第一步训练（以数据库为准）")}
+                    ${metric("审核点清单", `${n(cp.file_count)} 文件 / ${n(cp.document_count)} 块`, "第二步训练入库")}
+                    ${metric("误报/纠正反馈", `${n(fb.document_count)} 块`, "独立反馈库，不随清单清空")}
+                </div>
+                <div class="small fw-semibold mb-2">训练统计（按类型，仅主知识库）</div>
+                <p class="small text-muted mb-2">项目知识库按项目单独存放，不计入本表；入库数量请到「项目知识库协同」查看。</p>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered align-middle mb-0 bg-white">
+                        <thead class="table-light">
+                            <tr>
+                                <th>分类</th>
+                                <th class="text-end">文件数</th>
+                                <th class="text-end">向量块</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${catTableRows}
+                            ${extraRows}
+                            <tr class="table-light">
+                                <td>全部</td>
+                                <td class="text-end">${totalFiles}</td>
+                                <td class="text-end">${totalChunks}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            `;
         }
 
         document.getElementById("btnRefreshKnowledgeStatus")?.addEventListener("click", refreshKnowledgeStatus);
 
         document.getElementById("btnTrainDirectory")?.addEventListener("click", async () => {
-            const orgId = readHubOrg();
+            const orgId = String(document.getElementById("companyActiveOrgSelect")?.value || "").trim()
+                || String(document.getElementById("knowledgeOrgSelect")?.value || "").trim();
             const dirPath = String(document.getElementById("trainDirPath")?.value || "").trim();
-            const category = String(document.getElementById("trainDirCategory")?.value || "regulation");
+            let category = String(document.getElementById("trainDirCategory")?.value || "").trim();
+            if (!category) {
+                category = String(document.getElementById("companyTrainCategory")?.value || "regulation").trim() || "regulation";
+            }
             if (!orgId || !dirPath) {
                 notify("请填写公司与目录路径", "warning");
                 return;
             }
+            const btn = document.getElementById("btnTrainDirectory");
+            if (btn) btn.disabled = true;
             try {
                 const res = await apiRequest("/api/company/training/directory", {
                     method: "POST",
@@ -1752,9 +1927,11 @@
                     body: JSON.stringify({ organizationId: orgId, dirPath, category }),
                 });
                 notify(res.message || "目录训练已完成", "success");
-                refreshKnowledgeStatus();
+                if (typeof refreshKnowledgeStatus === "function") refreshKnowledgeStatus();
             } catch (e) {
                 notify(e.message || "目录训练失败", "danger");
+            } finally {
+                if (btn) btn.disabled = false;
             }
         });
 
@@ -1982,16 +2159,23 @@
             const roWrap = document.getElementById("defProjectReadonlyWrap");
             const ro = document.getElementById("defProjectReadonly");
             const projectSel = document.getElementById("defProjectId");
+            const dimRoWrap = document.getElementById("defDimReadonlyWrap");
+            const dimEditWrap = document.getElementById("defDimEditWrap");
             const unlinked = !isNew && isUnlinkedRecord(r || {});
             if (selWrap) selWrap.classList.toggle("d-none", !!unlinked);
             if (roWrap) roWrap.classList.toggle("d-none", !unlinked);
             if (projectSel) projectSel.disabled = !!unlinked;
+            if (dimRoWrap) dimRoWrap.classList.toggle("d-none", !!unlinked);
+            if (dimEditWrap) dimEditWrap.classList.toggle("d-none", !unlinked);
             if (unlinked && ro) {
                 const pname = String(r.project_name || r.projectName || "—").trim() || "—";
-                const country = String(r.registration_country || "").trim();
-                const cat = String(r.registration_category || "").trim();
-                const dim = country || cat ? `（${country || "—"} / ${cat || "—"}）` : "";
-                ro.textContent = `${pname}${dim}`;
+                ro.textContent = pname;
+            }
+            if (unlinked) {
+                const cEl = document.getElementById("defRegCountry");
+                const catEl = document.getElementById("defRegCategory");
+                if (cEl) cEl.value = String(r.registration_country || "").trim();
+                if (catEl) catEl.value = String(r.registration_category || "").trim();
             }
         }
 
@@ -2349,12 +2533,60 @@
             document.getElementById("defCompletedOn").value = "";
             document.getElementById("defPriority").value = "medium";
             document.getElementById("defType").value = "registration_review";
-            document.getElementById("defAssetsHint").textContent = "";
+            renderAssetsList([]);
             document.getElementById("defTrainHint").textContent = "";
             document.getElementById("defBeforeFiles").value = "";
             document.getElementById("defAfterFiles").value = "";
             const wrap = document.getElementById("defTrainProgressWrap");
             if (wrap) wrap.style.display = "none";
+        }
+
+        function defAssetRoleLabel(role) {
+            const r = String(role || "").trim();
+            if (r === "before_doc") return "整改前";
+            if (r === "after_doc") return "整改后";
+            if (r === "opinion_file") return "意见文件";
+            if (r === "plan_file") return "方案文件";
+            return r || "附件";
+        }
+
+        function renderAssetsList(assets) {
+            const list = Array.isArray(assets) ? assets : [];
+            const hint = document.getElementById("defAssetsHint");
+            const ul = document.getElementById("defAssetsList");
+            if (hint) {
+                hint.textContent = list.length ? "" : "尚无整改前/后文档附件";
+                hint.classList.toggle("d-none", list.length > 0);
+            }
+            if (!ul) return;
+            if (!list.length) {
+                ul.innerHTML = "";
+                ul.classList.add("d-none");
+                return;
+            }
+            ul.classList.remove("d-none");
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+            ul.innerHTML = list
+                .map((a) => {
+                    const id = String(a.id || "").trim();
+                    const name = String(a.display_name || a.displayName || "附件").trim();
+                    const role = String(a.role || "").trim();
+                    return (
+                        `<li class="list-group-item d-flex justify-content-between align-items-center gap-2 flex-wrap py-2" data-asset-id="${esc(id)}">` +
+                        `<span class="text-break"><span class="badge bg-secondary me-1">${esc(defAssetRoleLabel(role))}</span>${esc(name)}</span>` +
+                        `<span class="btn-group btn-group-sm">` +
+                        `<button type="button" class="btn btn-outline-primary btn-def-asset-download" data-asset-id="${esc(id)}" title="下载">下载</button>` +
+                        `<button type="button" class="btn btn-outline-secondary btn-def-asset-replace" data-asset-id="${esc(id)}" title="用新文件替换">替换</button>` +
+                        `<button type="button" class="btn btn-outline-danger btn-def-asset-delete" data-asset-id="${esc(id)}" title="删除附件">删除</button>` +
+                        `</span></li>`
+                    );
+                })
+                .join("");
         }
 
         function fillEditorFromRecord(r, id) {
@@ -2375,12 +2607,19 @@
                     projectSel.value = linkedId;
                 }
             }
-            updateDimReadonly();
-            const dim = document.getElementById("defDimReadonly");
-            if (dim && !(projectSel?.selectedOptions?.[0]?.getAttribute("data-country"))) {
-                const country = String(r.registration_country || "").trim();
-                const cat = String(r.registration_category || "").trim();
-                if (country || cat) dim.textContent = `${country || "—"} / ${cat || "—"}`;
+            if (!isUnlinkedRecord(r)) {
+                updateDimReadonly();
+                const dim = document.getElementById("defDimReadonly");
+                if (dim && !(projectSel?.selectedOptions?.[0]?.getAttribute("data-country"))) {
+                    const country = String(r.registration_country || "").trim();
+                    const cat = String(r.registration_category || "").trim();
+                    if (country || cat) dim.textContent = `${country || "—"} / ${cat || "—"}`;
+                }
+            } else {
+                const cEl = document.getElementById("defRegCountry");
+                const catEl = document.getElementById("defRegCategory");
+                if (cEl) cEl.value = String(r.registration_country || "").trim();
+                if (catEl) catEl.value = String(r.registration_category || "").trim();
             }
             document.getElementById("defType").value = r.deficiency_type || "registration_review";
             document.getElementById("defPriority").value = r.priority || "medium";
@@ -2390,22 +2629,11 @@
             document.getElementById("defSource").value = r.deficiency_source || "";
             document.getElementById("defOpinion").value = r.opinion_text || "";
             document.getElementById("defPlan").value = r.remediation_plan || "";
-            const assets = Array.isArray(r.assets) ? r.assets : [];
-            document.getElementById("defAssetsHint").textContent = assets.length
-                ? `已有附件 ${assets.length}：` +
-                  assets.map((a) => `${a.role}:${a.display_name}`).join("；")
-                : "尚无整改前/后文档附件";
+            renderAssetsList(Array.isArray(r.assets) ? r.assets : []);
         }
 
         function softUpdateEditorMeta(r) {
-            const assets = Array.isArray(r?.assets) ? r.assets : [];
-            const hint = document.getElementById("defAssetsHint");
-            if (hint) {
-                hint.textContent = assets.length
-                    ? `已有附件 ${assets.length}：` +
-                      assets.map((a) => `${a.role}:${a.display_name}`).join("；")
-                    : "尚无整改前/后文档附件";
-            }
+            renderAssetsList(Array.isArray(r?.assets) ? r.assets : []);
             const trainHint = document.getElementById("defTrainHint");
             if (trainHint && r && r.train_status) {
                 trainHint.textContent = `训练状态：${trainLabel(r.train_status)}`;
@@ -2523,6 +2751,8 @@
             });
         }
         wireBatchFieldToggle("defBatchChkProject", "defBatchProjectId");
+        wireBatchFieldToggle("defBatchChkCountry", "defBatchCountry");
+        wireBatchFieldToggle("defBatchChkCategory", "defBatchCategory");
         wireBatchFieldToggle("defBatchChkStatus", "defBatchStatus");
         wireBatchFieldToggle("defBatchChkPriority", "defBatchPriority");
         wireBatchFieldToggle("defBatchChkType", "defBatchType");
@@ -2535,18 +2765,36 @@
             }
             const countEl = document.getElementById("defBatchModalCount");
             if (countEl) countEl.textContent = String(selectedIds.size);
-            ["defBatchChkProject", "defBatchChkStatus", "defBatchChkPriority", "defBatchChkType", "defBatchChkSource"].forEach(
-                (id) => {
-                    const el = document.getElementById(id);
-                    if (el) el.checked = false;
-                }
-            );
-            ["defBatchProjectId", "defBatchStatus", "defBatchPriority", "defBatchType", "defBatchSource"].forEach((id) => {
+            [
+                "defBatchChkProject",
+                "defBatchChkCountry",
+                "defBatchChkCategory",
+                "defBatchChkStatus",
+                "defBatchChkPriority",
+                "defBatchChkType",
+                "defBatchChkSource",
+            ].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.checked = false;
+            });
+            [
+                "defBatchProjectId",
+                "defBatchCountry",
+                "defBatchCategory",
+                "defBatchStatus",
+                "defBatchPriority",
+                "defBatchType",
+                "defBatchSource",
+            ].forEach((id) => {
                 const el = document.getElementById(id);
                 if (el) el.disabled = true;
             });
             const src = document.getElementById("defBatchSource");
             if (src) src.value = "";
+            const bc = document.getElementById("defBatchCountry");
+            if (bc) bc.value = "";
+            const bcat = document.getElementById("defBatchCategory");
+            if (bcat) bcat.value = "";
             await loadProjectsForOrg();
             const modalEl = document.getElementById("defBatchModal");
             if (modalEl && window.bootstrap?.Modal) {
@@ -2567,6 +2815,14 @@
                     return;
                 }
                 payload.companyProjectId = pid;
+                any = true;
+            }
+            if (document.getElementById("defBatchChkCountry")?.checked) {
+                payload.registrationCountry = String(document.getElementById("defBatchCountry")?.value || "").trim();
+                any = true;
+            }
+            if (document.getElementById("defBatchChkCategory")?.checked) {
+                payload.registrationCategory = String(document.getElementById("defBatchCategory")?.value || "").trim();
                 any = true;
             }
             if (document.getElementById("defBatchChkStatus")?.checked) {
@@ -2957,6 +3213,10 @@
             if (!projectReadonly && projectId) {
                 payload.companyProjectId = projectId;
             }
+            if (projectReadonly) {
+                payload.registrationCountry = String(document.getElementById("defRegCountry")?.value || "").trim();
+                payload.registrationCategory = String(document.getElementById("defRegCategory")?.value || "").trim();
+            }
             // 新建且意见已存在：按批次提示，可选新增重复或覆盖更新
             let saveAsEditId = editId;
             if (!editId) {
@@ -3036,6 +3296,12 @@
                         await uploadRole(after, "after_doc");
                         if (document.getElementById("defBeforeFiles")) document.getElementById("defBeforeFiles").value = "";
                         if (document.getElementById("defAfterFiles")) document.getElementById("defAfterFiles").value = "";
+                        try {
+                            const detail = await apiRequest(
+                                `/api/company/deficiency/records/${encodeURIComponent(rid)}?organizationId=${encodeURIComponent(orgId)}`
+                            );
+                            softUpdateEditorMeta(detail?.record || {});
+                        } catch (_e) { /* ignore */ }
                     }
                     notify(res?.message || "已保存", "success");
                     saveOk = true;
@@ -3047,6 +3313,85 @@
                 defEditorSeq += 1;
                 defModal?.hide();
                 await refreshList();
+            }
+        });
+
+        let pendingReplaceAssetId = "";
+        const defAssetsListEl = document.getElementById("defAssetsList");
+        const defAssetReplaceInput = document.getElementById("defAssetReplaceInput");
+        defAssetsListEl?.addEventListener("click", async (ev) => {
+            const btn = ev.target?.closest?.("button");
+            if (!btn || !defAssetsListEl.contains(btn)) return;
+            const orgId = String(orgSel.value || "").trim();
+            const rid = String(document.getElementById("defEditId")?.value || "").trim();
+            const assetId = String(btn.dataset.assetId || "").trim();
+            if (!orgId || !rid || !assetId) {
+                notify("请先保存发补记录后再操作附件", "warning");
+                return;
+            }
+            if (btn.classList.contains("btn-def-asset-download")) {
+                const q = new URLSearchParams();
+                q.set("organizationId", orgId);
+                const url =
+                    `/api/company/deficiency/records/${encodeURIComponent(rid)}/assets/${encodeURIComponent(assetId)}/download?${q.toString()}`;
+                window.open(url, "_blank", "noopener");
+                return;
+            }
+            if (btn.classList.contains("btn-def-asset-replace")) {
+                pendingReplaceAssetId = assetId;
+                if (defAssetReplaceInput) {
+                    defAssetReplaceInput.value = "";
+                    defAssetReplaceInput.click();
+                }
+                return;
+            }
+            if (btn.classList.contains("btn-def-asset-delete")) {
+                if (!window.confirm("确定删除该附件？删除后需重新训练才会更新知识库。")) return;
+                try {
+                    await apiRequest(
+                        `/api/company/deficiency/records/${encodeURIComponent(rid)}/assets/${encodeURIComponent(assetId)}?organizationId=${encodeURIComponent(orgId)}`,
+                        { method: "DELETE" }
+                    );
+                    notify("附件已删除", "success");
+                    const detail = await apiRequest(
+                        `/api/company/deficiency/records/${encodeURIComponent(rid)}?organizationId=${encodeURIComponent(orgId)}`
+                    );
+                    softUpdateEditorMeta(detail?.record || {});
+                    await refreshList();
+                } catch (e) {
+                    notify(e.message || "删除失败", "danger");
+                }
+            }
+        });
+        defAssetReplaceInput?.addEventListener("change", async () => {
+            const file = defAssetReplaceInput.files && defAssetReplaceInput.files[0];
+            const assetId = pendingReplaceAssetId;
+            pendingReplaceAssetId = "";
+            defAssetReplaceInput.value = "";
+            if (!file || !assetId) return;
+            const orgId = String(orgSel.value || "").trim();
+            const rid = String(document.getElementById("defEditId")?.value || "").trim();
+            if (!orgId || !rid) {
+                notify("请先保存发补记录后再替换附件", "warning");
+                return;
+            }
+            if (!window.confirm(`确定用「${file.name}」替换该附件？`)) return;
+            const fd = new FormData();
+            fd.append("organizationId", orgId);
+            fd.append("file", file);
+            try {
+                await apiRequest(
+                    `/api/company/deficiency/records/${encodeURIComponent(rid)}/assets/${encodeURIComponent(assetId)}/replace`,
+                    { method: "POST", body: fd }
+                );
+                notify("附件已替换", "success");
+                const detail = await apiRequest(
+                    `/api/company/deficiency/records/${encodeURIComponent(rid)}?organizationId=${encodeURIComponent(orgId)}`
+                );
+                softUpdateEditorMeta(detail?.record || {});
+                await refreshList();
+            } catch (e) {
+                notify(e.message || "替换失败", "danger");
             }
         });
 

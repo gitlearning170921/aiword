@@ -4007,15 +4007,33 @@ def _upload_record_visible_to_page2_user(rec: UploadRecord) -> bool:
 
 
 def _can_access_upload_template(upload: UploadRecord) -> bool:
-    """页面1（访问密码超级管理员）或页面2（登录且有权）可下载任务模板。"""
-    from .authz import is_page13_super_admin
+    """页面1 维护人员或页面2 有权用户可下载任务模板。"""
+    from .authz import is_page13_super_admin, is_project_admin, upload_record_visible_to_user
 
-    if not _page13_password_configured():
-        return True
     if is_page13_super_admin():
         return True
+    if not _page13_password_configured():
+        return True
+    if not session.get("user_id"):
+        return False
+    # 项目管理员：可见范围内的任务均可下载（与页面1 列表一致）
+    if is_project_admin():
+        return upload_record_visible_to_user(upload)
+    # 普通账号：仅本人可见任务
+    return _upload_record_visible_to_page2_user(upload)
+
+
+def _can_replace_upload_template(upload: UploadRecord) -> bool:
+    """页面1 超管/项管可替换；页面2 仅可改本人任务。"""
+    from .authz import is_page13_super_admin, is_project_admin, upload_record_visible_to_user
+    from .observer_view import upload_record_mutable_by_current_user
+
+    if is_page13_super_admin():
+        return True
+    if session.get("user_id") and is_project_admin():
+        return upload_record_visible_to_user(upload)
     if session.get("user_id"):
-        return _upload_record_visible_to_page2_user(upload)
+        return upload_record_mutable_by_current_user(upload)
     return False
 
 
@@ -9809,6 +9827,45 @@ def api_audit_statuses_delete(item_id: str):
 
 # ---------- 上传与任务管理 API ----------
 
+def _refresh_and_sync_project_kb_for_scope(org_id: str, project_id: str, *, trigger: str) -> None:
+    oid = str(org_id or "").strip()
+    pid = str(project_id or "").strip()
+    if not oid or not pid:
+        return
+    try:
+        from webapp.document_control.project_kb_service import (
+            enqueue_project_kb_sync_events,
+            refresh_project_kb_document_versions,
+        )
+        from webapp.document_control.routes import _sync_project_kb_outbox
+        from webapp.tenant_context import collection_for_organization
+
+        refreshed = refresh_project_kb_document_versions(org_id=oid, project_id=pid)
+        enqueue_project_kb_sync_events(
+            org_id=oid,
+            project_id=pid,
+            documents=refreshed,
+            trigger=trigger,
+            force_retry=True,
+        )
+        db.session.commit()
+        _sync_project_kb_outbox(
+            org_id=oid,
+            collection=collection_for_organization(oid),
+            project_id=pid,
+            limit=80,
+        )
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.warning(
+            "project-kb 增量同步失败 org=%s project=%s trigger=%s err=%s",
+            oid,
+            pid,
+            trigger,
+            exc,
+        )
+
+
 @bp.post("/api/upload")
 @page13_access_required
 def api_upload():
@@ -10072,6 +10129,11 @@ def api_upload():
                 existing, existing.original_file_name or file_name
             )
         db.session.commit()
+        _refresh_and_sync_project_kb_for_scope(
+            existing.organization_id or "",
+            existing.project_id or "",
+            trigger="upload_replace",
+        )
 
         try:
             _send_task_notification(existing, due_date_str)
@@ -10147,6 +10209,11 @@ def api_upload():
     if template_file_blob:
         _apply_task_template_ftp_after_flush(upload, original_file_name or file_name)
     db.session.commit()
+    _refresh_and_sync_project_kb_for_scope(
+        upload.organization_id or "",
+        upload.project_id or "",
+        trigger="upload_create",
+    )
 
     try:
         _send_task_notification(upload, due_date_str)
@@ -10808,9 +10875,16 @@ def api_upload_delete(upload_id: str):
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
+    org_id = str(getattr(upload, "organization_id", "") or "").strip()
+    project_id = str(getattr(upload, "project_id", "") or "").strip()
 
     _delete_upload_record_files_and_row(upload)
     db.session.commit()
+    _refresh_and_sync_project_kb_for_scope(
+        org_id,
+        project_id,
+        trigger="upload_delete",
+    )
     return jsonify({"message": "已删除"})
 
 
@@ -10891,10 +10965,18 @@ def api_uploads_batch_delete():
             "message": "只能批量删除同一项目下的任务，请取消跨项目勾选后再试",
         }), 400
 
+    affected_scopes: set[tuple[str, str]] = set()
     deleted = 0
     errors = []
     for sid in ids:
         try:
+            r = found[sid]
+            affected_scopes.add(
+                (
+                    str(getattr(r, "organization_id", "") or "").strip(),
+                    str(getattr(r, "project_id", "") or "").strip(),
+                )
+            )
             _delete_upload_record_files_and_row(found[sid])
             deleted += 1
         except Exception as e:
@@ -10904,6 +10986,12 @@ def api_uploads_batch_delete():
     except Exception as e:
         db.session.rollback()
         return jsonify({"success": False, "message": f"删除失败：{e}"}), 500
+    for org_id, project_id in affected_scopes:
+        _refresh_and_sync_project_kb_for_scope(
+            org_id,
+            project_id,
+            trigger="upload_batch_delete",
+        )
 
     msg = f"已删除 {deleted} 条任务"
     if errors:
@@ -11082,6 +11170,11 @@ def api_upload_update(upload_id: str):
         upload.summary.author = upload.author
         db.session.add(upload.summary)
     db.session.commit()
+    _refresh_and_sync_project_kb_for_scope(
+        upload.organization_id or "",
+        upload.project_id or "",
+        trigger="upload_page1_edit",
+    )
     # 页面1编辑不触发模块级联催办，仅在页面2标记完成时触发（见 api_update_completion_status）
 
     return jsonify({
@@ -11262,13 +11355,22 @@ def api_download_upload_template_file(upload_id: str):
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
 
-    if upload.template_file_blob:
-        return send_file(
-            io.BytesIO(upload.template_file_blob),
+    def _send_bytes(data: bytes):
+        resp = send_file(
+            io.BytesIO(data),
             mimetype=mimetype,
             as_attachment=not inline,
             download_name=download_name,
         )
+        # 再写一遍 RFC 5987，避免部分环境下中文 download_name 异常
+        if not inline:
+            resp.headers["Content-Disposition"] = _content_disposition_attachment(
+                download_name, ascii_fallback="template.docx"
+            )
+        return resp
+
+    if upload.template_file_blob:
+        return _send_bytes(upload.template_file_blob)
 
     try:
         path = _get_template_path_for_upload(upload, 0)
@@ -11276,29 +11378,31 @@ def api_download_upload_template_file(upload_id: str):
         current_app.logger.warning(
             "下载任务模板失败 upload_id=%s: %s", upload_id, exc
         )
-        return jsonify({"message": f"获取模板失败：{exc}"}), 500
+        ftp_hint = ""
+        if (getattr(upload, "ftp_path", None) or "").strip():
+            ftp_hint = "（可能是 FTP 不可达；可在页面1「上传/替换」重新上传模板）"
+        return jsonify({"message": f"获取模板失败：{exc}{ftp_hint}"}), 500
 
     if not path or not Path(path).is_file():
         return jsonify({"message": "模板文件不存在或无法读取"}), 404
 
-    return send_file(
-        path,
-        mimetype=mimetype,
-        as_attachment=not inline,
-        download_name=download_name,
-    )
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        return jsonify({"message": f"读取模板失败：{exc}"}), 500
+    return _send_bytes(data)
 
 
 @bp.post("/api/uploads/<upload_id>/template-file")
-@login_required
+@_page13_or_login_required
 def api_upload_replace_template_file(upload_id: str):
-    """页面2：上传模板文件覆盖该任务已有文件或链接，写入 FTP（每条任务仅保留一个文件）。"""
-    from .observer_view import observer_mutation_blocked_response, upload_record_mutable_by_current_user
+    """上传/替换任务模板：页面1 维护人员或页面2 本人任务均可。"""
+    from .observer_view import observer_mutation_blocked_response
 
     upload = UploadRecord.query.get(upload_id)
     if not upload:
         return jsonify({"message": "未找到该记录"}), 404
-    if not upload_record_mutable_by_current_user(upload):
+    if not _can_replace_upload_template(upload):
         return observer_mutation_blocked_response(record_level=True)
 
     file = request.files.get("file")
@@ -11351,6 +11455,11 @@ def api_upload_replace_template_file(upload_id: str):
         upload, upload.original_file_name or upload.file_name
     )
     db.session.commit()
+    _refresh_and_sync_project_kb_for_scope(
+        upload.organization_id or "",
+        upload.project_id or "",
+        trigger="upload_replace_file",
+    )
 
     msg = "模板文件已上传"
     if had_file or had_links:
@@ -11426,6 +11535,11 @@ def api_update_completion_status(upload_id: str):
     
     db.session.add(upload)
     db.session.commit()
+    _refresh_and_sync_project_kb_for_scope(
+        upload.organization_id or "",
+        upload.project_id or "",
+        trigger="upload_page2_update",
+    )
     if upload.completion_status and (upload.belonging_module or "").strip() in ("产品", "开发"):
         _maybe_enqueue_module_cascade(upload.project_name or "", (upload.belonging_module or "").strip())
 

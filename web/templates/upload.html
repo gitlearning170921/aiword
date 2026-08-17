@@ -59,6 +59,7 @@
                 <p class="small text-muted mb-2">受控文件编号与文控台账。</p>
                 <div class="d-flex flex-wrap gap-2">
                     <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
+                    <a href="{{ url_for('document_control.project_kb_page') }}" class="btn btn-outline-primary">项目知识库协同</a>
                 </div>
             </div>
             {% endif %}
@@ -562,7 +563,7 @@
                     <div class="col-12">
                         <label class="form-label small">重新上传任务模板（Word / 压缩包）</label>
                         <input type="file" class="form-control form-control-sm" id="editRecordTemplateFile" accept=".doc,.docx,.zip,.tar,.gz,.tgz,.rar">
-                        <div class="form-text small">支持单个 .doc/.docx{% if is_page13_super_admin %}，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）{% else %}，或 .zip / .tar / .tar.gz（.tgz）压缩包{% endif %}；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。上传后将覆盖已有文件或链接，且来源改为「文件」。</div>
+                        <div class="form-text small" id="editRecordTemplateHint">支持单个 .doc/.docx{% if is_page13_super_admin %}，或与 aicheckword 一致的 .zip / .tar / .tar.gz（.tgz）{% else %}，或 .zip / .tar / .tar.gz（.tgz）压缩包{% endif %}；压缩包内须含至少一个 .docx，多文件时优先按「文件名称」匹配。上传后将覆盖已有文件或链接，且来源改为「文件」。</div>
                     </div>
                     <div class="col-12">
                         <label class="form-label small">下发任务备注</label>

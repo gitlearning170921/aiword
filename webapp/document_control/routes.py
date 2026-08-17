@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import time
 import uuid
+import base64
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
@@ -30,6 +32,8 @@ from webapp.models import (
     GenerationSummary,
     NumberAllocation,
     NumberingScheme,
+    ProjectKnowledgeDocumentVersion,
+    ProjectKnowledgeSyncOutbox,
     Project,
     UploadRecord,
     VersionTaskGenerationJob,
@@ -55,6 +59,15 @@ from .version_task_generator import (
     set_project_product_name,
     suggest_release_dates,
     upsert_project_version_records,
+)
+from .project_kb_service import (
+    refresh_project_kb_document_versions,
+    enqueue_project_kb_sync_events,
+    list_project_kb_latest_documents,
+    list_project_kb_document_history,
+    list_project_kb_overview_stats,
+    list_project_kb_task_records,
+    normalize_project_kb_document_number,
 )
 from .allocation_categories import (
     enrich_issue_categories,
@@ -689,6 +702,17 @@ def version_task_generator_page():
     return render_template("version_task_generator.html")
 
 
+@document_control_bp.get("/document-control/project-kb")
+def project_kb_page():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    return render_template("project_kb.html")
+
+
 def _parse_optional_date(value: Any) -> Optional[date]:
     text = (str(value or "")).strip()
     if not text:
@@ -769,6 +793,258 @@ def _suggest_release_dates_upstream(
     if not isinstance(data, dict):
         return None, user_facing_upstream_error("上游响应非 JSON", "服务响应异常，请联系管理员")
     return data, None
+
+
+_VERSION_TASK_RULES_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_VERSION_TASK_RULES_TTL_SEC = 60.0
+
+
+def _fetch_version_task_rules_upstream(
+    *,
+    org_id: str,
+    collection: str,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    base = integration_api_base()
+    if not base:
+        return None, user_facing_upstream_error(
+            "未配置文档服务地址，无法从知识库刷新任务规则",
+            "文档服务未配置，请联系管理员",
+        )
+    url = f"{base}/api/integration/document-control/version-task-rules"
+    try:
+        resp = integration_request(
+            "POST",
+            url,
+            json={"collection": collection},
+            headers=upstream_headers(for_multipart=False, organization_id=org_id),
+            timeout=integration_requests_timeout(read_seconds=60),
+        )
+    except requests.RequestException as exc:
+        current_app.logger.warning("version-tasks rules upstream failed: %s", exc)
+        return None, format_upstream_request_error(exc, base)
+    if resp.status_code != 200:
+        return None, user_facing_upstream_error(
+            f"任务规则刷新失败 HTTP {resp.status_code}",
+            "任务规则刷新失败，将使用现行制度回退",
+        )
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        return None, user_facing_upstream_error("上游响应非 JSON", "服务响应异常，请联系管理员")
+    return data, None
+
+
+def refresh_version_task_rules_for_request(org_id: str, collection: str) -> dict[str, Any]:
+    """预览前刷新：知识库最新 YY-IW-020 → 本地 docs/rules → 内嵌 V2.2。"""
+    from .version_task_rule_extract import extract_from_local_rules_dir
+    from .version_task_rules import apply_rule_overlay
+
+    key = f"{org_id}|{collection}"
+    now = time.time()
+    cached = _VERSION_TASK_RULES_CACHE.get(key)
+    if cached and now - cached[0] < _VERSION_TASK_RULES_TTL_SEC:
+        payload = cached[1]
+        apply_rule_overlay(payload if payload.get("ok") else None)
+        return payload
+
+    payload, err = _fetch_version_task_rules_upstream(org_id=org_id, collection=collection)
+    if payload and payload.get("ok"):
+        apply_rule_overlay(payload)
+        _VERSION_TASK_RULES_CACHE[key] = (now, payload)
+        return payload
+    if err:
+        current_app.logger.info("version-tasks rules kb miss: %s", err)
+
+    local = extract_from_local_rules_dir()
+    if local.get("ok"):
+        apply_rule_overlay(local)
+        return local
+
+    apply_rule_overlay(None)
+    return {
+        "ok": False,
+        "matchedBy": "embedded",
+        "sourceVersion": "V2.2",
+        "message": err or "知识库未命中制度，已用内嵌 V2.2 回退",
+    }
+
+
+def _project_kb_read_file_payload(file_uri: str) -> tuple[str, str, str]:
+    path = str(file_uri or "").strip()
+    if not path:
+        return "", "", ""
+    try:
+        if not os.path.exists(path) or not os.path.isfile(path):
+            return "", "", ""
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        if not raw:
+            return "", "", ""
+        b64 = base64.b64encode(raw).decode("ascii")
+        ext = os.path.splitext(path)[1].lower()
+        name = os.path.basename(path)
+        return b64, ext, name
+    except Exception:
+        return "", "", ""
+
+
+def _project_kb_read_upload_payload(upload_id: str) -> tuple[str, str, str]:
+    uid = str(upload_id or "").strip()
+    if not uid:
+        return "", "", ""
+    row = UploadRecord.query.get(uid)
+    if not row:
+        return "", "", ""
+    file_name = (
+        str(getattr(row, "original_file_name", "") or "").strip()
+        or str(getattr(row, "file_name", "") or "").strip()
+        or "project_kb_file"
+    )
+    ext = os.path.splitext(file_name)[1].lower()
+    if not ext:
+        ext = ".docx"
+        file_name = f"{file_name}{ext}"
+    try:
+        raw: bytes = b""
+        blob = getattr(row, "template_file_blob", None)
+        if blob:
+            raw = bytes(blob)
+        elif str(getattr(row, "ftp_path", "") or "").strip():
+            from webapp.ftp_store import download_bytes
+
+            raw = download_bytes(str(getattr(row, "ftp_path", "") or "").strip())
+        elif str(getattr(row, "storage_path", "") or "").strip():
+            p = str(getattr(row, "storage_path", "") or "").strip()
+            if os.path.isfile(p):
+                with open(p, "rb") as fh:
+                    raw = fh.read()
+        if not raw:
+            return "", ext, file_name
+        return base64.b64encode(raw).decode("ascii"), ext, file_name
+    except Exception:
+        return "", ext, file_name
+
+
+def _sync_project_kb_outbox(
+    *,
+    org_id: str,
+    collection: str,
+    project_id: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    base = integration_api_base()
+    if not base:
+        return {
+            "processed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "message": "未配置文档服务地址",
+        }
+    rows = (
+        ProjectKnowledgeSyncOutbox.query.filter_by(
+            organization_id=org_id,
+            project_id=str(project_id or "").strip(),
+        )
+        .filter(ProjectKnowledgeSyncOutbox.status.in_(("pending", "failed")))
+        .order_by(ProjectKnowledgeSyncOutbox.updated_at.asc())
+        .limit(max(1, min(int(limit or 20), 200)))
+        .all()
+    )
+    if not rows:
+        return {"processed": 0, "succeeded": 0, "failed": 0, "message": "无待同步事件"}
+    succeeded = 0
+    failed = 0
+    url = f"{base}/api/integration/project-kb/sync"
+    for row in rows:
+        payload = dict(row.payload_json or {})
+        payload["collection"] = collection
+        payload["eventId"] = row.id
+        payload["eventType"] = str(payload.get("eventType") or row.event_type or "UPSERT")
+        payload["retryCount"] = int(row.retries or 0)
+        is_deleted = bool(payload.get("isDeleted"))
+        if not is_deleted:
+            meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            upload_id = str(meta.get("uploadId") or "").strip()
+            file_b64, file_ext, file_name = ("", "", "")
+            if upload_id:
+                file_b64, file_ext, file_name = _project_kb_read_upload_payload(upload_id)
+            if not file_b64:
+                file_b64, file_ext, file_name = _project_kb_read_file_payload(payload.get("fileUri") or "")
+            if file_b64:
+                payload["fileBase64"] = file_b64
+                payload["fileExt"] = file_ext
+                if file_name and not payload.get("fileName"):
+                    payload["fileName"] = file_name
+        if not payload.get("contentText"):
+            payload["contentText"] = "\n".join(
+                [
+                    f"文件标题：{payload.get('title') or ''}",
+                    f"文件编号：{payload.get('documentNumber') or ''}",
+                    f"版本：{payload.get('version') or ''}",
+                    f"状态：{payload.get('status') or ''}",
+                ]
+            ).strip()
+        row.status = "syncing"
+        row.retries = int(row.retries or 0) + 1
+        db.session.add(row)
+        db.session.commit()
+        try:
+            resp = integration_request(
+                "POST",
+                url,
+                json=payload,
+                headers=upstream_headers(for_multipart=False, organization_id=org_id),
+                timeout=integration_requests_timeout(read_seconds=180),
+            )
+            if resp.status_code != 200:
+                msg = f"HTTP {resp.status_code}"
+                try:
+                    err = resp.json()
+                    if isinstance(err, dict):
+                        msg = str(err.get("detail") or err.get("message") or msg)
+                except Exception:
+                    pass
+                raise RuntimeError(msg)
+            row.status = "synced"
+            row.last_error = None
+            row.processed_at = now_local()
+            succeeded += 1
+            version_row_id = str((payload.get("metadata") or {}).get("versionRecordId") or "").strip()
+            if version_row_id:
+                target = ProjectKnowledgeDocumentVersion.query.filter_by(
+                    id=version_row_id,
+                    organization_id=org_id,
+                ).first()
+                if target:
+                    target.sync_state = "synced"
+                    target.sync_error = None
+                    target.synced_at = now_local()
+                    db.session.add(target)
+        except Exception as exc:
+            row.status = "failed"
+            row.last_error = str(exc)[:500]
+            failed += 1
+            version_row_id = str((payload.get("metadata") or {}).get("versionRecordId") or "").strip()
+            if version_row_id:
+                target = ProjectKnowledgeDocumentVersion.query.filter_by(
+                    id=version_row_id,
+                    organization_id=org_id,
+                ).first()
+                if target:
+                    target.sync_state = "failed"
+                    target.sync_error = str(exc)[:500]
+                    db.session.add(target)
+        db.session.add(row)
+        db.session.commit()
+    return {
+        "processed": len(rows),
+        "succeeded": succeeded,
+        "failed": failed,
+        "message": (
+            f"已处理 {len(rows)} 条，成功 {succeeded} 条，失败 {failed} 条"
+            if rows
+            else "无待同步事件"
+        ),
+    }
 
 
 def _release_date_diagnostics_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -1056,7 +1332,7 @@ def api_version_task_project_records_list():
     wall = login_wall()
     if wall is not None:
         return wall
-    org_id, _ = _org_context()
+    org_id, collection = _org_context()
     project_id = str(request.args.get("projectId") or "").strip()
     if not project_id:
         return jsonify({"message": "projectId 不能为空"}), 400
@@ -1329,7 +1605,7 @@ def api_version_task_preview():
     wall = login_wall()
     if wall is not None:
         return wall
-    org_id, _ = _org_context()
+    org_id, collection = _org_context()
     payload = request.get_json(silent=True) or {}
     from_version = str(payload.get("fromVersion") or "").strip()
     to_version = str(payload.get("toVersion") or "").strip()
@@ -1356,14 +1632,23 @@ def api_version_task_preview():
                 }
             ), 409
 
+    registration_country = str(payload.get("registrationCountry") or "").strip()
+    project_id_hint = str(payload.get("projectId") or "").strip()
+    if project_id_hint and not registration_country:
+        proj = Project.query.filter_by(id=project_id_hint).first()
+        if proj and _project_in_org(proj, org_id):
+            registration_country = str(getattr(proj, "registered_country", None) or "").strip()
+
     try:
         feedback_rows = feedback_rows_for_org(org_id)
+        refresh_version_task_rules_for_request(org_id, collection)
         preview = generate_task_preview(
             from_version=from_version,
             to_version=to_version,
             intermediate_versions=[str(x or "").strip() for x in intermediate_versions],
             version_release_dates=version_release_dates,
             feedback_rows=feedback_rows,
+            registration_country=registration_country,
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
@@ -1406,10 +1691,12 @@ def api_version_task_preview():
         job.status = "previewed"
     product_name = str(payload.get("productName") or "").strip()
     job.rule_snapshot_json = {
-        "rulesMode": "yy_iw_020_plus_qp739",
+        "rulesMode": preview.get("rulesMode") or "yy_iw_020_plus_qp739",
         "versionRule": "X.Y.Z.B",
         "ruleSource": preview.get("ruleSource"),
         "ruleBasis": preview.get("ruleBasis"),
+        "sourceFile": preview.get("sourceFile"),
+        "sourceVersion": preview.get("sourceVersion"),
         "versionReleaseDates": preview.get("versionReleaseDates") or {},
         "productName": product_name,
         "generatedAt": now_local().isoformat(),
@@ -1669,6 +1956,406 @@ def api_version_task_apply():
             "updated": updated,
             "uploadIds": upload_ids,
             "message": f"已下发到任务列表：新增 {created} 条，更新 {updated} 条",
+        }
+    )
+
+
+@document_control_bp.get("/api/project-kb/stats")
+def api_project_kb_stats():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    from webapp.authz import project_in_scope, rbac_enforced
+
+    projects = Project.query.order_by(Project.priority.desc(), Project.name.asc()).all()
+    projects = [p for p in projects if _project_in_org(p, org_id)]
+    if rbac_enforced():
+        projects = [p for p in projects if project_in_scope(p)]
+    stats_by_pid = list_project_kb_overview_stats(
+        org_id=org_id,
+        projects=projects,
+    )
+    items: list[dict[str, Any]] = []
+    totals = {
+        "projectCount": 0,
+        "taskCount": 0,
+        "latestCount": 0,
+        "syncedCount": 0,
+        "failedCount": 0,
+        "pendingCount": 0,
+        "readyCount": 0,
+        "missingDocumentNumberCount": 0,
+        "noFileCount": 0,
+    }
+    for project in projects:
+        pid = str(project.id)
+        st = stats_by_pid.get(pid) or {}
+        task_count = int(st.get("taskCount") or 0)
+        latest_count = int(st.get("latestCount") or 0)
+        synced_count = int(st.get("syncedCount") or 0)
+        failed_count = int(st.get("failedCount") or 0)
+        pending_count = int(st.get("pendingCount") or 0)
+        ready_count = int(st.get("readyCount") or 0)
+        missing_count = int(st.get("missingDocumentNumberCount") or 0)
+        no_file_count = int(st.get("noFileCount") or 0)
+        status = str(getattr(project, "status", "") or Project.STATUS_ACTIVE)
+        items.append(
+            {
+                "projectId": pid,
+                "projectName": project.name,
+                "projectCode": str(getattr(project, "project_code", "") or "").strip(),
+                "registeredCountry": str(getattr(project, "registered_country", "") or "").strip(),
+                "status": status,
+                "statusLabel": "已结束" if status == Project.STATUS_ENDED else "进行中",
+                "taskCount": task_count,
+                "latestCount": latest_count,
+                "syncedCount": synced_count,
+                "failedCount": failed_count,
+                "pendingCount": pending_count,
+                "readyCount": ready_count,
+                "missingDocumentNumberCount": missing_count,
+                "noFileCount": no_file_count,
+                "lastUpdatedAt": str(st.get("lastUpdatedAt") or ""),
+            }
+        )
+        totals["projectCount"] += 1
+        totals["taskCount"] += task_count
+        totals["latestCount"] += latest_count
+        totals["syncedCount"] += synced_count
+        totals["failedCount"] += failed_count
+        totals["pendingCount"] += pending_count
+        totals["readyCount"] += ready_count
+        totals["missingDocumentNumberCount"] += missing_count
+        totals["noFileCount"] += no_file_count
+    return jsonify(
+        {
+            "collection": collection,
+            "items": items,
+            "totals": totals,
+        }
+    )
+
+
+@document_control_bp.get("/api/project-kb/documents/latest")
+def api_project_kb_documents_latest():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 必填"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    do_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
+    queued = 0
+    if do_refresh:
+        refreshed = refresh_project_kb_document_versions(org_id=org_id, project_id=project_id)
+        queued = enqueue_project_kb_sync_events(
+            org_id=org_id,
+            project_id=project_id,
+            documents=refreshed,
+            trigger="latest_query",
+            force_retry=False,
+        )
+        db.session.commit()
+    docs = list_project_kb_task_records(org_id=org_id, project_id=project_id)
+    missing_doc_no_items = [
+        {
+            "uploadId": str(item.get("uploadId") or "").strip(),
+            "fileName": str(item.get("title") or "").strip(),
+            "author": str((item.get("metadata") or {}).get("author") or "").strip(),
+            "taskType": str((item.get("metadata") or {}).get("taskType") or "").strip(),
+            "updatedAt": str(item.get("updatedAt") or item.get("sourceUpdatedAt") or "").strip(),
+        }
+        for item in docs
+        if str(item.get("bucket") or "") == "missing_number"
+    ]
+    dist = {
+        "taskCount": len(docs),
+        "syncedCount": 0,
+        "failedCount": 0,
+        "pendingCount": 0,
+        "readyCount": 0,
+        "missingDocumentNumberCount": 0,
+        "noFileCount": 0,
+    }
+    for item in docs:
+        bucket = str(item.get("bucket") or "")
+        if bucket == "synced":
+            dist["syncedCount"] += 1
+        elif bucket == "failed":
+            dist["failedCount"] += 1
+        elif bucket == "pending":
+            dist["pendingCount"] += 1
+        elif bucket == "ready":
+            dist["readyCount"] += 1
+        elif bucket == "missing_number":
+            dist["missingDocumentNumberCount"] += 1
+        elif bucket == "no_file":
+            dist["noFileCount"] += 1
+    return jsonify(
+        {
+            "projectId": project_id,
+            "projectName": project.name,
+            "collection": collection,
+            "projectKbCollection": f"{collection}_project_{project_id}",
+            "queued": queued,
+            "items": docs,
+            "taskCount": dist["taskCount"],
+            "syncedCount": dist["syncedCount"],
+            "failedCount": dist["failedCount"],
+            "pendingCount": dist["pendingCount"],
+            "readyCount": dist["readyCount"],
+            "noFileCount": dist["noFileCount"],
+            "missingDocumentNumberCount": dist["missingDocumentNumberCount"],
+            "missingDocumentNumberItems": missing_doc_no_items[:20],
+        }
+    )
+
+
+@document_control_bp.get("/api/project-kb/documents/history")
+def api_project_kb_documents_history():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip()
+    doc_no = str(request.args.get("documentNumber") or "").strip()
+    if not project_id or not doc_no:
+        return jsonify({"message": "projectId 与 documentNumber 必填"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    items = list_project_kb_document_history(
+        org_id=org_id,
+        project_id=project_id,
+        normalized_document_number=normalize_project_kb_document_number(doc_no),
+        limit=max(1, min(int(request.args.get("limit") or 50), 200)),
+    )
+    return jsonify(
+        {
+            "projectId": project_id,
+            "documentNumber": doc_no,
+            "items": items,
+        }
+    )
+
+
+@document_control_bp.post("/api/project-kb/sync/retry")
+def api_project_kb_sync_retry():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 必填"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    doc_no = normalize_project_kb_document_number(str(payload.get("documentNumber") or "").strip())
+    force_retry = bool(payload.get("forceRetry", True))
+    latest = list_project_kb_latest_documents(org_id=org_id, project_id=project_id)
+    if doc_no:
+        latest = [x for x in latest if str(x.get("normalizedDocumentNumber") or "") == doc_no]
+    queued = enqueue_project_kb_sync_events(
+        org_id=org_id,
+        project_id=project_id,
+        documents=latest,
+        trigger="manual_retry",
+        force_retry=force_retry,
+    )
+    db.session.commit()
+    result = _sync_project_kb_outbox(
+        org_id=org_id,
+        collection=collection,
+        project_id=project_id,
+        limit=max(5, min(int(payload.get("limit") or 30), 300)),
+    )
+    return jsonify(
+        {
+            "projectId": project_id,
+            "queued": queued,
+            **result,
+        }
+    )
+
+
+@document_control_bp.post("/api/project-kb/backfill")
+def api_project_kb_backfill():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 必填"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    refreshed = refresh_project_kb_document_versions(org_id=org_id, project_id=project_id)
+    queued = enqueue_project_kb_sync_events(
+        org_id=org_id,
+        project_id=project_id,
+        documents=refreshed,
+        trigger="backfill",
+        force_retry=True,
+    )
+    db.session.commit()
+    result = _sync_project_kb_outbox(
+        org_id=org_id,
+        collection=collection,
+        project_id=project_id,
+        limit=max(10, min(int(payload.get("limit") or 80), 500)),
+    )
+    docs = list_project_kb_latest_documents(org_id=org_id, project_id=project_id)
+    return jsonify(
+        {
+            "projectId": project_id,
+            "queued": queued,
+            "latestCount": len(docs),
+            **result,
+        }
+    )
+
+
+@document_control_bp.post("/api/project-kb/promote")
+def api_project_kb_promote():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, collection = _org_context()
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "projectId 必填"}), 400
+    train_historical = bool(payload.get("trainHistorical", False))
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    if not _project_in_org(project, org_id):
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    latest = list_project_kb_latest_documents(org_id=org_id, project_id=project_id)
+    created = 0
+    updated = 0
+    promotable: list[dict[str, Any]] = []
+    for item in latest:
+        if str(item.get("status") or "").strip() == "deleted":
+            continue
+        norm = str(item.get("normalizedDocumentNumber") or "").strip()
+        if not norm:
+            continue
+        version = str(item.get("version") or "").strip() or "UNSPECIFIED"
+        title = str(item.get("title") or "").strip() or str(item.get("documentNumber") or norm).strip()
+        row = ControlledDocument.query.filter_by(
+            organization_id=org_id,
+            project_id=project_id,
+            normalized_document_number=norm,
+            version=version,
+            source="project_kb_promoted",
+        ).first()
+        if not row:
+            row = ControlledDocument(
+                organization_id=org_id,
+                document_number=str(item.get("documentNumber") or norm).strip() or norm,
+                normalized_document_number=norm,
+                version=version,
+                title=title,
+                project_id=project_id,
+                project_code=project.project_code,
+                project_name=project.name,
+                registered_country=project.registered_country,
+                status="controlled",
+                source="project_kb_promoted",
+            )
+            db.session.add(row)
+            created += 1
+        else:
+            updated += 1
+        row.document_number = str(item.get("documentNumber") or norm).strip() or norm
+        row.title = title
+        row.project_code = project.project_code
+        row.project_name = project.name
+        row.registered_country = project.registered_country
+        row.status = "controlled"
+        row.storage_path = str(item.get("fileUri") or "").strip() or None
+        meta = dict(item.get("metadata") or {})
+        row.upload_record_id = str(meta.get("uploadId") or "").strip() or None
+        row.metadata_json = {
+            **dict(row.metadata_json or {}),
+            "projectKbVersionId": str(item.get("id") or "").strip(),
+            "promotedFrom": "project_kb",
+        }
+        db.session.add(row)
+        promotable.append(
+            {
+                **item,
+                "metadata": {
+                    **meta,
+                    "promoteToHistorical": bool(train_historical),
+                },
+            }
+        )
+    db.session.commit()
+    historical_sync: dict[str, Any] = {"queued": 0, "processed": 0, "succeeded": 0, "failed": 0}
+    if train_historical and promotable:
+        queued = enqueue_project_kb_sync_events(
+            org_id=org_id,
+            project_id=project_id,
+            documents=promotable,
+            trigger="promote_to_historical",
+            force_retry=True,
+        )
+        db.session.commit()
+        result = _sync_project_kb_outbox(
+            org_id=org_id,
+            collection=collection,
+            project_id=project_id,
+            limit=max(20, min(len(promotable) * 2, 200)),
+        )
+        historical_sync = {"queued": queued, **result}
+    return jsonify(
+        {
+            "projectId": project_id,
+            "createdControlled": created,
+            "updatedControlled": updated,
+            "trainHistorical": train_historical,
+            "historicalSync": historical_sync,
+            "message": (
+                f"已同步到文控中心：新增 {created} 条，更新 {updated} 条"
+                + ("；并已触发历史知识库训练" if train_historical else "")
+            ),
         }
     )
 

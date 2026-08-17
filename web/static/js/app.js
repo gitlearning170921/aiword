@@ -3156,9 +3156,18 @@ async function openEditRecordModal(r) {
     window.__editRecordTemplateState = {
         hasFile: !!r.hasFile,
         hasLinks: !!r.hasLinks,
+        id: r.id || "",
+        fileName: r.fileName || "",
     };
     const editTplFile = document.getElementById("editRecordTemplateFile");
-    if (editTplFile) editTplFile.value = "";
+    if (editTplFile) {
+        editTplFile.value = "";
+        if (!editTplFile.dataset.hintBound) {
+            editTplFile.addEventListener("change", () => updateEditRecordTemplateHint());
+            editTplFile.dataset.hintBound = "1";
+        }
+    }
+    updateEditRecordTemplateHint();
     document.getElementById("editRecordNotes").value = r.notes || "";
     const editNoteFilesList = document.getElementById("editNoteFilesList");
     if (editNoteFilesList) {
@@ -3385,7 +3394,12 @@ function initEditRecordModal() {
                 fd.append("file", tplFile);
                 const res = await App.request("/api/upload", { method: "POST", body: fd });
                 document.getElementById("editRecordTemplateLinks").value = "";
-                window.__editRecordTemplateState = { hasFile: true, hasLinks: false };
+                window.__editRecordTemplateState = {
+                    hasFile: true,
+                    hasLinks: false,
+                    id: id,
+                    fileName: payload.fileName || "",
+                };
                 App.notify(res.message || "任务模板已更新并已尝试同步 FTP");
             } else {
                 await App.request(`/api/uploads/${id}`, {
@@ -4244,13 +4258,68 @@ function buildUploadTemplateFileUrl(uploadId) {
 
 /** 来源为「文件」时：左侧文字「文件」，右侧下载按钮 */
 function buildTaskFileSourceHtml(uploadId) {
-    const base = buildUploadTemplateFileUrl(uploadId);
     return (
         '<span class="d-inline-flex align-items-center justify-content-between gap-1" style="min-width:4.5rem">' +
         '<span>文件</span>' +
-        '<a href="' + base + '" class="btn btn-sm btn-outline-primary py-0 px-2" title="下载 Word 模板">下载</a>' +
-        '</span>'
+        '<button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 btn-download-template-file" data-id="' +
+        String(uploadId || "") +
+        '" title="下载任务模板">下载</button>' +
+        "</span>"
     );
+}
+
+async function downloadUploadTemplateFile(uploadId, triggerBtn) {
+    const id = String(uploadId || "").trim();
+    if (!id) return;
+    const url = buildUploadTemplateFileUrl(id);
+    const original = triggerBtn ? triggerBtn.innerHTML : "";
+    try {
+        if (triggerBtn) {
+            triggerBtn.disabled = true;
+            triggerBtn.textContent = "…";
+        }
+        const resp = await fetch(url, { credentials: "same-origin" });
+        if (!resp.ok) {
+            let msg = `下载失败（HTTP ${resp.status}）`;
+            try {
+                const data = await resp.json();
+                if (data && data.message) msg = data.message;
+            } catch (_e) { /* ignore */ }
+            throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const cd = resp.headers.get("Content-Disposition") || "";
+        let filename = "";
+        const star = /filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)/i.exec(cd);
+        if (star && star[1]) {
+            try {
+                filename = decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, ""));
+            } catch (_e) { /* ignore */ }
+        }
+        if (!filename) {
+            const quoted = /filename\s*=\s*"([^"]+)"/i.exec(cd);
+            if (quoted) filename = quoted[1];
+        }
+        if (!filename) filename = "template.docx";
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = filename;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            if (a.parentNode) document.body.removeChild(a);
+            URL.revokeObjectURL(objectUrl);
+        }, 300);
+    } catch (e) {
+        App.notify(e.message || "下载失败", "danger");
+    } finally {
+        if (triggerBtn) {
+            triggerBtn.disabled = false;
+            triggerBtn.innerHTML = original || "下载";
+        }
+    }
 }
 
 function renderRecordsTable(records) {
@@ -4316,6 +4385,12 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
         const auditBtnHtml = _page1Feature("FEATURE_PAGE1_AUDIT")
             ? `<button type="button" class="btn btn-sm btn-outline-info btn-audit-task me-1" data-id="${r.id}" title="${_escTitle(typeof window.ufText === "function" ? window.ufText("aicheckword 单文档审核", "单文档审核") : "单文档审核")}">单审</button>`
             : "";
+        const replaceTplBtnHtml = !_isMatterRow
+            ? (
+                `<input type="file" class="d-none task-template-file-input-page1" accept=".docx,.doc,.zip,.tar,.gz,.tgz,.rar" data-id="${r.id}">` +
+                `<button type="button" class="btn btn-sm btn-outline-secondary btn-replace-template-file-page1 me-1" data-id="${r.id}" title="上传/替换任务模板（覆盖已有文件或链接）">上传/替换</button>`
+              )
+            : "";
         tr.innerHTML = `
             <td class="col-drag"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span><input type="checkbox" class="form-check-input record-checkbox" data-id="${r.id}"></td>
             <td class="seq-cell">${idx + 1}</td>
@@ -4346,6 +4421,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             <td title="${_escTitle(r.registrationVersion)}">${(r.registrationVersion != null && r.registrationVersion !== "") ? r.registrationVersion : "-"}</td>
             <td class="col-op">
                 <button class="btn btn-sm btn-outline-primary btn-edit-task me-1" data-id="${r.id}">编辑</button>
+                ${replaceTplBtnHtml}
                 ${auditBtnHtml}
                 ${goSignBtnHtml}
                 ${goPrintBtnHtml}
@@ -4494,6 +4570,30 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
         btn.addEventListener("click", () => {
             const r = allRecordsCache.find(x => x.id === btn.dataset.id);
             if (r) openEditRecordModal(r);
+        });
+    });
+
+    tbody.querySelectorAll(".btn-download-template-file").forEach((btn) => {
+        btn.addEventListener("click", () => downloadUploadTemplateFile(btn.dataset.id, btn));
+    });
+
+    tbody.querySelectorAll(".btn-replace-template-file-page1").forEach((btn) => {
+        const tr = btn.closest("tr");
+        const input = tr?.querySelector(".task-template-file-input-page1");
+        if (!input) return;
+        btn.addEventListener("click", () => input.click());
+        input.addEventListener("change", async () => {
+            const file = input.files && input.files[0];
+            input.value = "";
+            if (!file) return;
+            const r = (allRecordsCache || []).find((x) => String(x.id) === String(btn.dataset.id));
+            if (!confirmTemplateFileOverwrite(r || { hasFile: false, hasLinks: false })) return;
+            try {
+                await uploadPage2TemplateFile(btn.dataset.id, file, btn);
+                if (typeof loadRecordsList === "function") loadRecordsList();
+            } catch (e) {
+                App.notify(e.message || "上传失败", "danger");
+            }
         });
     });
 
@@ -5737,6 +5837,42 @@ function initMyTasksTableSort() {
 
 const PAGE2_TEMPLATE_FILE_ACCEPT = ".docx,.doc,.zip,.tar,.gz,.tgz,.rar";
 
+function updateEditRecordTemplateHint() {
+    const hint = document.getElementById("editRecordTemplateHint");
+    if (!hint) return;
+    const st = window.__editRecordTemplateState || {};
+    const fileEl = document.getElementById("editRecordTemplateFile");
+    const hasNew = !!(fileEl && fileEl.files && fileEl.files[0]);
+    const baseHelp =
+        "支持单个 .doc/.docx 或压缩包；压缩包内须含至少一个 .docx。上传后将覆盖已有文件或链接，且来源改为「文件」。";
+    if (hasNew) {
+        hint.textContent = "将替换现有模板文件：" + (fileEl.files[0].name || "") + "。" + baseHelp;
+        return;
+    }
+    if (st.hasFile) {
+        const name = st.fileName || "模板文件";
+        hint.innerHTML =
+            "当前已有模板文件「" +
+            _escTitle(name) +
+            "」。" +
+            (st.id
+                ? ' <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" id="editRecordDownloadTemplateBtn">下载当前模板</button> '
+                : " ") +
+            "重新选择文件可替换。" +
+            baseHelp;
+        const dlBtn = document.getElementById("editRecordDownloadTemplateBtn");
+        if (dlBtn && st.id) {
+            dlBtn.addEventListener("click", () => downloadUploadTemplateFile(st.id, dlBtn));
+        }
+        return;
+    }
+    if (st.hasLinks) {
+        hint.textContent = "当前为链接来源；上传文件后将改为文件来源。" + baseHelp;
+        return;
+    }
+    hint.textContent = "可选：" + baseHelp;
+}
+
 function confirmTemplateFileOverwrite(r) {
     if (!r || (!r.hasFile && !r.hasLinks)) return true;
     return window.confirm(
@@ -6048,6 +6184,9 @@ function renderMyTasksTable(records) {
             });
         }
         bindPage2TemplateFileUpload(tr, r);
+        tr.querySelectorAll(".btn-download-template-file").forEach((btn) => {
+            btn.addEventListener("click", () => downloadUploadTemplateFile(btn.dataset.id, btn));
+        });
         tr.querySelector(".btn-fill-placeholders")?.addEventListener("click", () => openPlaceholderModal(r, placeholderModal));
         tr.querySelector(".btn-draft-gen-page2")?.addEventListener("click", () => {
             window.location.href = buildDraftGenUrlFromTask(r);

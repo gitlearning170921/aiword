@@ -4,6 +4,7 @@
 <div class="row">
   <div class="col-lg-10 mx-auto">
     <h2 class="mb-3">文档审核{% if is_page13_super_admin %}（aicheckword）{% endif %}</h2>
+    <div class="mb-2"><a class="btn btn-outline-primary btn-sm" href="{{ url_for('document_control.project_kb_page') }}">打开项目知识库协同</a></div>
     {% if is_page13_super_admin %}
     <p class="text-muted small">
       调用 aicheckword 的 <code>/api/integration/audit/*</code>。支持三种审核模式（单文档 / 多文档一致性 / 跨文档追溯），
@@ -123,7 +124,7 @@
         <div class="col-12">
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="aud_auto_match_case" checked>
-            <label class="form-check-label" for="aud_auto_match_case">自动匹配过往项目案例{% if is_page13_super_admin %}（与 aicheckword 第三步一致）{% endif %}</label>
+            <label class="form-check-label" for="aud_auto_match_case">自动匹配过往项目案例{% if is_page13_super_admin %}（与 aicheckword 第三步一致）{% endif %}；仅复用通用信息，版本不以案例为准</label>
           </div>
         </div>
         <div class="col-12">

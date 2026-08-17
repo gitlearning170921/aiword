@@ -4,6 +4,7 @@
 <div class="row">
   <div class="col-lg-10 mx-auto">
     <h2 class="mb-3">审核后修改{% if is_page13_super_admin %}（aicheckword）{% endif %}</h2>
+    <div class="mb-2"><a class="btn btn-outline-primary btn-sm" href="{{ url_for('document_control.project_kb_page') }}">打开项目知识库协同</a></div>
     <p class="text-muted small">
       {% if is_page13_super_admin %}
       与 aicheckword「审核后修改」同源：仅落实报告中<strong>立即修改</strong>审核点（高/中风险在未单独标记 <code>action</code> 时默认视为立即修改）。

@@ -156,6 +156,7 @@
     return '<span class="badge text-bg-secondary">未生成</span>';
   }
 
+
   function syncVersionDateValuesFromDom() {
     if (!els.versionDatesBody) return;
     Array.from(els.versionDatesBody.querySelectorAll("tr[data-vtg-version]")).forEach((row) => {
@@ -645,14 +646,36 @@
     if (!els.previewBody) return;
     if (!previewItems.length) {
       els.previewBody.innerHTML =
-        '<tr><td colspan="11" class="text-muted small text-center py-3">预览后将在此显示任务清单</td></tr>';
+        '<tr><td colspan="12" class="text-muted small text-center py-3">预览后将在此显示任务清单</td></tr>';
       return;
     }
-    const rows = previewItems
-      .map((item, idx) => {
+    const chapterOrder = [
+      "软件变更管理",
+      "系统追溯",
+      "缺陷管理",
+      "软件生产/发布管理",
+    ];
+    const groups = new Map();
+    previewItems.forEach((item, idx) => {
+      const key = String(item.chapter || item.processBranchLabel || "其它").trim() || "其它";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ item, idx });
+    });
+    const orderedKeys = [
+      ...chapterOrder.filter((k) => groups.has(k)),
+      ...Array.from(groups.keys()).filter((k) => !chapterOrder.includes(k)),
+    ];
+    const html = [];
+    orderedKeys.forEach((chapter) => {
+      const rows = groups.get(chapter) || [];
+      html.push(
+        `<tr class="vtg-chapter-row"><td colspan="12">${escapeHtml(chapter)}（${rows.length}）</td></tr>`
+      );
+      rows.forEach(({ item, idx }) => {
         const triggers = formatTriggerBits(item.triggeredBy);
         const targetVersion = item.targetVersion || item.fileVersion || "";
-        return `<tr data-vtg-preview-idx="${idx}">
+        const freq = String(item.archiveFrequency || "").trim() || (String(item.taskType || "").includes("流程") ? "流程" : "—");
+        html.push(`<tr data-vtg-preview-idx="${idx}">
           <td class="text-muted small">${idx + 1}</td>
           <td><input class="form-control form-control-sm" data-vtg-field="fileName" value="${escapeHtml(item.fileName || "")}"></td>
           <td><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"></td>
@@ -661,13 +684,14 @@
           <td><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"></td>
           <td><input type="date" class="form-control form-control-sm" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"></td>
           <td><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"></td>
+          <td class="small text-muted">${escapeHtml(freq)}</td>
           <td><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}"></td>
           <td class="small text-muted" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
           <td><button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="删除">×</button></td>
-        </tr>`;
-      })
-      .join("");
-    els.previewBody.innerHTML = rows;
+        </tr>`);
+      });
+    });
+    els.previewBody.innerHTML = html.join("");
     Array.from(els.previewBody.querySelectorAll("button[data-vtg-remove-preview]")).forEach((btn) => {
       btn.addEventListener("click", () => {
         syncPreviewItemsFromDom();
@@ -1038,31 +1062,82 @@
     await saveBatchSavedRecords();
   }
 
-  function buildPreviewMetaText(data, prefix) {
-    const dateSummary = Object.entries(data.versionReleaseDates || {})
-      .map(([v, d]) => `${v}:${d}`)
-      .join("；");
-    const updatedAt = data.updatedAt
+  function renderPreviewMeta(data, prefix) {
+    if (!els.previewMeta) return;
+    const exp = data && data.explanation && typeof data.explanation === "object"
+      ? data.explanation
+      : null;
+    const updatedAt = data && data.updatedAt
       ? String(data.updatedAt).replace("T", " ").slice(0, 19)
       : "";
-    const branchSummary = Array.isArray(data.processBranches)
-      ? data.processBranches
-          .map((row) => `${row.version}:${row.label || row.branch || ""}`)
-          .join("；")
+    const dates = Object.entries((data && data.versionReleaseDates) || {})
+      .map(([v, d]) => `<span class="font-monospace">${escapeHtml(v)}</span> ${escapeHtml(String(d))}`)
+      .join("、");
+    const steps = exp && Array.isArray(exp.steps) ? exp.steps : [];
+    const versions = exp && Array.isArray(exp.versions) ? exp.versions : [];
+    const versionHtml = versions.length
+      ? versions
+          .map((row) => {
+            const chs = Array.isArray(row.applicableChapters)
+              ? row.applicableChapters.join("、")
+              : "";
+            const market = row.archiveMarketLabel
+              ? ` · ${row.archiveMarketLabel}`
+              : "";
+            return `<li><span class="font-monospace">${escapeHtml(
+              row.fromVersion || ""
+            )}</span> → <span class="font-monospace">${escapeHtml(
+              row.version || ""
+            )}</span>
+              主导 <strong>${escapeHtml(row.dominantChange || "")}</strong> 位${escapeHtml(market)}<br>
+              <span class="text-muted">适用章节：${escapeHtml(chs || "—")}；主章节 ${escapeHtml(
+              row.primaryChapter || "-"
+            )}；生成 ${Number(row.itemCount || 0)} 条</span></li>`;
+          })
+          .join("")
       : "";
-    return [
-      prefix || "预览",
-      updatedAt ? `保存时间：${updatedAt}` : "",
-      `规则依据：${data.ruleSource || data.ruleBasis || "-"}`,
-      `版本链路：${(data.versionChain || []).join(" -> ") || "-"}`,
-      `各版本发布时间：${dateSummary || "-"}`,
-      `触发位：${(data.dominantChanges || []).join(", ") || "无"}`,
-      branchSummary ? `章节/流程：${branchSummary}` : "",
-      `说明：${data.note || "-"}`,
-      `反馈命中：${data.feedbackHitCount || 0}`,
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    const stepHtml = steps.length
+      ? `<ol class="mb-2 ps-3">${steps
+          .map((s) => `<li>${escapeHtml(s)}</li>`)
+          .join("")}</ol>`
+      : "";
+    els.previewMeta.innerHTML = `
+      <div class="vtg-explain">
+        <div class="vtg-explain-h">${escapeHtml(prefix || "预览")}${
+          updatedAt ? ` · 保存 ${escapeHtml(updatedAt)}` : ""
+        }</div>
+        <div class="vtg-explain-grid">
+          <div><span>依据</span>${escapeHtml((data && (data.ruleSource || data.ruleBasis)) || "-")}</div>
+          ${
+            data && data.sourceVersion
+              ? `<div><span>制度版次</span>${escapeHtml(String(data.sourceVersion))}${
+                  data.sourceFile ? ` · ${escapeHtml(String(data.sourceFile))}` : ""
+                }</div>`
+              : ""
+          }
+          <div><span>版本链路</span>${escapeHtml(((data && data.versionChain) || []).join(" → ") || "-")}</div>
+          <div><span>发布时间</span>${dates || "-"}</div>
+          <div><span>触发位</span>${escapeHtml(((data && data.dominantChanges) || []).join("、") || "无")}</div>
+          <div><span>反馈命中</span>${escapeHtml(String((data && data.feedbackHitCount) || 0))}</div>
+        </div>
+        ${stepHtml ? `<div class="vtg-explain-sub">匹配步骤</div>${stepHtml}` : ""}
+        ${versionHtml ? `<div class="vtg-explain-sub">各版本命中</div><ul class="mb-2 ps-3">${versionHtml}</ul>` : ""}
+        ${
+          exp && exp.chainNote
+            ? `<p class="mb-1">${escapeHtml(exp.chainNote)}</p>`
+            : ""
+        }
+        ${
+          exp && exp.supplementHint
+            ? `<p class="mb-0 text-muted">${escapeHtml(exp.supplementHint)}</p>`
+            : ""
+        }
+      </div>`;
+  }
+
+  function buildPreviewMetaText(data, prefix) {
+    renderPreviewMeta(data, prefix);
+    return "";
   }
 
   function applyPreviewPayload(data, options) {
@@ -1091,9 +1166,7 @@
       els.productName.value = data.productName;
       writeLocalProductName(String(data.projectId || els.projectId.value || "").trim(), data.productName);
     }
-    if (els.previewMeta) {
-      els.previewMeta.textContent = buildPreviewMetaText(data, opts.metaPrefix || "预览");
-    }
+    renderPreviewMeta(data, opts.metaPrefix || "预览");
     if (els.savePreviewEditsBtn) {
       els.savePreviewEditsBtn.disabled = !currentJobId || !previewItems.length;
     }
@@ -1137,11 +1210,17 @@
       const stamp = data.updatedAt
         ? String(data.updatedAt).replace("T", " ").slice(0, 19)
         : "";
-      els.previewMeta.textContent =
-        `已保存预览修改${stamp ? `（${stamp}）` : ""}` +
-        (data.feedbackSaved
-          ? ` | 反馈 ${data.feedbackSaved} 条将在下次「生成预览」时生效`
-          : " | 无相对上次原表的字段差异");
+      const extra = data.feedbackSaved
+        ? `反馈 ${data.feedbackSaved} 条将在下次「生成预览」时生效`
+        : "无相对上次原表的字段差异";
+      const banner = `<div class="alert alert-success py-2 px-3 mb-2 small">已保存预览修改${
+        stamp ? `（${escapeHtml(stamp)}）` : ""
+      } · ${escapeHtml(extra)}</div>`;
+      if (!els.previewMeta.querySelector(".vtg-explain")) {
+        els.previewMeta.innerHTML = banner;
+      } else {
+        els.previewMeta.insertAdjacentHTML("afterbegin", banner);
+      }
     }
     toast(data.message || "预览修改已保存", "success");
   }
@@ -1195,6 +1274,7 @@
       versionReleaseDates: out,
       projectId: String(els.projectId.value || "").trim() || null,
       productName: String(els.productName.value || "").trim(),
+      registrationCountry: currentRegistrationCountry(),
     };
     const data = await requestJson("/api/document-control/version-tasks/preview", {
       method: "POST",
@@ -1238,6 +1318,7 @@
       els.batchProjectId.innerHTML = options.join("");
     }
   }
+
 
   function applyBatchFieldsToRows() {
     if (!savedRecords.length) {

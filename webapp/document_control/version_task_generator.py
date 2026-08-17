@@ -46,10 +46,6 @@ from .version_task_rules import (
     process_branch_label,
 )
 
-_RULE_META = load_version_task_rules()
-RULE_BASIS_NOTE = str(_RULE_META.get("ruleBasis") or "")
-RULE_SOURCE = str(_RULE_META.get("ruleSource") or "")
-
 
 def parse_version(raw: str) -> ParsedVersion:
     text = (raw or "").strip()
@@ -210,6 +206,7 @@ def generate_task_preview(
     intermediate_versions: Optional[list[str]],
     version_release_dates: dict[str, Any],
     feedback_rows: Optional[list[VersionTaskGenerationFeedback]] = None,
+    registration_country: str = "",
 ) -> dict[str, Any]:
     chain = parse_version_chain(from_version, to_version, intermediate_versions or [])
     release_dates = normalize_version_release_dates(chain, version_release_dates)
@@ -219,18 +216,34 @@ def generate_task_preview(
     }
 
     items: list[dict[str, Any]] = []
-    route_by_version: dict[str, dict[str, str]] = {}
+    route_by_version: dict[str, dict[str, Any]] = {}
+    match_lines: list[dict[str, Any]] = []
     for transition in transitions:
         dominant = transition["dominantChange"]
         if dominant not in {"X", "Y", "Z", "B"}:
             continue
         target_version = str(transition["toVersion"])
-        route, catalog = catalogs_for_dominant(dominant)
+        route, catalog = catalogs_for_dominant(
+            dominant, registration_country=registration_country
+        )
         branch = route["processBranch"]
         route_by_version[target_version] = route
         transition["chapter"] = route["chapter"]
         transition["processBranch"] = branch
         transition["processBranchLabel"] = route.get("label") or process_branch_label(branch)
+        transition["applicableChapters"] = list(route.get("applicableChapters") or [])
+        match_lines.append(
+            {
+                "version": target_version,
+                "fromVersion": transition["fromVersion"],
+                "dominantChange": dominant,
+                "primaryChapter": route.get("chapter") or "",
+                "applicableChapters": list(route.get("applicableChapters") or []),
+                "processLabel": route.get("label") or process_branch_label(branch),
+                "archiveMarketLabel": route.get("archiveMarketLabel") or "",
+                "itemCount": len(catalog),
+            }
+        )
         anchor_date = _parse_iso_date(release_dates[target_version])
         for task in catalog:
             if dominant not in set(task.get("triggers") or set()):
@@ -286,18 +299,36 @@ def generate_task_preview(
         deduped, feedback_hit_count = apply_feedback_rules(deduped, feedback_rows)
 
     if intermediate_versions:
-        note = "已按提供的中间版本链路逐段推断触发规则。"
+        chain_note = "已按提供的中间版本链路逐段推断触发规则。"
     else:
-        note = "未提供中间版本，已按 from->to 单跳推断触发规则。"
-    branch_summary = "；".join(
-        f"{ver}:{r.get('label') or process_branch_label(r.get('processBranch') or '')}"
-        for ver, r in sorted(route_by_version.items())
-    )
-    note = f"{RULE_BASIS_NOTE} {note} 路由：{branch_summary or '无'}。"
-    note += (
-        " 另请对照公司「发补记录」中同一注册国家与注册类别、且发补日期不晚于今日的历史意见"
-        "（含未完成），补充相关文档/章节的复核与整改任务。"
-    )
+        chain_note = "未提供中间版本，已按起止版本单跳推断触发规则。"
+    rule_meta = load_version_task_rules()
+    match_steps = list(rule_meta.get("matchSteps") or [])
+    rule_source = str(rule_meta.get("ruleSource") or "")
+    rule_basis = str(rule_meta.get("ruleBasis") or "")
+    explanation = {
+        "title": "规则匹配说明",
+        "source": rule_source,
+        "steps": match_steps,
+        "chainNote": chain_note,
+        "versions": match_lines,
+        "supplementHint": (
+            "另请对照公司「发补记录」中同一注册国家与注册类别、且发补日期不晚于今日的历史意见"
+            "（含未完成），补充相关文档/章节的复核与整改任务。"
+        ),
+    }
+    note_parts = [
+        f"依据：{rule_source}",
+        chain_note,
+        *[
+            f"{row['fromVersion']}→{row['version']} 主导{row['dominantChange']}位："
+            f"适用章节「{'、'.join(row.get('applicableChapters') or [])}」"
+            f"（主章节 {row.get('primaryChapter') or '-'}，{row.get('itemCount') or 0} 条）"
+            for row in match_lines
+        ],
+        explanation["supplementHint"],
+    ]
+    note = "\n".join(note_parts)
 
     return {
         "fromVersion": chain[0].normalized,
@@ -312,14 +343,21 @@ def generate_task_preview(
                 "chapter": r.get("chapter") or "",
                 "branch": r.get("processBranch") or "",
                 "label": r.get("label") or process_branch_label(r.get("processBranch") or ""),
+                "applicableChapters": list(r.get("applicableChapters") or []),
+                "archiveMarketLabel": r.get("archiveMarketLabel") or "",
             }
             for ver, r in sorted(route_by_version.items())
         ],
         "releaseDate": release_dates[chain[-1].normalized],
         "items": deduped,
         "note": note,
-        "ruleBasis": RULE_BASIS_NOTE,
-        "ruleSource": RULE_SOURCE,
+        "explanation": explanation,
+        "ruleBasis": rule_basis,
+        "ruleSource": rule_source,
+        "rulesMode": rule_meta.get("mode") or "",
+        "sourceFile": rule_meta.get("sourceFile") or "",
+        "sourceVersion": rule_meta.get("sourceVersion") or "",
+        "registrationCountry": registration_country or "",
         "feedbackHitCount": feedback_hit_count,
     }
 
@@ -1283,4 +1321,5 @@ def get_latest_version_task_preview(
         }
     )
     return payload
+
 

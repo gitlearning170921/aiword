@@ -834,10 +834,13 @@ def upload_record_visible_to_user(rec: Any) -> bool:
         if rbac_enforced() and user_team_ids():
             return upload_in_scope(rec)
         return True
-    if is_project_admin() and rbac_enforced():
-        if not user_team_ids():
-            return False
-        return upload_in_scope(rec)
+    if is_project_admin():
+        # 未开多租户/RBAC 时项管可见全部；开启后按项目组隔离
+        if rbac_enforced():
+            if not user_team_ids():
+                return False
+            return upload_in_scope(rec)
+        return True
     return False
 
 
@@ -855,10 +858,13 @@ def upload_record_mutable_by_current_user(rec: Any) -> bool:
             if proj is not None:
                 return _project_visible_for_team(proj, set(user_team_ids()))
         return True
-    if is_project_admin() and rbac_enforced():
-        if not user_team_ids():
-            return False
-        return upload_in_scope(rec)
+    if is_project_admin():
+        # 已通过「本人任务」校验；未开 RBAC 时项管可改本人任务，开启后仍受项目组约束
+        if rbac_enforced():
+            if not user_team_ids():
+                return False
+            return upload_in_scope(rec)
+        return True
     return False
 
 
