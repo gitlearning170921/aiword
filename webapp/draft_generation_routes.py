@@ -31,6 +31,7 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
+from . import db
 from .user_facing import api_debug_fields, integration_error_message
 from .app_settings import get_setting
 from ._integration_common import (
