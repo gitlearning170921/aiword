@@ -434,6 +434,8 @@ def _ftp_path_for_display(ftp_path: str, display_name: str) -> str:
 
 def _base_doc_bytes_from_upload(upload: UploadRecord) -> tuple[Optional[bytes], str]:
     """从任务记录取 Base 文档字节；(None, name) 表示无文件（仅链接等）。"""
+    from pathlib import Path
+
     from .ftp_store import download_bytes
 
     fn = (upload.original_file_name or upload.file_name or "base.docx").strip() or "base.docx"
@@ -448,6 +450,11 @@ def _base_doc_bytes_from_upload(upload: UploadRecord) -> tuple[Optional[bytes], 
             raise
     if blob:
         return blob, fn
+    storage = (getattr(upload, "storage_path", None) or "").strip()
+    if storage:
+        p = Path(storage)
+        if p.is_file():
+            return p.read_bytes(), fn
     return None, fn
 
 
@@ -2303,15 +2310,18 @@ def api_jobs_submit():
         fn0 = secure_filename(suggested_fn) or "base.docx"
         base_from_uploads.append((fn0, bdata))
 
-    from .archive_expand import flatten_upload_file_storage
+    from .archive_expand import ArchiveExpandError, flatten_upload_file_storage
 
-    input_expanded: list[tuple[str, bytes]] = list(
-        flatten_upload_file_storage(request.files.getlist("input_files") or [])
-    )
-    base_expanded: list[tuple[str, bytes]] = list(base_from_uploads)
-    base_expanded.extend(
-        flatten_upload_file_storage(request.files.getlist("base_files") or [])
-    )
+    try:
+        input_expanded: list[tuple[str, bytes]] = list(
+            flatten_upload_file_storage(request.files.getlist("input_files") or [])
+        )
+        base_expanded: list[tuple[str, bytes]] = list(base_from_uploads)
+        base_expanded.extend(
+            flatten_upload_file_storage(request.files.getlist("base_files") or [])
+        )
+    except ArchiveExpandError as exc:
+        return jsonify({"message": str(exc)}), 400
     base_multipart_names = [secure_filename(n) or "base.bin" for n, _ in base_expanded]
     _auto_bind_base_files_by_target(payload_obj, base_multipart_names)
 

@@ -134,29 +134,30 @@ def get_task(task_id: str):
 @bp.get("/tasks/<task_id>/document")
 @_check_integration_secret
 def download_document(task_id: str):
-    """下载任务关联的文档文件"""
+    """下载任务关联的文档文件（BLOB / FTP / 本机路径 / 链接）。"""
     record = UploadRecord.query.get(task_id)
     if not record:
         return jsonify({"message": "任务不存在"}), 404
 
-    if record.template_file_blob:
+    from .draft_generation_routes import _base_doc_bytes_from_upload, _template_display_filename
+
+    try:
+        blob, suggested = _base_doc_bytes_from_upload(record)
+    except Exception as e:
+        return jsonify({"message": f"下载文档失败: {e}"}), 500
+    download_name = _template_display_filename(record) or suggested or "document.docx"
+    if blob:
         return send_file(
-            io.BytesIO(record.template_file_blob),
+            io.BytesIO(blob),
             as_attachment=True,
-            download_name=record.original_file_name or "document.docx",
+            download_name=download_name,
             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-    if record.storage_path and Path(record.storage_path).exists():
-        return send_file(
-            record.storage_path,
-            as_attachment=True,
-            download_name=record.original_file_name or "document.docx",
         )
 
     links = record.get_template_links_list()
     if links:
         first_link = links[0]
-        if first_link.lower().endswith(('.docx', '.doc')):
+        if first_link.lower().endswith((".docx", ".doc")):
             try:
                 from .doc_service import download_template_from_url
                 uploads_dir = Path(current_app.config["UPLOAD_FOLDER"])
@@ -165,7 +166,7 @@ def download_document(task_id: str):
                 return send_file(
                     str(temp_path),
                     as_attachment=True,
-                    download_name=f"{record.file_name or 'document'}.docx",
+                    download_name=download_name,
                 )
             except Exception as e:
                 return jsonify({"message": f"下载文档失败: {e}"}), 500
@@ -287,7 +288,11 @@ def _task_to_dict(r: UploadRecord, idx: int = 0) -> dict:
         "fileName": r.file_name,
         "taskType": r.task_type,
         "author": r.author,
-        "hasFile": bool(r.template_file_blob or r.storage_path),
+        "hasFile": bool(
+            r.template_file_blob
+            or r.storage_path
+            or (getattr(r, "ftp_path", None) or "").strip()
+        ),
         "hasLinks": bool(r.template_links),
         "templateLinks": r.template_links,
         "linksCount": len(r.get_template_links_list()),

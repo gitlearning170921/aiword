@@ -765,8 +765,7 @@
     prog.show(); prog.setRunning(true); prog.setHeadline("提交中…");
     prog.update(0.03, "正在上传文件…");
 
-    fetch(root + "/audit/api/jobs", { method: "POST", body: fd, credentials: "same-origin" })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, json: j }; }); })
+    AsyncJob.api(root + "/audit/api/jobs", { method: "POST", body: fd })
       .then(function (x) {
         if (!x.ok || !x.json || !x.json.ok) {
           var em = (x.json && (x.json.message || x.json.detail)) || "提交失败";

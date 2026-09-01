@@ -321,10 +321,13 @@ def api_translate_create_job():
             if not data:
                 continue
             raw_items.append((raw_name, data))
-        from .archive_expand import expand_translation_blobs
+        from .archive_expand import ArchiveExpandError, expand_translation_blobs
 
-        for name, blob in expand_translation_blobs(raw_items):
-            resolved.append((name, blob, ""))
+        try:
+            for name, blob in expand_translation_blobs(raw_items):
+                resolved.append((name, blob, ""))
+        except ArchiveExpandError as exc:
+            return jsonify({"message": str(exc)}), 400
 
     if not resolved:
         return jsonify({"message": "未能取到任何可翻译文件"}), 400

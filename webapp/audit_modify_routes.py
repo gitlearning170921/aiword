@@ -512,10 +512,13 @@ def api_audit_modify_create_job():
         disp = _template_display_filename(rec) or rec.file_name or "base.docx"
         base_uploads.append((disp, blob))
     else:
-        from .archive_expand import flatten_upload_file_storage
+        from .archive_expand import ArchiveExpandError, flatten_upload_file_storage
 
-        for disp_name, blob in flatten_upload_file_storage(base_files_form):
-            base_uploads.append((disp_name, blob))
+        try:
+            for disp_name, blob in flatten_upload_file_storage(base_files_form):
+                base_uploads.append((disp_name, blob))
+        except ArchiveExpandError as exc:
+            return jsonify({"message": str(exc)}), 400
 
     if not base_uploads and upload_id and not base_upload_id:
         # 未单独上传 Base 时：以审核来源任务中的文档作为 Base（对应报告「需修改文档」）

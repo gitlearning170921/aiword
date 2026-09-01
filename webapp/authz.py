@@ -430,11 +430,9 @@ def page4_access_required(fn: Callable):
 
 
 def _is_api_request() -> bool:
-    return bool(
-        request.is_json
-        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or (request.path or "").startswith("/api/")
-    )
+    from .app_settings import request_wants_json
+
+    return request_wants_json()
 
 
 def _company_admin_blocked_response():
@@ -615,13 +613,23 @@ def project_in_scope(
 
 
 def upload_in_scope(rec: UploadRecord | None) -> bool:
+    """项目组范围：项管按项目归属；普通账号按项目组可见（不可用 project_in_scope，其仅项管）。"""
     if rec is None:
         return False
     if not rbac_enforced():
         return True
+    if is_page13_super_admin():
+        return True
     if is_company_admin():
         return False
     proj = resolve_project_for_upload(rec)
+    if is_normal_user():
+        if proj is None:
+            return True
+        tids = set(user_team_ids())
+        if not tids:
+            return True
+        return _project_visible_for_team(proj, tids)
     if proj is None:
         return False
     return project_in_scope(proj)
@@ -831,8 +839,11 @@ def upload_record_visible_to_user(rec: Any) -> bool:
     if is_normal_user():
         if not _record_assigned_to_current_user(rec):
             return False
+        # 与页面2 列表过滤 / 写权限一致：普通账号按项目组可见，不能用 upload_in_scope（其内部 project_in_scope 仅项管）
         if rbac_enforced() and user_team_ids():
-            return upload_in_scope(rec)
+            proj = resolve_project_for_upload(rec)
+            if proj is not None:
+                return _project_visible_for_team(proj, set(user_team_ids()))
         return True
     if is_project_admin():
         # 未开多租户/RBAC 时项管可见全部；开启后按项目组隔离

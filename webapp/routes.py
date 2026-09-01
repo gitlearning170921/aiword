@@ -4007,20 +4007,14 @@ def _upload_record_visible_to_page2_user(rec: UploadRecord) -> bool:
 
 
 def _can_access_upload_template(upload: UploadRecord) -> bool:
-    """页面1 维护人员或页面2 有权用户可下载任务模板。"""
-    from .authz import is_page13_super_admin, is_project_admin, upload_record_visible_to_user
+    """与页面2 可见性同一口径：超管全可见，其余按 upload_record_visible_to_user。"""
+    from .authz import is_page13_super_admin, upload_record_visible_to_user
 
     if is_page13_super_admin():
         return True
-    if not _page13_password_configured():
-        return True
     if not session.get("user_id"):
         return False
-    # 项目管理员：可见范围内的任务均可下载（与页面1 列表一致）
-    if is_project_admin():
-        return upload_record_visible_to_user(upload)
-    # 普通账号：仅本人可见任务
-    return _upload_record_visible_to_page2_user(upload)
+    return upload_record_visible_to_user(upload)
 
 
 def _can_replace_upload_template(upload: UploadRecord) -> bool:
@@ -4200,6 +4194,20 @@ def _aiprintword_go_redirect(mode: str):
     from .app_settings import get_setting
 
     uid = (request.args.get("upload_id") or "").strip()
+    upload_row = UploadRecord.query.get(uid) if uid else None
+    if not upload_row:
+        htm = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>跳转失败</title></head><body>"
+            "<p>任务不存在</p><p><a href=\"javascript:history.back()\">返回</a></p></body></html>"
+        )
+        return make_response(htm, 404)
+    if not _can_access_upload_template(upload_row):
+        htm = (
+            "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>无权访问</title></head><body>"
+            "<p>无权交接该任务文档</p><p><a href=\"javascript:history.back()\">返回</a></p></body></html>"
+        )
+        return make_response(htm, 403)
+
     raw, fname, err, reuse_ftp = _resolve_handoff_doc_for_print_sign(uid, mode=mode)
     fname = _normalize_handoff_display_filename(fname or "document.docx")
     reuse_ok = (reuse_ftp or "").strip()
@@ -4223,7 +4231,6 @@ def _aiprintword_go_redirect(mode: str):
 
     import requests as _req
 
-    upload_row = UploadRecord.query.get(uid)
     handoff_ctx = _build_aiprintword_handoff_context(upload_row)
 
     post_data: dict[str, str] = {"purpose": mode, "filename": fname}
@@ -4367,6 +4374,8 @@ def _aiprintword_batch_handoff_redirect(mode: str, upload_ids: list[str]) -> tup
         row = UploadRecord.query.get(uid)
         if not row:
             return {"ok": False, "error": f"任务不存在：{uid}"}, 404
+        if not _can_access_upload_template(row):
+            return {"ok": False, "error": f"无权交接该任务：{row.file_name or uid}"}, 403
         rows.append(row)
         projects.add((row.project_name or "").strip())
     if len(projects) > 1:
@@ -11692,8 +11701,7 @@ def api_download_generated(record_id: str):
     record = GenerateRecord.query.get(record_id)
     if not record or not record.upload:
         return jsonify({"message": "记录不存在"}), 404
-    username = session.get("username")
-    if record.upload.author != username:
+    if not _can_access_upload_template(record.upload):
         return jsonify({"message": "无权下载"}), 403
     blob = record.output_file_blob
     if not blob and record.output_path and Path(record.output_path).is_file():

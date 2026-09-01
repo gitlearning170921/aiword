@@ -192,8 +192,38 @@ def _fix_numeric_port_path_typo(base: str) -> str:
     ).rstrip("/")
 
 
+def _rewrite_docker_internal_host_to_loopback(base: str) -> str:
+    """把 Docker 服务名改成本机回环，供非容器开发机使用。"""
+    try:
+        parsed = urlparse(base)
+    except Exception:
+        return base
+    host = (parsed.hostname or "").strip().lower()
+    if host not in _DOCKER_INTERNAL_UPSTREAM_HOSTS:
+        return base
+    port = parsed.port
+    if port and port not in (80, 443):
+        new_netloc = f"127.0.0.1:{port}"
+    else:
+        new_netloc = "127.0.0.1"
+    return urlunparse(
+        (
+            parsed.scheme or "http",
+            new_netloc,
+            parsed.path or "",
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    ).rstrip("/")
+
+
 def resolve_integration_api_base(raw: str) -> str:
-    """解析 aicheckword 根地址；Docker 主机名在本机开发时自动回退 127.0.0.1。"""
+    """解析 aicheckword 根地址。
+
+    - 容器内：127.0.0.1:8000 改写为 aicheckword:8000
+    - 本机开发：配置里的 Docker 服务名 aicheckword 直接改 127.0.0.1，避免 Windows DNS 长时间解析失败
+    """
     base = (raw or "").strip().rstrip("/")
     if not base:
         return ""
@@ -206,27 +236,24 @@ def resolve_integration_api_base(raw: str) -> str:
     host = (parsed.hostname or "").strip().lower()
     if host not in _DOCKER_INTERNAL_UPSTREAM_HOSTS:
         return base
+    if not _running_in_aiword_docker():
+        fallback = _rewrite_docker_internal_host_to_loopback(base)
+        try:
+            current_app.logger.info(
+                "本机非容器环境：aicheckword 地址 %s 已改用 %s（无需 DNS）",
+                base,
+                fallback,
+            )
+        except RuntimeError:
+            pass
+        return fallback
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
         socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         return base
     except OSError:
         pass
-    new_host = "127.0.0.1"
-    if port and port not in (80, 443):
-        new_netloc = f"{new_host}:{port}"
-    else:
-        new_netloc = new_host
-    fallback = urlunparse(
-        (
-            parsed.scheme or "http",
-            new_netloc,
-            parsed.path or "",
-            parsed.params,
-            parsed.query,
-            parsed.fragment,
-        )
-    ).rstrip("/")
+    fallback = _rewrite_docker_internal_host_to_loopback(base)
     try:
         current_app.logger.info(
             "aicheckword 地址 %s 在本机不可解析，已自动改用 %s（Docker 部署请保持服务名 aicheckword）",

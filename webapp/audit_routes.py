@@ -550,10 +550,13 @@ def api_audit_create_job():
             ), 400
         resolved_blobs = resolved
     else:
-        from .archive_expand import flatten_upload_file_storage
+        from .archive_expand import ArchiveExpandError, flatten_upload_file_storage
 
-        for disp_name, blob in flatten_upload_file_storage(uploaded_files):
-            resolved_blobs.append((disp_name, blob, ""))
+        try:
+            for disp_name, blob in flatten_upload_file_storage(uploaded_files):
+                resolved_blobs.append((disp_name, blob, ""))
+        except ArchiveExpandError as exc:
+            return jsonify({"message": str(exc)}), 400
 
     err_msg = _enforce_audit_stable(mode, len(resolved_blobs))
     if err_msg:

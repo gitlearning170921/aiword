@@ -7,6 +7,7 @@ from typing import Any
 from .authz import (
     _project_lookup_maps,
     filter_upload_records_in_scope,
+    filter_upload_records_visible_to_user,
     is_page13_super_admin,
     is_project_admin,
 )
@@ -218,7 +219,9 @@ def page2_query_upload_rows(*, include_history: bool, proj_meta: dict, ended: se
     if (not include_history) and ended:
         q = q.filter(~UploadRecord.project_name.in_(list(ended)))
     rows = q.order_by(UploadRecord.sort_order.asc(), UploadRecord.created_at.asc()).all()
-    if mode == "project_admin_readonly":
+    if mode == "normal":
+        rows = filter_upload_records_visible_to_user(rows)
+    elif mode == "project_admin_readonly":
         rows = filter_upload_records_in_scope(rows)
     return rows
 

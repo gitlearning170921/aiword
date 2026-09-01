@@ -985,9 +985,12 @@ def api_company_training_upload():
         raw = f.read()
         if raw:
             raw_items.append((str(f.filename or "upload.bin"), raw))
-    from .archive_expand import expand_upload_blobs
+    from .archive_expand import ArchiveExpandError, expand_upload_blobs
 
-    expanded = expand_upload_blobs(raw_items)
+    try:
+        expanded = expand_upload_blobs(raw_items)
+    except ArchiveExpandError as exc:
+        return jsonify({"message": str(exc)}), 400
     if not expanded:
         return jsonify({"message": "无有效训练文件（支持单文件或 zip/tar 压缩包）"}), 400
     for disp_name, raw in expanded:

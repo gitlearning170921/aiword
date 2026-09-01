@@ -1808,7 +1808,7 @@ def create_app() -> Flask:
         SEND_FILE_MAX_AGE=0,
         UPLOAD_FOLDER=str(uploads_dir),
         OUTPUT_FOLDER=str(outputs_dir),
-        MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # 25 MB safety cap
+        MAX_CONTENT_LENGTH=80 * 1024 * 1024,  # 多文档审核常见超过 25MB
         JSON_SORT_KEYS=False,
         DINGTALK_WEBHOOK="",
         DINGTALK_SECRET="",
@@ -1934,6 +1934,27 @@ def create_app() -> Flask:
     # 数据库连接断开后（如网络恢复前拿到的连接已失效）：清空连接池，下次请求自动重连，无需重启服务
     from sqlalchemy.exc import OperationalError, InterfaceError
     from sqlalchemy.engine import Engine
+    from werkzeug.exceptions import RequestEntityTooLarge
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def _handle_upload_too_large(exc):
+        from flask import jsonify, render_template
+
+        from .app_settings import request_wants_json
+
+        msg = "上传文件总大小超出限制（当前上限约 80MB）。多文档审核请减少文件、去掉扫描件 PDF，或分批提交。"
+        if request_wants_json():
+            return jsonify({"message": msg, "ok": False}), 413
+        try:
+            return render_template(
+                "error.html",
+                title="文件过大",
+                message=msg,
+                hide_main_nav=False,
+                gate_page=False,
+            ), 413
+        except Exception:
+            return msg, 413
 
     @app.errorhandler(OperationalError)
     @app.errorhandler(InterfaceError)
@@ -1945,7 +1966,8 @@ def create_app() -> Flask:
         except Exception:
             pass
         from flask import request
-        if request.path.startswith("/api/"):
+        from .app_settings import request_wants_json
+        if request_wants_json() or (request.path or "").startswith("/api/"):
             return {"message": "数据库连接中断，请刷新页面重试"}, 503
         try:
             from flask import render_template

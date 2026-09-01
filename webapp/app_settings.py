@@ -598,6 +598,28 @@ def is_effective_feature_enabled(key: str, app: Optional["Flask"] = None) -> boo
     return bool(flags.get(key))
 
 
+def request_wants_json() -> bool:
+    """判断当前请求应按 JSON 失败，而不是返回 HTML 错误页。
+
+    审核/初稿等集成 API 路径是 ``/audit/api/...``，并不以 ``/api/`` 开头；
+    浏览器 fetch 默认 Accept 也不是 application/json。漏判时功能开关/登录
+    会返回 ``<!doctype html>``，前端 ``res.json()`` 就会报 Unexpected token '<'。
+    """
+    from flask import has_request_context, request
+
+    if not has_request_context():
+        return False
+    path = (request.path or "").lower()
+    accept = (request.headers.get("Accept") or "").lower()
+    return bool(
+        request.is_json
+        or (request.headers.get("X-Requested-With") or "") == "XMLHttpRequest"
+        or path.startswith("/api/")
+        or "/api/" in path
+        or "application/json" in accept
+    )
+
+
 def feature_gate_response_any(*feature_keys: str):
     """任一分项开关对本账号生效则放行（用于页面1/2 共用集成路由）。"""
     for key in feature_keys:
@@ -618,14 +640,7 @@ def feature_gate_response(feature_key: str):
 
     label = USER_FEATURE_LABELS.get(feature_key, feature_key)
     message = f"「{label}」功能未对本账号开放（请确认系统配置已开启，且账号未被单独禁止）"
-    path = (request.path or "").lower()
-    wants_json = (
-        path.startswith("/api/")
-        or request.is_json
-        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or "application/json" in (request.headers.get("Accept") or "")
-    )
-    if wants_json:
+    if request_wants_json():
         return jsonify({"message": message, "featureDisabled": True, "featureKey": feature_key}), 403
     return (
         render_template(
@@ -663,6 +678,7 @@ def register_exam_center_feature_gate(app: "Flask") -> None:
             return feature_gate_response_any(
                 "FEATURE_PAGE0_AUDIT",
                 "FEATURE_PAGE1_AUDIT",
+                "FEATURE_PAGE2_AUDIT",
             )
         if rel.startswith("/translate"):
             return feature_gate_response_any(

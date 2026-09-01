@@ -69,19 +69,46 @@
     }
   }
 
-  /** 把 fetch 响应包装成 {ok, status, json}。 */
+  /** 把 fetch 响应包装成 {ok, status, json}；HTML 错误页不会再抛 Unexpected token '<'。 */
+  function parseResponseJson(r) {
+    return r.text().then(function (txt) {
+      var t = (txt || "").trim();
+      if (!t) return {};
+      var first = t.charAt(0);
+      if (first === "<") {
+        var msg = "接口返回了网页而不是数据，请刷新后重新登录再试";
+        if (/功能未开放/.test(t)) {
+          msg = "当前账号未开放文档审核，请在系统配置中开启对应功能后再试";
+        } else if (/Request Entity Too Large|413/i.test(t) || /文件过大|超出限制/.test(t)) {
+          msg = "上传文件总大小超出限制，请减少文件或分批做多文档审核";
+        } else if (/登录/.test(t)) {
+          msg = "登录已过期，请刷新页面后重新登录";
+        }
+        return { message: msg, htmlResponse: true };
+      }
+      try {
+        return JSON.parse(t);
+      } catch (e) {
+        return { message: "响应不是合法 JSON" };
+      }
+    });
+  }
+
   function api(url, opt) {
     opt = opt || {};
     opt.credentials = opt.credentials || "same-origin";
+    var headers = opt.headers || {};
+    if (!headers.Accept && !headers.accept) {
+      headers.Accept = "application/json";
+    }
+    if (!headers["X-Requested-With"] && !headers["x-requested-with"]) {
+      headers["X-Requested-With"] = "XMLHttpRequest";
+    }
+    opt.headers = headers;
     return fetch(url, opt).then(function (r) {
-      return r
-        .json()
-        .catch(function () {
-          return {};
-        })
-        .then(function (j) {
-          return { ok: r.ok, status: r.status, json: j };
-        });
+      return parseResponseJson(r).then(function (j) {
+        return { ok: r.ok, status: r.status, json: j };
+      });
     });
   }
 
