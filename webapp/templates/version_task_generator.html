@@ -4,7 +4,7 @@
 
 {% block content %}
 <style>
-  .vtg-page { max-width: 1180px; }
+  .vtg-page { max-width: none; width: 100%; }
   .vtg-hero {
     border: 1px solid #d7e3f4;
     border-radius: 12px;
@@ -189,12 +189,97 @@
     color: #1e3a5f;
     padding: 0.4rem 0.6rem;
   }
+  .vtg-version-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.5rem;
+    align-items: center;
+    margin-bottom: 0.65rem;
+  }
+  .vtg-version-bar-label {
+    font-size: 0.82rem;
+    color: #64748b;
+    margin-right: 0.15rem;
+  }
+  .vtg-version-chip {
+    border: 1px solid #c5d4e4;
+    background: #fff;
+    color: #334155;
+    border-radius: 999px;
+    padding: 0.12rem 0.7rem;
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .vtg-version-chip:hover { background: #f1f7fd; }
+  .vtg-version-chip.is-active {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #fff;
+  }
+  .vtg-version-chip .vtg-chip-n { opacity: 0.72; margin-left: 0.15rem; }
+  .vtg-version-bar-actions { margin-left: auto; display: flex; gap: 0.35rem; }
+  tr.vtg-version-row td {
+    background: #d9e9f8;
+    font-weight: 650;
+    color: #0f3a66;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.45rem 0.6rem;
+  }
+  tr.vtg-version-row:hover td { background: #c7def3; }
+  tr.vtg-version-row .vtg-caret {
+    display: inline-block;
+    width: 1.1rem;
+    font-size: 0.75rem;
+  }
+  tr.vtg-preview-hidden { display: none; }
+  tr.vtg-status-discard td { opacity: 0.62; }
+  tr.vtg-status-pending .vtg-status-select { border-color: #f0ad4e; }
+  .vtg-status-select { min-width: 5.4rem; }
+  .vtg-preview-select-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.55rem;
+    align-items: center;
+    margin-bottom: 0.55rem;
+  }
+  .vtg-apply-mode { margin-bottom: 0.45rem; }
+  .vtg-preview-table {
+    width: 100%;
+    table-layout: auto;
+  }
+  .vtg-preview-table th,
+  .vtg-preview-table td {
+    vertical-align: middle;
+  }
+  .vtg-col-check { width: 2.2rem; white-space: nowrap; }
+  .vtg-col-idx { width: 2.4rem; white-space: nowrap; }
+  .vtg-col-status { width: 5.8rem; }
+  .vtg-col-filename { min-width: 22rem; width: 32%; }
+  .vtg-col-tasktype { min-width: 6.5rem; }
+  .vtg-col-version { min-width: 7rem; }
+  .vtg-col-author { min-width: 6rem; }
+  .vtg-col-date { min-width: 8.2rem; }
+  .vtg-col-module { min-width: 5.5rem; }
+  .vtg-col-freq { min-width: 6.5rem; }
+  .vtg-col-notes { min-width: 8rem; }
+  .vtg-col-trigger { min-width: 4.5rem; white-space: nowrap; }
+  .vtg-col-action { width: 2.4rem; }
+  .vtg-filename-input {
+    width: 100%;
+    min-height: 2.4rem;
+    resize: vertical;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
   @media (max-width: 900px) {
     .vtg-explain-grid { grid-template-columns: 1fr; }
+    .vtg-version-bar-actions { margin-left: 0; width: 100%; }
   }
 </style>
 
-<div class="container-fluid px-3 px-lg-4 vtg-page">
+<div class="container-fluid px-0 vtg-page">
   <div class="vtg-hero">
     <div class="vtg-hero-top">
       <div>
@@ -362,7 +447,7 @@
       <span class="vtg-step-badge">3</span>
       <div class="flex-grow-1">
         <h2 id="vtgStep3Title">任务预览（可编辑）</h2>
-        <p class="vtg-sub">「生成预览」会自动保存规则结果。表格内手改后请点「保存预览修改」，下次再生成才会按反馈优化；下发时也会写入反馈。</p>
+        <p class="vtg-sub">「生成预览」会自动保存规则结果。每条记录可标为选用 / 弃用 / 待定（默认选用，历史为空按选用）。表格按目标版本分组，可筛选并收起/展开。仅勾选的「选用」会下发；手改后请点「保存预览修改」。</p>
       </div>
       <span id="vtgPreviewCount" class="badge text-bg-secondary vtg-count-slot">0 条</span>
     </div>
@@ -374,27 +459,38 @@
         <span class="small text-muted">写入当前预览快照 + 调整反馈（不必下发）</span>
       </div>
       <div id="vtgPreviewMeta" class="small text-muted mb-2">尚未生成预览。</div>
+      <div id="vtgPreviewVersionBar" class="vtg-version-bar d-none" aria-label="按版本筛选预览"></div>
+      <div class="vtg-preview-select-bar" aria-label="预览勾选">
+        <button id="vtgPreviewSelectAll" class="btn btn-outline-secondary btn-sm" type="button">全选</button>
+        <button id="vtgPreviewUnselectAll" class="btn btn-outline-secondary btn-sm" type="button">取消全选</button>
+        <button id="vtgPreviewUnselectVisible" class="btn btn-outline-secondary btn-sm" type="button">取消选择</button>
+        <span id="vtgPreviewSelectHint" class="small text-muted">仅「选用」可勾选下发。全选作用于当前可见行。</span>
+      </div>
       <div class="table-responsive border rounded">
-        <table class="table table-sm table-hover table-bordered mb-0 align-middle">
+        <table class="table table-sm table-hover table-bordered mb-0 align-middle vtg-preview-table">
           <thead class="table-light">
             <tr>
-              <th style="width: 3%">#</th>
-              <th style="width: 15%">文件名</th>
-              <th style="width: 9%">任务类型</th>
-              <th style="width: 8%">目标版本</th>
-              <th style="width: 9%">责任人</th>
-              <th style="width: 9%">完成日期</th>
-              <th style="width: 9%">文档日期</th>
-              <th style="width: 7%">模块</th>
-              <th style="width: 9%">归档频率</th>
-              <th style="width: 12%">说明</th>
-              <th style="width: 6%" title="版本号 X.Y.Z.B 的最高变化位">触发位</th>
-              <th style="width: 3%"></th>
+              <th class="vtg-col-check">
+                <input type="checkbox" class="form-check-input" id="vtgPreviewHeadCheck" title="全选当前可见的选用记录" disabled>
+              </th>
+              <th class="vtg-col-idx">#</th>
+              <th class="vtg-col-status">状态</th>
+              <th class="vtg-col-filename">文件名</th>
+              <th class="vtg-col-tasktype">任务类型</th>
+              <th class="vtg-col-version">目标版本</th>
+              <th class="vtg-col-author">责任人</th>
+              <th class="vtg-col-date">完成日期</th>
+              <th class="vtg-col-date">文档日期</th>
+              <th class="vtg-col-module">模块</th>
+              <th class="vtg-col-freq">归档频率</th>
+              <th class="vtg-col-notes">说明</th>
+              <th class="vtg-col-trigger" title="版本号 X.Y.Z.B 的最高变化位">触发位</th>
+              <th class="vtg-col-action"></th>
             </tr>
           </thead>
           <tbody id="vtgPreviewBody">
             <tr>
-              <td colspan="12" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
+              <td colspan="14" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
             </tr>
           </tbody>
         </table>
@@ -404,7 +500,17 @@
         <p class="vtg-subpanel-title" id="vtgStep4Title">
           <span class="badge text-bg-primary me-1">4</span>转换为任务列表
         </p>
-        <p class="vtg-subpanel-hint mb-2">确认项目与预览内容无误后，下发到当前所选项目的任务列表。</p>
+        <p class="vtg-subpanel-hint mb-2">仅勾选且状态为「选用」的记录会下发。同一预览可多次下发：替换更新覆盖已存在的同名任务，增量更新则跳过已存在项。</p>
+        <div class="vtg-apply-mode">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="vtgApplyMode" id="vtgApplyModeReplace" value="replace" checked>
+            <label class="form-check-label" for="vtgApplyModeReplace">替换更新</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="vtgApplyMode" id="vtgApplyModeIncrement" value="increment">
+            <label class="form-check-label" for="vtgApplyModeIncrement">增量更新</label>
+          </div>
+        </div>
         <button id="vtgApplyBtn" class="btn btn-success btn-sm" type="button">确认下发到任务列表</button>
         <div id="vtgApplyMsg" class="small text-muted mt-2"></div>
       </div>

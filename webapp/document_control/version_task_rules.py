@@ -4,7 +4,7 @@
 1) 按主导变更位套用适用章节：变更管理=X/Y；缺陷管理=X/Y/Z；生产/发布=X/Y/Z/B
 2) 主章节优先，其它适用章节补齐（同名归档物不重复）
 3) 章节内再按「归档频率」过滤版本位；事件驱动频率本阶段不自动生成
-4) 流程：X/Y→QP7.3.9；Z→SMP7.3-05；B→制度「要求」中的发布动作（不走缺陷）
+4) 只采用制度「归档物名称 / 归档频率」表格中的条目，不从正文「要求」或其它流程文件补任务
 5) 软件变更管理分 CE 获证 / 国内获证 两张表，按项目注册国家选择
 """
 
@@ -37,14 +37,14 @@ RULE_BASIS = (
     "缺陷管理=X/Y/Z；软件生产/发布管理=X/Y/Z/B。"
     "②主章节优先，其它适用章节补齐同名不重复。"
     "③章节内按归档频率过滤；事件驱动频率不自动生成。"
-    "④流程：X/Y→QP7.3.9；Z→SMP7.3-05；B→制度「要求」中的发布动作（无则仅归档表）。"
+    "④只识别制度中的归档文件表格，不从「要求」正文或其它程序补任务。"
 )
 
 MATCH_STEPS = [
     "按主导变更位匹配章节大标题适用位（变更管理 X/Y、缺陷 X/Y/Z、生产发布 X/Y/Z/B）",
     "主章节清单优先，其它适用章节补齐，归档物名称不重复",
     "章节内按归档频率过滤（每个版本 / X/Y 位 / 发现缺陷）；事件驱动不自动生成",
-    "叠加流程：X/Y=QP7.3.9，Z=SMP7.3-05，B=制度「要求」中仍存在的发布动作",
+    "仅采用归档文件表格中的条目，不叠加 QP/SMP/「要求」等非表格任务",
 ]
 
 
@@ -539,11 +539,11 @@ def resolve_chapter_route(
     if bit in {"X", "Y"}:
         primary = CHAPTER_CHANGE
         branch = PROCESS_BRANCH_CHANGE
-        label = f"{CHAPTER_CHANGE}（{market_label}，X/Y）+ 变更控制（QP7.3.9）"
+        label = f"{CHAPTER_CHANGE}（{market_label}，X/Y）"
     elif bit == "Z":
         primary = CHAPTER_DEFECT
         branch = PROCESS_BRANCH_DEFECT
-        label = f"{CHAPTER_DEFECT}（X/Y/Z）+ 缺陷管理（SMP7.3-05）"
+        label = f"{CHAPTER_DEFECT}（X/Y/Z）"
     elif bit == "B":
         primary = CHAPTER_RELEASE
         branch = PROCESS_BRANCH_RELEASE
@@ -631,7 +631,7 @@ def _process_catalog_for_branch(branch: str, dominant: str) -> list[dict[str, An
 def catalogs_for_dominant(
     dominant: str, *, registration_country: str = ""
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """先按章节标题适用位，主章节优先，再频率，再叠加流程。"""
+    """先按章节标题适用位，主章节优先，再按归档表频率过滤；不叠加非表格流程任务。"""
     market = archive_market_for_country(registration_country)
     route = resolve_chapter_route(dominant, archive_market=market)
     bit = (dominant or "").strip().upper()
@@ -640,7 +640,10 @@ def catalogs_for_dominant(
     if bit in heading_bits.get(CHAPTER_CHANGE, frozenset()):
         sources.append((CHAPTER_CHANGE, change_archive_for_market(market)))
     if bit in heading_bits.get("系统追溯", frozenset()):
-        sources.append(("系统追溯", _active_catalog("traceability", YY_TRACEABILITY_ARCHIVE)))
+        # 系统追溯章节要求禅道或《软件可追溯性分析报告》；不整表带入「首个版本」归档表
+        sources.append(
+            ("系统追溯", _active_catalog("traceability", YY_TRACEABILITY_ARCHIVE))
+        )
     if bit in heading_bits.get(CHAPTER_DEFECT, frozenset()):
         sources.append((CHAPTER_DEFECT, _active_catalog("defect", YY_CHAPTER_DEFECT_ARCHIVE)))
     if bit in heading_bits.get(CHAPTER_RELEASE, frozenset()):
@@ -658,7 +661,6 @@ def catalogs_for_dominant(
                 continue
             seen_names.add(name_key)
             tasks.append(item)
-    tasks.extend(_process_catalog_for_branch(route["processBranch"], bit))
     route["matchedFileCount"] = len(tasks)
     return route, tasks
 

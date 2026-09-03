@@ -69,19 +69,32 @@
     suggestWrap: byId("vtgSuggestWrap"),
     suggestList: byId("vtgSuggestList"),
     previewMeta: byId("vtgPreviewMeta"),
+    previewVersionBar: byId("vtgPreviewVersionBar"),
     previewBody: byId("vtgPreviewBody"),
     previewCount: byId("vtgPreviewCount"),
+    previewSelectAll: byId("vtgPreviewSelectAll"),
+    previewUnselectAll: byId("vtgPreviewUnselectAll"),
+    previewUnselectVisible: byId("vtgPreviewUnselectVisible"),
+    previewSelectHint: byId("vtgPreviewSelectHint"),
+    previewHeadCheck: byId("vtgPreviewHeadCheck"),
     applyBtn: byId("vtgApplyBtn"),
+    applyModeReplace: byId("vtgApplyModeReplace"),
+    applyModeIncrement: byId("vtgApplyModeIncrement"),
     savePreviewEditsBtn: byId("vtgSavePreviewEditsBtn"),
     projectId: byId("vtgProjectId"),
     applyMsg: byId("vtgApplyMsg"),
   };
 
   const PRODUCT_NAME_LS_PREFIX = "vtg.productName.";
+  const LAST_PROJECT_LS_KEY = "vtg.lastProjectId";
 
   let currentJobId = "";
   let originalPreviewItems = [];
   let previewItems = [];
+  let previewVersionFilter = "";
+  const previewCollapsedVersions = new Set();
+  const previewSelectedKeys = new Set();
+  const PREVIEW_COLSPAN = 14;
   let savedRecords = [];
   const projectsById = new Map();
   const versionDateValues = new Map();
@@ -355,28 +368,76 @@
     });
   }
 
-  function loadSavedRecordsToChain() {
-    syncSavedRecordsFromDom();
+  function applySavedRecordsToChainForm() {
     const versions = savedRecords
       .map((r) => String(r.version || "").trim())
       .filter(Boolean)
       .sort(compareVersion);
-    if (!versions.length) {
+    if (!versions.length) return 0;
+    const storedFrom = savedRecords
+      .map((r) => String(r.chainFromVersion || "").trim())
+      .find(Boolean);
+    const storedTo = savedRecords
+      .map((r) => String(r.chainToVersion || "").trim())
+      .find(Boolean);
+    const fromV = storedFrom || versions[0];
+    const toV = storedTo || versions[versions.length - 1];
+    if (els.fromVersion) els.fromVersion.value = fromV;
+    if (els.toVersion) els.toVersion.value = toV;
+    if (els.intermediate) {
+      els.intermediate.value = versions.filter((v) => v !== fromV && v !== toV).join(", ");
+    }
+    applySavedRecordsToChainMaps(savedRecords);
+    const withProduct = savedRecords.find((r) => String(r.productName || "").trim());
+    if (withProduct && els.productName && !String(els.productName.value || "").trim()) {
+      els.productName.value = withProduct.productName;
+    }
+    renderVersionDatesTable();
+    return versions.length;
+  }
+
+  function loadSavedRecordsToChain() {
+    syncSavedRecordsFromDom();
+    const n = applySavedRecordsToChainForm();
+    if (!n) {
       toast("没有可加载的版本记录", "warning");
       return;
     }
-    els.fromVersion.value = versions[0];
-    els.toVersion.value = versions[versions.length - 1];
-    els.intermediate.value = versions.length > 2 ? versions.slice(1, -1).join(", ") : "";
-    applySavedRecordsToChainMaps(savedRecords);
-    const withProduct = savedRecords.find((r) => String(r.productName || "").trim());
-    if (withProduct) els.productName.value = withProduct.productName;
-    renderVersionDatesTable();
-    toast(`已加载 ${versions.length} 个版本到链路表单`, "success");
+    toast(`已加载 ${n} 个版本到链路表单`, "success");
   }
 
   function productNameStorageKey(projectId) {
     return `${PRODUCT_NAME_LS_PREFIX}${projectId}`;
+  }
+
+  function readLastProjectId() {
+    try {
+      return String(localStorage.getItem(LAST_PROJECT_LS_KEY) || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function writeLastProjectId(projectId) {
+    const pid = String(projectId || "").trim();
+    try {
+      if (pid) localStorage.setItem(LAST_PROJECT_LS_KEY, pid);
+      else localStorage.removeItem(LAST_PROJECT_LS_KEY);
+    } catch (e) {
+      /* ignore quota / private mode */
+    }
+  }
+
+  function restoreLastProject() {
+    if (!els.projectId) return "";
+    const current = String(els.projectId.value || "").trim();
+    if (current) return current;
+    const last = readLastProjectId();
+    if (last && projectsById.has(last)) {
+      els.projectId.value = last;
+      return last;
+    }
+    return "";
   }
 
   function readLocalProductName(projectId) {
@@ -525,6 +586,7 @@
     } else {
       savedRecords[idx] = saved;
       applySavedRecordsToChainMaps([savedRecords[idx]]);
+      writeLastProjectId(projectId);
       toast("版本记录已保存", "success");
     }
     renderSavedRecordsTable();
@@ -632,21 +694,284 @@
       item.documentDisplayDate = val("documentDisplayDate");
       item.belongingModule = val("belongingModule");
       item.notes = val("notes");
+      item.recordStatus = recordStatusOf({ recordStatus: val("recordStatus") });
     });
   }
 
-  function renderPreviewTable(items) {
-    previewItems = Array.isArray(items) ? items.map((x) => ({ ...x })) : [];
+  function recordStatusOf(item) {
+    const key = String((item && item.recordStatus) || "").trim().toLowerCase();
+    if (key === "discard" || key === "弃用" || key === "deprecated" || key === "rejected") {
+      return "discard";
+    }
+    if (key === "pending" || key === "待定") return "pending";
+    return "adopt";
+  }
+
+  function recordStatusSelectHtml(status) {
+    const cur = recordStatusOf({ recordStatus: status });
+    const opts = [
+      ["adopt", "选用"],
+      ["pending", "待定"],
+      ["discard", "弃用"],
+    ];
+    return `<select class="form-select form-select-sm vtg-status-select" data-vtg-field="recordStatus">${opts
+      .map(
+        ([value, label]) =>
+          `<option value="${value}"${cur === value ? " selected" : ""}>${label}</option>`
+      )
+      .join("")}</select>`;
+  }
+
+  function itemForFeedbackCompare(item) {
+    const copy = { ...(item || {}) };
+    delete copy.recordStatus;
+    return copy;
+  }
+
+  function defaultSelectAdoptItems(items) {
+    previewSelectedKeys.clear();
+    (items || []).forEach((item) => {
+      if (recordStatusOf(item) === "adopt") {
+        previewSelectedKeys.add(taskIdentity(item));
+      }
+    });
+  }
+
+  function prunePreviewSelection(items) {
+    const live = new Set((items || []).map((item) => taskIdentity(item)));
+    Array.from(previewSelectedKeys).forEach((key) => {
+      if (!live.has(key)) previewSelectedKeys.delete(key);
+    });
+  }
+
+  function visiblePreviewRows() {
+    if (!els.previewBody) return [];
+    return Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).filter(
+      (tr) => !tr.classList.contains("vtg-preview-hidden")
+    );
+  }
+
+  function syncPreviewSelectionFromDom() {
+    if (!els.previewBody) return;
+    Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).forEach((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || !previewItems[idx]) return;
+      const key = taskIdentity(previewItems[idx]);
+      const cb = row.querySelector("[data-vtg-select-row]");
+      const adopted = recordStatusOf(previewItems[idx]) === "adopt";
+      if (cb && cb.checked && adopted) previewSelectedKeys.add(key);
+      else previewSelectedKeys.delete(key);
+    });
+  }
+
+  function selectVisibleAdopt() {
+    syncPreviewItemsFromDom();
+    visiblePreviewRows().forEach((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || !previewItems[idx]) return;
+      if (recordStatusOf(previewItems[idx]) !== "adopt") return;
+      previewSelectedKeys.add(taskIdentity(previewItems[idx]));
+    });
+    updatePreviewSelectionUi();
+  }
+
+  function unselectAllPreview() {
+    previewSelectedKeys.clear();
+    updatePreviewSelectionUi();
+  }
+
+  function unselectVisiblePreview() {
+    visiblePreviewRows().forEach((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || !previewItems[idx]) return;
+      previewSelectedKeys.delete(taskIdentity(previewItems[idx]));
+    });
+    updatePreviewSelectionUi();
+  }
+
+  function currentApplyMode() {
+    if (els.applyModeIncrement && els.applyModeIncrement.checked) return "increment";
+    return "replace";
+  }
+
+  function updatePreviewSelectionUi() {
+    if (!els.previewBody) return;
+    const visible = visiblePreviewRows();
+    let visibleAdopt = 0;
+    let visibleSelected = 0;
+    visible.forEach((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      const item = previewItems[idx];
+      if (!item) return;
+      const status = recordStatusOf(item);
+      const adopted = status === "adopt";
+      const key = taskIdentity(item);
+      if (!adopted) previewSelectedKeys.delete(key);
+      const selected = adopted && previewSelectedKeys.has(key);
+      const cb = row.querySelector("[data-vtg-select-row]");
+      if (cb) {
+        cb.disabled = !adopted;
+        cb.checked = selected;
+      }
+      row.classList.toggle("vtg-status-discard", status === "discard");
+      row.classList.toggle("vtg-status-pending", status === "pending");
+      if (adopted) visibleAdopt += 1;
+      if (selected) visibleSelected += 1;
+    });
+    if (els.previewHeadCheck) {
+      els.previewHeadCheck.disabled = !previewItems.length || visibleAdopt === 0;
+      els.previewHeadCheck.checked = visibleAdopt > 0 && visibleSelected === visibleAdopt;
+      els.previewHeadCheck.indeterminate = visibleSelected > 0 && visibleSelected < visibleAdopt;
+    }
+    const adoptCount = previewItems.filter((item) => recordStatusOf(item) === "adopt").length;
+    const selectedCount = previewItems.filter(
+      (item) => recordStatusOf(item) === "adopt" && previewSelectedKeys.has(taskIdentity(item))
+    ).length;
     if (els.previewCount) {
-      els.previewCount.textContent = `${previewItems.length} 条`;
+      if (!previewItems.length) {
+        els.previewCount.textContent = "0 条";
+      } else if (previewVersionFilter) {
+        const n = previewItems.filter((item) => previewVersionKey(item) === previewVersionFilter).length;
+        els.previewCount.textContent = `${n} / ${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}`;
+      } else {
+        els.previewCount.textContent = `${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}`;
+      }
+    }
+    if (els.previewSelectHint) {
+      els.previewSelectHint.textContent = previewItems.length
+        ? `仅「选用」可下发。当前可见已选 ${visibleSelected} / ${visibleAdopt}。`
+        : "仅「选用」可勾选下发。全选作用于当前可见行。";
+    }
+  }
+
+  function previewVersionKey(item) {
+    return String(
+      (item && (item.targetVersion || item.fileVersion || item.registrationVersion)) || ""
+    ).trim() || "未指定版本";
+  }
+
+  function comparePreviewVersions(a, b) {
+    const parse = (s) => {
+      const m = String(s || "").trim().match(/^v?\s*(\d+)\.(\d+)\.(\d+)\.(\d+)$/i);
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] : null;
+    };
+    if (a === "未指定版本" && b !== "未指定版本") return 1;
+    if (b === "未指定版本" && a !== "未指定版本") return -1;
+    const pa = parse(a);
+    const pb = parse(b);
+    if (pa && pb) {
+      for (let i = 0; i < 4; i += 1) {
+        if (pa[i] !== pb[i]) return pa[i] - pb[i];
+      }
+      return 0;
+    }
+    return String(a).localeCompare(String(b), "zh");
+  }
+
+  function listPreviewVersionStats() {
+    const map = new Map();
+    previewItems.forEach((item) => {
+      const key = previewVersionKey(item);
+      map.set(key, (map.get(key) || 0) + 1);
+    });
+    return Array.from(map.entries()).sort((left, right) => comparePreviewVersions(left[0], right[0]));
+  }
+
+  function resetPreviewVersionUi() {
+    previewVersionFilter = "";
+    previewCollapsedVersions.clear();
+  }
+
+  function renderPreviewVersionBar() {
+    if (!els.previewVersionBar) return;
+    const stats = listPreviewVersionStats();
+    if (!stats.length) {
+      els.previewVersionBar.classList.add("d-none");
+      els.previewVersionBar.innerHTML = "";
+      return;
+    }
+    if (previewVersionFilter && !stats.some((row) => row[0] === previewVersionFilter)) {
+      previewVersionFilter = "";
+    }
+    const chips = [
+      `<button type="button" class="vtg-version-chip${previewVersionFilter ? "" : " is-active"}" data-vtg-ver-filter="">全部<span class="vtg-chip-n">${previewItems.length}</span></button>`,
+      ...stats.map(([ver, count]) => {
+        const active = previewVersionFilter === ver ? " is-active" : "";
+        return `<button type="button" class="vtg-version-chip${active}" data-vtg-ver-filter="${escapeHtml(ver)}"><span class="font-monospace">${escapeHtml(ver)}</span><span class="vtg-chip-n">${count}</span></button>`;
+      }),
+    ];
+    els.previewVersionBar.innerHTML = `
+      <span class="vtg-version-bar-label">按版本</span>
+      ${chips.join("")}
+      <span class="vtg-version-bar-actions">
+        <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-vtg-ver-expand-all>全部展开</button>
+        <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-vtg-ver-collapse-all>全部收起</button>
+      </span>`;
+    els.previewVersionBar.classList.remove("d-none");
+  }
+
+  function applyPreviewVersionUi() {
+    if (!els.previewBody) {
+      updatePreviewSelectionUi();
+      return;
+    }
+    els.previewBody.querySelectorAll("tr[data-vtg-ver]").forEach((tr) => {
+      const ver = tr.getAttribute("data-vtg-ver") || "";
+      const isHeader = tr.classList.contains("vtg-version-row");
+      const filteredOut = Boolean(previewVersionFilter && ver !== previewVersionFilter);
+      const collapsed = !isHeader && previewCollapsedVersions.has(ver);
+      tr.classList.toggle("vtg-preview-hidden", filteredOut || collapsed);
+    });
+    els.previewBody.querySelectorAll("tr.vtg-version-row").forEach((tr) => {
+      const ver = tr.getAttribute("data-vtg-ver") || "";
+      const expanded = !previewCollapsedVersions.has(ver);
+      tr.setAttribute("aria-expanded", expanded ? "true" : "false");
+      const caret = tr.querySelector(".vtg-caret");
+      if (caret) caret.textContent = expanded ? "▼" : "▶";
+    });
+    if (els.previewVersionBar) {
+      els.previewVersionBar.querySelectorAll("[data-vtg-ver-filter]").forEach((btn) => {
+        const val = btn.getAttribute("data-vtg-ver-filter") || "";
+        btn.classList.toggle("is-active", val === (previewVersionFilter || ""));
+      });
+    }
+    updatePreviewSelectionUi();
+    fitFilenameInputs();
+  }
+
+  function renderPreviewTable(items, options) {
+    const opts = options || {};
+    previewItems = Array.isArray(items)
+      ? items.map((x) => {
+          const rec = { ...x };
+          rec.recordStatus = recordStatusOf(rec);
+          return rec;
+        })
+      : [];
+    if (opts.resetSelection) {
+      defaultSelectAdoptItems(previewItems);
+    } else {
+      prunePreviewSelection(previewItems);
     }
     if (els.savePreviewEditsBtn) {
       els.savePreviewEditsBtn.disabled = !currentJobId || !previewItems.length;
     }
     if (!els.previewBody) return;
     if (!previewItems.length) {
+      previewSelectedKeys.clear();
+      resetPreviewVersionUi();
+      renderPreviewVersionBar();
+      if (els.previewCount) els.previewCount.textContent = "0 条";
+      if (els.previewHeadCheck) {
+        els.previewHeadCheck.checked = false;
+        els.previewHeadCheck.indeterminate = false;
+        els.previewHeadCheck.disabled = true;
+      }
+      if (els.previewSelectHint) {
+        els.previewSelectHint.textContent = "仅「选用」可勾选下发。全选作用于当前可见行。";
+      }
       els.previewBody.innerHTML =
-        '<tr><td colspan="12" class="text-muted small text-center py-3">预览后将在此显示任务清单</td></tr>';
+        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">预览后将在此显示任务清单</td></tr>`;
       return;
     }
     const chapterOrder = [
@@ -655,46 +980,78 @@
       "缺陷管理",
       "软件生产/发布管理",
     ];
-    const groups = new Map();
+    const byVersion = new Map();
     previewItems.forEach((item, idx) => {
-      const key = String(item.chapter || item.processBranchLabel || "其它").trim() || "其它";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push({ item, idx });
+      const ver = previewVersionKey(item);
+      if (!byVersion.has(ver)) byVersion.set(ver, []);
+      byVersion.get(ver).push({ item, idx });
     });
-    const orderedKeys = [
-      ...chapterOrder.filter((k) => groups.has(k)),
-      ...Array.from(groups.keys()).filter((k) => !chapterOrder.includes(k)),
-    ];
+    const versionKeys = Array.from(byVersion.keys()).sort(comparePreviewVersions);
     const html = [];
-    orderedKeys.forEach((chapter) => {
-      const rows = groups.get(chapter) || [];
-      html.push(
-        `<tr class="vtg-chapter-row"><td colspan="12">${escapeHtml(chapter)}（${rows.length}）</td></tr>`
+    versionKeys.forEach((ver) => {
+      const versionRows = byVersion.get(ver) || [];
+      const triggerBits = Array.from(
+        new Set(
+          versionRows.flatMap(({ item }) =>
+            Array.isArray(item.triggeredBy) ? item.triggeredBy : []
+          )
+        )
       );
-      rows.forEach(({ item, idx }) => {
-        const triggers = formatTriggerBits(item.triggeredBy);
-        const targetVersion = item.targetVersion || item.fileVersion || "";
-        const freq = String(item.archiveFrequency || "").trim() || (String(item.taskType || "").includes("流程") ? "流程" : "—");
-        html.push(`<tr data-vtg-preview-idx="${idx}">
-          <td class="text-muted small">${idx + 1}</td>
-          <td><input class="form-control form-control-sm" data-vtg-field="fileName" value="${escapeHtml(item.fileName || "")}"></td>
-          <td><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"></td>
-          <td><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"></td>
-          <td><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}"></td>
-          <td><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"></td>
-          <td><input type="date" class="form-control form-control-sm" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"></td>
-          <td><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"></td>
-          <td class="small text-muted">${escapeHtml(freq)}</td>
-          <td><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}"></td>
-          <td class="small text-muted" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
-          <td><button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="删除">×</button></td>
-        </tr>`);
+      const triggerText = triggerBits.length ? ` · ${formatTriggerBits(triggerBits)}` : "";
+      html.push(
+        `<tr class="vtg-version-row" data-vtg-ver="${escapeHtml(ver)}" role="button" tabindex="0" aria-expanded="true">
+          <td colspan="${PREVIEW_COLSPAN}"><span class="vtg-caret">▼</span>版本 <span class="font-monospace">${escapeHtml(ver)}</span>（${versionRows.length}）${escapeHtml(triggerText)}</td>
+        </tr>`
+      );
+      const chapterGroups = new Map();
+      versionRows.forEach((row) => {
+        const key = String(row.item.chapter || row.item.processBranchLabel || "其它").trim() || "其它";
+        if (!chapterGroups.has(key)) chapterGroups.set(key, []);
+        chapterGroups.get(key).push(row);
+      });
+      const orderedChapters = [
+        ...chapterOrder.filter((k) => chapterGroups.has(k)),
+        ...Array.from(chapterGroups.keys()).filter((k) => !chapterOrder.includes(k)),
+      ];
+      orderedChapters.forEach((chapter) => {
+        const rows = chapterGroups.get(chapter) || [];
+        html.push(
+          `<tr class="vtg-chapter-row" data-vtg-ver="${escapeHtml(ver)}"><td colspan="${PREVIEW_COLSPAN}">${escapeHtml(chapter)}（${rows.length}）</td></tr>`
+        );
+        rows.forEach(({ item, idx }) => {
+          const triggers = formatTriggerBits(item.triggeredBy);
+          const targetVersion = item.targetVersion || item.fileVersion || "";
+          const freq = String(item.archiveFrequency || "").trim() || (String(item.taskType || "").includes("流程") ? "流程" : "—");
+          const status = recordStatusOf(item);
+          const adopted = status === "adopt";
+          const selected = adopted && previewSelectedKeys.has(taskIdentity(item));
+          html.push(`<tr data-vtg-preview-idx="${idx}" data-vtg-ver="${escapeHtml(ver)}" class="${status === "discard" ? "vtg-status-discard" : status === "pending" ? "vtg-status-pending" : ""}">
+            <td class="text-center"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${adopted ? "" : "disabled"} title="${adopted ? "勾选后下发" : "仅选用状态可下发"}"></td>
+            <td class="text-muted small">${idx + 1}</td>
+            <td>${recordStatusSelectHtml(status)}</td>
+            <td class="vtg-col-filename"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}">${escapeHtml(item.fileName || "")}</textarea></td>
+            <td><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"></td>
+            <td><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"></td>
+            <td><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}"></td>
+            <td><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"></td>
+            <td><input type="date" class="form-control form-control-sm" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"></td>
+            <td><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"></td>
+            <td class="small text-muted">${escapeHtml(freq)}</td>
+            <td><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}"></td>
+            <td class="small text-muted" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
+            <td><button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="删除">×</button></td>
+          </tr>`);
+        });
       });
     });
     els.previewBody.innerHTML = html.join("");
+    renderPreviewVersionBar();
+    applyPreviewVersionUi();
+    fitFilenameInputs();
     Array.from(els.previewBody.querySelectorAll("button[data-vtg-remove-preview]")).forEach((btn) => {
       btn.addEventListener("click", () => {
         syncPreviewItemsFromDom();
+        syncPreviewSelectionFromDom();
         const idx = Number(btn.getAttribute("data-vtg-remove-preview"));
         if (Number.isNaN(idx)) return;
         previewItems.splice(idx, 1);
@@ -705,13 +1062,22 @@
 
   function getPreviewItems() {
     syncPreviewItemsFromDom();
-    return previewItems.map((x) => ({ ...x }));
+    syncPreviewSelectionFromDom();
+    return previewItems.map((x) => ({ ...x, recordStatus: recordStatusOf(x) }));
+  }
+
+  function fitFilenameInputs() {
+    if (!els.previewBody) return;
+    Array.from(els.previewBody.querySelectorAll(".vtg-filename-input")).forEach((el) => {
+      el.style.height = "auto";
+      el.style.height = `${Math.max(38, el.scrollHeight)}px`;
+    });
   }
 
   function taskIdentity(item) {
-    const fileName = String(item.fileName || "").trim().toLowerCase();
-    const taskType = String(item.taskType || "").trim().toLowerCase();
-    const fileVersion = String(item.fileVersion || item.targetVersion || "").trim().toLowerCase();
+    const fileName = String((item && (item.taskKey || item.fileName)) || "").trim().toLowerCase();
+    const taskType = String((item && item.taskType) || "").trim().toLowerCase();
+    const fileVersion = String((item && (item.fileVersion || item.targetVersion)) || "").trim().toLowerCase();
     return `${fileName}__${taskType}__${fileVersion}`;
   }
 
@@ -747,8 +1113,8 @@
         adjustments.push({ type: "add", adjustedItem: item });
         return;
       }
-      const originStr = JSON.stringify(origin);
-      const editedStr = JSON.stringify(item);
+      const originStr = JSON.stringify(itemForFeedbackCompare(origin));
+      const editedStr = JSON.stringify(itemForFeedbackCompare(item));
       if (originStr !== editedStr) {
         adjustments.push({ type: "update", originalItem: origin, adjustedItem: item });
       }
@@ -1053,6 +1419,7 @@
       toast("请先选择项目再保存版本记录", "warning");
       return;
     }
+    writeLastProjectId(projectId);
     syncChainVersionsIntoSavedRecords();
     if (!savedRecords.length) {
       toast("请先填写版本号，或在下方表格新增版本后再保存", "warning");
@@ -1144,7 +1511,8 @@
     const opts = options || {};
     currentJobId = data.jobId || "";
     originalPreviewItems = Array.isArray(data.items) ? JSON.parse(JSON.stringify(data.items)) : [];
-    renderPreviewTable(originalPreviewItems);
+    resetPreviewVersionUi();
+    renderPreviewTable(originalPreviewItems, { resetSelection: true });
     if (opts.fillForm !== false) {
       if (data.fromVersion) els.fromVersion.value = data.fromVersion;
       if (data.toVersion) els.toVersion.value = data.toVersion;
@@ -1175,6 +1543,7 @@
   function clearPreviewPanel(message) {
     currentJobId = "";
     originalPreviewItems = [];
+    previewSelectedKeys.clear();
     renderPreviewTable([]);
     if (els.previewMeta) {
       els.previewMeta.textContent = message || "尚未生成预览。";
@@ -1317,6 +1686,7 @@
     if (els.batchProjectId) {
       els.batchProjectId.innerHTML = options.join("");
     }
+    restoreLastProject();
   }
 
 
@@ -1430,6 +1800,14 @@
       toast("预览任务清单为空，请先生成预览", "warning");
       return;
     }
+    const selectedItems = items.filter(
+      (item) => recordStatusOf(item) === "adopt" && previewSelectedKeys.has(taskIdentity(item))
+    );
+    if (!selectedItems.length) {
+      toast("请勾选至少一条「选用」记录再下发（弃用/待定不会下发）", "warning");
+      return;
+    }
+    const applyMode = currentApplyMode();
     const { out } = collectVersionReleaseDates();
     const saved = await saveFeedbackIfNeeded(items);
     const data = await requestJson("/api/document-control/version-tasks/apply", {
@@ -1438,7 +1816,9 @@
       body: JSON.stringify({
         sourceJobId: currentJobId || null,
         projectId,
-        items,
+        items: selectedItems,
+        previewItems: items,
+        applyMode,
         versionReleaseDates: out,
         fromVersion: String(els.fromVersion.value || "").trim(),
         toVersion: String(els.toVersion.value || "").trim(),
@@ -1451,13 +1831,17 @@
   }
 
   async function onProjectChanged() {
-    await loadSavedRecords();
     const projectId = String(els.projectId.value || "").trim();
+    writeLastProjectId(projectId);
+    await loadSavedRecords();
     if (!projectId) {
       clearPreviewPanel("请选择项目后查看该项目上次预览，或直接生成新预览。");
       return;
     }
-    await loadLatestPreview({ projectId, clearIfEmpty: true });
+    const latest = await loadLatestPreview({ projectId, clearIfEmpty: true });
+    if (!latest) {
+      applySavedRecordsToChainForm();
+    }
   }
 
   function bindEvents() {
@@ -1553,6 +1937,90 @@
         );
       });
     }
+    if (els.previewSelectAll) {
+      els.previewSelectAll.addEventListener("click", () => selectVisibleAdopt());
+    }
+    if (els.previewUnselectAll) {
+      els.previewUnselectAll.addEventListener("click", () => unselectAllPreview());
+    }
+    if (els.previewUnselectVisible) {
+      els.previewUnselectVisible.addEventListener("click", () => unselectVisiblePreview());
+    }
+    if (els.previewHeadCheck) {
+      els.previewHeadCheck.addEventListener("change", () => {
+        if (els.previewHeadCheck.checked) selectVisibleAdopt();
+        else unselectVisiblePreview();
+      });
+    }
+    if (els.previewVersionBar) {
+      els.previewVersionBar.addEventListener("click", (ev) => {
+        const filterBtn = ev.target.closest("[data-vtg-ver-filter]");
+        if (filterBtn) {
+          previewVersionFilter = filterBtn.getAttribute("data-vtg-ver-filter") || "";
+          if (previewVersionFilter) previewCollapsedVersions.delete(previewVersionFilter);
+          applyPreviewVersionUi();
+          return;
+        }
+        if (ev.target.closest("[data-vtg-ver-expand-all]")) {
+          previewCollapsedVersions.clear();
+          applyPreviewVersionUi();
+          return;
+        }
+        if (ev.target.closest("[data-vtg-ver-collapse-all]")) {
+          listPreviewVersionStats().forEach(([ver]) => previewCollapsedVersions.add(ver));
+          applyPreviewVersionUi();
+        }
+      });
+    }
+    if (els.previewBody) {
+      els.previewBody.addEventListener("input", (ev) => {
+        if (!ev.target.matches(".vtg-filename-input")) return;
+        ev.target.title = ev.target.value || "";
+        ev.target.style.height = "auto";
+        ev.target.style.height = `${Math.max(38, ev.target.scrollHeight)}px`;
+      });
+      els.previewBody.addEventListener("change", (ev) => {
+        const row = ev.target.closest("tr[data-vtg-preview-idx]");
+        if (!row) return;
+        const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+        if (Number.isNaN(idx) || !previewItems[idx]) return;
+        if (ev.target.matches("[data-vtg-field=\"recordStatus\"]")) {
+          const status = recordStatusOf({ recordStatus: ev.target.value });
+          previewItems[idx].recordStatus = status;
+          const key = taskIdentity(previewItems[idx]);
+          if (status === "adopt") previewSelectedKeys.add(key);
+          else previewSelectedKeys.delete(key);
+          updatePreviewSelectionUi();
+          return;
+        }
+        if (ev.target.matches("[data-vtg-select-row]")) {
+          const key = taskIdentity(previewItems[idx]);
+          if (ev.target.checked && recordStatusOf(previewItems[idx]) === "adopt") {
+            previewSelectedKeys.add(key);
+          } else {
+            previewSelectedKeys.delete(key);
+          }
+          updatePreviewSelectionUi();
+        }
+      });
+      els.previewBody.addEventListener("click", (ev) => {
+        if (ev.target.closest("button[data-vtg-remove-preview], input, select, textarea, a")) return;
+        const header = ev.target.closest("tr.vtg-version-row");
+        if (!header) return;
+        const ver = header.getAttribute("data-vtg-ver") || "";
+        if (!ver) return;
+        if (previewCollapsedVersions.has(ver)) previewCollapsedVersions.delete(ver);
+        else previewCollapsedVersions.add(ver);
+        applyPreviewVersionUi();
+      });
+      els.previewBody.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        const header = ev.target.closest("tr.vtg-version-row");
+        if (!header) return;
+        ev.preventDefault();
+        header.click();
+      });
+    }
   }
 
   async function init() {
@@ -1564,13 +2032,32 @@
     bindEvents();
     try {
       await loadProjects();
-      const latest = await loadLatestPreview({ clearIfEmpty: false });
-      if (latest && latest.projectId) {
-        if (String(els.projectId.value || "").trim() !== String(latest.projectId)) {
-          els.projectId.value = latest.projectId;
+      let projectId = restoreLastProject();
+      if (!projectId) {
+        try {
+          const hint = await requestJson("/api/document-control/version-tasks/latest-preview");
+          const hintId = String((hint && hint.lastRecordProjectId) || "").trim();
+          if (hintId && projectsById.has(hintId)) {
+            els.projectId.value = hintId;
+            projectId = hintId;
+          }
+        } catch (e) {
+          /* 仅用于回填项目，失败则保持未选 */
         }
+      }
+      if (projectId) {
+        writeLastProjectId(projectId);
         await loadSavedRecords();
-      } else if (!latest) {
+        const latest = await loadLatestPreview({
+          projectId,
+          clearIfEmpty: false,
+          fillForm: true,
+        });
+        if (!latest) {
+          applySavedRecordsToChainForm();
+          clearPreviewPanel("尚未生成预览。已回填该项目已保存的版本记录，可直接生成预览。");
+        }
+      } else {
         clearPreviewPanel("尚未生成预览。选择项目可加载该项目上次结果，或填写版本后生成。");
       }
     } catch (err) {

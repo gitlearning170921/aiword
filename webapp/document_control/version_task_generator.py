@@ -199,6 +199,33 @@ def _task_dedupe_key(item: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def normalize_record_status(raw: Any) -> str:
+    """预览记录状态：选用 / 弃用 / 待定。空值与未知值按选用。"""
+    key = str(raw or "").strip().lower()
+    if key in {"discard", "弃用", "deprecated", "rejected"}:
+        return "discard"
+    if key in {"pending", "待定"}:
+        return "pending"
+    return "adopt"
+
+
+def apply_previous_record_status(
+    items: list[dict[str, Any]],
+    previous_items: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    prev_map: dict[tuple[str, str, str], str] = {}
+    for row in previous_items or []:
+        if not isinstance(row, dict):
+            continue
+        prev_map[_task_dedupe_key(row)] = normalize_record_status(row.get("recordStatus"))
+    out: list[dict[str, Any]] = []
+    for item in items:
+        rec = dict(item)
+        rec["recordStatus"] = prev_map.get(_task_dedupe_key(rec), "adopt")
+        out.append(rec)
+    return out
+
+
 def generate_task_preview(
     *,
     from_version: str,
@@ -207,6 +234,7 @@ def generate_task_preview(
     version_release_dates: dict[str, Any],
     feedback_rows: Optional[list[VersionTaskGenerationFeedback]] = None,
     registration_country: str = "",
+    previous_items: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     chain = parse_version_chain(from_version, to_version, intermediate_versions or [])
     release_dates = normalize_version_release_dates(chain, version_release_dates)
@@ -297,6 +325,7 @@ def generate_task_preview(
     feedback_hit_count = 0
     if feedback_rows:
         deduped, feedback_hit_count = apply_feedback_rules(deduped, feedback_rows)
+    deduped = apply_previous_record_status(deduped, previous_items)
 
     if intermediate_versions:
         chain_note = "已按提供的中间版本链路逐段推断触发规则。"
@@ -831,6 +860,16 @@ def list_project_version_records(
     return [serialize_project_version_record(x) for x in rows]
 
 
+def latest_version_record_project_id(*, org_id: str) -> str:
+    """最近更新过版本记录的项目，供刷新后无预览时回填项目选择。"""
+    row = (
+        ProjectVersionRecord.query.filter_by(organization_id=org_id)
+        .order_by(ProjectVersionRecord.updated_at.desc())
+        .first()
+    )
+    return str(row.project_id or "").strip() if row else ""
+
+
 def get_project_version_record(
     *,
     org_id: str,
@@ -1260,7 +1299,9 @@ def save_version_task_preview_edits(
     cleaned_items: list[dict[str, Any]] = []
     for raw in items:
         if isinstance(raw, dict):
-            cleaned_items.append(dict(raw))
+            rec = dict(raw)
+            rec["recordStatus"] = normalize_record_status(rec.get("recordStatus"))
+            cleaned_items.append(rec)
     preview["items"] = cleaned_items
     preview["editedAt"] = now_local().isoformat()
     preview["manualEdited"] = True

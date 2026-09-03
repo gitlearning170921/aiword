@@ -50,7 +50,10 @@ from .version_task_generator import (
     generate_task_preview,
     get_latest_version_task_preview,
     get_project_version_record,
+    latest_version_record_project_id,
     list_project_version_records,
+    normalize_record_status,
+    parse_version,
     batch_save_project_version_records,
     rebind_project_version_records,
     resolve_project_product_name,
@@ -1592,8 +1595,17 @@ def api_version_task_latest_preview():
         if not _project_in_org(project, org_id):
             return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
     data = get_latest_version_task_preview(org_id=org_id, project_id=project_id)
+    last_record_project_id = latest_version_record_project_id(org_id=org_id)
     if not data:
-        return jsonify({"jobId": "", "items": [], "message": "暂无已保存的预览"})
+        return jsonify(
+            {
+                "jobId": "",
+                "items": [],
+                "message": "暂无已保存的预览",
+                "lastRecordProjectId": last_record_project_id,
+            }
+        )
+    data["lastRecordProjectId"] = last_record_project_id
     return jsonify(data)
 
 
@@ -1642,6 +1654,29 @@ def api_version_task_preview():
     try:
         feedback_rows = feedback_rows_for_org(org_id)
         refresh_version_task_rules_for_request(org_id, collection)
+        previous_items: list = []
+        project_id_for_prev = str(payload.get("projectId") or "").strip()
+        if project_id_for_prev:
+            try:
+                prev_from = parse_version(from_version).normalized
+                prev_to = parse_version(to_version).normalized
+            except ValueError:
+                prev_from = from_version
+                prev_to = to_version
+            prior_job = (
+                VersionTaskGenerationJob.query.filter_by(
+                    organization_id=org_id,
+                    project_id=project_id_for_prev,
+                    from_version=prev_from,
+                    to_version=prev_to,
+                )
+                .order_by(VersionTaskGenerationJob.updated_at.desc())
+                .first()
+            )
+            if prior_job and isinstance(prior_job.preview_json, dict):
+                raw_prev = prior_job.preview_json.get("items") or []
+                if isinstance(raw_prev, list):
+                    previous_items = [x for x in raw_prev if isinstance(x, dict)]
         preview = generate_task_preview(
             from_version=from_version,
             to_version=to_version,
@@ -1649,6 +1684,7 @@ def api_version_task_preview():
             version_release_dates=version_release_dates,
             feedback_rows=feedback_rows,
             registration_country=registration_country,
+            previous_items=previous_items,
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
@@ -1846,24 +1882,50 @@ def api_version_task_apply():
     if not isinstance(items, list) or not items:
         return jsonify({"message": "items 不能为空"}), 400
 
+    apply_mode_raw = str(payload.get("applyMode") or payload.get("updateMode") or "replace").strip().lower()
+    apply_mode = "increment" if apply_mode_raw in {"increment", "incremental", "增量", "增量更新"} else "replace"
+
+    snapshot_items = payload.get("previewItems")
     source_job_id = str(payload.get("sourceJobId") or "").strip() or None
     source_job = (
         VersionTaskGenerationJob.query.filter_by(id=source_job_id, organization_id=org_id).first()
         if source_job_id
         else None
     )
+    if isinstance(snapshot_items, list) and source_job is not None:
+        preview = dict(source_job.preview_json) if isinstance(source_job.preview_json, dict) else {}
+        cleaned = []
+        for raw in snapshot_items:
+            if not isinstance(raw, dict):
+                continue
+            rec = dict(raw)
+            rec["recordStatus"] = normalize_record_status(rec.get("recordStatus"))
+            cleaned.append(rec)
+        preview["items"] = cleaned
+        source_job.preview_json = preview
 
-    created = 0
-    updated = 0
-    upload_ids: list[str] = []
+    issue_items: list[dict[str, Any]] = []
+    skipped_status = 0
     for row in items:
         if not isinstance(row, dict):
             continue
+        if normalize_record_status(row.get("recordStatus")) != "adopt":
+            skipped_status += 1
+            continue
+        if not str(row.get("fileName") or "").strip():
+            continue
+        issue_items.append(row)
+    if not issue_items:
+        return jsonify({"message": "没有可下发的选用记录（弃用/待定不会下发）"}), 400
+
+    created = 0
+    updated = 0
+    skipped_exist = 0
+    upload_ids: list[str] = []
+    for row in issue_items:
         file_name = str(row.get("fileName") or "").strip()
         author = str(row.get("author") or "").strip()
         task_type = str(row.get("taskType") or "").strip()
-        if not file_name:
-            continue
         if not author:
             author = "待分配"
         if not task_type:
@@ -1879,6 +1941,9 @@ def api_version_task_apply():
         notes = str(row.get("notes") or "").strip() or None
         module = str(row.get("belongingModule") or "").strip() or None
         if existing:
+            if apply_mode == "increment":
+                skipped_exist += 1
+                continue
             existing.organization_id = org_id
             existing.project_id = project.id
             existing.project_name = project.name
@@ -1924,6 +1989,9 @@ def api_version_task_apply():
         source_job.result_json = {
             "created": created,
             "updated": updated,
+            "skippedExist": skipped_exist,
+            "skippedStatus": skipped_status,
+            "applyMode": apply_mode,
             "uploadIds": upload_ids,
         }
         db.session.add(source_job)
@@ -1950,12 +2018,22 @@ def api_version_task_apply():
             pass
 
     db.session.commit()
+    mode_label = "增量更新" if apply_mode == "increment" else "替换更新"
+    extra = []
+    if skipped_exist:
+        extra.append(f"已存在跳过 {skipped_exist} 条")
+    if skipped_status:
+        extra.append(f"非选用跳过 {skipped_status} 条")
+    extra_text = f"（{'，'.join(extra)}）" if extra else ""
     return jsonify(
         {
             "created": created,
             "updated": updated,
+            "skippedExist": skipped_exist,
+            "skippedStatus": skipped_status,
+            "applyMode": apply_mode,
             "uploadIds": upload_ids,
-            "message": f"已下发到任务列表：新增 {created} 条，更新 {updated} 条",
+            "message": f"已{mode_label}下发到任务列表：新增 {created} 条，更新 {updated} 条{extra_text}",
         }
     )
 
