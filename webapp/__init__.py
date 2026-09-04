@@ -483,6 +483,12 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN ftp_last_error VARCHAR(512) NULL",
     )
     ensure_column(
+        "upload_records",
+        "is_system_record",
+        "ALTER TABLE upload_records ADD COLUMN is_system_record INTEGER DEFAULT 0",
+        "ALTER TABLE upload_records ADD COLUMN is_system_record TINYINT(1) DEFAULT 0",
+    )
+    ensure_column(
         "generate_records",
         "output_file_blob",
         "ALTER TABLE generate_records ADD COLUMN output_file_blob BLOB",
@@ -1380,6 +1386,18 @@ def ensure_schema(app: Flask):
         "organization_id",
         "ALTER TABLE exam_set_review_jobs ADD COLUMN organization_id VARCHAR(36)",
         "ALTER TABLE exam_set_review_jobs ADD COLUMN organization_id VARCHAR(36)",
+    )
+    ensure_column(
+        "version_task_generation_feedbacks",
+        "reason",
+        "ALTER TABLE version_task_generation_feedbacks ADD COLUMN reason VARCHAR(512)",
+        "ALTER TABLE version_task_generation_feedbacks ADD COLUMN reason VARCHAR(512)",
+    )
+    ensure_column(
+        "version_task_generation_feedbacks",
+        "change_summary_json",
+        "ALTER TABLE version_task_generation_feedbacks ADD COLUMN change_summary_json TEXT",
+        "ALTER TABLE version_task_generation_feedbacks ADD COLUMN change_summary_json JSON",
     )
 
     def _table_needs_org_backfill(conn, table_name: str) -> bool:

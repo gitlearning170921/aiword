@@ -48,10 +48,13 @@ from .version_task_generator import (
     diagnose_release_dates,
     feedback_rows_for_org,
     generate_task_preview,
+    enrich_preview_items_from_document_control,
     get_latest_version_task_preview,
     get_project_version_record,
     latest_version_record_project_id,
     list_project_version_records,
+    list_version_task_feedbacks,
+    normalize_is_system_record,
     normalize_record_status,
     parse_version,
     batch_save_project_version_records,
@@ -60,6 +63,10 @@ from .version_task_generator import (
     save_project_version_record_item,
     save_version_task_preview_edits,
     set_project_product_name,
+    stamp_manual_preview_items,
+    find_preview_filename_conflicts,
+    format_preview_filename_conflicts,
+    find_version_task_preview_job,
     suggest_release_dates,
     upsert_project_version_records,
 )
@@ -1645,38 +1652,69 @@ def api_version_task_preview():
             ), 409
 
     registration_country = str(payload.get("registrationCountry") or "").strip()
-    project_id_hint = str(payload.get("projectId") or "").strip()
-    if project_id_hint and not registration_country:
-        proj = Project.query.filter_by(id=project_id_hint).first()
-        if proj and _project_in_org(proj, org_id):
-            registration_country = str(getattr(proj, "registered_country", None) or "").strip()
+    project_id = str(payload.get("projectId") or "").strip() or None
+    overwrite = bool(payload.get("overwrite") is True)
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+        if not registration_country:
+            registration_country = str(getattr(project, "registered_country", None) or "").strip()
+        if not overwrite:
+            existing = find_version_task_preview_job(
+                org_id=org_id,
+                project_id=project_id,
+                from_version=from_version,
+                to_version=to_version,
+            )
+            if existing is not None:
+                n = 0
+                if isinstance(existing.preview_json, dict):
+                    raw_items = existing.preview_json.get("items") or []
+                    if isinstance(raw_items, list):
+                        n = len(raw_items)
+                ts = existing.updated_at.isoformat() if existing.updated_at else ""
+                ts_short = ts.replace("T", " ")[:19] if ts else ""
+                return jsonify(
+                    {
+                        "duplicatePreview": True,
+                        "existingJobId": existing.id,
+                        "fromVersion": existing.from_version,
+                        "toVersion": existing.to_version,
+                        "updatedAt": ts,
+                        "itemCount": n,
+                        "message": (
+                            f"该项目已有版本 {existing.from_version} → {existing.to_version} 的预览快照"
+                            f"（{n} 条"
+                            + (f"，上次保存 {ts_short}" if ts_short else "")
+                            + "）。是否覆盖已有快照？"
+                        ),
+                    }
+                ), 409
 
     try:
         feedback_rows = feedback_rows_for_org(org_id)
         refresh_version_task_rules_for_request(org_id, collection)
         previous_items: list = []
-        project_id_for_prev = str(payload.get("projectId") or "").strip()
-        if project_id_for_prev:
-            try:
-                prev_from = parse_version(from_version).normalized
-                prev_to = parse_version(to_version).normalized
-            except ValueError:
-                prev_from = from_version
-                prev_to = to_version
-            prior_job = (
-                VersionTaskGenerationJob.query.filter_by(
-                    organization_id=org_id,
-                    project_id=project_id_for_prev,
-                    from_version=prev_from,
-                    to_version=prev_to,
-                )
-                .order_by(VersionTaskGenerationJob.updated_at.desc())
-                .first()
+        previous_deleted_keys: list = []
+        previous_manual_edited = False
+        if project_id:
+            prior_job = find_version_task_preview_job(
+                org_id=org_id,
+                project_id=project_id,
+                from_version=from_version,
+                to_version=to_version,
             )
             if prior_job and isinstance(prior_job.preview_json, dict):
                 raw_prev = prior_job.preview_json.get("items") or []
                 if isinstance(raw_prev, list):
                     previous_items = [x for x in raw_prev if isinstance(x, dict)]
+                raw_deleted = prior_job.preview_json.get("manualDeletedKeys") or []
+                if isinstance(raw_deleted, list):
+                    previous_deleted_keys = raw_deleted
+                previous_manual_edited = bool(prior_job.preview_json.get("manualEdited"))
         preview = generate_task_preview(
             from_version=from_version,
             to_version=to_version,
@@ -1685,6 +1723,10 @@ def api_version_task_preview():
             feedback_rows=feedback_rows,
             registration_country=registration_country,
             previous_items=previous_items,
+            previous_deleted_keys=previous_deleted_keys,
+            previous_manual_edited=previous_manual_edited,
+            org_id=org_id,
+            project_id=project_id,
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
@@ -1692,20 +1734,36 @@ def api_version_task_preview():
         return jsonify({"message": f"生成预览失败：{exc}"}), 500
 
     project_id = str(payload.get("projectId") or "").strip() or None
-    # 同一项目+起止版本再次预览：更新已有批次，避免重复堆积
+    # 按项目 + 起止版本判重：确认覆盖才更新已有快照，否则新建
     job = None
+    preview_updated = False
     if project_id:
-        job = (
-            VersionTaskGenerationJob.query.filter_by(
-                organization_id=org_id,
-                project_id=project_id,
-                from_version=preview["fromVersion"],
-                to_version=preview["toVersion"],
-            )
-            .order_by(VersionTaskGenerationJob.updated_at.desc())
-            .first()
+        job = find_version_task_preview_job(
+            org_id=org_id,
+            project_id=project_id,
+            from_version=preview["fromVersion"],
+            to_version=preview["toVersion"],
         )
-    preview_updated = bool(job)
+        if job is not None and not overwrite:
+            n = 0
+            if isinstance(job.preview_json, dict):
+                raw_items = job.preview_json.get("items") or []
+                if isinstance(raw_items, list):
+                    n = len(raw_items)
+            return jsonify(
+                {
+                    "duplicatePreview": True,
+                    "existingJobId": job.id,
+                    "fromVersion": job.from_version,
+                    "toVersion": job.to_version,
+                    "itemCount": n,
+                    "message": (
+                        f"该项目已有版本 {job.from_version} → {job.to_version} 的预览快照"
+                        f"（{n} 条）。是否覆盖已有快照？"
+                    ),
+                }
+            ), 409
+        preview_updated = bool(job)
     if job is None:
         job = VersionTaskGenerationJob(
             organization_id=org_id,
@@ -1742,6 +1800,9 @@ def api_version_task_preview():
     if product_name:
         preview["productName"] = product_name
     job.preview_json = preview
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(job, "preview_json")
     db.session.flush()
 
     saved_records: list[dict[str, Any]] = []
@@ -1773,6 +1834,7 @@ def api_version_task_preview():
         {
             "jobId": job.id,
             "previewUpdated": preview_updated,
+            "previewCreated": not preview_updated,
             "savedRecords": saved_records,
             **preview,
         }
@@ -1806,6 +1868,35 @@ def api_version_task_feedback():
     return jsonify({"saved": len(rows)})
 
 
+@document_control_bp.get("/api/document-control/version-tasks/preview/feedbacks")
+def api_version_task_preview_feedbacks():
+    """列出当前公司（可按项目）已采集的预览增删改记录，用于优化规则。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip() or None
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    try:
+        limit = int(request.args.get("limit") or 80)
+    except (TypeError, ValueError):
+        limit = 80
+    items = list_version_task_feedbacks(
+        org_id=org_id,
+        project_id=project_id,
+        limit=limit,
+    )
+    return jsonify({"items": items, "count": len(items)})
+
+
 @document_control_bp.post("/api/document-control/version-tasks/preview/save-edits")
 def api_version_task_preview_save_edits():
     """保存预览表格人工修改；同时写入反馈，供下次「生成预览」优化。"""
@@ -1819,9 +1910,17 @@ def api_version_task_preview_save_edits():
     payload = request.get_json(silent=True) or {}
     job_id = str(payload.get("jobId") or payload.get("sourceJobId") or "").strip()
     items = payload.get("items")
+    changed_items = payload.get("changedItems")
+    removed_origin_keys = payload.get("removedOriginKeys")
     if not job_id:
         return jsonify({"message": "请先生成预览后再保存修改"}), 400
-    if not isinstance(items, list):
+    incremental = changed_items is not None
+    if incremental:
+        if not isinstance(changed_items, list):
+            return jsonify({"message": "changedItems 必须为数组"}), 400
+        if removed_origin_keys is not None and not isinstance(removed_origin_keys, list):
+            return jsonify({"message": "removedOriginKeys 必须为数组"}), 400
+    elif not isinstance(items, list):
         return jsonify({"message": "items 必须为数组"}), 400
     adjustments = payload.get("adjustments")
     if adjustments is not None and not isinstance(adjustments, list):
@@ -1837,26 +1936,94 @@ def api_version_task_preview_save_edits():
         result = save_version_task_preview_edits(
             org_id=org_id,
             job_id=job_id,
-            items=items,
+            items=items if isinstance(items, list) else None,
+            changed_items=changed_items if incremental else None,
+            removed_origin_keys=removed_origin_keys if incremental else None,
             adjustments=adjustments if isinstance(adjustments, list) else None,
             project_id=project_id,
         )
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
+    if result.get("unchanged"):
+        return jsonify(
+            {
+                "message": "没有需要保存的增删改",
+                **result,
+            }
+        )
     db.session.commit()
+    db.session.expire_all()
+    stored_job = VersionTaskGenerationJob.query.filter_by(
+        id=job_id, organization_id=org_id
+    ).first()
+    stored_items: list[dict[str, Any]] = []
+    if stored_job and isinstance(stored_job.preview_json, dict):
+        raw_stored = stored_job.preview_json.get("items") or []
+        if isinstance(raw_stored, list):
+            stored_items = [x for x in raw_stored if isinstance(x, dict)]
+    result["items"] = stored_items
+    result["itemCount"] = len(stored_items)
+    stored_preview = stored_job.preview_json if stored_job and isinstance(stored_job.preview_json, dict) else {}
+    result["changeLog"] = stored_preview.get("changeLog") or result.get("changeLog") or []
+    result["ruleItems"] = stored_preview.get("ruleItems") or result.get("ruleItems") or []
+    saved_n = int(result.get("feedbackSaved") or 0)
+    patched_n = int(result.get("patchedCount") or 0)
+    if result.get("unchanged"):
+        msg = "没有需要保存的增删改"
+    elif patched_n:
+        msg = f"已增量保存 {patched_n} 条（清单共 {len(stored_items)} 条）"
+    else:
+        msg = f"已保存预览清单（{len(stored_items)} 条）"
+    if saved_n:
+        msg += f"，采集 {saved_n} 条增删改记录"
     return jsonify(
         {
-            "message": (
-                f"已保存预览修改（{result.get('itemCount') or 0} 条）"
-                + (
-                    f"，并写入反馈 {result.get('feedbackSaved') or 0} 条供下次生成生效"
-                    if result.get("feedbackSaved")
-                    else "（无字段变更，仅更新了预览快照）"
-                )
-            ),
+            "message": msg,
             **result,
         }
     )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/sync-document-meta")
+def api_version_task_sync_document_meta():
+    """按文件名从文控台账补齐预览清单的文件编号、文件版本号。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"message": "请先生成预览"}), 400
+    project_id = str(payload.get("projectId") or "").strip() or None
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    overwrite = bool(payload.get("overwrite") is True)
+    cleaned = [x for x in items if isinstance(x, dict)]
+    enriched, filled = enrich_preview_items_from_document_control(
+        cleaned, org_id=org_id, project_id=project_id, overwrite=overwrite
+    )
+    out = [
+        {
+            "originKey": str(rec.get("originKey") or "").strip(),
+            "fileName": str(rec.get("fileName") or "").strip(),
+            "documentNumber": str(rec.get("documentNumber") or "").strip(),
+            "fileVersion": str(rec.get("fileVersion") or "").strip(),
+        }
+        for rec in enriched
+    ]
+    if filled:
+        msg = f"已从文控台账补齐 {filled} 条文件编号/文件版本号"
+    else:
+        msg = "没有可同步的编号。请确认文件名能对应到文控台账中的文件名称，且对应字段目前为空。"
+    return jsonify({"message": msg, "filledCount": filled, "items": out})
 
 
 @document_control_bp.post("/api/document-control/version-tasks/apply")
@@ -1893,16 +2060,14 @@ def api_version_task_apply():
         else None
     )
     if isinstance(snapshot_items, list) and source_job is not None:
-        preview = dict(source_job.preview_json) if isinstance(source_job.preview_json, dict) else {}
-        cleaned = []
-        for raw in snapshot_items:
-            if not isinstance(raw, dict):
-                continue
-            rec = dict(raw)
-            rec["recordStatus"] = normalize_record_status(rec.get("recordStatus"))
-            cleaned.append(rec)
-        preview["items"] = cleaned
+        from sqlalchemy.orm.attributes import flag_modified
+
+        preview = stamp_manual_preview_items(
+            source_job.preview_json if isinstance(source_job.preview_json, dict) else {},
+            snapshot_items,
+        )
         source_job.preview_json = preview
+        flag_modified(source_job, "preview_json")
 
     issue_items: list[dict[str, Any]] = []
     skipped_status = 0
@@ -1912,11 +2077,17 @@ def api_version_task_apply():
         if normalize_record_status(row.get("recordStatus")) != "adopt":
             skipped_status += 1
             continue
+        if str(row.get("changeKind") or "").strip().lower() == "delete":
+            skipped_status += 1
+            continue
         if not str(row.get("fileName") or "").strip():
             continue
         issue_items.append(row)
     if not issue_items:
         return jsonify({"message": "没有可下发的选用记录（弃用/待定不会下发）"}), 400
+    conflicts = find_preview_filename_conflicts(issue_items)
+    if conflicts:
+        return jsonify({"message": format_preview_filename_conflicts(conflicts)}), 400
 
     created = 0
     updated = 0
@@ -1940,6 +2111,7 @@ def api_version_task_apply():
         document_display_date = _parse_optional_date(row.get("documentDisplayDate"))
         notes = str(row.get("notes") or "").strip() or None
         module = str(row.get("belongingModule") or "").strip() or None
+        is_system_record = normalize_is_system_record(row.get("isSystemRecord"), default=False)
         if existing:
             if apply_mode == "increment":
                 skipped_exist += 1
@@ -1952,8 +2124,12 @@ def api_version_task_apply():
             existing.due_date = due_date
             existing.document_display_date = document_display_date
             existing.belonging_module = module
+            existing.is_system_record = is_system_record
+            existing.document_number = str(row.get("documentNumber") or "").strip() or None
             existing.file_version = str(row.get("fileVersion") or "").strip() or None
-            existing.registration_version = str(row.get("registrationVersion") or "").strip() or None
+            existing.registration_version = str(
+                row.get("registrationVersion") or row.get("targetVersion") or ""
+            ).strip() or None
             existing.task_status = "pending"
             existing.completion_status = None
             db.session.add(existing)
@@ -1972,8 +2148,12 @@ def api_version_task_apply():
                 due_date=due_date,
                 document_display_date=document_display_date,
                 belonging_module=module,
+                is_system_record=is_system_record,
+                document_number=str(row.get("documentNumber") or "").strip() or None,
                 file_version=str(row.get("fileVersion") or "").strip() or None,
-                registration_version=str(row.get("registrationVersion") or "").strip() or None,
+                registration_version=str(
+                    row.get("registrationVersion") or row.get("targetVersion") or ""
+                ).strip() or None,
                 task_status="pending",
                 completion_status=None,
             )

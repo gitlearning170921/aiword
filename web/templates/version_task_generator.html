@@ -164,11 +164,34 @@
     border: 1px solid #dbe7f5;
     border-radius: 10px;
     background: #f7fbff;
-    padding: 0.75rem 1rem;
+    padding: 0.55rem 0.85rem;
     font-size: 0.86rem;
     line-height: 1.45;
     color: #334155;
   }
+  .vtg-explain-details { margin: 0; }
+  .vtg-explain-summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem 0.75rem;
+    font-weight: 650;
+  }
+  .vtg-explain-summary::-webkit-details-marker { display: none; }
+  .vtg-explain-summary::before {
+    content: "▶";
+    font-size: 0.72rem;
+    color: #64748b;
+  }
+  details.vtg-explain-details[open] > .vtg-explain-summary::before { content: "▼"; }
+  .vtg-explain-summary-hint {
+    font-weight: 400;
+    color: #64748b;
+    font-size: 0.82rem;
+  }
+  .vtg-explain-body { margin-top: 0.55rem; }
   .vtg-explain-h { font-weight: 650; margin-bottom: 0.45rem; }
   .vtg-explain-sub { font-weight: 600; margin: 0.4rem 0 0.2rem; }
   .vtg-explain-grid {
@@ -233,15 +256,99 @@
     font-size: 0.75rem;
   }
   tr.vtg-preview-hidden { display: none; }
-  tr.vtg-status-discard td { opacity: 0.62; }
-  tr.vtg-status-pending .vtg-status-select { border-color: #f0ad4e; }
+  tr.vtg-status-discard td { opacity: 0.58; }
+  tr.vtg-status-pending .vtg-status-select { border-color: #d97706; }
+  tr.vtg-change-delete .vtg-filename-input { text-decoration: line-through; color: #9f1239; }
+  .vtg-filename-input.vtg-name-dup-input {
+    border-color: #dc3545;
+    background-color: #fff8f8;
+  }
   .vtg-status-select { min-width: 5.4rem; }
+  .vtg-kind {
+    display: inline-block;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    padding: 0.12rem 0.38rem;
+    border-radius: 0.25rem;
+    border: 1px solid transparent;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .vtg-kind-add { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+  .vtg-kind-del { color: #9f1239; background: #fff1f2; border-color: #fecdd3; }
+  .vtg-kind-upd { color: #92400e; background: #fffbeb; border-color: #fde68a; }
   .vtg-preview-select-bar {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem 0.55rem;
     align-items: center;
-    margin-bottom: 0.55rem;
+    margin-bottom: 0;
+  }
+  .vtg-preview-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    background: #fff;
+    padding: 0.15rem 0 0.55rem;
+    margin-bottom: 0.45rem;
+    border-bottom: 1px solid #eef2f7;
+  }
+  .vtg-preview-table-wrap {
+    overflow: auto;
+    max-height: none;
+  }
+  .vtg-preview-table thead tr:first-child th {
+    position: sticky;
+    top: 0;
+    z-index: 6;
+    background: #eef2f7;
+    box-shadow: 0 1px 0 #dee2e6;
+  }
+  .vtg-preview-table thead tr.vtg-preview-filter-row th {
+    position: sticky;
+    top: 2.35rem;
+    z-index: 5;
+    background: #f4f7fb;
+    font-weight: 400;
+    padding: 0.22rem 0.28rem;
+    vertical-align: middle;
+    box-shadow: 0 1px 0 #dee2e6;
+  }
+  .vtg-preview-table thead .vtg-th-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    cursor: grab;
+    white-space: nowrap;
+  }
+  .vtg-preview-table thead .vtg-th-sort:hover { color: #1d4ed8; }
+  .vtg-preview-table thead th[data-vtg-col] { cursor: grab; -webkit-user-drag: none; }
+  .vtg-preview-table thead.vtg-col-reordering,
+  .vtg-preview-table thead.vtg-col-reordering * { user-select: none; }
+  .vtg-preview-table thead th[data-vtg-col]:active,
+  .vtg-preview-table thead th.vtg-col-dragging { cursor: grabbing; opacity: 0.55; }
+  .vtg-preview-table thead th.vtg-col-drop {
+    box-shadow: inset 3px 0 0 #1d4ed8;
+    background: #dbeafe;
+  }
+  .vtg-preview-table thead .vtg-th-sort.is-active { color: #1d4ed8; }
+  .vtg-preview-table thead .vtg-sort-ind {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    line-height: 1;
+  }
+  .vtg-preview-table thead .vtg-th-sort.is-active .vtg-sort-ind { color: #1d4ed8; }
+  .vtg-preview-table thead .vtg-filter-input {
+    min-width: 4.2rem;
+    width: 100%;
+    font-size: 0.75rem;
+    padding: 0.12rem 0.28rem;
   }
   .vtg-apply-mode { margin-bottom: 0.45rem; }
   .vtg-preview-table {
@@ -253,18 +360,143 @@
     vertical-align: middle;
   }
   .vtg-col-check { width: 2.2rem; white-space: nowrap; }
-  .vtg-col-idx { width: 2.4rem; white-space: nowrap; }
+  .vtg-col-idx { width: 3.2rem; white-space: nowrap; }
+  .vtg-drag-handle {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: element;
+    display: inline-block;
+    padding: 0 0.15rem;
+    margin-right: 0.15rem;
+    color: #6c757d;
+    font-size: 0.78rem;
+    vertical-align: middle;
+  }
+  .vtg-drag-handle:active { cursor: grabbing; }
+  tr.vtg-dragging { opacity: 0.45; pointer-events: none; }
+  tr.vtg-drop-target > td {
+    outline: 2px dashed #1d4ed8;
+    outline-offset: -2px;
+  }
+  .vtg-preview-table.table > tbody > tr.vtg-row-locate {
+    outline: 2px solid #60a5fa;
+    outline-offset: -2px;
+  }
+  .vtg-preview-table.table > tbody > tr.vtg-row-locate > *:first-child {
+    box-shadow: inset 3px 0 0 #2563eb;
+  }
+  .vtg-locate-hint {
+    color: #1d4ed8;
+    font-weight: 600;
+  }
+  .vtg-locate-hint.is-empty {
+    color: #6c757d;
+    font-weight: 400;
+  }
+  .vtg-add-anchor-wrap select {
+    min-height: 8.5rem;
+  }
+  tr.vtg-version-row.vtg-drop-target td,
+  tr.vtg-chapter-row.vtg-drop-target td {
+    background: #dbeafe;
+  }
+  .vtg-add-panel {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    padding: 0.55rem 0.7rem;
+  }
+  .vtg-move-anchor-wrap {
+    min-width: 18rem;
+    flex: 1 1 18rem;
+  }
+  .vtg-move-anchor-wrap select {
+    min-height: 10.5rem;
+  }
   .vtg-col-status { width: 5.8rem; }
+  .vtg-col-system { width: 4.2rem; white-space: nowrap; text-align: center; }
+  .vtg-system-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 0;
+    font-size: 0.78rem;
+    color: #334155;
+    cursor: pointer;
+  }
+  .vtg-doc-date-alert {
+    border-color: #dc3545 !important;
+    background-color: #fff1f2 !important;
+    color: #9f1239;
+  }
+  .vtg-col-change { width: 5.6rem; white-space: nowrap; }
   .vtg-col-filename { min-width: 22rem; width: 32%; }
+  .vtg-col-docno { min-width: 8.5rem; }
+  .vtg-col-filever { min-width: 6.2rem; }
   .vtg-col-tasktype { min-width: 6.5rem; }
   .vtg-col-version { min-width: 7rem; }
   .vtg-col-author { min-width: 6rem; }
   .vtg-col-date { min-width: 8.2rem; }
+  .vtg-preview-table thead tr:first-child th[data-vtg-col="dueDate"],
+  .vtg-preview-table thead tr.vtg-preview-filter-row th[data-vtg-col="dueDate"] {
+    background: #d1fae5;
+    color: #065f46;
+  }
+  .vtg-preview-table thead tr:first-child th[data-vtg-col="documentDisplayDate"],
+  .vtg-preview-table thead tr.vtg-preview-filter-row th[data-vtg-col="documentDisplayDate"] {
+    background: #fde68a;
+    color: #92400e;
+  }
+  .vtg-preview-table.table > tbody > tr > [data-vtg-col="dueDate"],
+  .vtg-preview-table.table-hover > tbody > tr:hover > [data-vtg-col="dueDate"] {
+    background-color: #ecfdf5 !important;
+  }
+  .vtg-preview-table.table > tbody > tr > [data-vtg-col="documentDisplayDate"],
+  .vtg-preview-table.table-hover > tbody > tr:hover > [data-vtg-col="documentDisplayDate"] {
+    background-color: #fffbeb !important;
+  }
+  .vtg-preview-table [data-vtg-col="dueDate"] input.form-control {
+    background-color: #f0fdf9;
+    border-color: #5eead4;
+  }
+  .vtg-preview-table [data-vtg-col="documentDisplayDate"] input.form-control {
+    background-color: #fffbeb;
+    border-color: #f59e0b;
+  }
   .vtg-col-module { min-width: 5.5rem; }
   .vtg-col-freq { min-width: 6.5rem; }
   .vtg-col-notes { min-width: 8rem; }
   .vtg-col-trigger { min-width: 4.5rem; white-space: nowrap; }
-  .vtg-col-action { width: 2.4rem; }
+  .vtg-col-reason { min-width: 10rem; }
+  .vtg-col-action { width: 4.2rem; white-space: nowrap; }
+  .vtg-changelog {
+    margin-top: 0.85rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fbfcfe;
+    padding: 0.75rem 0.9rem;
+  }
+  .vtg-changelog h3 {
+    margin: 0 0 0.35rem;
+    font-size: 0.92rem;
+  }
+  .vtg-changelog-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+  .vtg-changelog-empty { margin: 0; color: #6c7a89; font-size: 0.82rem; }
+  .vtg-changelog-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+    margin-top: 0.55rem;
+    font-size: 0.82rem;
+    color: #64748b;
+  }
   .vtg-filename-input {
     width: 100%;
     min-height: 2.4rem;
@@ -447,53 +679,199 @@
       <span class="vtg-step-badge">3</span>
       <div class="flex-grow-1">
         <h2 id="vtgStep3Title">任务预览（可编辑）</h2>
-        <p class="vtg-sub">「生成预览」会自动保存规则结果。每条记录可标为选用 / 弃用 / 待定（默认选用，历史为空按选用）。表格按目标版本分组，可筛选并收起/展开。仅勾选的「选用」会下发；手改后请点「保存预览修改」。</p>
+        <p class="vtg-sub">生成预览按「项目 + 起止版本」判重入库：已有快照会询问是否覆盖，没有则新建。同一项目、同一版本下文件名不可重复。表格可手工增、删、改；删除为标记保留，便于对照规则。变更原因可后补，保存后写入采集，用来优化规则文件。</p>
       </div>
       <span id="vtgPreviewCount" class="badge text-bg-secondary vtg-count-slot">0 条</span>
     </div>
     <div class="vtg-panel-b">
-      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-        <button id="vtgSavePreviewEditsBtn" class="btn btn-outline-primary btn-sm" type="button" disabled>
-          保存预览修改
-        </button>
-        <span class="small text-muted">写入当前预览快照 + 调整反馈（不必下发）</span>
+      <div class="vtg-preview-toolbar">
+        <div id="vtgPreviewSaveBanner"></div>
+        <div id="vtgPreviewOpStatus" class="small text-muted mb-2" aria-live="polite"></div>
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+          <button id="vtgSavePreviewEditsBtn" class="btn btn-outline-primary btn-sm" type="button" disabled>
+            保存预览修改
+          </button>
+          <button id="vtgSyncDocMetaBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled title="按文件名模糊匹配文控台账，只补空着的文件编号和文件版本号">
+            从文控同步编号
+          </button>
+          <button id="vtgAddPreviewRowBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
+            添加记录
+          </button>
+          <button id="vtgMovePreviewBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
+            批量调整顺序
+          </button>
+          <span id="vtgLocateHint" class="small vtg-locate-hint is-empty">点一下目标行或把鼠标停在上面，该行会标蓝条；再点「添加记录」会插到这行后面。</span>
+          <span class="small text-muted">勾选多条后可批量调整顺序。点表头排序，拖动表头可改列位置，表头下方可筛选。完成日期为青绿列，文档日期为琥珀列。</span>
+          <button id="vtgClearColFiltersBtn" class="btn btn-outline-secondary btn-sm d-none" type="button">清除筛选/排序</button>
+        </div>
+        <div id="vtgAddPreviewPanel" class="vtg-add-panel d-none mb-2">
+          <div class="small mb-2" id="vtgAddPreviewHint">把鼠标停在目标行上再点「添加记录」，会默认对准该行。</div>
+          <div class="d-flex flex-wrap gap-2 align-items-end">
+            <div class="vtg-add-anchor-wrap vtg-move-anchor-wrap">
+              <label class="form-label small mb-1" for="vtgAddAnchorSelect">参照记录</label>
+              <select id="vtgAddAnchorSelect" class="form-select form-select-sm" size="6" aria-label="参照记录"></select>
+            </div>
+            <div>
+              <label class="form-label small mb-1" for="vtgAddPlaceSelect">插入位置</label>
+              <select id="vtgAddPlaceSelect" class="form-select form-select-sm">
+                <option value="after">该记录后面</option>
+                <option value="before">该记录前面</option>
+              </select>
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" id="vtgAddPreviewConfirmBtn" class="btn btn-primary btn-sm">确定添加</button>
+              <button type="button" id="vtgAddPreviewCancelBtn" class="btn btn-outline-secondary btn-sm">取消</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-1">默认对准鼠标停留的那一行（可改）。新记录会跟参照记录同一版本、同一章节；添加后仍可拖动改分类和顺序。</div>
+        </div>
+        <div id="vtgMovePreviewPanel" class="vtg-add-panel d-none mb-2">
+          <div class="small mb-2" id="vtgMovePreviewHint">请先勾选要移动的记录。</div>
+          <div class="d-flex flex-wrap gap-2 align-items-end">
+            <div class="vtg-move-anchor-wrap">
+              <label class="form-label small mb-1" for="vtgMoveAnchorFilter">插到这份文件旁边</label>
+              <input id="vtgMoveAnchorFilter" class="form-control form-control-sm mb-1" placeholder="输入文件名筛选参照" aria-label="筛选参照文件">
+              <select id="vtgMoveAnchorSelect" class="form-select form-select-sm" size="8" aria-label="参照文件"></select>
+            </div>
+            <div>
+              <label class="form-label small mb-1" for="vtgMovePlaceSelect">插入位置</label>
+              <select id="vtgMovePlaceSelect" class="form-select form-select-sm">
+                <option value="after">该文件后面</option>
+                <option value="before">该文件前面</option>
+              </select>
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" id="vtgMovePreviewConfirmBtn" class="btn btn-primary btn-sm">确定移动</button>
+              <button type="button" id="vtgMovePreviewCancelBtn" class="btn btn-outline-secondary btn-sm">取消</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-1">默认对准鼠标停留的那一行（可改）。已勾选记录会作为一组插入，并跟参照文件同一版本、同一章节。移动后请点「保存预览修改」。</div>
+        </div>
+        <div id="vtgPreviewMeta" class="small text-muted mb-2">尚未生成预览。</div>
+        <div id="vtgPreviewVersionBar" class="vtg-version-bar d-none" aria-label="按版本筛选预览"></div>
+        <div class="vtg-preview-select-bar" aria-label="预览勾选">
+          <button id="vtgPreviewSelectAll" class="btn btn-outline-secondary btn-sm" type="button">全选</button>
+          <button id="vtgPreviewUnselectAll" class="btn btn-outline-secondary btn-sm" type="button">取消全选</button>
+          <button id="vtgPreviewUnselectVisible" class="btn btn-outline-secondary btn-sm" type="button">取消选择</button>
+          <span id="vtgPreviewSelectHint" class="small text-muted">仅「选用」可勾选下发。全选作用于当前可见行。</span>
+        </div>
       </div>
-      <div id="vtgPreviewMeta" class="small text-muted mb-2">尚未生成预览。</div>
-      <div id="vtgPreviewVersionBar" class="vtg-version-bar d-none" aria-label="按版本筛选预览"></div>
-      <div class="vtg-preview-select-bar" aria-label="预览勾选">
-        <button id="vtgPreviewSelectAll" class="btn btn-outline-secondary btn-sm" type="button">全选</button>
-        <button id="vtgPreviewUnselectAll" class="btn btn-outline-secondary btn-sm" type="button">取消全选</button>
-        <button id="vtgPreviewUnselectVisible" class="btn btn-outline-secondary btn-sm" type="button">取消选择</button>
-        <span id="vtgPreviewSelectHint" class="small text-muted">仅「选用」可勾选下发。全选作用于当前可见行。</span>
-      </div>
-      <div class="table-responsive border rounded">
+      <div id="vtgPreviewTableWrap" class="vtg-preview-table-wrap table-responsive border rounded">
         <table class="table table-sm table-hover table-bordered mb-0 align-middle vtg-preview-table">
           <thead class="table-light">
             <tr>
-              <th class="vtg-col-check">
+              <th class="vtg-col-check" data-vtg-col="check">
                 <input type="checkbox" class="form-check-input" id="vtgPreviewHeadCheck" title="全选当前可见的选用记录" disabled>
               </th>
-              <th class="vtg-col-idx">#</th>
-              <th class="vtg-col-status">状态</th>
-              <th class="vtg-col-filename">文件名</th>
-              <th class="vtg-col-tasktype">任务类型</th>
-              <th class="vtg-col-version">目标版本</th>
-              <th class="vtg-col-author">责任人</th>
-              <th class="vtg-col-date">完成日期</th>
-              <th class="vtg-col-date">文档日期</th>
-              <th class="vtg-col-module">模块</th>
-              <th class="vtg-col-freq">归档频率</th>
-              <th class="vtg-col-notes">说明</th>
-              <th class="vtg-col-trigger" title="版本号 X.Y.Z.B 的最高变化位">触发位</th>
-              <th class="vtg-col-action"></th>
+              <th class="vtg-col-idx" data-vtg-col="sortOrder">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="sortOrder" title="点击按手工顺序排序">#<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-status" data-vtg-col="recordStatus">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="recordStatus" title="点击排序">状态<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-system" data-vtg-col="isSystemRecord">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="isSystemRecord" title="点击排序">体系记录<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-change" data-vtg-col="changeKind">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="changeKind" title="点击排序">变更<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-filename" data-vtg-col="fileName">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="fileName" title="点击排序">文件名<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-tasktype" data-vtg-col="taskType">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="taskType" title="点击排序">任务类型<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-version" data-vtg-col="targetVersion">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="targetVersion" title="点击排序">目标版本<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-author" data-vtg-col="author">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="author" title="点击排序">责任人<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-date" data-vtg-col="dueDate">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="dueDate" title="完成日期，青绿列；点击排序">完成日期<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-date" data-vtg-col="documentDisplayDate">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="documentDisplayDate" title="文档日期，琥珀列；点击排序">文档日期<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-module" data-vtg-col="belongingModule">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="belongingModule" title="点击排序">模块<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-freq" data-vtg-col="archiveFrequency">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="archiveFrequency" title="点击排序">归档频率<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-trigger" data-vtg-col="triggeredBy">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="triggeredBy" title="点击排序">触发位<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-reason" data-vtg-col="changeReason">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="changeReason" title="点击排序">变更原因<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-docno" data-vtg-col="documentNumber">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="documentNumber" title="可从文控台账同步；点击排序">文件编号<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-filever" data-vtg-col="fileVersion">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="fileVersion" title="文件版本号，可填写；点击排序">文件版本号<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-notes" data-vtg-col="notes">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="notes" title="点击排序">备注<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-action" data-vtg-col="action"></th>
+            </tr>
+            <tr class="vtg-preview-filter-row">
+              <th data-vtg-col="check"></th>
+              <th data-vtg-col="sortOrder"></th>
+              <th data-vtg-col="recordStatus">
+                <select class="form-select form-select-sm vtg-filter-input" data-vtg-filter="recordStatus" aria-label="筛选状态">
+                  <option value="">全部</option>
+                  <option value="adopt">选用</option>
+                  <option value="pending">待定</option>
+                  <option value="discard">弃用</option>
+                </select>
+              </th>
+              <th data-vtg-col="isSystemRecord">
+                <select class="form-select form-select-sm vtg-filter-input" data-vtg-filter="isSystemRecord" aria-label="筛选体系记录">
+                  <option value="">全部</option>
+                  <option value="1">是</option>
+                  <option value="0">否</option>
+                </select>
+              </th>
+              <th data-vtg-col="changeKind">
+                <select class="form-select form-select-sm vtg-filter-input" data-vtg-filter="changeKind" aria-label="筛选变更">
+                  <option value="">全部</option>
+                  <option value="add">新增</option>
+                  <option value="update">已修改</option>
+                  <option value="delete">已删除</option>
+                  <option value="none">无变更</option>
+                </select>
+              </th>
+              <th data-vtg-col="fileName"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="fileName" placeholder="筛选" aria-label="筛选文件名"></th>
+              <th data-vtg-col="taskType"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="taskType" placeholder="筛选" aria-label="筛选任务类型"></th>
+              <th data-vtg-col="targetVersion"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="targetVersion" placeholder="筛选" aria-label="筛选目标版本"></th>
+              <th data-vtg-col="author"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="author" placeholder="筛选" aria-label="筛选责任人"></th>
+              <th data-vtg-col="dueDate"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="dueDate" placeholder="筛选" aria-label="筛选完成日期"></th>
+              <th data-vtg-col="documentDisplayDate"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="documentDisplayDate" placeholder="筛选" aria-label="筛选文档日期"></th>
+              <th data-vtg-col="belongingModule"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="belongingModule" placeholder="筛选" aria-label="筛选模块"></th>
+              <th data-vtg-col="archiveFrequency"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="archiveFrequency" placeholder="筛选" aria-label="筛选归档频率"></th>
+              <th data-vtg-col="triggeredBy"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="triggeredBy" placeholder="筛选" aria-label="筛选触发位"></th>
+              <th data-vtg-col="changeReason"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="changeReason" placeholder="筛选" aria-label="筛选变更原因"></th>
+              <th data-vtg-col="documentNumber"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="documentNumber" placeholder="筛选" aria-label="筛选文件编号"></th>
+              <th data-vtg-col="fileVersion"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="fileVersion" placeholder="筛选" aria-label="筛选文件版本号"></th>
+              <th data-vtg-col="notes"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="notes" placeholder="筛选" aria-label="筛选备注"></th>
+              <th data-vtg-col="action"></th>
             </tr>
           </thead>
           <tbody id="vtgPreviewBody">
             <tr>
-              <td colspan="14" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
+              <td colspan="17" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <div id="vtgChangeLogWrap" class="vtg-changelog">
+        <h3>规则优化采集</h3>
+        <p class="small text-muted mb-2">对照规则的增删改会采集到这里，用来优化 YY-IW-020。未保存的标「本次」，已保存的带时间。每页 20 条。</p>
+        <div id="vtgChangeLog"><p class="vtg-changelog-empty">暂无增删改。对预览表操作或保存后将在此列出。</p></div>
+        <div id="vtgChangeLogPager" class="vtg-changelog-pager d-none"></div>
       </div>
 
       <div class="vtg-apply-box" aria-labelledby="vtgStep4Title">

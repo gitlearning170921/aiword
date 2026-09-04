@@ -6,11 +6,20 @@
   }
 
   function toast(msg, level) {
-    if (window.showPageToast) {
-      window.showPageToast(msg, level || "info");
+    const lv = level || "info";
+    if (lv === "info") {
+      note(msg);
       return;
     }
-    window.alert(msg);
+    if (window.showPageToast) {
+      window.showPageToast(msg, lv);
+      return;
+    }
+    note(msg);
+  }
+
+  function note(msg) {
+    if (els.previewOpStatus) els.previewOpStatus.textContent = msg || "";
   }
 
   function setButtonBusy(btn, busy, busyText) {
@@ -69,9 +78,12 @@
     suggestWrap: byId("vtgSuggestWrap"),
     suggestList: byId("vtgSuggestList"),
     previewMeta: byId("vtgPreviewMeta"),
+    previewSaveBanner: byId("vtgPreviewSaveBanner"),
     previewVersionBar: byId("vtgPreviewVersionBar"),
     previewBody: byId("vtgPreviewBody"),
+    previewTableWrap: byId("vtgPreviewTableWrap"),
     previewCount: byId("vtgPreviewCount"),
+    previewOpStatus: byId("vtgPreviewOpStatus"),
     previewSelectAll: byId("vtgPreviewSelectAll"),
     previewUnselectAll: byId("vtgPreviewUnselectAll"),
     previewUnselectVisible: byId("vtgPreviewUnselectVisible"),
@@ -81,6 +93,26 @@
     applyModeReplace: byId("vtgApplyModeReplace"),
     applyModeIncrement: byId("vtgApplyModeIncrement"),
     savePreviewEditsBtn: byId("vtgSavePreviewEditsBtn"),
+    syncDocMetaBtn: byId("vtgSyncDocMetaBtn"),
+    addPreviewRowBtn: byId("vtgAddPreviewRowBtn"),
+    addPreviewPanel: byId("vtgAddPreviewPanel"),
+    addPreviewHint: byId("vtgAddPreviewHint"),
+    addAnchorSelect: byId("vtgAddAnchorSelect"),
+    addPlaceSelect: byId("vtgAddPlaceSelect"),
+    addPreviewConfirmBtn: byId("vtgAddPreviewConfirmBtn"),
+    addPreviewCancelBtn: byId("vtgAddPreviewCancelBtn"),
+    movePreviewBtn: byId("vtgMovePreviewBtn"),
+    movePreviewPanel: byId("vtgMovePreviewPanel"),
+    movePreviewHint: byId("vtgMovePreviewHint"),
+    moveAnchorFilter: byId("vtgMoveAnchorFilter"),
+    moveAnchorSelect: byId("vtgMoveAnchorSelect"),
+    movePlaceSelect: byId("vtgMovePlaceSelect"),
+    movePreviewConfirmBtn: byId("vtgMovePreviewConfirmBtn"),
+    movePreviewCancelBtn: byId("vtgMovePreviewCancelBtn"),
+    clearColFiltersBtn: byId("vtgClearColFiltersBtn"),
+    locateHint: byId("vtgLocateHint"),
+    changeLog: byId("vtgChangeLog"),
+    changeLogPager: byId("vtgChangeLogPager"),
     projectId: byId("vtgProjectId"),
     applyMsg: byId("vtgApplyMsg"),
   };
@@ -90,11 +122,83 @@
 
   let currentJobId = "";
   let originalPreviewItems = [];
+  let rulePreviewItems = [];
   let previewItems = [];
   let previewVersionFilter = "";
   const previewCollapsedVersions = new Set();
   const previewSelectedKeys = new Set();
-  const PREVIEW_COLSPAN = 14;
+  let previewColSort = null;
+  let previewColFilters = {};
+  let previewFilterTimer = 0;
+  let previewLocateOriginKey = "";
+  let previewLocateCandidateIdx = -1;
+  let previewLocateTimer = 0;
+  const PREVIEW_COLSPAN = 19;
+  const PREVIEW_COL_KEYS = [
+    "check",
+    "sortOrder",
+    "recordStatus",
+    "isSystemRecord",
+    "changeKind",
+    "fileName",
+    "taskType",
+    "targetVersion",
+    "author",
+    "dueDate",
+    "documentDisplayDate",
+    "belongingModule",
+    "archiveFrequency",
+    "triggeredBy",
+    "changeReason",
+    "documentNumber",
+    "fileVersion",
+    "notes",
+    "action",
+  ];
+  const PREVIEW_COL_ORDER_LS = "vtg.previewColOrder.v2";
+  let previewColOrder = [];
+  let previewColDragKey = "";
+  let previewColDropKey = "";
+  let previewColDragMoved = false;
+  let previewColDragOrigin = null;
+  let previewColSuppressSort = false;
+  const PREVIEW_VISIBLE_ROWS = 10;
+  const PREVIEW_CHAPTER_ORDER = [
+    "软件变更管理",
+    "系统追溯",
+    "缺陷管理",
+    "软件生产/发布管理",
+  ];
+  const COLLECTION_PAGE_SIZE = 20;
+  let previewRulesOpen = false;
+  let collectionHistory = [];
+  let collectionPage = 1;
+  let collectionLoadError = "";
+  const CHANGE_KIND_LABELS = {
+    add: "新增",
+    update: "已修改",
+    delete: "已删除",
+  };
+  const CHANGE_FIELD_LABELS = {
+    fileName: "文件名",
+    documentNumber: "文件编号",
+    fileVersion: "文件版本号",
+    taskType: "任务类型",
+    targetVersion: "目标版本",
+    author: "责任人",
+    dueDate: "完成日期",
+    documentDisplayDate: "文档日期",
+    belongingModule: "模块",
+    notes: "备注",
+    recordStatus: "状态",
+    chapter: "章节分类",
+    isSystemRecord: "体系记录",
+  };
+  const RECORD_STATUS_LABELS = {
+    adopt: "选用",
+    discard: "弃用",
+    pending: "待定",
+  };
   let savedRecords = [];
   const projectsById = new Map();
   const versionDateValues = new Map();
@@ -685,9 +789,10 @@
         return el ? String(el.value || "").trim() : "";
       };
       item.fileName = val("fileName");
+      item.documentNumber = val("documentNumber");
+      item.fileVersion = val("fileVersion");
       item.taskType = val("taskType");
       item.targetVersion = val("targetVersion");
-      item.fileVersion = val("targetVersion") || item.fileVersion;
       item.registrationVersion = val("targetVersion") || item.registrationVersion;
       item.author = val("author");
       item.dueDate = val("dueDate");
@@ -695,6 +800,12 @@
       item.belongingModule = val("belongingModule");
       item.notes = val("notes");
       item.recordStatus = recordStatusOf({ recordStatus: val("recordStatus") });
+      const sysEl = row.querySelector('[data-vtg-field="isSystemRecord"]');
+      if (sysEl) item.isSystemRecord = Boolean(sysEl.checked);
+      const reasonEl = row.querySelector('[data-vtg-field="changeReason"]');
+      if (reasonEl) item.changeReason = String(reasonEl.value || "").trim();
+      ensureOriginKey(item);
+      refreshItemChangeMark(item);
     });
   }
 
@@ -707,14 +818,33 @@
     return "adopt";
   }
 
-  function recordStatusSelectHtml(status) {
+  function isSystemRecordOf(item) {
+    const raw = item && item.isSystemRecord;
+    if (raw === false || raw === 0 || raw === "0") return false;
+    const key = String(raw == null ? "" : raw).trim().toLowerCase();
+    if (key === "false" || key === "no" || key === "n" || key === "否" || key === "非体系") return false;
+    if (raw === true || raw === 1 || raw === "1") return true;
+    if (key === "true" || key === "yes" || key === "y" || key === "是" || key === "体系" || key === "体系记录") {
+      return true;
+    }
+    return false;
+  }
+
+  function isSystemRecordSelectHtml(item, disabled) {
+    const on = isSystemRecordOf(item);
+    return `<label class="vtg-system-check"><input type="checkbox" class="form-check-input" data-vtg-field="isSystemRecord"${
+      on ? " checked" : ""
+    }${disabled ? " disabled" : ""} title="勾选表示为质量管理体系记录"><span>${on ? "是" : "否"}</span></label>`;
+  }
+
+  function recordStatusSelectHtml(status, disabled) {
     const cur = recordStatusOf({ recordStatus: status });
     const opts = [
       ["adopt", "选用"],
       ["pending", "待定"],
       ["discard", "弃用"],
     ];
-    return `<select class="form-select form-select-sm vtg-status-select" data-vtg-field="recordStatus">${opts
+    return `<select class="form-select form-select-sm vtg-status-select" data-vtg-field="recordStatus"${disabled ? " disabled" : ""}>${opts
       .map(
         ([value, label]) =>
           `<option value="${value}"${cur === value ? " selected" : ""}>${label}</option>`
@@ -722,16 +852,150 @@
       .join("")}</select>`;
   }
 
+  function changeKindOf(item) {
+    const key = String((item && item.changeKind) || "").trim().toLowerCase();
+    if (key === "add" || key === "update" || key === "delete") return key;
+    return "";
+  }
+
+  function isPreviewDeleted(item) {
+    return changeKindOf(item) === "delete";
+  }
+
+  function canCheckPreview(item) {
+    return !isPreviewDeleted(item);
+  }
+
+  function canSelectPreview(item) {
+    return recordStatusOf(item) === "adopt" && !isPreviewDeleted(item);
+  }
+
+  function originKeyOf(item) {
+    const existing = String((item && item.originKey) || "").trim();
+    if (existing) return existing;
+    return taskIdentity(item);
+  }
+
+  function ensureOriginKey(item) {
+    if (!item) return "";
+    if (!String(item.originKey || "").trim()) item.originKey = originKeyOf(item);
+    return item.originKey;
+  }
+
+  function ruleItemOf(item) {
+    const key = originKeyOf(item);
+    return (rulePreviewItems || []).find((x) => originKeyOf(x) === key) || null;
+  }
+
+  function summarizeItemDiff(original, adjusted) {
+    const before = original || {};
+    const after = adjusted || {};
+    const out = [];
+    Object.keys(CHANGE_FIELD_LABELS).forEach((key) => {
+      let left = String(before[key] || "").trim();
+      let right = String(after[key] || "").trim();
+      if (key === "targetVersion") {
+        left = left || String(before.registrationVersion || "").trim();
+        right = right || String(after.registrationVersion || "").trim();
+      }
+      if (key === "recordStatus") {
+        left = RECORD_STATUS_LABELS[recordStatusOf({ recordStatus: left })] || left;
+        right = RECORD_STATUS_LABELS[recordStatusOf({ recordStatus: right })] || right;
+      }
+      if (key === "chapter") {
+        left = left || String(before.processBranchLabel || "").trim();
+        right = right || String(after.processBranchLabel || "").trim();
+      }
+      if (key === "isSystemRecord") {
+        left = isSystemRecordOf(before) ? "是" : "否";
+        right = isSystemRecordOf(after) ? "是" : "否";
+      }
+      if (left === right) return;
+      out.push({
+        field: key,
+        label: CHANGE_FIELD_LABELS[key],
+        from: left,
+        to: right,
+      });
+    });
+    return out;
+  }
+
+  function formatChangeValue(field, raw) {
+    const text = String(raw || "").trim();
+    if (!text) return "空";
+    if (field === "recordStatus") {
+      if (text === "选用" || text === "弃用" || text === "待定") return text;
+      return RECORD_STATUS_LABELS[recordStatusOf({ recordStatus: text })] || text;
+    }
+    if (field === "isSystemRecord") {
+      return isSystemRecordOf({ isSystemRecord: raw }) ? "是" : "否";
+    }
+    return text;
+  }
+
+  function formatChangeSummary(summary) {
+    if (!Array.isArray(summary) || !summary.length) return "";
+    return summary
+      .map((row) => {
+        const label = String((row && (row.label || CHANGE_FIELD_LABELS[row.field])) || row.field || "");
+        const from = formatChangeValue(row && row.field, row && row.from);
+        const to = formatChangeValue(row && row.field, row && row.to);
+        return `${label}：「${from}」→「${to}」`;
+      })
+      .join("；");
+  }
+
+  function changeKindBadgeHtml(item) {
+    const kind = changeKindOf(item);
+    if (kind === "add") return '<span class="vtg-kind vtg-kind-add">新增</span>';
+    if (kind === "delete") return '<span class="vtg-kind vtg-kind-del">已删除</span>';
+    if (kind === "update") {
+      const detail = formatChangeSummary(item && item.changeFields);
+      return `<span class="vtg-kind vtg-kind-upd" title="${escapeHtml(detail)}">已修改</span>`;
+    }
+    return '<span class="text-muted">—</span>';
+  }
+
+  function refreshItemChangeMark(item) {
+    if (!item) return;
+    ensureOriginKey(item);
+    const kind = changeKindOf(item);
+    if (kind === "delete" || kind === "add") {
+      if (kind === "add") item.changeFields = [];
+      return;
+    }
+    const baseline = ruleItemOf(item);
+    if (!baseline) {
+      item.changeKind = "add";
+      item.changeFields = [];
+      return;
+    }
+    const summary = summarizeItemDiff(baseline, item);
+    if (summary.length) {
+      item.changeKind = "update";
+      item.changeFields = summary;
+    } else {
+      item.changeKind = "";
+      item.changeFields = [];
+    }
+  }
+
   function itemForFeedbackCompare(item) {
     const copy = { ...(item || {}) };
-    delete copy.recordStatus;
+    copy.recordStatus = recordStatusOf(copy);
+    delete copy.changeKind;
+    delete copy.changeReason;
+    delete copy.changeFields;
+    delete copy.originKey;
+    delete copy.sortOrder;
     return copy;
   }
 
   function defaultSelectAdoptItems(items) {
     previewSelectedKeys.clear();
     (items || []).forEach((item) => {
-      if (recordStatusOf(item) === "adopt") {
+      if (recordStatusOf(item) === "adopt" && !isPreviewDeleted(item)) {
         previewSelectedKeys.add(taskIdentity(item));
       }
     });
@@ -758,8 +1022,9 @@
       if (Number.isNaN(idx) || !previewItems[idx]) return;
       const key = taskIdentity(previewItems[idx]);
       const cb = row.querySelector("[data-vtg-select-row]");
-      const adopted = recordStatusOf(previewItems[idx]) === "adopt";
-      if (cb && cb.checked && adopted) previewSelectedKeys.add(key);
+      const adopted = canSelectPreview(previewItems[idx]);
+      const checkable = canCheckPreview(previewItems[idx]);
+      if (cb && cb.checked && checkable) previewSelectedKeys.add(key);
       else previewSelectedKeys.delete(key);
     });
   }
@@ -769,7 +1034,7 @@
     visiblePreviewRows().forEach((row) => {
       const idx = Number(row.getAttribute("data-vtg-preview-idx"));
       if (Number.isNaN(idx) || !previewItems[idx]) return;
-      if (recordStatusOf(previewItems[idx]) !== "adopt") return;
+      if (!canSelectPreview(previewItems[idx])) return;
       previewSelectedKeys.add(taskIdentity(previewItems[idx]));
     });
     updatePreviewSelectionUi();
@@ -804,50 +1069,207 @@
       const item = previewItems[idx];
       if (!item) return;
       const status = recordStatusOf(item);
-      const adopted = status === "adopt";
+      const adopted = canSelectPreview(item);
+      const checkable = canCheckPreview(item);
       const key = taskIdentity(item);
-      if (!adopted) previewSelectedKeys.delete(key);
-      const selected = adopted && previewSelectedKeys.has(key);
+      if (!checkable) previewSelectedKeys.delete(key);
+      const selected = checkable && previewSelectedKeys.has(key);
       const cb = row.querySelector("[data-vtg-select-row]");
       if (cb) {
-        cb.disabled = !adopted;
+        cb.disabled = !checkable;
         cb.checked = selected;
       }
       row.classList.toggle("vtg-status-discard", status === "discard");
       row.classList.toggle("vtg-status-pending", status === "pending");
+      row.classList.toggle("vtg-change-delete", changeKindOf(item) === "delete");
+      row.classList.toggle("vtg-change-add", changeKindOf(item) === "add");
+      row.classList.toggle("vtg-change-update", changeKindOf(item) === "update");
       if (adopted) visibleAdopt += 1;
-      if (selected) visibleSelected += 1;
+      if (selected && adopted) visibleSelected += 1;
     });
     if (els.previewHeadCheck) {
       els.previewHeadCheck.disabled = !previewItems.length || visibleAdopt === 0;
       els.previewHeadCheck.checked = visibleAdopt > 0 && visibleSelected === visibleAdopt;
       els.previewHeadCheck.indeterminate = visibleSelected > 0 && visibleSelected < visibleAdopt;
     }
-    const adoptCount = previewItems.filter((item) => recordStatusOf(item) === "adopt").length;
+    const adoptCount = previewItems.filter((item) => canSelectPreview(item)).length;
     const selectedCount = previewItems.filter(
-      (item) => recordStatusOf(item) === "adopt" && previewSelectedKeys.has(taskIdentity(item))
+      (item) => canSelectPreview(item) && previewSelectedKeys.has(taskIdentity(item))
     ).length;
+    const addCount = previewItems.filter((item) => changeKindOf(item) === "add").length;
+    const updateCount = previewItems.filter((item) => changeKindOf(item) === "update").length;
+    const deleteCount = previewItems.filter((item) => changeKindOf(item) === "delete").length;
+    const changeBit = addCount || updateCount || deleteCount
+      ? ` · 新增 ${addCount} / 改 ${updateCount} / 删 ${deleteCount}`
+      : "";
     if (els.previewCount) {
       if (!previewItems.length) {
         els.previewCount.textContent = "0 条";
-      } else if (previewVersionFilter) {
-        const n = previewItems.filter((item) => previewVersionKey(item) === previewVersionFilter).length;
-        els.previewCount.textContent = `${n} / ${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}`;
+      } else if (previewVersionFilter || hasPreviewColFilters()) {
+        const n = previewItems.filter(
+          (item) =>
+            itemMatchesColFilters(item) &&
+            (!previewVersionFilter || previewVersionKey(item) === previewVersionFilter)
+        ).length;
+        els.previewCount.textContent = `${n} / ${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
       } else {
-        els.previewCount.textContent = `${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}`;
+        els.previewCount.textContent = `${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
       }
     }
     if (els.previewSelectHint) {
       els.previewSelectHint.textContent = previewItems.length
-        ? `仅「选用」可下发。当前可见已选 ${visibleSelected} / ${visibleAdopt}。`
-        : "仅「选用」可勾选下发。全选作用于当前可见行。";
+        ? `勾选后可下发（仅选用）或批量调整顺序。当前可见选用已选 ${visibleSelected} / ${visibleAdopt}。`
+        : "勾选后可下发（仅选用）或批量调整顺序。已删除记录不能勾选。";
     }
   }
 
   function previewVersionKey(item) {
     return String(
-      (item && (item.targetVersion || item.fileVersion || item.registrationVersion)) || ""
+      (item && (item.targetVersion || item.registrationVersion)) || ""
     ).trim() || "未指定版本";
+  }
+
+  function looksLikeSoftwareVersion(value) {
+    return /^v?\s*\d+\.\d+\.\d+\.\d+$/i.test(String(value || "").trim());
+  }
+
+  function normalizePreviewDocFields(item) {
+    if (!item) return item;
+    const tv = String(item.targetVersion || item.registrationVersion || "").trim();
+    const fv = String(item.fileVersion || "").trim();
+    if (!tv && looksLikeSoftwareVersion(fv)) {
+      item.targetVersion = fv;
+      item.fileVersion = "";
+      if (!String(item.registrationVersion || "").trim()) item.registrationVersion = fv;
+    } else if (fv && tv && fv === tv && looksLikeSoftwareVersion(fv)) {
+      item.fileVersion = "";
+    }
+    item.documentNumber = String(item.documentNumber || "").trim();
+    item.fileVersion = String(item.fileVersion || "").trim();
+    return item;
+  }
+
+  function previewFileNameKey(name) {
+    return String(name || "").trim().toLowerCase();
+  }
+
+  function listPreviewFilenameConflicts(items) {
+    const groups = new Map();
+    (items || []).forEach((item) => {
+      if (isPreviewDeleted(item)) return;
+      const name = previewFileNameKey(item && item.fileName);
+      if (!name) return;
+      const key = `${previewVersionKey(item)}\0${name}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    const out = [];
+    groups.forEach((rows) => {
+      if (rows.length < 2) return;
+      out.push({
+        version: previewVersionKey(rows[0]),
+        fileName: String((rows[0] && rows[0].fileName) || "").trim(),
+        count: rows.length,
+        items: rows,
+      });
+    });
+    return out;
+  }
+
+  function formatFilenameConflicts(conflicts) {
+    if (!conflicts || !conflicts.length) return "同一项目、同一版本下文件名不能重复";
+    return (
+      "同一项目、同一版本下文件名不能重复：" +
+      conflicts
+        .map((row) => `版本 ${row.version} 的「${row.fileName}」有 ${row.count} 条`)
+        .join("；")
+    );
+  }
+
+  function findSameNameInVersion(item, items) {
+    const name = previewFileNameKey(item && item.fileName);
+    if (!name) return null;
+    const ver = previewVersionKey(item);
+    const selfKey = originKeyOf(item);
+    return (
+      (items || []).find((row) => {
+        if (!row || row === item) return false;
+        if (originKeyOf(row) === selfKey) return false;
+        if (isPreviewDeleted(row)) return false;
+        if (previewFileNameKey(row.fileName) !== name) return false;
+        return previewVersionKey(row) === ver;
+      }) || null
+    );
+  }
+
+  function findMoveFilenameConflict(moving, destVer, items) {
+    const movingKeys = new Set((moving || []).map((item) => originKeyOf(item)));
+    const counts = new Map();
+    const add = (item) => {
+      if (!item || isPreviewDeleted(item)) return;
+      const name = previewFileNameKey(item.fileName);
+      if (!name) return;
+      const cur = counts.get(name) || {
+        count: 0,
+        fileName: String(item.fileName || "").trim(),
+        fromOtherVersion: false,
+      };
+      cur.count += 1;
+      if (previewVersionKey(item) !== destVer) cur.fromOtherVersion = true;
+      counts.set(name, cur);
+    };
+    (items || []).forEach((item) => {
+      if (!item || movingKeys.has(originKeyOf(item))) return;
+      if (previewVersionKey(item) !== destVer) return;
+      add(item);
+    });
+    (moving || []).forEach((item) => add(item));
+    let found = null;
+    counts.forEach((row) => {
+      if (found || row.count < 2) return;
+      found = {
+        fileName: row.fileName,
+        version: destVer,
+        count: row.count,
+        crossVersion: row.fromOtherVersion,
+      };
+    });
+    return found;
+  }
+
+  function movingItemsForAnchor(moving, anchor) {
+    const list = moving || [];
+    if (!anchor) return { toMove: list, ignoredOther: 0, destVer: "" };
+    const destVer = previewVersionKey(anchor);
+    const sameVer = [];
+    const otherVer = [];
+    list.forEach((item) => {
+      if (previewVersionKey(item) === destVer) sameVer.push(item);
+      else otherVer.push(item);
+    });
+    if (sameVer.length && otherVer.length) {
+      return { toMove: sameVer, ignoredOther: otherVer.length, destVer };
+    }
+    return { toMove: list, ignoredOther: 0, destVer };
+  }
+
+  function markPreviewFilenameConflicts() {
+    const conflicts = listPreviewFilenameConflicts(previewItems);
+    const dupKeys = new Set();
+    conflicts.forEach((row) => {
+      (row.items || []).forEach((item) => dupKeys.add(originKeyOf(item)));
+    });
+    if (els.previewBody) {
+      els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]").forEach((tr) => {
+        const idx = Number(tr.getAttribute("data-vtg-preview-idx"));
+        const item = previewItems[idx];
+        const dup = Boolean(item && dupKeys.has(originKeyOf(item)));
+        tr.classList.toggle("vtg-name-dup", dup);
+        const input = tr.querySelector(".vtg-filename-input");
+        if (input) input.classList.toggle("vtg-name-dup-input", dup);
+      });
+    }
+    return conflicts;
   }
 
   function comparePreviewVersions(a, b) {
@@ -866,6 +1288,381 @@
       return 0;
     }
     return String(a).localeCompare(String(b), "zh");
+  }
+
+  function previewChapterKey(item) {
+    return String((item && (item.chapter || item.processBranchLabel)) || "其它").trim() || "其它";
+  }
+
+  function isReleaseRecordName(name) {
+    return String(name || "").trim() === "发布记录";
+  }
+
+  function applyReleaseRecordDateUi(row, fileName) {
+    if (!row) return;
+    const input = row.querySelector('[data-vtg-field="documentDisplayDate"]');
+    if (!input) return;
+    const hit = isReleaseRecordName(fileName);
+    input.classList.toggle("vtg-doc-date-alert", hit);
+    if (hit) {
+      input.title = "发布记录的文档日期需与发布日对齐，请核对";
+    } else if (input.getAttribute("data-vtg-field") === "documentDisplayDate") {
+      input.removeAttribute("title");
+    }
+  }
+
+  function previewArchiveFrequency(item) {
+    return (
+      String((item && item.archiveFrequency) || "").trim() ||
+      (String((item && item.taskType) || "").includes("流程") ? "流程" : "")
+    );
+  }
+
+  function previewColValue(item, key) {
+    if (key === "sortOrder") return String(Number((item && item.sortOrder) || 0) + 1);
+    if (key === "recordStatus") return RECORD_STATUS_LABELS[recordStatusOf(item)] || "";
+    if (key === "changeKind") return CHANGE_KIND_LABELS[changeKindOf(item)] || "无变更";
+    if (key === "targetVersion") {
+      const ver = previewVersionKey(item);
+      return ver === "未指定版本" ? "" : ver;
+    }
+    if (key === "archiveFrequency") return previewArchiveFrequency(item);
+    if (key === "triggeredBy") return formatTriggerBits(item && item.triggeredBy);
+    if (key === "chapter") return previewChapterKey(item);
+    if (key === "isSystemRecord") return isSystemRecordOf(item) ? "是" : "否";
+    return String((item && item[key]) || "").trim();
+  }
+
+  function previewColSortValue(item, key) {
+    if (key === "sortOrder") return Number((item && item.sortOrder) || 0);
+    if (key === "recordStatus") {
+      const order = { adopt: 0, pending: 1, discard: 2 };
+      return order[recordStatusOf(item)] ?? 9;
+    }
+    if (key === "changeKind") {
+      const order = { "": 0, add: 1, update: 2, delete: 3 };
+      return order[changeKindOf(item)] ?? 0;
+    }
+    if (key === "isSystemRecord") return isSystemRecordOf(item) ? 0 : 1;
+    if (key === "dueDate" || key === "documentDisplayDate") return String((item && item[key]) || "");
+    if (key === "targetVersion") return previewVersionKey(item);
+    return previewColValue(item, key).toLowerCase();
+  }
+
+  function comparePreviewCol(a, b, key) {
+    if (key === "targetVersion") {
+      return comparePreviewVersions(previewVersionKey(a), previewVersionKey(b));
+    }
+    const va = previewColSortValue(a, key);
+    const vb = previewColSortValue(b, key);
+    if (typeof va === "number" && typeof vb === "number") return va - vb;
+    return String(va).localeCompare(String(vb), "zh", { numeric: true, sensitivity: "base" });
+  }
+
+  function hasPreviewColFilters() {
+    return Object.keys(previewColFilters).some((key) => String(previewColFilters[key] || "").trim());
+  }
+
+  function itemMatchesColFilters(item) {
+    return Object.keys(previewColFilters).every((key) => {
+      const q = String(previewColFilters[key] || "").trim();
+      if (!q) return true;
+      if (key === "recordStatus") return recordStatusOf(item) === q;
+      if (key === "isSystemRecord") {
+        if (q === "1" || q === "yes" || q === "是") return isSystemRecordOf(item);
+        if (q === "0" || q === "no" || q === "否") return !isSystemRecordOf(item);
+        return true;
+      }
+      if (key === "changeKind") {
+        if (q === "none") return !changeKindOf(item);
+        return changeKindOf(item) === q;
+      }
+      return previewColValue(item, key).toLowerCase().includes(q.toLowerCase());
+    });
+  }
+
+  function updatePreviewHeadUi() {
+    document.querySelectorAll("[data-vtg-sort]").forEach((btn) => {
+      const key = btn.getAttribute("data-vtg-sort") || "";
+      const ind = btn.querySelector(".vtg-sort-ind");
+      const active = Boolean(previewColSort && previewColSort.key === key);
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute(
+        "aria-sort",
+        active ? (previewColSort.dir === "desc" ? "descending" : "ascending") : "none"
+      );
+      if (ind) ind.textContent = active ? (previewColSort.dir === "desc" ? "▼" : "▲") : "⇅";
+    });
+    if (els.clearColFiltersBtn) {
+      els.clearColFiltersBtn.classList.toggle(
+        "d-none",
+        !previewColSort && !hasPreviewColFilters()
+      );
+    }
+  }
+
+  function clearPreviewColFilters() {
+    previewColSort = null;
+    previewColFilters = {};
+    document.querySelectorAll("[data-vtg-filter]").forEach((el) => {
+      el.value = "";
+    });
+    updatePreviewHeadUi();
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    renderPreviewTable(previewItems);
+  }
+
+  function togglePreviewColSort(key) {
+    if (!key) return;
+    if (previewColSort && previewColSort.key === key) {
+      previewColSort = previewColSort.dir === "asc" ? { key, dir: "desc" } : null;
+    } else {
+      previewColSort = { key, dir: "asc" };
+    }
+    updatePreviewHeadUi();
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    renderPreviewTable(previewItems);
+  }
+
+  function applyPreviewColFilter(el) {
+    const key = el && el.getAttribute("data-vtg-filter");
+    if (!key) return;
+    previewColFilters[key] = el.value;
+    updatePreviewHeadUi();
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    renderPreviewTable(previewItems);
+  }
+
+  function loadPreviewColOrder() {
+    let stored = [];
+    try {
+      stored = JSON.parse(localStorage.getItem(PREVIEW_COL_ORDER_LS) || "[]");
+    } catch (err) {
+      stored = [];
+    }
+    const next = [];
+    if (Array.isArray(stored)) {
+      stored.forEach((key) => {
+        if (PREVIEW_COL_KEYS.indexOf(key) >= 0 && next.indexOf(key) < 0) next.push(key);
+      });
+    }
+    PREVIEW_COL_KEYS.forEach((key) => {
+      if (next.indexOf(key) < 0) next.push(key);
+    });
+    return next;
+  }
+
+  function savePreviewColOrder(order) {
+    previewColOrder = order.slice();
+    try {
+      localStorage.setItem(PREVIEW_COL_ORDER_LS, JSON.stringify(previewColOrder));
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  function applyPreviewColOrder() {
+    const table = els.previewTableWrap && els.previewTableWrap.querySelector(".vtg-preview-table");
+    if (!table) return;
+    const order = previewColOrder.length ? previewColOrder : PREVIEW_COL_KEYS;
+    table.querySelectorAll("tr").forEach((tr) => {
+      if (tr.querySelector("[colspan]")) return;
+      const byKey = new Map();
+      Array.from(tr.children).forEach((cell) => {
+        const key = cell.getAttribute("data-vtg-col");
+        if (key) byKey.set(key, cell);
+      });
+      if (!byKey.size) return;
+      order.forEach((key) => {
+        const cell = byKey.get(key);
+        if (cell) tr.appendChild(cell);
+      });
+    });
+  }
+
+  function movePreviewCol(fromKey, toKey) {
+    if (!fromKey || !toKey || fromKey === toKey) return false;
+    const order = previewColOrder.slice();
+    const from = order.indexOf(fromKey);
+    const to = order.indexOf(toKey);
+    if (from < 0 || to < 0) return false;
+    order.splice(from, 1);
+    order.splice(to, 0, fromKey);
+    savePreviewColOrder(order);
+    applyPreviewColOrder();
+    return true;
+  }
+
+  function clearPreviewColDragUi(thead) {
+    if (!thead) return;
+    thead.classList.remove("vtg-col-reordering");
+    thead.querySelectorAll(".vtg-col-dragging, .vtg-col-drop").forEach((el) => {
+      el.classList.remove("vtg-col-dragging", "vtg-col-drop");
+    });
+  }
+
+  function previewColThKey(el) {
+    const cell = el && el.closest ? el.closest("#vtgPreviewTableWrap [data-vtg-col]") : null;
+    return cell ? cell.getAttribute("data-vtg-col") || "" : "";
+  }
+
+  function bindPreviewHead() {
+    const table = els.previewTableWrap && els.previewTableWrap.querySelector("table");
+    const thead = table && table.querySelector("thead");
+    if (!thead || thead.dataset.vtgHeadBound) return;
+    thead.dataset.vtgHeadBound = "1";
+    thead.querySelectorAll("th[data-vtg-col]").forEach((th) => {
+      th.draggable = false;
+    });
+    thead.addEventListener("click", (ev) => {
+      if (previewColSuppressSort) {
+        previewColSuppressSort = false;
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
+      const btn = ev.target.closest("[data-vtg-sort]");
+      if (!btn) return;
+      ev.preventDefault();
+      togglePreviewColSort(btn.getAttribute("data-vtg-sort") || "");
+    });
+    thead.addEventListener("change", (ev) => {
+      const el = ev.target.closest("[data-vtg-filter]");
+      if (!el) return;
+      applyPreviewColFilter(el);
+    });
+    thead.addEventListener("input", (ev) => {
+      const el = ev.target.closest("input[data-vtg-filter]");
+      if (!el) return;
+      window.clearTimeout(previewFilterTimer);
+      previewFilterTimer = window.setTimeout(() => applyPreviewColFilter(el), 180);
+    });
+    thead.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      if (ev.target.closest("input, select, textarea")) return;
+      const th = ev.target.closest("th[data-vtg-col]");
+      if (!th) return;
+      previewColDragKey = th.getAttribute("data-vtg-col") || "";
+      previewColDragMoved = false;
+      previewColDropKey = "";
+      previewColDragOrigin = {
+        x: ev.clientX,
+        y: ev.clientY,
+        pointerId: ev.pointerId,
+        th,
+      };
+    });
+    window.addEventListener(
+      "pointermove",
+      (ev) => {
+        if (!previewColDragKey || !previewColDragOrigin) return;
+        const dx = ev.clientX - previewColDragOrigin.x;
+        const dy = ev.clientY - previewColDragOrigin.y;
+        if (!previewColDragMoved && Math.hypot(dx, dy) < 8) return;
+        if (!previewColDragMoved) {
+          previewColDragMoved = true;
+          thead.classList.add("vtg-col-reordering");
+          thead.querySelectorAll(`th[data-vtg-col="${previewColDragKey}"]`).forEach((el) => {
+            el.classList.add("vtg-col-dragging");
+          });
+          try {
+            previewColDragOrigin.th.setPointerCapture(previewColDragOrigin.pointerId);
+          } catch (err) {
+            /* ignore */
+          }
+        }
+        ev.preventDefault();
+        const overKey = previewColThKey(document.elementFromPoint(ev.clientX, ev.clientY));
+        previewColDropKey = overKey && overKey !== previewColDragKey ? overKey : "";
+        thead.querySelectorAll(".vtg-col-drop").forEach((el) => el.classList.remove("vtg-col-drop"));
+        if (previewColDropKey) {
+          thead.querySelectorAll(`th[data-vtg-col="${previewColDropKey}"]`).forEach((el) => {
+            el.classList.add("vtg-col-drop");
+          });
+        }
+      },
+      { passive: false }
+    );
+    const endPreviewColPointer = (ev) => {
+      if (!previewColDragKey || !previewColDragOrigin) return;
+      if (ev && ev.pointerId !== previewColDragOrigin.pointerId) return;
+      const fromKey = previewColDragKey;
+      const toKey = previewColDropKey;
+      const moved = previewColDragMoved;
+      try {
+        if (moved) previewColDragOrigin.th.releasePointerCapture(previewColDragOrigin.pointerId);
+      } catch (err) {
+        /* ignore */
+      }
+      clearPreviewColDragUi(thead);
+      previewColDragKey = "";
+      previewColDropKey = "";
+      previewColDragMoved = false;
+      previewColDragOrigin = null;
+      if (!moved) return;
+      previewColSuppressSort = true;
+      window.setTimeout(() => {
+        previewColSuppressSort = false;
+      }, 0);
+      if (movePreviewCol(fromKey, toKey)) note("已调整列顺序");
+    };
+    window.addEventListener("pointerup", endPreviewColPointer);
+    window.addEventListener("pointercancel", endPreviewColPointer);
+  }
+
+  function ensureSortOrders(items) {
+    const groups = new Map();
+    (items || []).forEach((item) => {
+      const ver = previewVersionKey(item);
+      if (!groups.has(ver)) groups.set(ver, []);
+      groups.get(ver).push(item);
+    });
+    groups.forEach((list) => {
+      const assigned = [];
+      const missing = [];
+      list.forEach((item) => {
+        if (Number.isFinite(Number(item.sortOrder))) assigned.push(item);
+        else missing.push(item);
+      });
+      assigned.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+      if (!assigned.length) {
+        missing.sort((a, b) => {
+          const ca = previewChapterKey(a);
+          const cb = previewChapterKey(b);
+          const ia = PREVIEW_CHAPTER_ORDER.indexOf(ca);
+          const ib = PREVIEW_CHAPTER_ORDER.indexOf(cb);
+          const ra = ia < 0 ? 1000 : ia;
+          const rb = ib < 0 ? 1000 : ib;
+          if (ra !== rb) return ra - rb;
+          return 0;
+        });
+        missing.forEach((item, i) => {
+          item.sortOrder = i;
+        });
+        return;
+      }
+      let next = Math.max(...assigned.map((x) => Number(x.sortOrder))) + 1;
+      missing.forEach((item) => {
+        item.sortOrder = next;
+        next += 1;
+      });
+      assigned.concat(missing).forEach((item, i) => {
+        item.sortOrder = i;
+      });
+    });
+    const ordered = [];
+    Array.from(groups.keys())
+      .sort(comparePreviewVersions)
+      .forEach((ver) => {
+        const list = groups.get(ver) || [];
+        list.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+        list.forEach((item) => ordered.push(item));
+      });
+    items.length = 0;
+    ordered.forEach((item) => items.push(item));
   }
 
   function listPreviewVersionStats() {
@@ -937,6 +1734,9 @@
     }
     updatePreviewSelectionUi();
     fitFilenameInputs();
+    fitPreviewTableViewport();
+    markPreviewFilenameConflicts();
+    applyPreviewLocateUi();
   }
 
   function renderPreviewTable(items, options) {
@@ -944,7 +1744,9 @@
     previewItems = Array.isArray(items)
       ? items.map((x) => {
           const rec = { ...x };
+          normalizePreviewDocFields(rec);
           rec.recordStatus = recordStatusOf(rec);
+          ensureOriginKey(rec);
           return rec;
         })
       : [];
@@ -953,9 +1755,7 @@
     } else {
       prunePreviewSelection(previewItems);
     }
-    if (els.savePreviewEditsBtn) {
-      els.savePreviewEditsBtn.disabled = !currentJobId || !previewItems.length;
-    }
+    setPreviewSaveEnabled();
     if (!els.previewBody) return;
     if (!previewItems.length) {
       previewSelectedKeys.clear();
@@ -971,20 +1771,44 @@
         els.previewSelectHint.textContent = "仅「选用」可勾选下发。全选作用于当前可见行。";
       }
       els.previewBody.innerHTML =
-        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">预览后将在此显示任务清单</td></tr>`;
+        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">${
+          currentJobId
+            ? "当前没有记录，可点「添加记录」或保存空清单"
+            : "预览后将在此显示任务清单"
+        }</td></tr>`;
+      renderChangeLog([]);
+      fitPreviewTableViewport();
+      updatePreviewHeadUi();
       return;
     }
-    const chapterOrder = [
-      "软件变更管理",
-      "系统追溯",
-      "缺陷管理",
-      "软件生产/发布管理",
-    ];
+    ensureSortOrders(previewItems);
     const byVersion = new Map();
     previewItems.forEach((item, idx) => {
+      if (!itemMatchesColFilters(item)) return;
       const ver = previewVersionKey(item);
       if (!byVersion.has(ver)) byVersion.set(ver, []);
       byVersion.get(ver).push({ item, idx });
+    });
+    if (!byVersion.size) {
+      renderPreviewVersionBar();
+      if (els.previewSelectHint) {
+        els.previewSelectHint.textContent = "没有符合表头筛选的记录，可点「清除筛选/排序」。";
+      }
+      els.previewBody.innerHTML =
+        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">没有符合表头筛选的记录，可点「清除筛选/排序」</td></tr>`;
+      renderChangeLog(previewItems);
+      applyPreviewVersionUi();
+      updatePreviewHeadUi();
+      return;
+    }
+    byVersion.forEach((rows) => {
+      rows.sort((a, b) => {
+        if (previewColSort && previewColSort.key) {
+          const cmp = comparePreviewCol(a.item, b.item, previewColSort.key);
+          if (cmp) return previewColSort.dir === "desc" ? -cmp : cmp;
+        }
+        return Number(a.item.sortOrder) - Number(b.item.sortOrder) || a.idx - b.idx;
+      });
     });
     const versionKeys = Array.from(byVersion.keys()).sort(comparePreviewVersions);
     const html = [];
@@ -1003,61 +1827,181 @@
           <td colspan="${PREVIEW_COLSPAN}"><span class="vtg-caret">▼</span>版本 <span class="font-monospace">${escapeHtml(ver)}</span>（${versionRows.length}）${escapeHtml(triggerText)}</td>
         </tr>`
       );
-      const chapterGroups = new Map();
-      versionRows.forEach((row) => {
-        const key = String(row.item.chapter || row.item.processBranchLabel || "其它").trim() || "其它";
-        if (!chapterGroups.has(key)) chapterGroups.set(key, []);
-        chapterGroups.get(key).push(row);
-      });
-      const orderedChapters = [
-        ...chapterOrder.filter((k) => chapterGroups.has(k)),
-        ...Array.from(chapterGroups.keys()).filter((k) => !chapterOrder.includes(k)),
-      ];
-      orderedChapters.forEach((chapter) => {
-        const rows = chapterGroups.get(chapter) || [];
-        html.push(
-          `<tr class="vtg-chapter-row" data-vtg-ver="${escapeHtml(ver)}"><td colspan="${PREVIEW_COLSPAN}">${escapeHtml(chapter)}（${rows.length}）</td></tr>`
-        );
-        rows.forEach(({ item, idx }) => {
-          const triggers = formatTriggerBits(item.triggeredBy);
-          const targetVersion = item.targetVersion || item.fileVersion || "";
-          const freq = String(item.archiveFrequency || "").trim() || (String(item.taskType || "").includes("流程") ? "流程" : "—");
-          const status = recordStatusOf(item);
-          const adopted = status === "adopt";
-          const selected = adopted && previewSelectedKeys.has(taskIdentity(item));
-          html.push(`<tr data-vtg-preview-idx="${idx}" data-vtg-ver="${escapeHtml(ver)}" class="${status === "discard" ? "vtg-status-discard" : status === "pending" ? "vtg-status-pending" : ""}">
-            <td class="text-center"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${adopted ? "" : "disabled"} title="${adopted ? "勾选后下发" : "仅选用状态可下发"}"></td>
-            <td class="text-muted small">${idx + 1}</td>
-            <td>${recordStatusSelectHtml(status)}</td>
-            <td class="vtg-col-filename"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}">${escapeHtml(item.fileName || "")}</textarea></td>
-            <td><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"></td>
-            <td><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"></td>
-            <td><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}"></td>
-            <td><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"></td>
-            <td><input type="date" class="form-control form-control-sm" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"></td>
-            <td><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"></td>
-            <td class="small text-muted">${escapeHtml(freq)}</td>
-            <td><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}"></td>
-            <td class="small text-muted" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
-            <td><button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="删除">×</button></td>
-          </tr>`);
-        });
+      let lastChapter = null;
+      const useChapterHeads = !previewColSort;
+      versionRows.forEach(({ item, idx }) => {
+        const chapter = previewChapterKey(item);
+        if (useChapterHeads && chapter !== lastChapter) {
+          const chapterCount = versionRows.filter((row) => previewChapterKey(row.item) === chapter).length;
+          html.push(
+            `<tr class="vtg-chapter-row" data-vtg-ver="${escapeHtml(ver)}" data-vtg-chapter="${escapeHtml(chapter)}"><td colspan="${PREVIEW_COLSPAN}">${escapeHtml(chapter)}（${chapterCount}）</td></tr>`
+          );
+          lastChapter = chapter;
+        }
+        const triggers = formatTriggerBits(item.triggeredBy);
+        const targetVersion = item.targetVersion || item.registrationVersion || "";
+        const freq = previewArchiveFrequency(item) || "—";
+        const status = recordStatusOf(item);
+        const deleted = isPreviewDeleted(item);
+        const adopted = canSelectPreview(item);
+        const checkable = canCheckPreview(item);
+        const selected = checkable && previewSelectedKeys.has(taskIdentity(item));
+        const disabledAttr = deleted ? " disabled" : "";
+        const rowClass = [
+          status === "discard" ? "vtg-status-discard" : "",
+          status === "pending" ? "vtg-status-pending" : "",
+          changeKindOf(item) === "delete" ? "vtg-change-delete" : "",
+          changeKindOf(item) === "add" ? "vtg-change-add" : "",
+          changeKindOf(item) === "update" ? "vtg-change-update" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const actionBtn = deleted
+          ? `<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" data-vtg-restore-preview="${idx}" title="撤销删除">还原</button>`
+          : `<button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="标记删除">×</button>`;
+        html.push(`<tr data-vtg-preview-idx="${idx}" data-vtg-ver="${escapeHtml(ver)}" class="${rowClass}">
+          <td class="text-center" data-vtg-col="check"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${checkable ? "" : "disabled"} title="${deleted ? "已删除，不能勾选" : adopted ? "勾选后可下发或批量调整顺序" : "勾选后可批量调整顺序；仅选用会下发"}"></td>
+          <td class="vtg-col-idx" data-vtg-col="sortOrder"><span class="vtg-drag-handle" draggable="true" title="拖动调整顺序，也可拖到其他版本或章节">⋮⋮</span><span class="text-muted small">${Number(item.sortOrder) + 1}</span></td>
+          <td data-vtg-col="recordStatus">${recordStatusSelectHtml(status, deleted)}</td>
+          <td class="vtg-col-system text-center" data-vtg-col="isSystemRecord">${isSystemRecordSelectHtml(item, deleted)}</td>
+          <td class="vtg-change-cell" data-vtg-col="changeKind">${changeKindBadgeHtml(item)}</td>
+          <td class="vtg-col-filename" data-vtg-col="fileName"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}"${disabledAttr}>${escapeHtml(item.fileName || "")}</textarea></td>
+          <td data-vtg-col="taskType"><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"${disabledAttr}></td>
+          <td data-vtg-col="targetVersion"><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"${disabledAttr}></td>
+          <td data-vtg-col="author"><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}"${disabledAttr}></td>
+          <td data-vtg-col="dueDate"><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"${disabledAttr}></td>
+          <td data-vtg-col="documentDisplayDate"><input type="date" class="form-control form-control-sm${
+            isReleaseRecordName(item.fileName) ? " vtg-doc-date-alert" : ""
+          }" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"${
+            isReleaseRecordName(item.fileName)
+              ? ' title="发布记录的文档日期需与发布日对齐，请核对"'
+              : ""
+          }${disabledAttr}></td>
+          <td data-vtg-col="belongingModule"><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"${disabledAttr}></td>
+          <td class="small text-muted" data-vtg-col="archiveFrequency">${escapeHtml(freq)}</td>
+          <td class="small text-muted" data-vtg-col="triggeredBy" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
+          <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
+          <td class="vtg-col-docno" data-vtg-col="documentNumber"><input class="form-control form-control-sm font-monospace" data-vtg-field="documentNumber" value="${escapeHtml(item.documentNumber || "")}" placeholder="可从文控同步"${disabledAttr}></td>
+          <td class="vtg-col-filever" data-vtg-col="fileVersion"><input class="form-control form-control-sm" data-vtg-field="fileVersion" value="${escapeHtml(item.fileVersion || "")}" placeholder="如 V1.0"${disabledAttr}></td>
+          <td data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="备注"${disabledAttr}></td>
+          <td data-vtg-col="action">${actionBtn}</td>
+        </tr>`);
       });
     });
     els.previewBody.innerHTML = html.join("");
     renderPreviewVersionBar();
     applyPreviewVersionUi();
-    fitFilenameInputs();
-    Array.from(els.previewBody.querySelectorAll("button[data-vtg-remove-preview]")).forEach((btn) => {
-      btn.addEventListener("click", () => {
-        syncPreviewItemsFromDom();
-        syncPreviewSelectionFromDom();
-        const idx = Number(btn.getAttribute("data-vtg-remove-preview"));
-        if (Number.isNaN(idx)) return;
-        previewItems.splice(idx, 1);
-        renderPreviewTable(previewItems);
-      });
+    renderChangeLog(previewItems);
+    if (els.addPreviewPanel && !els.addPreviewPanel.classList.contains("d-none")) {
+      fillAddPreviewAnchorOptions();
+    }
+    if (els.movePreviewPanel && !els.movePreviewPanel.classList.contains("d-none")) {
+      fillMoveAnchorOptions();
+      updateMovePreviewHint();
+    }
+    updatePreviewHeadUi();
+    applyPreviewColOrder();
+  }
+
+  function locatePreviewItem() {
+    if (!previewLocateOriginKey) return null;
+    return previewItems.find((item) => originKeyOf(item) === previewLocateOriginKey) || null;
+  }
+
+  function locatePreviewRowEl() {
+    const item = locatePreviewItem();
+    if (!item || !els.previewBody) return null;
+    return (
+      Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).find((tr) => {
+        const idx = Number(tr.getAttribute("data-vtg-preview-idx"));
+        return previewItems[idx] && originKeyOf(previewItems[idx]) === originKeyOf(item);
+      }) || null
+    );
+  }
+
+  function applyPreviewLocateUi() {
+    if (!els.previewBody) return;
+    const key = previewLocateOriginKey;
+    els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]").forEach((tr) => {
+      const idx = Number(tr.getAttribute("data-vtg-preview-idx"));
+      const item = previewItems[idx];
+      tr.classList.toggle("vtg-row-locate", Boolean(item && key && originKeyOf(item) === key));
     });
+    updatePreviewLocateHint();
+  }
+
+  function updatePreviewLocateHint() {
+    const item = locatePreviewItem();
+    const text = item
+      ? `参照：${previewRecordLabel(item)}。点「添加记录」会插到这行后面。`
+      : "点一下目标行或把鼠标停在上面，该行会标蓝条；再点「添加记录」会插到这行后面。";
+    if (els.locateHint) {
+      els.locateHint.textContent = text;
+      els.locateHint.classList.toggle("is-empty", !item);
+    }
+    if (els.addPreviewHint) {
+      els.addPreviewHint.textContent = item
+        ? `将添加到「${previewRecordLabel(item)}」旁边（可改参照和前/后）。`
+        : "尚未锁定参照行。请先把鼠标在目标行上停一会儿，或在下方列表里选择。";
+    }
+  }
+
+  function queuePreviewLocate(idx) {
+    if (!Number.isFinite(idx) || !previewItems[idx]) return;
+    previewLocateCandidateIdx = idx;
+    if (previewLocateTimer) window.clearTimeout(previewLocateTimer);
+    previewLocateTimer = window.setTimeout(() => {
+      previewLocateTimer = 0;
+      setPreviewLocateByIdx(idx);
+    }, 220);
+  }
+
+  function flushPreviewLocate() {
+    if (previewLocateTimer) {
+      window.clearTimeout(previewLocateTimer);
+      previewLocateTimer = 0;
+    }
+    if (previewLocateOriginKey) return;
+    if (previewLocateCandidateIdx >= 0) setPreviewLocateByIdx(previewLocateCandidateIdx);
+  }
+
+  function setPreviewLocateByIdx(idx) {
+    const item = previewItems[idx];
+    if (!item) return;
+    previewLocateCandidateIdx = idx;
+    previewLocateOriginKey = originKeyOf(item);
+    applyPreviewLocateUi();
+  }
+
+  function setPreviewLocateByItem(item) {
+    if (!item) return;
+    previewLocateOriginKey = originKeyOf(item);
+    previewLocateCandidateIdx = previewItems.indexOf(item);
+    applyPreviewLocateUi();
+  }
+
+  function scrollPreviewItemIntoView(originKey) {
+    const key = String(originKey || previewLocateOriginKey || "").trim();
+    if (!key || !els.previewBody) return;
+    const tr = Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).find((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      return previewItems[idx] && originKeyOf(previewItems[idx]) === key;
+    });
+    if (!tr) return;
+    try {
+      tr.scrollIntoView({ block: "nearest", inline: "nearest" });
+    } catch (err) {
+      tr.scrollIntoView();
+    }
+  }
+
+  function preferredAnchorIdxFromList(source) {
+    const locate = locatePreviewItem();
+    if (locate) {
+      const hit = (source || []).find((item) => originKeyOf(item) === originKeyOf(locate));
+      if (hit) return previewItems.indexOf(hit);
+    }
+    return -1;
   }
 
   function getPreviewItems() {
@@ -1074,10 +2018,448 @@
     });
   }
 
+  let previewDragRow = null;
+  let previewDropTarget = null;
+  let previewDragScrollSpeed = 0;
+  let previewDragRaf = 0;
+  let previewDragLastY = 0;
+
+  function stopPreviewDragScroll() {
+    previewDragScrollSpeed = 0;
+    if (previewDragRaf) {
+      cancelAnimationFrame(previewDragRaf);
+      previewDragRaf = 0;
+    }
+  }
+
+  function tickPreviewDragScroll() {
+    previewDragRaf = 0;
+    if (!previewDragRow || !previewDragScrollSpeed) return;
+    const wrap = els.previewTableWrap;
+    if (wrap) wrap.scrollTop += previewDragScrollSpeed;
+    placePreviewDragRowAt(previewDragLastY);
+    previewDragRaf = requestAnimationFrame(tickPreviewDragScroll);
+  }
+
+  function updatePreviewDragScroll(clientY) {
+    const wrap = els.previewTableWrap;
+    if (!wrap || !previewDragRow) {
+      stopPreviewDragScroll();
+      return;
+    }
+    const rect = wrap.getBoundingClientRect();
+    const edge = 56;
+    let speed = 0;
+    if (clientY < rect.top + edge) {
+      speed = -Math.max(8, (edge - (clientY - rect.top)) * 0.45);
+    } else if (clientY > rect.bottom - edge) {
+      speed = Math.max(8, (edge - (rect.bottom - clientY)) * 0.45);
+    }
+    previewDragScrollSpeed = speed;
+    if (speed && !previewDragRaf) {
+      previewDragRaf = requestAnimationFrame(tickPreviewDragScroll);
+    }
+    if (!speed) stopPreviewDragScroll();
+  }
+
+  function clearPreviewDropTarget() {
+    if (previewDropTarget) {
+      previewDropTarget.classList.remove("vtg-drop-target");
+      previewDropTarget = null;
+    }
+  }
+
+  function setPreviewDropTarget(tr) {
+    if (previewDropTarget === tr) return;
+    clearPreviewDropTarget();
+    if (tr && tr !== previewDragRow) {
+      tr.classList.add("vtg-drop-target");
+      previewDropTarget = tr;
+    }
+  }
+
+  function revealPreviewVersion(ver) {
+    if (!ver || !els.previewBody) return;
+    previewCollapsedVersions.delete(ver);
+    Array.from(els.previewBody.querySelectorAll("tr[data-vtg-ver]")).forEach((tr) => {
+      if ((tr.getAttribute("data-vtg-ver") || "") !== ver) return;
+      const filteredOut = Boolean(previewVersionFilter && ver !== previewVersionFilter);
+      const isHeader = tr.classList.contains("vtg-version-row");
+      tr.classList.toggle("vtg-preview-hidden", filteredOut || (!isHeader && previewCollapsedVersions.has(ver)));
+    });
+  }
+
+  function visiblePreviewDataRows() {
+    if (!els.previewBody) return [];
+    return Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).filter(
+      (tr) => !tr.classList.contains("vtg-preview-hidden") && tr !== previewDragRow
+    );
+  }
+
+  function insertDragRowAfter(node) {
+    if (!node || !previewDragRow || !node.parentNode) return;
+    node.parentNode.insertBefore(previewDragRow, node.nextSibling);
+  }
+
+  function insertDragRowBefore(node) {
+    if (!node || !previewDragRow || !node.parentNode) return;
+    node.parentNode.insertBefore(previewDragRow, node);
+  }
+
+  function placePreviewDragRowAt(clientY) {
+    if (!previewDragRow || !els.previewBody) return;
+    const wrap = els.previewTableWrap;
+    const probeX = wrap
+      ? Math.min(wrap.getBoundingClientRect().right - 8, wrap.getBoundingClientRect().left + 36)
+      : 36;
+    const under = document.elementFromPoint(probeX, clientY);
+    if (under && under.closest && under.closest("thead")) {
+      const first = visiblePreviewDataRows()[0];
+      if (first) insertDragRowBefore(first);
+      setPreviewDropTarget(first || null);
+      return;
+    }
+    const targetRow = under && under.closest ? under.closest("tr[data-vtg-ver]") : null;
+    if (!targetRow || targetRow === previewDragRow) {
+      if (wrap && clientY > wrap.getBoundingClientRect().bottom - 40) {
+        const visibles = visiblePreviewDataRows();
+        const last = visibles[visibles.length - 1];
+        if (last) insertDragRowAfter(last);
+        setPreviewDropTarget(last || null);
+        return;
+      }
+      const locateEl = locatePreviewRowEl();
+      if (locateEl && locateEl !== previewDragRow && !locateEl.classList.contains("vtg-preview-hidden")) {
+        setPreviewDropTarget(locateEl);
+        previewDragRow.setAttribute("data-vtg-ver", locateEl.getAttribute("data-vtg-ver") || "");
+        const rect = locateEl.getBoundingClientRect();
+        if (clientY < rect.top + rect.height / 2) insertDragRowBefore(locateEl);
+        else insertDragRowAfter(locateEl);
+      }
+      return;
+    }
+    if (targetRow.classList.contains("vtg-preview-hidden")) return;
+    const destVer = targetRow.getAttribute("data-vtg-ver") || "";
+    if (destVer) revealPreviewVersion(destVer);
+    setPreviewDropTarget(targetRow);
+    previewDragRow.setAttribute("data-vtg-ver", destVer);
+    if (targetRow.classList.contains("vtg-version-row")) {
+      let after = targetRow.nextElementSibling;
+      if (after === previewDragRow) after = after.nextElementSibling;
+      if (
+        after &&
+        after.classList.contains("vtg-chapter-row") &&
+        (after.getAttribute("data-vtg-ver") || "") === destVer
+      ) {
+        insertDragRowAfter(after);
+      } else {
+        insertDragRowAfter(targetRow);
+      }
+      return;
+    }
+    if (targetRow.classList.contains("vtg-chapter-row")) {
+      insertDragRowAfter(targetRow);
+      return;
+    }
+    if (!targetRow.hasAttribute("data-vtg-preview-idx")) return;
+    const rect = targetRow.getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      insertDragRowBefore(targetRow);
+    } else {
+      insertDragRowAfter(targetRow);
+    }
+  }
+
+  function onPreviewDragOver(ev) {
+    if (!previewDragRow) return;
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+    previewDragLastY = ev.clientY;
+    updatePreviewDragScroll(ev.clientY);
+    placePreviewDragRowAt(ev.clientY);
+  }
+
+  function snapshotPreviewLayout() {
+    return previewItems
+      .map(
+        (item) =>
+          `${originKeyOf(item)}|${previewVersionKey(item)}|${previewChapterKey(item)}|${Number(item.sortOrder)}`
+      )
+      .join("\n");
+  }
+
+  function applyDroppedCategory(row, item) {
+    const prevVer = previewVersionKey(item);
+    const prevChapter = previewChapterKey(item);
+    let ver = "";
+    let chapter = "";
+    let neighbor = null;
+    let cursor = row.previousElementSibling;
+    while (cursor) {
+      if (!neighbor && cursor.hasAttribute("data-vtg-preview-idx") && cursor !== row) {
+        const nidx = Number(cursor.getAttribute("data-vtg-preview-idx"));
+        if (!Number.isNaN(nidx) && previewItems[nidx]) neighbor = previewItems[nidx];
+      }
+      if (!chapter && cursor.classList.contains("vtg-chapter-row")) {
+        chapter = String(cursor.getAttribute("data-vtg-chapter") || "").trim();
+      }
+      if (cursor.classList.contains("vtg-version-row")) {
+        ver = cursor.getAttribute("data-vtg-ver") || "";
+        break;
+      }
+      cursor = cursor.previousElementSibling;
+    }
+    if (!chapter || !neighbor) {
+      let nxt = row.nextElementSibling;
+      while (nxt && nxt === previewDragRow) nxt = nxt.nextElementSibling;
+      if (nxt && nxt.classList.contains("vtg-chapter-row")) {
+        if (!chapter) chapter = String(nxt.getAttribute("data-vtg-chapter") || "").trim();
+      } else if (nxt && nxt.hasAttribute("data-vtg-preview-idx")) {
+        const nidx = Number(nxt.getAttribute("data-vtg-preview-idx"));
+        if (!Number.isNaN(nidx) && previewItems[nidx]) {
+          if (!neighbor) neighbor = previewItems[nidx];
+          if (!chapter) chapter = previewChapterKey(previewItems[nidx]);
+        }
+      }
+    }
+    if (ver && ver !== "未指定版本") {
+      item.targetVersion = ver;
+      item.registrationVersion = ver;
+    } else if (ver === "未指定版本") {
+      item.targetVersion = "";
+      item.registrationVersion = "";
+    }
+    if (chapter) {
+      item.chapter = chapter;
+      item.processBranchLabel = chapter;
+    }
+    if (ver && ver !== prevVer && neighbor) {
+      if (neighbor.dueDate) item.dueDate = neighbor.dueDate;
+      if (neighbor.documentDisplayDate) item.documentDisplayDate = neighbor.documentDisplayDate;
+    }
+    refreshItemChangeMark(item);
+    return previewVersionKey(item) !== prevVer || previewChapterKey(item) !== prevChapter;
+  }
+
+  function capturePreviewDupBackup(items) {
+    return (items || []).map((item) => ({
+      targetVersion: item.targetVersion,
+      fileVersion: item.fileVersion,
+      registrationVersion: item.registrationVersion,
+      chapter: item.chapter,
+      processBranchLabel: item.processBranchLabel,
+      dueDate: item.dueDate,
+      documentDisplayDate: item.documentDisplayDate,
+      sortOrder: item.sortOrder,
+      changeKind: item.changeKind,
+      changeFields: item.changeFields,
+    }));
+  }
+
+  function restorePreviewDupBackup(items, backup) {
+    (items || []).forEach((item, i) => {
+      if (!backup || !backup[i]) return;
+      Object.assign(item, backup[i]);
+    });
+  }
+
+  function commitPreviewRowOrder() {
+    if (!els.previewBody || !previewDragRow) return { changed: false, movedCategory: false };
+    syncPreviewItemsFromDom();
+    const backupItems = previewItems.slice();
+    const backupFields = capturePreviewDupBackup(previewItems);
+    const before = snapshotPreviewLayout();
+    const dragIdx = Number(previewDragRow.getAttribute("data-vtg-preview-idx"));
+    const dragItem =
+      Number.isFinite(dragIdx) && previewItems[dragIdx] ? previewItems[dragIdx] : null;
+    const rows = Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]"));
+    const next = [];
+    const used = new Set();
+    let movedCategory = false;
+    rows.forEach((tr) => {
+      const idx = Number(tr.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || used.has(idx) || !previewItems[idx]) return;
+      used.add(idx);
+      const item = previewItems[idx];
+      if (tr === previewDragRow && applyDroppedCategory(tr, item)) movedCategory = true;
+      next.push(item);
+    });
+    const leftovers = previewItems.filter((item, idx) => !used.has(idx));
+    if (next.length + leftovers.length !== previewItems.length) {
+      return { changed: false, movedCategory: false };
+    }
+    const counts = new Map();
+    next.concat(leftovers).forEach((item) => {
+      const ver = previewVersionKey(item);
+      const n = counts.get(ver) || 0;
+      item.sortOrder = n;
+      counts.set(ver, n + 1);
+    });
+    previewItems = next.concat(leftovers);
+    ensureSortOrders(previewItems);
+    if (movedCategory && dragItem) {
+      const other = findSameNameInVersion(dragItem, previewItems);
+      if (other) {
+        const conflicts = [
+          {
+            version: previewVersionKey(dragItem),
+            fileName: String(dragItem.fileName || "").trim(),
+            count: 2,
+            items: [dragItem, other],
+          },
+        ];
+        previewItems = backupItems;
+        restorePreviewDupBackup(previewItems, backupFields);
+        return { changed: false, movedCategory: false, duplicate: true, conflicts };
+      }
+    }
+    return { changed: before !== snapshotPreviewLayout() || movedCategory, movedCategory };
+  }
+
+  function bindPreviewDrag() {
+    if (!els.previewBody || els.previewBody.dataset.vtgDragBound) return;
+    els.previewBody.dataset.vtgDragBound = "1";
+    const wrap = els.previewTableWrap;
+    els.previewBody.addEventListener("mouseover", (ev) => {
+      if (previewDragRow) return;
+      const row = ev.target.closest("tr[data-vtg-preview-idx]");
+      if (!row) return;
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || !previewItems[idx]) return;
+      if (ev.target.closest(".vtg-drag-handle") && previewLocateOriginKey) return;
+      queuePreviewLocate(idx);
+    });
+    els.previewBody.addEventListener("mousedown", (ev) => {
+      if (previewDragRow) return;
+      if (ev.target.closest("button, a, .vtg-drag-handle")) return;
+      const row = ev.target.closest("tr[data-vtg-preview-idx]");
+      if (!row) return;
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      if (Number.isNaN(idx) || !previewItems[idx]) return;
+      if (previewLocateTimer) {
+        window.clearTimeout(previewLocateTimer);
+        previewLocateTimer = 0;
+      }
+      setPreviewLocateByIdx(idx);
+    });
+    els.previewBody.addEventListener("dragstart", (ev) => {
+      if (!ev.target.closest(".vtg-drag-handle")) return;
+      const row = ev.target.closest("tr[data-vtg-preview-idx]");
+      if (!row) return;
+      previewDragRow = row;
+      previewDragLastY = ev.clientY;
+      row.classList.add("vtg-dragging");
+      if (previewColSort) {
+        previewColSort = null;
+        updatePreviewHeadUi();
+      }
+      if (previewVersionFilter) {
+        previewVersionFilter = "";
+        applyPreviewVersionUi();
+      }
+      ev.dataTransfer.effectAllowed = "move";
+      try {
+        ev.dataTransfer.setData("text/plain", row.getAttribute("data-vtg-preview-idx") || "");
+      } catch (err) {
+        /* ignore */
+      }
+      try {
+        ev.dataTransfer.setDragImage(row, 24, 16);
+      } catch (err) {
+        /* ignore */
+      }
+    });
+    els.previewBody.addEventListener("dragend", () => {
+      const row = previewDragRow;
+      const dragIdx = row ? Number(row.getAttribute("data-vtg-preview-idx")) : NaN;
+      const dragKey =
+        Number.isFinite(dragIdx) && previewItems[dragIdx] ? originKeyOf(previewItems[dragIdx]) : "";
+      if (row) row.classList.remove("vtg-dragging");
+      stopPreviewDragScroll();
+      const result = commitPreviewRowOrder();
+      clearPreviewDropTarget();
+      previewDragRow = null;
+      if (result.duplicate) {
+        renderPreviewTable(previewItems);
+        toast(formatFilenameConflicts(result.conflicts), "warning");
+      } else if (result.changed) {
+        if (dragKey) previewLocateOriginKey = dragKey;
+        renderPreviewTable(previewItems);
+        scrollPreviewItemIntoView(dragKey);
+        toast(
+          result.movedCategory
+            ? "已调整分类和顺序，请点「保存预览修改」"
+            : "已调整顺序，请点「保存预览修改」",
+          "info"
+        );
+      }
+    });
+    els.previewBody.addEventListener("dragover", onPreviewDragOver);
+    if (wrap) {
+      wrap.addEventListener("dragover", onPreviewDragOver);
+      wrap.addEventListener(
+        "wheel",
+        (ev) => {
+          if (!previewDragRow) return;
+          wrap.scrollTop += ev.deltaY;
+          previewDragLastY = ev.clientY;
+          ev.preventDefault();
+          placePreviewDragRowAt(ev.clientY);
+        },
+        { passive: false }
+      );
+    }
+    document.addEventListener("dragover", onPreviewDragOver);
+    document.addEventListener(
+      "wheel",
+      (ev) => {
+        if (!previewDragRow || !wrap) return;
+        wrap.scrollTop += ev.deltaY;
+        previewDragLastY = ev.clientY;
+        ev.preventDefault();
+        placePreviewDragRowAt(ev.clientY);
+      },
+      { passive: false, capture: true }
+    );
+    els.previewBody.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+    });
+    if (wrap) {
+      wrap.addEventListener("drop", (ev) => ev.preventDefault());
+      wrap.addEventListener("mouseleave", () => {
+        if (previewLocateTimer) {
+          window.clearTimeout(previewLocateTimer);
+          previewLocateTimer = 0;
+        }
+      });
+    }
+  }
+
+  function fitPreviewTableViewport() {
+    const wrap = els.previewTableWrap;
+    if (!wrap) return;
+    const dataRows = Array.from(
+      (els.previewBody && els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")) || []
+    ).filter((tr) => !tr.classList.contains("vtg-preview-hidden"));
+    if (dataRows.length <= PREVIEW_VISIBLE_ROWS) {
+      wrap.style.maxHeight = "";
+      return;
+    }
+    const last = dataRows[PREVIEW_VISIBLE_ROWS - 1];
+    const thead = wrap.querySelector("thead");
+    const theadH = thead ? thead.offsetHeight : 0;
+    let rowBottom = last.offsetTop + last.offsetHeight;
+    const parentTag = last.offsetParent && String(last.offsetParent.tagName || "").toLowerCase();
+    if (parentTag === "tbody") {
+      rowBottom += theadH;
+    }
+    wrap.style.maxHeight = `${Math.max(160, Math.ceil(rowBottom + 8))}px`;
+  }
+
   function taskIdentity(item) {
     const fileName = String((item && (item.taskKey || item.fileName)) || "").trim().toLowerCase();
     const taskType = String((item && item.taskType) || "").trim().toLowerCase();
-    const fileVersion = String((item && (item.fileVersion || item.targetVersion)) || "").trim().toLowerCase();
+    const fileVersion = String((item && (item.targetVersion || item.registrationVersion)) || "").trim().toLowerCase();
     return `${fileName}__${taskType}__${fileVersion}`;
   }
 
@@ -1099,33 +2481,223 @@
     return data;
   }
 
+  function itemForSaveCompare(item) {
+    return {
+      fileName: String((item && item.fileName) || "").trim(),
+      documentNumber: String((item && item.documentNumber) || "").trim(),
+      fileVersion: String((item && item.fileVersion) || "").trim(),
+      taskType: String((item && item.taskType) || "").trim(),
+      targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
+      author: String((item && item.author) || "").trim(),
+      dueDate: String((item && item.dueDate) || "").trim(),
+      documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
+      belongingModule: String((item && item.belongingModule) || "").trim(),
+      notes: String((item && item.notes) || "").trim(),
+      recordStatus: recordStatusOf(item),
+      isSystemRecord: isSystemRecordOf(item),
+      chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
+      archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
+      changeKind: changeKindOf(item),
+      changeReason: String((item && item.changeReason) || "").trim(),
+      sortOrder: Number(item && item.sortOrder) || 0,
+      triggeredBy: Array.isArray(item && item.triggeredBy)
+        ? item.triggeredBy.map((x) => String(x)).join(",")
+        : String((item && item.triggeredBy) || ""),
+    };
+  }
+
+  function collectChangedPreviewItems(items) {
+    const originalMap = new Map();
+    originalPreviewItems.forEach((x) => originalMap.set(originKeyOf(x), x));
+    const changedItems = [];
+    const seen = new Set();
+    (items || []).forEach((item) => {
+      const key = originKeyOf(item);
+      seen.add(key);
+      const origin = originalMap.get(key);
+      if (!origin) {
+        changedItems.push(item);
+        return;
+      }
+      if (JSON.stringify(itemForSaveCompare(origin)) !== JSON.stringify(itemForSaveCompare(item))) {
+        changedItems.push(item);
+      }
+    });
+    const removedOriginKeys = [];
+    originalPreviewItems.forEach((x) => {
+      const key = originKeyOf(x);
+      if (!seen.has(key)) removedOriginKeys.push(key);
+    });
+    return { changedItems, removedOriginKeys };
+  }
+
   function collectAdjustments(editedItems) {
     const originalMap = new Map();
-    originalPreviewItems.forEach((x) => originalMap.set(taskIdentity(x), x));
-    const editedMap = new Map();
-    editedItems.forEach((x) => editedMap.set(taskIdentity(x), x));
+    originalPreviewItems.forEach((x) => originalMap.set(originKeyOf(x), x));
 
     const adjustments = [];
     editedItems.forEach((item) => {
-      const key = taskIdentity(item);
+      const key = originKeyOf(item);
       const origin = originalMap.get(key);
-      if (!origin) {
-        adjustments.push({ type: "add", adjustedItem: item });
+      const kind = changeKindOf(item);
+      const reason = String((item && item.changeReason) || "").trim();
+      if (kind === "delete") {
+        if (origin && changeKindOf(origin) === "delete" && String(origin.changeReason || "").trim() === reason) {
+          return;
+        }
+        adjustments.push({
+          type: "delete",
+          originalItem: origin || item,
+          adjustedItem: item,
+          reason,
+          changeSummary: [],
+        });
         return;
       }
-      const originStr = JSON.stringify(itemForFeedbackCompare(origin));
-      const editedStr = JSON.stringify(itemForFeedbackCompare(item));
-      if (originStr !== editedStr) {
-        adjustments.push({ type: "update", originalItem: origin, adjustedItem: item });
+      if (!origin || kind === "add") {
+        if (origin && changeKindOf(origin) === "add") {
+          const sameFields =
+            JSON.stringify(itemForFeedbackCompare(origin)) ===
+            JSON.stringify(itemForFeedbackCompare(item));
+          if (sameFields && String(origin.changeReason || "").trim() === reason) return;
+        }
+        adjustments.push({
+          type: "add",
+          adjustedItem: item,
+          reason,
+          changeSummary: [],
+        });
+        return;
       }
-    });
-    originalPreviewItems.forEach((item) => {
-      const key = taskIdentity(item);
-      if (!editedMap.has(key)) {
-        adjustments.push({ type: "delete", originalItem: item });
+      const summary = summarizeItemDiff(origin, item);
+      const reasonChanged = String(origin.changeReason || "").trim() !== reason;
+      if (!summary.length && !reasonChanged && changeKindOf(origin) === kind) return;
+      if (summary.length || kind === "update" || reasonChanged) {
+        adjustments.push({
+          type: "update",
+          originalItem: origin,
+          adjustedItem: item,
+          reason,
+          changeSummary: summary.length ? summary : item.changeFields || [],
+        });
       }
     });
     return adjustments;
+  }
+
+  function collectionRowFromAdjustment(adj) {
+    const item = (adj && (adj.adjustedItem || adj.originalItem)) || {};
+    const kind = adj && adj.type === "replace" ? "update" : (adj && adj.type) || "";
+    return {
+      pending: true,
+      type: kind,
+      typeLabel: CHANGE_KIND_LABELS[kind] || kind,
+      fileName: String(item.fileName || "").trim() || "未命名",
+      targetVersion: String(item.targetVersion || item.registrationVersion || "").trim(),
+      reason: String((adj && adj.reason) || item.changeReason || "").trim(),
+      changeSummary: Array.isArray(adj && adj.changeSummary)
+        ? adj.changeSummary
+        : item.changeFields || [],
+      createdAt: "",
+    };
+  }
+
+  function collectionRowFromHistory(row) {
+    const kind = row && row.type === "replace" ? "update" : (row && row.type) || "";
+    return {
+      pending: false,
+      type: kind,
+      typeLabel: String((row && (row.typeLabel || CHANGE_KIND_LABELS[kind] || kind)) || ""),
+      fileName: String((row && row.fileName) || "").trim() || "未命名",
+      targetVersion: String((row && row.targetVersion) || "").trim(),
+      reason: String((row && row.reason) || "").trim(),
+      changeSummary: Array.isArray(row && row.changeSummary) ? row.changeSummary : [],
+      createdAt: String((row && row.createdAt) || "").replace("T", " ").slice(0, 19),
+    };
+  }
+
+  function collectionRowHtml(row) {
+    const badge = row.pending
+      ? '<span class="badge text-bg-primary me-1">本次</span>'
+      : '<span class="badge text-bg-secondary me-1">已采集</span>';
+    const reason = String(row.reason || "").trim() || "（原因可后补）";
+    const fields = formatChangeSummary(row.changeSummary);
+    const extra = fields ? `；${escapeHtml(fields)}` : "";
+    const stamp = row.pending ? "未保存" : row.createdAt || "";
+    return `<li>${badge}${
+      stamp ? `<span class="text-muted">${escapeHtml(stamp)}</span> ` : ""
+    }<strong>${escapeHtml(row.typeLabel || "")}</strong> ${escapeHtml(row.fileName)}${
+      row.targetVersion ? ` <span class="font-monospace">${escapeHtml(row.targetVersion)}</span>` : ""
+    }：${escapeHtml(reason)}${extra}</li>`;
+  }
+
+  function renderCollectionPanel() {
+    if (!els.changeLog) return;
+    const pending = collectAdjustments(previewItems || []).map(collectionRowFromAdjustment);
+    const saved = (collectionHistory || []).map(collectionRowFromHistory);
+    const rows = pending.concat(saved);
+    const total = rows.length;
+    const totalPages = Math.max(1, Math.ceil(total / COLLECTION_PAGE_SIZE) || 1);
+    if (collectionPage > totalPages) collectionPage = totalPages;
+    if (collectionPage < 1) collectionPage = 1;
+    if (!total) {
+      const empty = collectionLoadError
+        ? collectionLoadError
+        : "暂无增删改。对预览表操作或保存后将在此列出。";
+      els.changeLog.innerHTML = `<p class="vtg-changelog-empty">${escapeHtml(empty)}</p>`;
+      if (els.changeLogPager) {
+        els.changeLogPager.classList.add("d-none");
+        els.changeLogPager.innerHTML = "";
+      }
+      return;
+    }
+    const start = (collectionPage - 1) * COLLECTION_PAGE_SIZE;
+    const pageRows = rows.slice(start, start + COLLECTION_PAGE_SIZE);
+    els.changeLog.innerHTML = `<ul class="vtg-changelog-list">${pageRows.map(collectionRowHtml).join("")}</ul>`;
+    if (els.changeLogPager) {
+      els.changeLogPager.classList.remove("d-none");
+      if (totalPages <= 1) {
+        els.changeLogPager.innerHTML = `<span>共 ${total} 条</span>`;
+      } else {
+        const prevDisabled = collectionPage <= 1 ? " disabled" : "";
+        const nextDisabled = collectionPage >= totalPages ? " disabled" : "";
+        els.changeLogPager.innerHTML = `
+          <span>共 ${total} 条 · 第 ${collectionPage}/${totalPages} 页</span>
+          <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-vtg-collection-page="${
+            collectionPage - 1
+          }"${prevDisabled}>上一页</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-vtg-collection-page="${
+            collectionPage + 1
+          }"${nextDisabled}>下一页</button>`;
+      }
+    }
+  }
+
+  function renderChangeLog() {
+    renderCollectionPanel();
+  }
+
+  async function loadFeedbackHistory() {
+    collectionLoadError = "";
+    const projectId = String(els.projectId && els.projectId.value || "").trim();
+    if (!projectId) {
+      collectionHistory = [];
+      renderCollectionPanel();
+      return;
+    }
+    try {
+      const data = await requestJson(
+        `/api/document-control/version-tasks/preview/feedbacks?projectId=${encodeURIComponent(
+          projectId
+        )}&limit=200`
+      );
+      collectionHistory = Array.isArray(data.items) ? data.items : [];
+      collectionPage = 1;
+    } catch (e) {
+      collectionHistory = [];
+      collectionLoadError = e.message || "加载采集记录失败";
+    }
+    renderCollectionPanel();
   }
 
   function setVersionDate(version, dateValue) {
@@ -1469,10 +3041,16 @@
           .join("")}</ol>`
       : "";
     els.previewMeta.innerHTML = `
-      <div class="vtg-explain">
-        <div class="vtg-explain-h">${escapeHtml(prefix || "预览")}${
-          updatedAt ? ` · 保存 ${escapeHtml(updatedAt)}` : ""
-        }</div>
+      <details class="vtg-explain vtg-explain-details"${previewRulesOpen ? " open" : ""}>
+        <summary class="vtg-explain-summary">
+          <span>规则说明</span>
+          <span class="vtg-explain-summary-hint">${escapeHtml(prefix || "预览")}${
+            updatedAt ? ` · 保存 ${escapeHtml(updatedAt)}` : ""
+          } · ${escapeHtml((data && (data.ruleSource || data.ruleBasis)) || "-")}${
+            data && data.sourceVersion ? ` ${escapeHtml(String(data.sourceVersion))}` : ""
+          } · 点此展开</span>
+        </summary>
+        <div class="vtg-explain-body">
         <div class="vtg-explain-grid">
           <div><span>依据</span>${escapeHtml((data && (data.ruleSource || data.ruleBasis)) || "-")}</div>
           ${
@@ -1499,7 +3077,14 @@
             ? `<p class="mb-0 text-muted">${escapeHtml(exp.supplementHint)}</p>`
             : ""
         }
-      </div>`;
+        </div>
+      </details>`;
+    const details = els.previewMeta.querySelector("details.vtg-explain-details");
+    if (details) {
+      details.addEventListener("toggle", () => {
+        previewRulesOpen = details.open;
+      });
+    }
   }
 
   function buildPreviewMetaText(data, prefix) {
@@ -1511,6 +3096,22 @@
     const opts = options || {};
     currentJobId = data.jobId || "";
     originalPreviewItems = Array.isArray(data.items) ? JSON.parse(JSON.stringify(data.items)) : [];
+    originalPreviewItems.forEach((item) => {
+      normalizePreviewDocFields(item);
+      ensureOriginKey(item);
+    });
+    if (Array.isArray(data.ruleItems) && data.ruleItems.length) {
+      rulePreviewItems = JSON.parse(JSON.stringify(data.ruleItems));
+    } else {
+      rulePreviewItems = originalPreviewItems
+        .filter((item) => changeKindOf(item) !== "add")
+        .map((item) => {
+          const copy = { ...item, changeKind: "", changeReason: "", changeFields: [] };
+          ensureOriginKey(copy);
+          return copy;
+        });
+    }
+    rulePreviewItems.forEach((item) => ensureOriginKey(item));
     resetPreviewVersionUi();
     renderPreviewTable(originalPreviewItems, { resetSelection: true });
     if (opts.fillForm !== false) {
@@ -1535,22 +3136,470 @@
       writeLocalProductName(String(data.projectId || els.projectId.value || "").trim(), data.productName);
     }
     renderPreviewMeta(data, opts.metaPrefix || "预览");
-    if (els.savePreviewEditsBtn) {
-      els.savePreviewEditsBtn.disabled = !currentJobId || !previewItems.length;
-    }
+    setPreviewSaveEnabled();
   }
 
   function clearPreviewPanel(message) {
     currentJobId = "";
     originalPreviewItems = [];
+    rulePreviewItems = [];
     previewSelectedKeys.clear();
     renderPreviewTable([]);
     if (els.previewMeta) {
       els.previewMeta.textContent = message || "尚未生成预览。";
     }
+    if (els.previewSaveBanner) els.previewSaveBanner.innerHTML = "";
     if (els.savePreviewEditsBtn) {
       els.savePreviewEditsBtn.disabled = true;
     }
+    if (els.syncDocMetaBtn) {
+      els.syncDocMetaBtn.disabled = true;
+    }
+    if (els.addPreviewRowBtn) {
+      els.addPreviewRowBtn.disabled = true;
+    }
+    if (els.movePreviewBtn) {
+      els.movePreviewBtn.disabled = true;
+    }
+    hideAddPreviewPanel();
+    hideMovePreviewPanel();
+  }
+
+  function setPreviewSaveEnabled() {
+    if (els.savePreviewEditsBtn) {
+      els.savePreviewEditsBtn.disabled = !currentJobId;
+    }
+    if (els.syncDocMetaBtn) {
+      els.syncDocMetaBtn.disabled = !previewItems.length;
+    }
+    if (els.addPreviewRowBtn) {
+      els.addPreviewRowBtn.disabled = !currentJobId;
+    }
+    if (els.movePreviewBtn) {
+      els.movePreviewBtn.disabled = !currentJobId;
+    }
+  }
+
+  function newManualTaskKey() {
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `manual:${Date.now().toString(36)}:${rand}`;
+  }
+
+  function previewRecordLabel(item) {
+    const name = String((item && item.fileName) || "").trim() || "（未命名）";
+    const deleted = isPreviewDeleted(item) ? " · 已删除" : "";
+    return `${previewVersionKey(item)} · ${previewChapterKey(item)} · #${
+      Number((item && item.sortOrder) || 0) + 1
+    } ${name}${deleted}`;
+  }
+
+  function hideAddPreviewPanel() {
+    if (els.addPreviewPanel) els.addPreviewPanel.classList.add("d-none");
+  }
+
+  function hideMovePreviewPanel() {
+    if (els.movePreviewPanel) els.movePreviewPanel.classList.add("d-none");
+  }
+
+  function fillAddPreviewAnchorOptions() {
+    if (!els.addAnchorSelect) return;
+    const filtered = previewItems.filter((item) => {
+      if (previewVersionFilter && previewVersionKey(item) !== previewVersionFilter) return false;
+      return itemMatchesColFilters(item);
+    });
+    const source = filtered.length ? filtered : previewItems;
+    els.addAnchorSelect.innerHTML = source
+      .map((item) => {
+        const idx = previewItems.indexOf(item);
+        return `<option value="${idx}">${escapeHtml(previewRecordLabel(item))}</option>`;
+      })
+      .join("");
+    if (source.length) {
+      const locateIdx = preferredAnchorIdxFromList(source);
+      els.addAnchorSelect.value = String(
+        locateIdx >= 0 ? locateIdx : previewItems.indexOf(source[source.length - 1])
+      );
+      const opt = els.addAnchorSelect.selectedOptions && els.addAnchorSelect.selectedOptions[0];
+      if (opt && typeof opt.scrollIntoView === "function") {
+        try {
+          opt.scrollIntoView({ block: "nearest" });
+        } catch (err) {
+          opt.scrollIntoView();
+        }
+      }
+    }
+    updatePreviewLocateHint();
+  }
+
+  function openAddPreviewPanel() {
+    if (!currentJobId) {
+      toast("请先生成预览后再添加记录", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    flushPreviewLocate();
+    if (!previewItems.length) {
+      addPreviewRow(null, "after");
+      return;
+    }
+    const locate = locatePreviewItem();
+    if (locate) {
+      hideMovePreviewPanel();
+      hideAddPreviewPanel();
+      addPreviewRow(locate, "after");
+      return;
+    }
+    hideMovePreviewPanel();
+    fillAddPreviewAnchorOptions();
+    if (els.addPlaceSelect) els.addPlaceSelect.value = "after";
+    if (els.addPreviewPanel) {
+      els.addPreviewPanel.classList.remove("d-none");
+      try {
+        els.addPreviewPanel.scrollIntoView({ block: "nearest" });
+      } catch (err) {
+        els.addPreviewPanel.scrollIntoView();
+      }
+    }
+    if (els.addPreviewConfirmBtn) els.addPreviewConfirmBtn.focus();
+  }
+
+  function buildBlankPreviewItem(anchor) {
+    const filtered = String(previewVersionFilter || "").trim();
+    const fallback = String((els.toVersion && els.toVersion.value) || "").trim();
+    let version = "";
+    let chapter = "";
+    if (anchor) {
+      const verKey = previewVersionKey(anchor);
+      version = verKey === "未指定版本" ? "" : verKey;
+      chapter = previewChapterKey(anchor);
+      if (chapter === "其它") chapter = String(anchor.chapter || "").trim();
+    } else {
+      version = filtered && filtered !== "未指定版本" ? filtered : fallback;
+    }
+    const item = {
+      taskKey: newManualTaskKey(),
+      originKey: "",
+      fileName: "",
+      taskType: "版本变更任务",
+      targetVersion: version,
+      fileVersion: "",
+      documentNumber: "",
+      registrationVersion: version,
+      author: "",
+      dueDate: (anchor && anchor.dueDate) || "",
+      documentDisplayDate: (anchor && anchor.documentDisplayDate) || "",
+      belongingModule: "",
+      notes: "手工新增",
+      recordStatus: "adopt",
+      isSystemRecord: false,
+      archiveFrequency: "",
+      triggeredBy: [],
+      chapter,
+      processBranchLabel: chapter,
+      changeKind: "add",
+      changeReason: "",
+      changeFields: [],
+    };
+    item.originKey = originKeyOf(item);
+    return item;
+  }
+
+  function insertPreviewItemRelative(item, anchor, place) {
+    ensureSortOrders(previewItems);
+    if (!anchor) {
+      const verKey = previewVersionKey(item);
+      const maxOrder = previewItems
+        .filter((row) => previewVersionKey(row) === verKey)
+        .reduce((max, row) => Math.max(max, Number(row.sortOrder)), -1);
+      item.sortOrder = maxOrder + 1;
+      previewItems.push(item);
+      ensureSortOrders(previewItems);
+      return;
+    }
+    const ver = previewVersionKey(item);
+    const group = [];
+    const rest = [];
+    previewItems.forEach((row) => {
+      if (previewVersionKey(row) === ver) group.push(row);
+      else rest.push(row);
+    });
+    group.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+    let at = group.findIndex((row) => originKeyOf(row) === originKeyOf(anchor));
+    if (at < 0) at = group.length;
+    else if (place !== "before") at += 1;
+    group.splice(at, 0, item);
+    group.forEach((row, i) => {
+      row.sortOrder = i;
+    });
+    previewItems = rest.concat(group);
+    ensureSortOrders(previewItems);
+  }
+
+  function listSelectedItemsForMove() {
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    return visiblePreviewRows()
+      .map((tr) => previewItems[Number(tr.getAttribute("data-vtg-preview-idx"))])
+      .filter((item) => item && canCheckPreview(item) && previewSelectedKeys.has(taskIdentity(item)));
+  }
+
+  function applyCategoryFromAnchor(item, anchor) {
+    if (!item || !anchor) return;
+    const prevVer = previewVersionKey(item);
+    const ver = previewVersionKey(anchor);
+    const chapter = previewChapterKey(anchor);
+    if (ver && ver !== "未指定版本") {
+      item.targetVersion = ver;
+      item.registrationVersion = ver;
+    } else if (ver === "未指定版本") {
+      item.targetVersion = "";
+      item.registrationVersion = "";
+    }
+    if (chapter) {
+      item.chapter = chapter === "其它" ? String(anchor.chapter || "").trim() || chapter : chapter;
+      item.processBranchLabel = item.chapter;
+    }
+    if (ver !== prevVer) {
+      if (anchor.dueDate) item.dueDate = anchor.dueDate;
+      if (anchor.documentDisplayDate) item.documentDisplayDate = anchor.documentDisplayDate;
+    }
+    refreshItemChangeMark(item);
+  }
+
+  function movePreviewItemsRelative(moving, anchor, place) {
+    if (!moving.length || !anchor) return false;
+    const movingKeys = new Set(moving.map((item) => originKeyOf(item)));
+    if (movingKeys.has(originKeyOf(anchor))) return false;
+    const destVer = previewVersionKey(anchor);
+    const nameConflict = findMoveFilenameConflict(moving, destVer, previewItems);
+    if (nameConflict) {
+      toast(
+        nameConflict.crossVersion
+          ? `无法移动到版本 ${nameConflict.version}：「${nameConflict.fileName}」在该版本已存在。同版本内调序请只勾选该版本的记录。`
+          : `同一版本下文件名不能重复：版本 ${nameConflict.version} 已有「${nameConflict.fileName}」`,
+        "warning"
+      );
+      return false;
+    }
+    moving.forEach((item) => applyCategoryFromAnchor(item, anchor));
+    ensureSortOrders(previewItems);
+    const rest = previewItems.filter((item) => !movingKeys.has(originKeyOf(item)));
+    const destGroup = rest.filter((item) => previewVersionKey(item) === destVer);
+    const other = rest.filter((item) => previewVersionKey(item) !== destVer);
+    destGroup.sort((a, b) => Number(a.sortOrder) - Number(b.sortOrder));
+    let at = destGroup.findIndex((row) => originKeyOf(row) === originKeyOf(anchor));
+    if (at < 0) at = destGroup.length;
+    else if (place !== "before") at += 1;
+    destGroup.splice(at, 0, ...moving);
+    destGroup.forEach((row, i) => {
+      row.sortOrder = i;
+    });
+    previewItems = other.concat(destGroup);
+    ensureSortOrders(previewItems);
+    return true;
+  }
+
+  function updateMovePreviewHint() {
+    if (!els.movePreviewHint) return;
+    const moving = listSelectedItemsForMove();
+    if (!moving.length) {
+      els.movePreviewHint.textContent = "请先勾选要移动的记录。";
+      return;
+    }
+    const idx = Number(els.moveAnchorSelect && els.moveAnchorSelect.value);
+    const anchor = Number.isFinite(idx) ? previewItems[idx] : null;
+    if (!anchor) {
+      els.movePreviewHint.textContent = `已勾选 ${moving.length} 条，请选择参照文件。`;
+      return;
+    }
+    const planned = movingItemsForAnchor(moving, anchor);
+    if (planned.ignoredOther) {
+      els.movePreviewHint.textContent = `将调整「${planned.destVer}」内已勾选的 ${planned.toMove.length} 条顺序（另外 ${planned.ignoredOther} 条属于其它版本，本次不改版本、不移动）。`;
+      return;
+    }
+    const cross = planned.toMove.filter((item) => previewVersionKey(item) !== planned.destVer);
+    els.movePreviewHint.textContent = cross.length
+      ? `将把已勾选的 ${planned.toMove.length} 条移到版本 ${planned.destVer}，并保持它们当前相对顺序。`
+      : `将调整已勾选的 ${planned.toMove.length} 条在「${planned.destVer}」内的顺序。`;
+  }
+
+  function fillMoveAnchorOptions(options) {
+    if (!els.moveAnchorSelect) return;
+    const keepSelection = Boolean(options && options.keepSelection);
+    const moving = listSelectedItemsForMove();
+    const movingKeys = new Set(moving.map((item) => originKeyOf(item)));
+    const q = String((els.moveAnchorFilter && els.moveAnchorFilter.value) || "")
+      .trim()
+      .toLowerCase();
+    const prev = String((els.moveAnchorSelect && els.moveAnchorSelect.value) || "");
+    const source = previewItems.filter((item) => {
+      if (movingKeys.has(originKeyOf(item))) return false;
+      if (!q) return true;
+      return previewRecordLabel(item).toLowerCase().includes(q);
+    });
+    els.moveAnchorSelect.innerHTML = source
+      .map((item) => {
+        const idx = previewItems.indexOf(item);
+        return `<option value="${idx}">${escapeHtml(previewRecordLabel(item))}</option>`;
+      })
+      .join("");
+    if (!source.length) {
+      els.moveAnchorSelect.innerHTML = `<option value="">没有可作参照的记录</option>`;
+      updateMovePreviewHint();
+      return;
+    }
+    const locateIdx = preferredAnchorIdxFromList(source);
+    if (!keepSelection && locateIdx >= 0) {
+      els.moveAnchorSelect.value = String(locateIdx);
+    } else if (prev && source.some((item) => String(previewItems.indexOf(item)) === prev)) {
+      els.moveAnchorSelect.value = prev;
+    } else if (locateIdx >= 0) {
+      els.moveAnchorSelect.value = String(locateIdx);
+    } else {
+      els.moveAnchorSelect.value = String(previewItems.indexOf(source[0]));
+    }
+    updateMovePreviewHint();
+  }
+
+  function openMovePreviewPanel() {
+    if (!currentJobId) {
+      toast("请先生成预览后再调整顺序", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    flushPreviewLocate();
+    const moving = listSelectedItemsForMove();
+    if (!moving.length) {
+      toast("请先勾选要调整顺序的记录", "warning");
+      return;
+    }
+    hideAddPreviewPanel();
+    if (els.movePlaceSelect) els.movePlaceSelect.value = "after";
+    if (els.moveAnchorFilter) els.moveAnchorFilter.value = "";
+    fillMoveAnchorOptions();
+    updateMovePreviewHint();
+    if (els.movePreviewPanel) els.movePreviewPanel.classList.remove("d-none");
+    const locate = locatePreviewItem();
+    if (locate) scrollPreviewItemIntoView(originKeyOf(locate));
+  }
+
+  function confirmMovePreviewRows() {
+    if (!currentJobId) {
+      toast("请先生成预览后再调整顺序", "warning");
+      return;
+    }
+    const moving = listSelectedItemsForMove();
+    if (!moving.length) {
+      toast("请先勾选要调整顺序的记录", "warning");
+      return;
+    }
+    const idx = Number(els.moveAnchorSelect && els.moveAnchorSelect.value);
+    const anchor = Number.isFinite(idx) ? previewItems[idx] : null;
+    if (!anchor) {
+      toast("请选择参照文件", "warning");
+      return;
+    }
+    if (moving.some((item) => originKeyOf(item) === originKeyOf(anchor))) {
+      toast("参照文件不能包含在要移动的勾选里", "warning");
+      return;
+    }
+    const planned = movingItemsForAnchor(moving, anchor);
+    const toMove = planned.toMove;
+    const place = String((els.movePlaceSelect && els.movePlaceSelect.value) || "after");
+    const ok = movePreviewItemsRelative(toMove, anchor, place === "before" ? "before" : "after");
+    if (!ok) {
+      return;
+    }
+    previewColSort = null;
+    updatePreviewHeadUi();
+    hideMovePreviewPanel();
+    setPreviewLocateByItem(toMove[0] || anchor);
+    renderPreviewTable(previewItems);
+    scrollPreviewItemIntoView(originKeyOf(toMove[0] || anchor));
+    const ignoredBit = planned.ignoredOther
+      ? `（已忽略其它版本 ${planned.ignoredOther} 条）`
+      : "";
+    toast(
+      `已将 ${toMove.length} 条移到「${previewRecordLabel(anchor)}」${
+        place === "before" ? "前面" : "后面"
+      }${ignoredBit}，请点「保存预览修改」`,
+      "info"
+    );
+  }
+
+  function addPreviewRow(anchor, place) {
+    if (!currentJobId) {
+      toast("请先生成预览后再添加记录", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    const item = buildBlankPreviewItem(anchor || null);
+    insertPreviewItemRelative(item, anchor || null, place || "after");
+    previewSelectedKeys.add(taskIdentity(item));
+    hideAddPreviewPanel();
+    setPreviewLocateByItem(item);
+    renderPreviewTable(previewItems);
+    scrollPreviewItemIntoView(originKeyOf(item));
+    const where = anchor
+      ? `${place === "before" ? "前面" : "后面"}（${previewVersionKey(item)} / ${previewChapterKey(item)}）`
+      : "末尾";
+    toast(`已在${where}添加一条空白记录，请填写后点「保存预览修改」`, "info");
+  }
+
+  function confirmAddPreviewRow() {
+    if (!currentJobId) {
+      toast("请先生成预览后再添加记录", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    if (!previewItems.length) {
+      addPreviewRow(null, "after");
+      return;
+    }
+    const idx = Number(els.addAnchorSelect && els.addAnchorSelect.value);
+    const anchor = Number.isFinite(idx) ? previewItems[idx] : null;
+    if (!anchor) {
+      toast("请选择参照记录", "warning");
+      return;
+    }
+    const place = String((els.addPlaceSelect && els.addPlaceSelect.value) || "after");
+    addPreviewRow(anchor, place === "before" ? "before" : "after");
+  }
+
+  async function syncPreviewDocMeta() {
+    syncPreviewItemsFromDom();
+    if (!previewItems.length) {
+      toast("请先生成预览", "warning");
+      return;
+    }
+    const data = await requestJson("/api/document-control/version-tasks/sync-document-meta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: String((els.projectId && els.projectId.value) || "").trim() || null,
+        items: previewItems.map((item) => ({
+          originKey: originKeyOf(item),
+          fileName: item.fileName || "",
+          documentNumber: item.documentNumber || "",
+          fileVersion: item.fileVersion || "",
+        })),
+      }),
+    });
+    const byKey = new Map();
+    (Array.isArray(data.items) ? data.items : []).forEach((row) => {
+      if (row && row.originKey) byKey.set(String(row.originKey), row);
+    });
+    previewItems.forEach((item) => {
+      const hit = byKey.get(originKeyOf(item));
+      if (!hit) return;
+      item.documentNumber = String(hit.documentNumber || "").trim();
+      item.fileVersion = String(hit.fileVersion || "").trim();
+      refreshItemChangeMark(item);
+    });
+    renderPreviewTable(previewItems);
+    toast(data.message || "已从文控台账同步", "info");
   }
 
   async function savePreviewEdits() {
@@ -1559,8 +3608,15 @@
       return;
     }
     const items = getPreviewItems();
-    if (!items.length) {
-      toast("预览清单为空，无法保存", "warning");
+    const conflicts = listPreviewFilenameConflicts(items);
+    if (conflicts.length) {
+      markPreviewFilenameConflicts();
+      toast(formatFilenameConflicts(conflicts), "warning");
+      return;
+    }
+    const { changedItems, removedOriginKeys } = collectChangedPreviewItems(items);
+    if (!changedItems.length && !removedOriginKeys.length) {
+      toast("没有需要保存的增删改", "info");
       return;
     }
     const adjustments = collectAdjustments(items);
@@ -1570,28 +3626,39 @@
       body: JSON.stringify({
         jobId: currentJobId,
         projectId: String(els.projectId.value || "").trim() || null,
-        items,
+        changedItems,
+        removedOriginKeys,
         adjustments,
       }),
     });
-    originalPreviewItems = JSON.parse(JSON.stringify(items));
-    if (els.previewMeta) {
+    const savedItems = Array.isArray(data.items) ? data.items : items;
+    originalPreviewItems = JSON.parse(JSON.stringify(savedItems));
+    if (Array.isArray(data.ruleItems) && data.ruleItems.length) {
+      rulePreviewItems = JSON.parse(JSON.stringify(data.ruleItems));
+    }
+    renderPreviewTable(savedItems);
+    loadFeedbackHistory().catch(() => {});
+    const addCount = adjustments.filter((row) => row && row.type === "add").length;
+    const updateCount = adjustments.filter((row) => row && row.type === "update").length;
+    const deletedCount = adjustments.filter((row) => row && row.type === "delete").length;
+    if (els.previewSaveBanner) {
       const stamp = data.updatedAt
         ? String(data.updatedAt).replace("T", " ").slice(0, 19)
         : "";
-      const extra = data.feedbackSaved
-        ? `反馈 ${data.feedbackSaved} 条将在下次「生成预览」时生效`
-        : "无相对上次原表的字段差异";
-      const banner = `<div class="alert alert-success py-2 px-3 mb-2 small">已保存预览修改${
+      const extraBits = [`当前 ${savedItems.length} 条`];
+      const patchedN = Number(data.patchedCount || changedItems.length);
+      if (patchedN) extraBits.push(`增量 ${patchedN}`);
+      if (addCount) extraBits.push(`新增 ${addCount}`);
+      if (updateCount) extraBits.push(`修改 ${updateCount}`);
+      if (deletedCount) extraBits.push(`删除 ${deletedCount}`);
+      const extra = extraBits.join("，") + "（再次生成会按规则重建）";
+      els.previewSaveBanner.innerHTML = `<div class="alert alert-success py-2 px-3 mb-2 small">已保存预览修改${
         stamp ? `（${escapeHtml(stamp)}）` : ""
-      } · ${escapeHtml(extra)}</div>`;
-      if (!els.previewMeta.querySelector(".vtg-explain")) {
-        els.previewMeta.innerHTML = banner;
-      } else {
-        els.previewMeta.insertAdjacentHTML("afterbegin", banner);
-      }
+      } · ${escapeHtml(extra)}${
+        data.feedbackSaved ? ` · 采集 ${Number(data.feedbackSaved)} 条` : ""
+      }</div>`;
     }
-    toast(data.message || "预览修改已保存", "success");
+    toast(data.message || `已保存预览清单（${savedItems.length} 条）`, "success");
   }
 
   async function loadLatestPreview(options) {
@@ -1624,7 +3691,7 @@
     return data;
   }
 
-  async function doPreview() {
+  async function doPreview(overwrite) {
     const { out, missing } = collectVersionReleaseDates();
     if (missing.length) {
       throw new Error(
@@ -1644,14 +3711,33 @@
       projectId: String(els.projectId.value || "").trim() || null,
       productName: String(els.productName.value || "").trim(),
       registrationCountry: currentRegistrationCountry(),
+      overwrite: Boolean(overwrite),
     };
-    const data = await requestJson("/api/document-control/version-tasks/preview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const sendPreview = (ow) =>
+      requestJson("/api/document-control/version-tasks/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, overwrite: Boolean(ow) }),
+      });
+    let data;
+    try {
+      data = await sendPreview(overwrite);
+    } catch (e) {
+      if (e.status === 409 && e.payload && e.payload.duplicatePreview) {
+        const ok = window.confirm(
+          e.payload.message || "该项目该版本已有预览快照，是否覆盖？"
+        );
+        if (!ok) {
+          toast("已取消，未覆盖已有快照", "info");
+          return;
+        }
+        data = await sendPreview(true);
+      } else {
+        throw e;
+      }
+    }
     applyPreviewPayload(data, {
-      metaPrefix: data.previewUpdated ? "已更新既有预览" : "已新建预览",
+      metaPrefix: data.previewUpdated ? "已覆盖既有预览快照" : "已新建预览快照",
       fillForm: false,
     });
     const projectId = String(els.projectId.value || "").trim();
@@ -1662,8 +3748,8 @@
     }
     toast(
       data.previewUpdated
-        ? "预览已更新并自动保存（规则结果；表格手改需点「保存预览修改」）"
-        : "预览已生成并自动保存（规则结果；表格手改需点「保存预览修改」）",
+        ? "已覆盖该项目该版本的预览快照"
+        : "已生成并保存为新的预览快照",
       "success"
     );
   }
@@ -1786,6 +3872,7 @@
         adjustments,
       }),
     });
+    loadFeedbackHistory().catch(() => {});
     return Number(data.saved || 0);
   }
 
@@ -1801,10 +3888,16 @@
       return;
     }
     const selectedItems = items.filter(
-      (item) => recordStatusOf(item) === "adopt" && previewSelectedKeys.has(taskIdentity(item))
+      (item) => canSelectPreview(item) && previewSelectedKeys.has(taskIdentity(item))
     );
     if (!selectedItems.length) {
-      toast("请勾选至少一条「选用」记录再下发（弃用/待定不会下发）", "warning");
+      toast("请勾选至少一条「选用」且未删除的记录再下发", "warning");
+      return;
+    }
+    const conflicts = listPreviewFilenameConflicts(selectedItems);
+    if (conflicts.length) {
+      markPreviewFilenameConflicts();
+      toast(formatFilenameConflicts(conflicts), "warning");
       return;
     }
     const applyMode = currentApplyMode();
@@ -1836,15 +3929,37 @@
     await loadSavedRecords();
     if (!projectId) {
       clearPreviewPanel("请选择项目后查看该项目上次预览，或直接生成新预览。");
+      loadFeedbackHistory().catch(() => {});
       return;
     }
     const latest = await loadLatestPreview({ projectId, clearIfEmpty: true });
     if (!latest) {
       applySavedRecordsToChainForm();
     }
+    loadFeedbackHistory().catch(() => {});
   }
 
   function bindEvents() {
+    window.addEventListener("resize", () => {
+      fitPreviewTableViewport();
+    });
+    bindPreviewDrag();
+    bindPreviewHead();
+    previewColOrder = loadPreviewColOrder();
+    applyPreviewColOrder();
+    if (els.clearColFiltersBtn) {
+      els.clearColFiltersBtn.addEventListener("click", () => clearPreviewColFilters());
+    }
+    if (els.changeLogPager) {
+      els.changeLogPager.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("[data-vtg-collection-page]");
+        if (!btn || btn.disabled) return;
+        const page = Number(btn.getAttribute("data-vtg-collection-page"));
+        if (Number.isNaN(page) || page < 1) return;
+        collectionPage = page;
+        renderCollectionPanel();
+      });
+    }
     [els.fromVersion, els.toVersion, els.intermediate].forEach((el) => {
       if (!el) return;
       el.addEventListener("input", renderVersionDatesTable);
@@ -1937,6 +4052,44 @@
         );
       });
     }
+    if (els.syncDocMetaBtn) {
+      els.syncDocMetaBtn.addEventListener("click", () => {
+        withButtonBusy(els.syncDocMetaBtn, "同步中…", () => syncPreviewDocMeta()).catch((e) =>
+          toast(e.message || "从文控同步编号失败", "danger")
+        );
+      });
+    }
+    if (els.addPreviewRowBtn) {
+      els.addPreviewRowBtn.addEventListener("click", () => openAddPreviewPanel());
+    }
+    if (els.addAnchorSelect) {
+      els.addAnchorSelect.addEventListener("change", () => {
+        const idx = Number(els.addAnchorSelect.value);
+        if (!els.addPreviewHint || !previewItems[idx]) return;
+        els.addPreviewHint.textContent = `将添加到「${previewRecordLabel(previewItems[idx])}」旁边（可改参照和前/后）。`;
+      });
+    }
+    if (els.addPreviewConfirmBtn) {
+      els.addPreviewConfirmBtn.addEventListener("click", () => confirmAddPreviewRow());
+    }
+    if (els.addPreviewCancelBtn) {
+      els.addPreviewCancelBtn.addEventListener("click", () => hideAddPreviewPanel());
+    }
+    if (els.movePreviewBtn) {
+      els.movePreviewBtn.addEventListener("click", () => openMovePreviewPanel());
+    }
+    if (els.movePreviewConfirmBtn) {
+      els.movePreviewConfirmBtn.addEventListener("click", () => confirmMovePreviewRows());
+    }
+    if (els.movePreviewCancelBtn) {
+      els.movePreviewCancelBtn.addEventListener("click", () => hideMovePreviewPanel());
+    }
+    if (els.moveAnchorFilter) {
+      els.moveAnchorFilter.addEventListener("input", () => fillMoveAnchorOptions({ keepSelection: true }));
+    }
+    if (els.moveAnchorSelect) {
+      els.moveAnchorSelect.addEventListener("change", () => updateMovePreviewHint());
+    }
     if (els.previewSelectAll) {
       els.previewSelectAll.addEventListener("click", () => selectVisibleAdopt());
     }
@@ -1978,6 +4131,8 @@
         ev.target.title = ev.target.value || "";
         ev.target.style.height = "auto";
         ev.target.style.height = `${Math.max(38, ev.target.scrollHeight)}px`;
+        const row = ev.target.closest("tr[data-vtg-preview-idx]");
+        applyReleaseRecordDateUi(row, ev.target.value);
       });
       els.previewBody.addEventListener("change", (ev) => {
         const row = ev.target.closest("tr[data-vtg-preview-idx]");
@@ -1988,23 +4143,120 @@
           const status = recordStatusOf({ recordStatus: ev.target.value });
           previewItems[idx].recordStatus = status;
           const key = taskIdentity(previewItems[idx]);
-          if (status === "adopt") previewSelectedKeys.add(key);
-          else previewSelectedKeys.delete(key);
-          updatePreviewSelectionUi();
-          return;
+          if (canSelectPreview(previewItems[idx])) previewSelectedKeys.add(key);
+          else if (isPreviewDeleted(previewItems[idx])) previewSelectedKeys.delete(key);
         }
         if (ev.target.matches("[data-vtg-select-row]")) {
           const key = taskIdentity(previewItems[idx]);
-          if (ev.target.checked && recordStatusOf(previewItems[idx]) === "adopt") {
+          if (ev.target.checked && canCheckPreview(previewItems[idx])) {
             previewSelectedKeys.add(key);
           } else {
             previewSelectedKeys.delete(key);
           }
           updatePreviewSelectionUi();
+          return;
+        }
+        if (ev.target.matches("[data-vtg-field]")) {
+          const field = ev.target.getAttribute("data-vtg-field") || "";
+          const prevItem = {
+            fileName: previewItems[idx].fileName,
+            targetVersion: previewItems[idx].targetVersion,
+            fileVersion: previewItems[idx].fileVersion,
+            registrationVersion: previewItems[idx].registrationVersion,
+          };
+          syncPreviewItemsFromDom();
+          const item = previewItems[idx];
+          if (field === "isSystemRecord") {
+            const wrap = ev.target.closest(".vtg-system-check");
+            const span = wrap && wrap.querySelector("span");
+            if (span) span.textContent = isSystemRecordOf(item) ? "是" : "否";
+          }
+          if (field === "fileName" || field === "targetVersion") {
+            const other = findSameNameInVersion(item, previewItems);
+            if (other) {
+              if (field === "fileName") {
+                item.fileName = prevItem.fileName;
+                ev.target.value = prevItem.fileName || "";
+              } else {
+                item.targetVersion = prevItem.targetVersion;
+                item.fileVersion = prevItem.fileVersion;
+                item.registrationVersion = prevItem.registrationVersion;
+                ev.target.value = prevItem.targetVersion || prevItem.fileVersion || "";
+              }
+              toast(
+                `同一版本下文件名不能重复：${previewVersionKey(other)} 已有「${String(
+                  other.fileName || ""
+                ).trim()}」`,
+                "warning"
+              );
+              markPreviewFilenameConflicts();
+              return;
+            }
+          }
+          if (field === "fileName") applyReleaseRecordDateUi(row, item.fileName);
+          const changeCell = row.querySelector(".vtg-change-cell");
+          if (changeCell) changeCell.innerHTML = changeKindBadgeHtml(item);
+          row.classList.toggle("vtg-change-delete", changeKindOf(item) === "delete");
+          row.classList.toggle("vtg-change-add", changeKindOf(item) === "add");
+          row.classList.toggle("vtg-change-update", changeKindOf(item) === "update");
+          renderChangeLog(previewItems);
+          updatePreviewSelectionUi();
+          markPreviewFilenameConflicts();
         }
       });
       els.previewBody.addEventListener("click", (ev) => {
-        if (ev.target.closest("button[data-vtg-remove-preview], input, select, textarea, a")) return;
+        const restoreBtn = ev.target.closest("button[data-vtg-restore-preview]");
+        if (restoreBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          syncPreviewItemsFromDom();
+          syncPreviewSelectionFromDom();
+          const idx = Number(restoreBtn.getAttribute("data-vtg-restore-preview"));
+          if (Number.isNaN(idx) || !previewItems[idx]) return;
+          const item = previewItems[idx];
+          const other = findSameNameInVersion(item, previewItems);
+          if (other) {
+            toast(
+              `无法还原：同一版本 ${previewVersionKey(item)} 已有文件「${String(other.fileName || "").trim()}」`,
+              "warning"
+            );
+            return;
+          }
+          item.changeKind = "";
+          refreshItemChangeMark(item);
+          if (canSelectPreview(item)) previewSelectedKeys.add(taskIdentity(item));
+          renderPreviewTable(previewItems);
+          toast("已还原该记录", "info");
+          return;
+        }
+        const removeBtn = ev.target.closest("button[data-vtg-remove-preview]");
+        if (removeBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          syncPreviewItemsFromDom();
+          syncPreviewSelectionFromDom();
+          const idx = Number(removeBtn.getAttribute("data-vtg-remove-preview"));
+          if (Number.isNaN(idx) || idx < 0 || idx >= previewItems.length) return;
+          const item = previewItems[idx];
+          const inRules = Boolean(ruleItemOf(item));
+          const savedAlready = originalPreviewItems.some(
+            (x) => originKeyOf(x) === originKeyOf(item)
+          );
+          if (!inRules && !savedAlready) {
+            previewItems.splice(idx, 1);
+            previewSelectedKeys.delete(taskIdentity(item));
+            renderPreviewTable(previewItems);
+            toast("已移除未保存的新增记录", "info");
+            return;
+          }
+          item.changeKind = "delete";
+          previewSelectedKeys.delete(taskIdentity(item));
+          renderPreviewTable(previewItems);
+          toast("已标记删除，原因可后补", "info");
+          return;
+        }
+        if (ev.target.closest(".vtg-drag-handle")) return;
+        if (ev.target.closest("input, select, textarea, a")) return;
         const header = ev.target.closest("tr.vtg-version-row");
         if (!header) return;
         const ver = header.getAttribute("data-vtg-ver") || "";
@@ -2060,6 +4312,7 @@
       } else {
         clearPreviewPanel("尚未生成预览。选择项目可加载该项目上次结果，或填写版本后生成。");
       }
+      loadFeedbackHistory().catch(() => {});
     } catch (err) {
       toast(err.message || "页面初始化失败", "danger");
     }

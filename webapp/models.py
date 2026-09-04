@@ -527,6 +527,8 @@ class VersionTaskGenerationFeedback(db.Model):
     adjust_type: Mapped[str] = mapped_column(db.String(16), nullable=False, default="update")
     applied_count: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)
     last_applied_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(db.String(512), nullable=True)
+    change_summary_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
 
 
@@ -660,6 +662,7 @@ class UploadRecord(db.Model):
     reviewer: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     approver: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
     belonging_module: Mapped[Optional[str]] = mapped_column(db.String(32), nullable=True)  # 所属模块：产品、开发、测试、全员
+    is_system_record: Mapped[bool] = mapped_column(default=False)  # 是否质量管理体系记录
     displayed_author: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)  # 体现编写人员
     task_status: Mapped[str] = mapped_column(db.String(32), default="pending")
     completion_status: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
