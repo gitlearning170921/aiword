@@ -77,7 +77,17 @@ def msg_page1_project_code_required() -> str:
 
 
 def msg_upstream_request_failed(exc: Exception | str) -> str:
+    if isinstance(exc, Exception):
+        base = ""
+        try:
+            if has_request_context():
+                base = integration_api_base()
+        except Exception:
+            base = ""
+        return format_upstream_request_error(exc, base)
     e = str(exc)[:500]
+    if classify_upstream_connect_error(e) != "other":
+        return format_upstream_request_error(RuntimeError(e), "")
     return user_facing_text(f"上游请求失败：{e}", f"服务请求失败：{e}")
 
 
@@ -265,40 +275,76 @@ def resolve_integration_api_base(raw: str) -> str:
     return fallback
 
 
+def classify_upstream_connect_error(exc: Exception | str) -> str:
+    """将连接类异常归类为 dns / timeout / refused / other（不依赖原始堆栈展示）。"""
+    msg = str(exc or "")
+    msg_l = msg.lower()
+    if any(
+        x in msg_l
+        for x in (
+            "getaddrinfo failed",
+            "nameresolutionerror",
+            "failed to resolve",
+            "name or service not known",
+            "nodename nor servname",
+        )
+    ):
+        return "dns"
+    if any(x in msg_l for x in ("timed out", "timeout", "read timed out", "connect timeout")):
+        return "timeout"
+    if (
+        "connection refused" in msg_l
+        or "actively refused" in msg_l
+        or "winerror 10061" in msg_l
+        or "10061" in msg
+        or "积极拒绝" in msg
+        or "failed to establish a new connection" in msg_l
+        or "newconnectionerror" in msg_l
+        or "max retries exceeded" in msg_l
+        or "强迫关闭" in msg
+        or "10054" in msg
+        or "connection aborted" in msg_l
+        or "errno 111" in msg_l
+    ):
+        return "refused"
+    return "other"
+
+
 def format_upstream_request_error(exc: Exception, base: str = "") -> str:
-    """将 requests 异常转为可操作的提示（含本地开发 / Docker 配置说明）。"""
-    msg = str(exc)
-    base_l = (base or "").lower()
-    hint = ""
-    if "aicheckword" in msg and (
-        "getaddrinfo failed" in msg
-        or "nameresolutionerror" in msg.lower()
-        or "failed to resolve" in msg.lower()
-    ):
-        hint = user_facing_text(
-            " 当前为 Docker 内部主机名 aicheckword，在本机直接运行 aiword 时无法解析。"
-            "请在页面4「系统配置」将 QUIZ_API_BASE_URL 与 AICHECKWORD_DRAFT_API_BASE"
-            " 设为 http://127.0.0.1:8000（端口与 aicheckword 一致），或确认 aicheckword 容器已启动且端口已映射。",
-            " 文档服务地址在本机无法连接，请联系管理员检查服务配置与运行状态。",
+    """将 requests 异常转为可操作的提示（不把 ConnectionPool 原文甩给用户）。"""
+    kind = classify_upstream_connect_error(exc)
+    addr = (base or "").strip() or "未配置"
+    if kind == "dns":
+        admin = (
+            f"文档服务地址无法解析。当前地址：{addr}。"
+            "本机直接运行时请在系统配置将地址设为 http://127.0.0.1:8000；"
+            "Docker 部署请使用服务名 aicheckword。"
         )
-    elif ("127.0.0.1" in base_l or "localhost" in base_l) and (
-        "connection refused" in msg.lower() or "actively refused" in msg.lower()
-    ):
-        hint = user_facing_text(
-            " 请确认 aicheckword API 已在该地址启动（本地常见为 uvicorn 监听 8000 端口）。"
-            + (
-                " Docker 部署时页面4 须设为 http://aicheckword:8000，勿用 127.0.0.1:8000。"
-                if _running_in_aiword_docker()
-                else ""
-            ),
-            " 请确认文档生成服务已在该地址启动。"
-            + (" 请联系管理员检查 Docker 内 aicheckword 服务配置。" if _running_in_aiword_docker() else ""),
+        user = "文档服务无法连接。请联系管理员检查服务配置与运行状态。"
+    elif kind == "timeout":
+        admin = f"连接文档服务超时。当前地址：{addr}。请确认 API 已启动且网络可达。"
+        user = "文档服务连接超时。请稍后重试；若持续失败请联系管理员。"
+    elif kind == "refused":
+        admin = (
+            "文档服务（API）未启动或无法连接。"
+            f"请先启动 API 后再刷新本页。当前地址：{addr}。"
+            "本地可执行 aicheckword/dev/local-run/start_api.bat（常见端口 8000）。"
         )
-    admin = f"上游请求失败：{exc}.{hint}" if hint else f"上游请求失败：{exc}"
-    return user_facing_upstream_error(
-        admin,
-        f"服务请求失败：{exc}。" + (hint if hint else "请稍后重试或联系管理员。"),
-    )
+        if _running_in_aiword_docker():
+            admin += " Docker 部署时系统配置须为 http://aicheckword:8000，勿用 127.0.0.1:8000。"
+        user = "文档服务未启动。请先启动后再刷新本页；若无法处理请联系管理员。"
+    else:
+        admin = f"文档服务请求失败。当前地址：{addr}。"
+        user = "文档服务暂不可用，请稍后重试或联系管理员。"
+    return user_facing_upstream_error(admin, user)
+
+
+def upstream_connect_error_payload(exc: Exception, base: str = "") -> dict[str, Any]:
+    """代理层统一错误体：明确文案 + 前端可识别的 code。"""
+    payload: dict[str, Any] = {"message": format_upstream_request_error(exc, base)}
+    if classify_upstream_connect_error(exc) in ("refused", "dns", "timeout"):
+        payload["code"] = "UPSTREAM_UNREACHABLE"
+    return payload
 
 
 def integration_api_base() -> str:

@@ -62,6 +62,18 @@
         else window.alert(msg);
     }
 
+    function renderServiceUnavailableHtml(title, err, retryId) {
+        const msg = String((err && err.message) || err || "加载失败");
+        const retry = retryId
+            ? `<button type="button" class="btn btn-sm btn-outline-secondary mt-2" id="${esc(retryId)}">重试</button>`
+            : "";
+        return `<div class="alert alert-warning mb-0">
+            <div class="fw-semibold">${esc(title)}</div>
+            <div class="small mt-1">${esc(msg)}</div>
+            ${retry}
+        </div>`;
+    }
+
     async function apiRequest(url, options) {
         const App = getApp();
         if (!App || !App.request) {
@@ -1804,7 +1816,10 @@
                 );
                 box.innerHTML = renderKnowledgeStatusHtml(res?.status || res);
             } catch (e) {
-                box.innerHTML = `<p class="small text-danger mb-0">${esc(e.message || "加载失败")}</p>`;
+                box.innerHTML = renderServiceUnavailableHtml("无法加载知识库统计", e, "btnRetryKnowledgeStatus");
+                document.getElementById("btnRetryKnowledgeStatus")?.addEventListener("click", () => {
+                    refreshKnowledgeStatus();
+                });
             }
         }
 
@@ -1982,7 +1997,10 @@
         const typeLabel = (t) =>
             t === "type_testing" ? "体考" : t === "registration_review" ? "注册审评" : t || "—";
         const priLabel = (p) => ({ high: "高", medium: "中", low: "低" }[p] || p || "—");
-        const stLabel = (s) => (s === "done" ? "已完成" : "未完成");
+        const stLabel = (s) =>
+            ({ open: "未完成", in_progress: "正在整改中", done: "已完成" }[s] || s || "—");
+        const stBadgeClass = (s) =>
+            s === "done" ? "text-bg-success" : s === "in_progress" ? "text-bg-info" : "text-bg-warning";
         const trainLabel = (s) =>
             ({ trained: "已训练", stale: "待重训", not_trained: "未训练" }[s] || s || "—");
 
@@ -2297,7 +2315,7 @@
                         <td>${renderEllipsis(opinion)}${dupHtml}</td>
                         <td class="small">${esc(r.deficiency_source || "—")}</td>
                         <td>${esc(priLabel(r.priority))}</td>
-                        <td><span class="badge ${r.remediation_status === "done" ? "text-bg-success" : "text-bg-warning"}">${esc(stLabel(r.remediation_status))}</span></td>
+                        <td><span class="badge ${stBadgeClass(r.remediation_status)}">${esc(stLabel(r.remediation_status))}</span></td>
                         <td class="small">${esc(trainLabel(r.train_status))}</td>
                         <td class="text-nowrap" style="width:7.5rem">
                             <button type="button" class="btn btn-link btn-sm p-0 me-2 def-edit-btn" data-id="${esc(id)}">编辑</button>
@@ -2514,9 +2532,12 @@
                 });
                 renderGrouped(rows);
             } catch (e) {
-                sectionsEl.innerHTML = `<div class="card mb-3"><div class="card-body text-danger small">${esc(
-                    e.message || "加载失败"
+                sectionsEl.innerHTML = `<div class="card mb-3"><div class="card-body">${renderServiceUnavailableHtml(
+                    "无法加载发补记录",
+                    e,
+                    "btnRetryDefList"
                 )}</div></div>`;
+                document.getElementById("btnRetryDefList")?.addEventListener("click", () => refreshList());
             }
         }
 
@@ -2707,7 +2728,7 @@
             const st = String(document.getElementById("defRemediationStatus")?.value || "");
             const completed = document.getElementById("defCompletedOn");
             if (st === "done" && completed && !completed.value) completed.value = todayIso();
-            if (st === "open" && completed) completed.value = "";
+            if (st !== "done" && completed) completed.value = "";
         });
         document.getElementById("defProjectId")?.addEventListener("change", updateDimReadonly);
 

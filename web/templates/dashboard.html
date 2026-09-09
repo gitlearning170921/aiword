@@ -196,6 +196,8 @@
                 <label class="btn btn-outline-secondary" for="detailGroupByAuthor">按编写人</label>
                 <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByProjectAuthor" value="project_author">
                 <label class="btn btn-outline-secondary" for="detailGroupByProjectAuthor">按项目+编写人</label>
+                <input type="radio" class="btn-check" name="detailGroupBy" id="detailGroupByProjectVersion" value="project_target_version">
+                <label class="btn btn-outline-secondary" for="detailGroupByProjectVersion">按项目+目标版本</label>
             </div>
             <div class="col-toggle-wrap ms-auto">
                 <p class="fw-bold small mb-1 col-toggle-tip">文档通用及签审批信息请打开列设置查看。</p>
@@ -210,6 +212,7 @@
                     <th data-col="seq">序号</th>
                     <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
                     <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>
+                    <th class="th-sortable col-narrow" data-sort-key="targetVersion" data-col="targetVersion">目标版本 <span class="sort-indicator"></span></th>
                     <th class="th-sortable" data-sort-key="taskType" data-col="taskType">任务类型 <span class="sort-indicator"></span></th>
                     <th class="th-sortable col-narrow" data-sort-key="belongingModule" data-col="belongingModule">所属模块 <span class="sort-indicator"></span></th>
                     <th class="th-sortable" data-sort-key="author" data-col="author">编写人员 <span class="sort-indicator"></span></th>

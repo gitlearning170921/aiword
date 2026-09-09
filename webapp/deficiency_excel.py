@@ -116,7 +116,7 @@ def build_deficiency_import_template_bytes() -> bytes:
         "5. 若与系统已有记录重复：导入时可选择「覆盖更新」或「新增重复」；手工新增时同样可选。",
         "6. 列表默认按 Excel 行序展示（与文控台账导入顺序一致）；手工新增记录排在导入记录之后。",
         "5. 优先级：高 / 中 / 低（或 high / medium / low）。",
-        "6. 整改状态：未完成 / 已完成（或 open / done）。已完成时建议填写整改完成日期，缺省为导入当天。",
+        "6. 整改状态：未完成 / 正在整改中 / 已完成（或 open / in_progress / done）。已完成时建议填写整改完成日期，缺省为导入当天。",
         "7. 发补类型：注册审评发补 / 受理发补 / 体考发补（受理/审评均按注册审评类入库）。",
         "8. 日期格式：优先 YYYY-MM-DD 或 Excel 日期；若只填年份（如 2025）将按该年 12 月 31 日导入。",
         "9. 优先级数字：1=高，2=中，3=低。",
@@ -205,8 +205,16 @@ def _parse_priority(val: Any) -> str:
 
 def _parse_status(val: Any) -> str:
     s = str(val or "").strip().lower()
-    if s in ("已完成", "完成", "done", "completed", "closed", "close"):
+    raw = str(val or "").strip()
+    if s in ("已完成", "完成", "done", "completed", "closed", "close") or raw in ("已完成", "完成"):
         return "done"
+    compact = s.replace(" ", "_").replace("-", "_")
+    if (
+        compact in ("in_progress", "inprogress", "doing", "wip", "progress")
+        or "正在整改" in raw
+        or raw in ("整改中", "处理中", "进行中")
+    ):
+        return "in_progress"
     return "open"
 
 
@@ -281,7 +289,7 @@ def parse_deficiency_excel(file_bytes: bytes) -> tuple[list[dict[str, Any]], lis
         if status == "done" and not completed:
             completed = date.today().isoformat()
             # 完成日也是纯年份时上面已解析；若无完成日则用今天
-        if status == "open":
+        if status != "done":
             completed = None
         # 完成日仅年份时同样提示
         raw_completed = item.get("completed_on")

@@ -646,6 +646,132 @@ def confirmation_response_payload(check: ProjectCodeSaveCheck) -> dict[str, Any]
     }
 
 
+def find_other_project_owning_code(
+    organization_id: Optional[str],
+    project_code: str,
+    *,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
+) -> Optional[Project]:
+    """若项目编号已被「其他」页面1项目占用，返回该项目；同项目或无人占用返回 None。
+
+    台账/任务记录上的 project_code 仅作带入字段，不以它们作为占用依据。
+    """
+    tokens = project_code_tokens(project_code)
+    if not tokens:
+        return None
+    if len(tokens) > 1:
+        return None  # 多码由上层另报；此处只查占用
+    new_code = tokens[0]
+    resolved = find_page1_project(
+        project_id=project_id,
+        project_name=project_name,
+        registered_country=registered_country,
+    )
+    resolved_project_id = (project_id or "").strip() or (
+        str(getattr(resolved, "id", "") or "").strip() or None
+    )
+    eff_name = project_name or (
+        getattr(resolved, "name", None) if resolved else None
+    )
+    eff_country = (registered_country or "").strip() or (
+        str(getattr(resolved, "registered_country", "") or "").strip() or None
+    )
+    # 本项目已登记该编号：不算被占用
+    if resolved and new_code in project_code_tokens(
+        getattr(resolved, "project_code", None)
+    ):
+        return None
+
+    org = (organization_id or "").strip() or None
+    for other in Project.query.filter(
+        Project.project_code.isnot(None),
+        Project.project_code != "",
+    ).all():
+        if org:
+            other_org = str(getattr(other, "organization_id", "") or "").strip()
+            if other_org and other_org != org:
+                continue
+        if new_code not in project_code_tokens(getattr(other, "project_code", None)):
+            continue
+        if resolved_project_id and other.id == resolved_project_id:
+            continue
+        if record_belongs_to_project(
+            record_project_id=other.id,
+            record_project_name=other.name,
+            record_registered_country=getattr(other, "registered_country", None),
+            project_id=resolved_project_id,
+            project_name=eff_name,
+            registered_country=eff_country,
+        ):
+            continue
+        return other
+    return None
+
+
+def gate_project_code_for_record(
+    organization_id: Optional[str],
+    project_code: str,
+    *,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    registered_country: Optional[str] = None,
+) -> Optional[str]:
+    """台账/任务「新增」时的轻量校验（修改记录请勿调用）。
+
+    仅拦截「编号已被其他页面1项目占用」。
+    同项目多条记录共用编号、多项目台账逗号串多编号，均不提示、不要求确认。
+    「同一项目只能有一个编号」只在项目管理改 Project.project_code 时校验。
+    """
+    tokens = project_code_tokens(project_code)
+    if not tokens:
+        return None
+
+    def _conflict_msg(code: str, other: Project) -> str:
+        other_label = (other.name or "").strip() or other.id
+        other_rc = (getattr(other, "registered_country", None) or "").strip()
+        if other_rc:
+            other_label = f"{other_label}（{other_rc}）"
+        return (
+            f"项目编号「{code}」已被项目「{other_label}」使用，"
+            f"不同项目的项目编号不能重复"
+        )
+
+    pairs = _expand_scope_code_pairs(
+        project_name or "",
+        registered_country or "",
+        project_code or "",
+    )
+    # 多项目作用域：按「名+国家+编号」逐对检查，避免整串被当成单项目
+    if len(pairs) > 1 or len(tokens) > 1:
+        for pn, rc, pc in pairs:
+            if not (pc or "").strip():
+                continue
+            other = find_other_project_owning_code(
+                organization_id,
+                pc,
+                project_id=project_id if len(pairs) == 1 else None,
+                project_name=pn or project_name,
+                registered_country=rc or registered_country,
+            )
+            if other:
+                code = project_code_tokens(pc)[0] if project_code_tokens(pc) else pc
+                return _conflict_msg(code, other)
+        return None
+
+    other = find_other_project_owning_code(
+        organization_id,
+        project_code,
+        project_id=project_id,
+        project_name=project_name,
+        registered_country=registered_country,
+    )
+    if not other:
+        return None
+    return _conflict_msg(tokens[0], other)
+
+
 def gate_project_code_save(
     organization_id: Optional[str],
     project_code: str,

@@ -12,7 +12,15 @@ from flask import Blueprint, current_app, jsonify, render_template, request, ses
 from sqlalchemy import case, func, or_
 
 from . import db
-from ._integration_common import integration_api_base, integration_requests_timeout, msg_upstream_not_configured_env, upstream_headers, user_facing_text, user_facing_upstream_error
+from ._integration_common import (
+    integration_api_base,
+    integration_requests_timeout,
+    msg_upstream_not_configured_env,
+    upstream_connect_error_payload,
+    upstream_headers,
+    user_facing_text,
+    user_facing_upstream_error,
+)
 from .user_facing import api_debug_fields
 from .app_settings import is_multi_tenant_enabled
 from .authz import (
@@ -1011,7 +1019,7 @@ def api_company_training_upload():
             timeout=integration_requests_timeout(read_seconds=_train_read_timeout_seconds()),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": user_facing_upstream_error(f"上游训练请求失败：{exc}")}), 502
+        return jsonify(upstream_connect_error_payload(exc, integration_api_base())), 502
     try:
         body = resp.json()
     except Exception:
@@ -1148,7 +1156,7 @@ def api_company_training_project_case_create():
             timeout=integration_requests_timeout(read_seconds=60),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": user_facing_upstream_error(f"上游创建案例失败：{exc}")}), 502
+        return jsonify(upstream_connect_error_payload(exc, integration_api_base())), 502
     try:
         body = resp.json()
     except Exception:
@@ -1217,7 +1225,7 @@ def api_company_training_project_case_upload():
             timeout=integration_requests_timeout(read_seconds=900),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": user_facing_upstream_error(f"上游案例训练失败：{exc}")}), 502
+        return jsonify(upstream_connect_error_payload(exc, integration_api_base())), 502
     try:
         body = resp.json()
     except Exception:
@@ -1488,7 +1496,7 @@ def api_company_deficiency_patch(record_id: int):
             timeout=integration_requests_timeout(read_seconds=60),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": user_facing_upstream_error(f"更新发补失败：{exc}")}), 502
+        return jsonify(upstream_connect_error_payload(exc, integration_api_base())), 502
     try:
         upstream = resp.json()
     except Exception:
@@ -1541,7 +1549,7 @@ def api_company_deficiency_batch_update():
         ).strip() or "open"
         if patch["remediation_status"] == "done" and not data.get("completedOn") and not data.get("completed_on"):
             patch["completed_on"] = now_local().date().isoformat()
-        if patch["remediation_status"] == "open":
+        if patch["remediation_status"] != "done":
             patch["completed_on"] = None
     if "priority" in data:
         patch["priority"] = str(data.get("priority") or "medium").strip() or "medium"
@@ -1761,7 +1769,7 @@ def api_company_deficiency_asset_download(record_id: int, asset_id: int):
             timeout=integration_requests_timeout(read_seconds=120),
         )
     except requests.RequestException as e:
-        return jsonify({"message": user_facing_upstream_error(f"下载失败：{e}")}), 502
+        return jsonify(upstream_connect_error_payload(e, integration_api_base())), 502
     if r.status_code != 200:
         return jsonify({
             "message": user_facing_upstream_error(f"上游下载失败（HTTP {r.status_code}）"),

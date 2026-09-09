@@ -19,7 +19,8 @@
   }
 
   function note(msg) {
-    if (els.previewOpStatus) els.previewOpStatus.textContent = msg || "";
+    const el = document.getElementById("vtgPreviewOpStatus");
+    if (el) el.textContent = msg || "";
   }
 
   function setButtonBusy(btn, busy, busyText) {
@@ -109,6 +110,26 @@
     movePlaceSelect: byId("vtgMovePlaceSelect"),
     movePreviewConfirmBtn: byId("vtgMovePreviewConfirmBtn"),
     movePreviewCancelBtn: byId("vtgMovePreviewCancelBtn"),
+    copyPreviewBtn: byId("vtgCopyPreviewBtn"),
+    copyPreviewPanel: byId("vtgCopyPreviewPanel"),
+    copyPreviewHint: byId("vtgCopyPreviewHint"),
+    copyFromVersion: byId("vtgCopyFromVersion"),
+    copyToVersion: byId("vtgCopyToVersion"),
+    copySelectedOnly: byId("vtgCopySelectedOnly"),
+    copyPreviewConfirmBtn: byId("vtgCopyPreviewConfirmBtn"),
+    copyPreviewCancelBtn: byId("vtgCopyPreviewCancelBtn"),
+    batchDueDateBtn: byId("vtgBatchDueDateBtn"),
+    batchDueDatePanel: byId("vtgBatchDueDatePanel"),
+    batchDueDateHint: byId("vtgBatchDueDateHint"),
+    batchDueDateInput: byId("vtgBatchDueDateInput"),
+    batchDueDateConfirmBtn: byId("vtgBatchDueDateConfirmBtn"),
+    batchDueDateCancelBtn: byId("vtgBatchDueDateCancelBtn"),
+    deleteVersionBtn: byId("vtgDeleteVersionBtn"),
+    deleteVersionPanel: byId("vtgDeleteVersionPanel"),
+    deleteVersionHint: byId("vtgDeleteVersionHint"),
+    deleteVersionSelect: byId("vtgDeleteVersionSelect"),
+    deleteVersionConfirmBtn: byId("vtgDeleteVersionConfirmBtn"),
+    deleteVersionCancelBtn: byId("vtgDeleteVersionCancelBtn"),
     clearColFiltersBtn: byId("vtgClearColFiltersBtn"),
     locateHint: byId("vtgLocateHint"),
     changeLog: byId("vtgChangeLog"),
@@ -204,30 +225,50 @@
   const versionDateValues = new Map();
   const projectVersionStatus = new Map();
 
+  function inputValue(el) {
+    return String((el && el.value) || "").trim();
+  }
+
+  function selectedProjectId() {
+    return inputValue(els.projectId);
+  }
+
+  function setProjectSelectValue(id) {
+    if (!els.projectId) return "";
+    const pid = String(id || "").trim();
+    if (!pid) {
+      els.projectId.value = "";
+      return "";
+    }
+    const ok = Array.from(els.projectId.options).some((opt) => opt.value === pid);
+    if (!ok) return "";
+    els.projectId.value = pid;
+    return pid;
+  }
+
   function currentRegistrationCountry() {
-    const projectId = String(els.projectId && els.projectId.value || "").trim();
-    const p = projectsById.get(projectId);
+    const p = projectsById.get(selectedProjectId());
     return String((p && (p.registeredCountry || p.country)) || "").trim();
   }
 
   function buildSuggestPayload(targetVersion) {
-    const projectId = String(els.projectId.value || "").trim() || null;
-    let productName = String(els.productName.value || "").trim();
+    const projectId = selectedProjectId() || null;
+    let productName = inputValue(els.productName);
     // 未填产品名时用所选项目名称回填（与后端兜底一致）
     if (!productName && projectId) {
       const p = projectsById.get(projectId);
       const fromProject = String((p && p.name) || "").trim();
       if (fromProject) {
         productName = fromProject;
-        if (els.productName && !String(els.productName.value || "").trim()) {
+        if (els.productName && !inputValue(els.productName)) {
           els.productName.value = fromProject;
         }
       }
     }
     return {
       productName,
-      fromVersion: String(els.fromVersion.value || "").trim(),
-      toVersion: String(els.toVersion.value || "").trim(),
+      fromVersion: inputValue(els.fromVersion),
+      toVersion: inputValue(els.toVersion),
       intermediateVersions: parseIntermediateVersions(),
       targetVersion: targetVersion || null,
       projectId,
@@ -236,7 +277,7 @@
   }
 
   function parseIntermediateVersions() {
-    const raw = String(els.intermediate.value || "");
+    const raw = String((els.intermediate && els.intermediate.value) || "");
     return raw
       .split(/[\n,，;]/)
       .map((s) => s.trim())
@@ -244,8 +285,8 @@
   }
 
   function buildVersionChainInputs() {
-    const from = String(els.fromVersion.value || "").trim();
-    const to = String(els.toVersion.value || "").trim();
+    const from = inputValue(els.fromVersion);
+    const to = inputValue(els.toVersion);
     if (!from || !to) {
       return [];
     }
@@ -402,7 +443,7 @@
       els.savedRecordsCount.textContent = `${savedRecords.length} 条`;
     }
     if (!els.savedRecordsBody) return;
-    const projectId = String(els.projectId.value || "").trim();
+    const projectId = selectedProjectId();
     if (!projectId) {
       els.savedRecordsBody.innerHTML =
         '<tr><td colspan="7" class="text-muted small text-center py-3">请先选择项目</td></tr>';
@@ -533,14 +574,10 @@
   }
 
   function restoreLastProject() {
-    if (!els.projectId) return "";
-    const current = String(els.projectId.value || "").trim();
-    if (current) return current;
+    const current = selectedProjectId();
+    if (current && projectsById.has(current)) return current;
     const last = readLastProjectId();
-    if (last && projectsById.has(last)) {
-      els.projectId.value = last;
-      return last;
-    }
+    if (last && projectsById.has(last)) return setProjectSelectValue(last);
     return "";
   }
 
@@ -862,6 +899,49 @@
     return changeKindOf(item) === "delete";
   }
 
+  function isHiddenPreviewItem(item) {
+    return isPreviewDeleted(item) || Boolean(item && item.hideInPreview);
+  }
+
+  function previewDedupeKey(item) {
+    const a = String((item && (item.taskKey || item.fileName)) || "").trim().toLowerCase();
+    const b = String((item && (item.targetVersion || item.registrationVersion)) || "").trim().toLowerCase();
+    const c = String((item && item.taskType) || "").trim().toLowerCase();
+    return `${a}\t${b}\t${c}`;
+  }
+
+  function combinePreviewPayloadItems(data, fallbackItems) {
+    const live = Array.isArray(data && data.items)
+      ? data.items
+      : Array.isArray(fallbackItems)
+        ? fallbackItems
+        : [];
+    const deleted = Array.isArray(data && data.deletedItems) ? data.deletedItems : [];
+    return live.concat(deleted);
+  }
+
+  function hydrateDeletedMarkers(items, manualDeletedKeys) {
+    const deleted = new Set();
+    (manualDeletedKeys || []).forEach((raw) => {
+      if (!Array.isArray(raw) || raw.length !== 3) return;
+      deleted.add(
+        `${String(raw[0] || "").toLowerCase()}\t${String(raw[1] || "").toLowerCase()}\t${String(raw[2] || "").toLowerCase()}`
+      );
+    });
+    return (items || []).map((item) => {
+      const rec = { ...item };
+      if (isPreviewDeleted(rec) || rec.hideInPreview || deleted.has(previewDedupeKey(rec))) {
+        rec.changeKind = "delete";
+        rec.hideInPreview = true;
+      }
+      return rec;
+    });
+  }
+
+  function visiblePreviewItems(items) {
+    return (items || previewItems).filter((item) => !isHiddenPreviewItem(item));
+  }
+
   function canCheckPreview(item) {
     return !isPreviewDeleted(item);
   }
@@ -870,10 +950,17 @@
     return recordStatusOf(item) === "adopt" && !isPreviewDeleted(item);
   }
 
+  function makeOriginKey(item) {
+    const a = String((item && (item.taskKey || item.fileName)) || "").trim();
+    const b = String((item && (item.targetVersion || item.registrationVersion)) || "").trim();
+    const c = String((item && item.taskType) || "").trim();
+    return `${a}||${b}||${c}`;
+  }
+
   function originKeyOf(item) {
     const existing = String((item && item.originKey) || "").trim();
     if (existing) return existing;
-    return taskIdentity(item);
+    return makeOriginKey(item);
   }
 
   function ensureOriginKey(item) {
@@ -883,13 +970,23 @@
   }
 
   function ruleItemOf(item) {
+    const rules = rulePreviewItems || [];
     const key = originKeyOf(item);
-    return (rulePreviewItems || []).find((x) => originKeyOf(x) === key) || null;
+    const byOrigin = rules.find((x) => originKeyOf(x) === key);
+    if (byOrigin) return byOrigin;
+    const ident = taskIdentity(item);
+    return rules.find((x) => taskIdentity(x) === ident) || null;
+  }
+
+  function cloneNormalizedPreviewItem(item) {
+    const copy = { ...(item || {}) };
+    normalizePreviewDocFields(copy);
+    return copy;
   }
 
   function summarizeItemDiff(original, adjusted) {
-    const before = original || {};
-    const after = adjusted || {};
+    const before = cloneNormalizedPreviewItem(original);
+    const after = cloneNormalizedPreviewItem(adjusted);
     const out = [];
     Object.keys(CHANGE_FIELD_LABELS).forEach((key) => {
       let left = String(before[key] || "").trim();
@@ -1106,20 +1203,20 @@
       if (!previewItems.length) {
         els.previewCount.textContent = "0 条";
       } else if (previewVersionFilter || hasPreviewColFilters()) {
-        const n = previewItems.filter(
+        const n = visiblePreviewItems().filter(
           (item) =>
             itemMatchesColFilters(item) &&
             (!previewVersionFilter || previewVersionKey(item) === previewVersionFilter)
         ).length;
-        els.previewCount.textContent = `${n} / ${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
+        els.previewCount.textContent = `${n} / ${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
       } else {
-        els.previewCount.textContent = `${previewItems.length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
+        els.previewCount.textContent = `${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
       }
     }
     if (els.previewSelectHint) {
       els.previewSelectHint.textContent = previewItems.length
-        ? `勾选后可下发（仅选用）或批量调整顺序。当前可见选用已选 ${visibleSelected} / ${visibleAdopt}。`
-        : "勾选后可下发（仅选用）或批量调整顺序。已删除记录不能勾选。";
+        ? `勾选后可下发（仅选用）、批量调整顺序或设置完成日期。当前可见选用已选 ${visibleSelected} / ${visibleAdopt}。`
+        : "勾选后可下发（仅选用）、批量调整顺序或设置完成日期。已删除记录不能勾选。";
     }
   }
 
@@ -1667,7 +1764,7 @@
 
   function listPreviewVersionStats() {
     const map = new Map();
-    previewItems.forEach((item) => {
+    visiblePreviewItems().forEach((item) => {
       const key = previewVersionKey(item);
       map.set(key, (map.get(key) || 0) + 1);
     });
@@ -1691,7 +1788,7 @@
       previewVersionFilter = "";
     }
     const chips = [
-      `<button type="button" class="vtg-version-chip${previewVersionFilter ? "" : " is-active"}" data-vtg-ver-filter="">全部<span class="vtg-chip-n">${previewItems.length}</span></button>`,
+      `<button type="button" class="vtg-version-chip${previewVersionFilter ? "" : " is-active"}" data-vtg-ver-filter="">全部<span class="vtg-chip-n">${visiblePreviewItems().length}</span></button>`,
       ...stats.map(([ver, count]) => {
         const active = previewVersionFilter === ver ? " is-active" : "";
         return `<button type="button" class="vtg-version-chip${active}" data-vtg-ver-filter="${escapeHtml(ver)}"><span class="font-monospace">${escapeHtml(ver)}</span><span class="vtg-chip-n">${count}</span></button>`;
@@ -1784,6 +1881,7 @@
     ensureSortOrders(previewItems);
     const byVersion = new Map();
     previewItems.forEach((item, idx) => {
+      if (isHiddenPreviewItem(item)) return;
       if (!itemMatchesColFilters(item)) return;
       const ver = previewVersionKey(item);
       if (!byVersion.has(ver)) byVersion.set(ver, []);
@@ -1791,11 +1889,22 @@
     });
     if (!byVersion.size) {
       renderPreviewVersionBar();
+      const hiddenDeletes = previewItems.filter((item) => isHiddenPreviewItem(item)).length;
+      const onlyHidden = hiddenDeletes && !visiblePreviewItems().length;
+      if (els.previewCount) {
+        els.previewCount.textContent = onlyHidden ? `0 条（已隐藏 ${hiddenDeletes} 条）` : "0 条";
+      }
       if (els.previewSelectHint) {
-        els.previewSelectHint.textContent = "没有符合表头筛选的记录，可点「清除筛选/排序」。";
+        els.previewSelectHint.textContent = onlyHidden
+          ? "已删除记录已从列表隐藏，不占行；可在下方采集区查看。"
+          : "没有符合表头筛选的记录，可点「清除筛选/排序」。";
       }
       els.previewBody.innerHTML =
-        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">没有符合表头筛选的记录，可点「清除筛选/排序」</td></tr>`;
+        `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-muted small text-center py-3">${
+          onlyHidden
+            ? "清单已加载。该范围内记录已删除，不再显示。可在下方采集区查看。"
+            : "没有符合表头筛选的记录，可点「清除筛选/排序」"
+        }</td></tr>`;
       renderChangeLog(previewItems);
       applyPreviewVersionUi();
       updatePreviewHeadUi();
@@ -1824,7 +1933,13 @@
       const triggerText = triggerBits.length ? ` · ${formatTriggerBits(triggerBits)}` : "";
       html.push(
         `<tr class="vtg-version-row" data-vtg-ver="${escapeHtml(ver)}" role="button" tabindex="0" aria-expanded="true">
-          <td colspan="${PREVIEW_COLSPAN}"><span class="vtg-caret">▼</span>版本 <span class="font-monospace">${escapeHtml(ver)}</span>（${versionRows.length}）${escapeHtml(triggerText)}</td>
+          <td colspan="${PREVIEW_COLSPAN}"><div class="vtg-ver-head">
+            <span class="vtg-ver-head-label"><span class="vtg-caret">▼</span>版本 <span class="font-monospace">${escapeHtml(ver)}</span>（${versionRows.length}）${escapeHtml(triggerText)}</span>
+            <span class="vtg-ver-actions">
+              <button type="button" class="btn btn-outline-secondary btn-sm py-0" data-vtg-copy-ver="${escapeHtml(ver)}">复制本版</button>
+              <button type="button" class="btn btn-outline-danger btn-sm py-0" data-vtg-delete-ver="${escapeHtml(ver)}">删除本版</button>
+            </span>
+          </div></td>
         </tr>`
       );
       let lastChapter = null;
@@ -1898,6 +2013,17 @@
     if (els.movePreviewPanel && !els.movePreviewPanel.classList.contains("d-none")) {
       fillMoveAnchorOptions();
       updateMovePreviewHint();
+    }
+    if (els.copyPreviewPanel && !els.copyPreviewPanel.classList.contains("d-none")) {
+      fillCopyVersionOptions({ keepSelection: true });
+      updateCopyPreviewHint();
+    }
+    if (els.batchDueDatePanel && !els.batchDueDatePanel.classList.contains("d-none")) {
+      updateBatchDueDateHint();
+    }
+    if (els.deleteVersionPanel && !els.deleteVersionPanel.classList.contains("d-none")) {
+      fillDeleteVersionOptions({ keepSelection: true });
+      updateDeleteVersionHint();
     }
     updatePreviewHeadUi();
     applyPreviewColOrder();
@@ -2463,8 +2589,18 @@
     return `${fileName}__${taskType}__${fileVersion}`;
   }
 
+  function withScriptRoot(url) {
+    const root = String(window.__SCRIPT_ROOT__ || "").replace(/\/+$/, "");
+    if (!url || typeof url !== "string" || !url.startsWith("/")) return url;
+    if (root && url.startsWith(`${root}/`)) return url;
+    return root ? root + url : url;
+  }
+
   async function requestJson(url, options) {
-    const resp = await fetch(url, options);
+    const resp = await fetch(withScriptRoot(url), {
+      credentials: "include",
+      ...(options || {}),
+    });
     let data = {};
     try {
       data = await resp.json();
@@ -2497,7 +2633,10 @@
       isSystemRecord: isSystemRecordOf(item),
       chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
       archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
-      changeKind: changeKindOf(item),
+      changeKind: (() => {
+        const kind = changeKindOf(item);
+        return kind === "add" || kind === "delete" ? kind : "";
+      })(),
       changeReason: String((item && item.changeReason) || "").trim(),
       sortOrder: Number(item && item.sortOrder) || 0,
       triggeredBy: Array.isArray(item && item.triggeredBy)
@@ -2512,10 +2651,16 @@
     const changedItems = [];
     const seen = new Set();
     (items || []).forEach((item) => {
-      const key = originKeyOf(item);
-      seen.add(key);
-      const origin = originalMap.get(key);
+      const origin = findOriginalPreviewItem(item, originalMap);
+      if (origin) {
+        seen.add(originKeyOf(origin));
+      }
+      seen.add(originKeyOf(item));
       if (!origin) {
+        changedItems.push(item);
+        return;
+      }
+      if (isPreviewDeleted(item) || item.hideInPreview) {
         changedItems.push(item);
         return;
       }
@@ -2531,14 +2676,20 @@
     return { changedItems, removedOriginKeys };
   }
 
+  function findOriginalPreviewItem(item, originalMap) {
+    const key = originKeyOf(item);
+    if (originalMap.has(key)) return originalMap.get(key);
+    const ident = taskIdentity(item);
+    return (originalPreviewItems || []).find((x) => taskIdentity(x) === ident) || null;
+  }
+
   function collectAdjustments(editedItems) {
     const originalMap = new Map();
     originalPreviewItems.forEach((x) => originalMap.set(originKeyOf(x), x));
 
     const adjustments = [];
     editedItems.forEach((item) => {
-      const key = originKeyOf(item);
-      const origin = originalMap.get(key);
+      const origin = findOriginalPreviewItem(item, originalMap);
       const kind = changeKindOf(item);
       const reason = String((item && item.changeReason) || "").trim();
       if (kind === "delete") {
@@ -2554,13 +2705,7 @@
         });
         return;
       }
-      if (!origin || kind === "add") {
-        if (origin && changeKindOf(origin) === "add") {
-          const sameFields =
-            JSON.stringify(itemForFeedbackCompare(origin)) ===
-            JSON.stringify(itemForFeedbackCompare(item));
-          if (sameFields && String(origin.changeReason || "").trim() === reason) return;
-        }
+      if (!origin) {
         adjustments.push({
           type: "add",
           adjustedItem: item,
@@ -2571,16 +2716,14 @@
       }
       const summary = summarizeItemDiff(origin, item);
       const reasonChanged = String(origin.changeReason || "").trim() !== reason;
-      if (!summary.length && !reasonChanged && changeKindOf(origin) === kind) return;
-      if (summary.length || kind === "update" || reasonChanged) {
-        adjustments.push({
-          type: "update",
-          originalItem: origin,
-          adjustedItem: item,
-          reason,
-          changeSummary: summary.length ? summary : item.changeFields || [],
-        });
-      }
+      if (!summary.length && !reasonChanged) return;
+      adjustments.push({
+        type: "update",
+        originalItem: origin,
+        adjustedItem: item,
+        reason,
+        changeSummary: summary,
+      });
     });
     return adjustments;
   }
@@ -3092,36 +3235,54 @@
     return "";
   }
 
-  function applyPreviewPayload(data, options) {
-    const opts = options || {};
-    currentJobId = data.jobId || "";
-    originalPreviewItems = Array.isArray(data.items) ? JSON.parse(JSON.stringify(data.items)) : [];
+  function adoptPreviewBaselines(items, ruleItems, deletedKeys) {
+    originalPreviewItems = hydrateDeletedMarkers(
+      Array.isArray(items) ? JSON.parse(JSON.stringify(items)) : [],
+      deletedKeys
+    );
     originalPreviewItems.forEach((item) => {
       normalizePreviewDocFields(item);
       ensureOriginKey(item);
     });
-    if (Array.isArray(data.ruleItems) && data.ruleItems.length) {
-      rulePreviewItems = JSON.parse(JSON.stringify(data.ruleItems));
-    } else {
-      rulePreviewItems = originalPreviewItems
-        .filter((item) => changeKindOf(item) !== "add")
-        .map((item) => {
-          const copy = { ...item, changeKind: "", changeReason: "", changeFields: [] };
-          ensureOriginKey(copy);
-          return copy;
-        });
-    }
-    rulePreviewItems.forEach((item) => ensureOriginKey(item));
+    const sourceRules =
+      Array.isArray(ruleItems) && ruleItems.length
+        ? ruleItems
+        : originalPreviewItems.filter((item) => changeKindOf(item) !== "add" && changeKindOf(item) !== "delete");
+    rulePreviewItems = sourceRules.map((item) => {
+      const copy = { ...item, changeKind: "", changeReason: "", changeFields: [], hideInPreview: false };
+      delete copy.hideInPreview;
+      normalizePreviewDocFields(copy);
+      ensureOriginKey(copy);
+      return copy;
+    });
+  }
+
+  function applyPreviewPayload(data, options) {
+    const opts = options || {};
+    currentJobId = data.jobId || "";
+    const rows = combinePreviewPayloadItems(data, []);
+    adoptPreviewBaselines(rows, data.ruleItems, data.manualDeletedKeys);
     resetPreviewVersionUi();
-    renderPreviewTable(originalPreviewItems, { resetSelection: true });
+    try {
+      renderPreviewTable(originalPreviewItems, { resetSelection: true });
+    } catch (err) {
+      if (els.previewBody) {
+        els.previewBody.innerHTML = `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-danger small text-center py-3">清单渲染失败：${escapeHtml(
+          err.message || "未知错误"
+        )}</td></tr>`;
+      }
+      toast(err.message || "渲染清单失败", "danger");
+    }
     if (opts.fillForm !== false) {
-      if (data.fromVersion) els.fromVersion.value = data.fromVersion;
-      if (data.toVersion) els.toVersion.value = data.toVersion;
+      if (data.fromVersion && els.fromVersion) els.fromVersion.value = data.fromVersion;
+      if (data.toVersion && els.toVersion) els.toVersion.value = data.toVersion;
       const chain = Array.isArray(data.versionChain) ? data.versionChain : [];
-      if (chain.length > 2) {
-        els.intermediate.value = chain.slice(1, -1).join(", ");
-      } else if (chain.length <= 2 && opts.clearIntermediate) {
-        els.intermediate.value = "";
+      if (els.intermediate) {
+        if (chain.length > 2) {
+          els.intermediate.value = chain.slice(1, -1).join(", ");
+        } else if (chain.length <= 2 && opts.clearIntermediate) {
+          els.intermediate.value = "";
+        }
       }
       applyVersionReleaseDatesFromPreview(data.versionReleaseDates || {});
       renderVersionDatesTable();
@@ -3133,7 +3294,7 @@
     }
     if (opts.fillForm !== false && data.productName && els.productName) {
       els.productName.value = data.productName;
-      writeLocalProductName(String(data.projectId || els.projectId.value || "").trim(), data.productName);
+      writeLocalProductName(String(data.projectId || selectedProjectId()).trim(), data.productName);
     }
     renderPreviewMeta(data, opts.metaPrefix || "预览");
     setPreviewSaveEnabled();
@@ -3161,8 +3322,20 @@
     if (els.movePreviewBtn) {
       els.movePreviewBtn.disabled = true;
     }
+    if (els.copyPreviewBtn) {
+      els.copyPreviewBtn.disabled = true;
+    }
+    if (els.batchDueDateBtn) {
+      els.batchDueDateBtn.disabled = true;
+    }
+    if (els.deleteVersionBtn) {
+      els.deleteVersionBtn.disabled = true;
+    }
     hideAddPreviewPanel();
     hideMovePreviewPanel();
+    hideCopyPreviewPanel();
+    hideBatchDueDatePanel();
+    hideDeleteVersionPanel();
   }
 
   function setPreviewSaveEnabled() {
@@ -3170,13 +3343,22 @@
       els.savePreviewEditsBtn.disabled = !currentJobId;
     }
     if (els.syncDocMetaBtn) {
-      els.syncDocMetaBtn.disabled = !previewItems.length;
+      els.syncDocMetaBtn.disabled = !visiblePreviewItems().length;
     }
     if (els.addPreviewRowBtn) {
       els.addPreviewRowBtn.disabled = !currentJobId;
     }
     if (els.movePreviewBtn) {
       els.movePreviewBtn.disabled = !currentJobId;
+    }
+    if (els.copyPreviewBtn) {
+      els.copyPreviewBtn.disabled = !currentJobId || !visiblePreviewItems().length;
+    }
+    if (els.batchDueDateBtn) {
+      els.batchDueDateBtn.disabled = !currentJobId || !visiblePreviewItems().length;
+    }
+    if (els.deleteVersionBtn) {
+      els.deleteVersionBtn.disabled = !currentJobId || !visiblePreviewItems().length;
     }
   }
 
@@ -3201,13 +3383,396 @@
     if (els.movePreviewPanel) els.movePreviewPanel.classList.add("d-none");
   }
 
+  function hideCopyPreviewPanel() {
+    if (els.copyPreviewPanel) els.copyPreviewPanel.classList.add("d-none");
+  }
+
+  function hideDeleteVersionPanel() {
+    if (els.deleteVersionPanel) els.deleteVersionPanel.classList.add("d-none");
+  }
+
+  function hideBatchDueDatePanel() {
+    if (els.batchDueDatePanel) els.batchDueDatePanel.classList.add("d-none");
+  }
+
+  function hidePreviewOpPanels() {
+    hideAddPreviewPanel();
+    hideMovePreviewPanel();
+    hideCopyPreviewPanel();
+    hideBatchDueDatePanel();
+    hideDeleteVersionPanel();
+  }
+
+  function listPreviewVersionChoices() {
+    const seen = new Set();
+    const out = [];
+    const add = (raw) => {
+      const key = String(raw || "").trim() || "未指定版本";
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(key);
+    };
+    buildVersionChainInputs().forEach(add);
+    previewItems.forEach((item) => add(previewVersionKey(item)));
+    return out.sort(comparePreviewVersions);
+  }
+
+  function destVersionDateHints(ver) {
+    const key = String(ver || "").trim() || "未指定版本";
+    const live = previewItems.find(
+      (item) => previewVersionKey(item) === key && !isPreviewDeleted(item)
+    );
+    const chainDate = key === "未指定版本" ? "" : String(versionDateValues.get(key) || "").trim();
+    return {
+      dueDate: (live && live.dueDate) || "",
+      documentDisplayDate: (live && live.documentDisplayDate) || chainDate,
+    };
+  }
+
+  function clonePreviewItemToVersion(item, destVer, hints) {
+    const destValue = destVer === "未指定版本" ? "" : String(destVer || "").trim();
+    const copy = { ...item };
+    copy.taskKey = newManualTaskKey();
+    copy.originKey = copy.taskKey;
+    copy.targetVersion = destValue;
+    copy.registrationVersion = destValue;
+    copy.sortOrder = 0;
+    copy.changeKind = "add";
+    copy.changeReason = "";
+    copy.changeFields = [];
+    delete copy.hideInPreview;
+    copy.triggeredBy = Array.isArray(item.triggeredBy) ? item.triggeredBy.slice() : [];
+    if (hints && hints.dueDate) copy.dueDate = hints.dueDate;
+    if (hints && hints.documentDisplayDate) copy.documentDisplayDate = hints.documentDisplayDate;
+    return copy;
+  }
+
+  function livePreviewItemsForVersion(ver) {
+    const key = String(ver || "").trim() || "未指定版本";
+    return previewItems.filter(
+      (item) => previewVersionKey(item) === key && !isPreviewDeleted(item)
+    );
+  }
+
+  function selectedLiveItemsForVersion(ver) {
+    const key = String(ver || "").trim() || "未指定版本";
+    return livePreviewItemsForVersion(key).filter((item) =>
+      previewSelectedKeys.has(taskIdentity(item))
+    );
+  }
+
+  function fillVersionSelect(selectEl, versions, selected, options) {
+    if (!selectEl) return;
+    const opts = options || {};
+    const exclude = new Set(opts.exclude || []);
+    const list = (versions || []).filter((ver) => !exclude.has(ver));
+    const keep = selected && list.includes(selected) ? selected : list[0] || "";
+    selectEl.innerHTML = list.length
+      ? list
+          .map(
+            (ver) =>
+              `<option value="${escapeHtml(ver)}"${ver === keep ? " selected" : ""}>${escapeHtml(
+                ver
+              )}</option>`
+          )
+          .join("")
+      : `<option value="">暂无版本</option>`;
+    if (keep) selectEl.value = keep;
+  }
+
+  function fillCopyVersionOptions(options) {
+    const keep = Boolean(options && options.keepSelection);
+    const versions = listPreviewVersionChoices();
+    const prevFrom = keep ? String((els.copyFromVersion && els.copyFromVersion.value) || "") : "";
+    const prevTo = keep ? String((els.copyToVersion && els.copyToVersion.value) || "") : "";
+    const preferredFrom =
+      String((options && options.sourceVer) || "").trim() ||
+      prevFrom ||
+      previewVersionFilter ||
+      (locatePreviewItem() ? previewVersionKey(locatePreviewItem()) : "") ||
+      versions[0] ||
+      "";
+    fillVersionSelect(els.copyFromVersion, versions, preferredFrom);
+    const sourceVer = String((els.copyFromVersion && els.copyFromVersion.value) || "");
+    const destChoices = versions.filter((ver) => ver !== sourceVer);
+    const preferredTo =
+      destChoices.includes(prevTo) && prevTo !== sourceVer ? prevTo : destChoices[0] || "";
+    fillVersionSelect(els.copyToVersion, destChoices, preferredTo);
+    if (els.copySelectedOnly && !keep) {
+      const sourceHasSel = selectedLiveItemsForVersion(sourceVer).length > 0;
+      els.copySelectedOnly.checked = sourceHasSel;
+    }
+    updateCopyPreviewHint();
+  }
+
+  function updateCopyPreviewHint() {
+    if (!els.copyPreviewHint) return;
+    const sourceVer = String((els.copyFromVersion && els.copyFromVersion.value) || "").trim();
+    const destVer = String((els.copyToVersion && els.copyToVersion.value) || "").trim();
+    if (!sourceVer || !destVer) {
+      els.copyPreviewHint.textContent = "请选择源版本和另一个目标版本。";
+      return;
+    }
+    if (sourceVer === destVer) {
+      els.copyPreviewHint.textContent = "源版本和目标版本不能相同。";
+      return;
+    }
+    const selectedOnly = Boolean(els.copySelectedOnly && els.copySelectedOnly.checked);
+    const live = livePreviewItemsForVersion(sourceVer);
+    const picked = selectedLiveItemsForVersion(sourceVer);
+    const usingSelected = selectedOnly && picked.length;
+    if (selectedOnly && !picked.length) {
+      els.copyPreviewHint.textContent = `已勾选「仅复制已勾选记录」，但「${sourceVer}」下没有勾选。请勾选或取消该选项。`;
+      return;
+    }
+    const count = usingSelected ? picked.length : live.length;
+    if (!live.length) {
+      els.copyPreviewHint.textContent = `版本 ${sourceVer} 没有可复制的未删除记录。`;
+      return;
+    }
+    els.copyPreviewHint.textContent = usingSelected
+      ? `将把「${sourceVer}」已勾选的 ${count} 条复制到「${destVer}」，原版本保留。`
+      : `将把「${sourceVer}」全部 ${count} 条未删除记录复制到「${destVer}」，原版本保留。`;
+  }
+
+  function copyPreviewItemsToVersion(items, destVer) {
+    const destKey = String(destVer || "").trim() || "未指定版本";
+    const incoming = (items || []).filter((item) => previewVersionKey(item) !== destKey);
+    if (!incoming.length) {
+      toast("没有可复制到该版本的记录（可能已在目标版本）", "info");
+      return [];
+    }
+    const destNames = new Set(
+      livePreviewItemsForVersion(destKey)
+        .map((item) => previewFileNameKey(item.fileName))
+        .filter(Boolean)
+    );
+    const conflicts = [];
+    incoming.forEach((item) => {
+      const name = previewFileNameKey(item.fileName);
+      if (name && destNames.has(name)) conflicts.push(String(item.fileName || "").trim());
+      if (name) destNames.add(name);
+    });
+    if (conflicts.length) {
+      toast(
+        `无法复制到版本 ${destKey}：已存在「${conflicts.slice(0, 5).join("」「")}」${
+          conflicts.length > 5 ? " 等" : ""
+        }`,
+        "warning"
+      );
+      return [];
+    }
+    const hints = destVersionDateHints(destKey);
+    const copies = incoming.map((item) => clonePreviewItemToVersion(item, destKey, hints));
+    const destLive = livePreviewItemsForVersion(destKey).slice().sort(
+      (a, b) => Number(a.sortOrder) - Number(b.sortOrder)
+    );
+    let anchor = destLive.length ? destLive[destLive.length - 1] : null;
+    copies.forEach((copy) => {
+      insertPreviewItemRelative(copy, anchor, "after");
+      previewSelectedKeys.add(taskIdentity(copy));
+      anchor = copy;
+    });
+    return copies;
+  }
+
+  function confirmCopyPreviewRows() {
+    if (!currentJobId) {
+      toast("请先生成预览后再复制", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    const sourceVer = String((els.copyFromVersion && els.copyFromVersion.value) || "").trim();
+    const destVer = String((els.copyToVersion && els.copyToVersion.value) || "").trim();
+    if (!sourceVer || !destVer) {
+      toast("请选择源版本和目标版本", "warning");
+      return;
+    }
+    if (sourceVer === destVer) {
+      toast("请复制到另一个目标版本", "warning");
+      return;
+    }
+    const selectedOnly = Boolean(els.copySelectedOnly && els.copySelectedOnly.checked);
+    let sourceItems;
+    if (selectedOnly) {
+      sourceItems = selectedLiveItemsForVersion(sourceVer);
+      if (!sourceItems.length) {
+        toast("当前源版本没有已勾选记录，请勾选或取消「仅复制已勾选记录」", "warning");
+        return;
+      }
+    } else {
+      sourceItems = livePreviewItemsForVersion(sourceVer);
+    }
+    if (!sourceItems.length) {
+      toast(`版本 ${sourceVer} 没有可复制的未删除记录`, "warning");
+      return;
+    }
+    const copies = copyPreviewItemsToVersion(sourceItems, destVer);
+    if (!copies.length) return;
+    hideCopyPreviewPanel();
+    previewVersionFilter = destVer;
+    previewCollapsedVersions.delete(destVer);
+    if (copies[0]) setPreviewLocateByItem(copies[0]);
+    renderPreviewTable(previewItems);
+    toast(
+      `已将 ${copies.length} 条从「${sourceVer}」复制到「${destVer}」，请点「保存预览修改」`,
+      "info"
+    );
+  }
+
+  function openCopyPreviewPanel(sourceVer) {
+    if (!currentJobId) {
+      toast("请先生成预览后再复制", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    flushPreviewLocate();
+    hidePreviewOpPanels();
+    const preferred = String(sourceVer || "").trim();
+    fillCopyVersionOptions({ sourceVer: preferred });
+    if (preferred && els.copySelectedOnly) {
+      els.copySelectedOnly.checked = false;
+      updateCopyPreviewHint();
+    }
+    if (els.copyPreviewPanel) {
+      els.copyPreviewPanel.classList.remove("d-none");
+      try {
+        els.copyPreviewPanel.scrollIntoView({ block: "nearest" });
+      } catch (err) {
+        els.copyPreviewPanel.scrollIntoView();
+      }
+    }
+  }
+
+  function fillDeleteVersionOptions(options) {
+    const keep = Boolean(options && options.keepSelection);
+    const versions = listPreviewVersionChoices().filter(
+      (ver) => livePreviewItemsForVersion(ver).length || previewItems.some((item) => previewVersionKey(item) === ver)
+    );
+    const prev = keep ? String((els.deleteVersionSelect && els.deleteVersionSelect.value) || "") : "";
+    const preferred =
+      String((options && options.version) || "").trim() ||
+      prev ||
+      previewVersionFilter ||
+      versions[0] ||
+      "";
+    fillVersionSelect(els.deleteVersionSelect, versions, preferred);
+    updateDeleteVersionHint();
+  }
+
+  function updateDeleteVersionHint() {
+    if (!els.deleteVersionHint) return;
+    const ver = String((els.deleteVersionSelect && els.deleteVersionSelect.value) || "").trim();
+    if (!ver) {
+      els.deleteVersionHint.textContent = "请选择要清空的目标版本。";
+      return;
+    }
+    const live = livePreviewItemsForVersion(ver);
+    const already = previewItems.filter(
+      (item) => previewVersionKey(item) === ver && isPreviewDeleted(item)
+    ).length;
+    if (!live.length) {
+      els.deleteVersionHint.textContent = already
+        ? `版本 ${ver} 的记录都已标记删除。`
+        : `版本 ${ver} 没有可删除的记录。`;
+      return;
+    }
+    els.deleteVersionHint.textContent = `将标记删除「${ver}」的 ${live.length} 条未删除记录${
+      already ? `（另有 ${already} 条已删除）` : ""
+    }。`;
+  }
+
+  function markPreviewItemDeleted(item) {
+    const inRules = Boolean(ruleItemOf(item));
+    const savedAlready = originalPreviewItems.some(
+      (x) => originKeyOf(x) === originKeyOf(item)
+    );
+    previewSelectedKeys.delete(taskIdentity(item));
+    if (!inRules && !savedAlready) return "remove";
+    item.changeKind = "delete";
+    item.hideInPreview = true;
+    return "mark";
+  }
+
+  function deletePreviewItemsByVersion(ver) {
+    const key = String(ver || "").trim() || "未指定版本";
+    const targets = livePreviewItemsForVersion(key);
+    if (!targets.length) {
+      toast(`版本 ${key} 没有可删除的记录`, "info");
+      return 0;
+    }
+    if (
+      !window.confirm(
+        `确定删除版本 ${key} 的 ${targets.length} 条记录？它们将从列表中隐藏，尚未保存的新增会直接移除。`
+      )
+    ) {
+      return 0;
+    }
+    const removeKeys = new Set();
+    let marked = 0;
+    targets.forEach((item) => {
+      const mode = markPreviewItemDeleted(item);
+      if (mode === "remove") removeKeys.add(originKeyOf(item));
+      else {
+        item.hideInPreview = true;
+        marked += 1;
+      }
+    });
+    if (removeKeys.size) {
+      previewItems = previewItems.filter((item) => !removeKeys.has(originKeyOf(item)));
+    }
+    return marked + removeKeys.size;
+  }
+
+  function confirmDeletePreviewVersion() {
+    if (!currentJobId) {
+      toast("请先生成预览后再删除", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    const ver = String((els.deleteVersionSelect && els.deleteVersionSelect.value) || "").trim();
+    if (!ver) {
+      toast("请选择要删除的目标版本", "warning");
+      return;
+    }
+    const count = deletePreviewItemsByVersion(ver);
+    if (!count) return;
+    hideDeleteVersionPanel();
+    renderPreviewTable(previewItems);
+    toast(`已删除版本 ${ver} 的 ${count} 条记录，已从列表隐藏`, "info");
+    persistPreviewEdits({ quietSuccess: true }).catch((e) =>
+      toast(e.message || "删除已生效，但保存失败，请点「保存预览修改」", "warning")
+    );
+  }
+
+  function openDeleteVersionPanel(version) {
+    if (!currentJobId) {
+      toast("请先生成预览后再删除", "warning");
+      return;
+    }
+    syncPreviewItemsFromDom();
+    hidePreviewOpPanels();
+    fillDeleteVersionOptions({ version: String(version || "").trim() });
+    if (els.deleteVersionPanel) {
+      els.deleteVersionPanel.classList.remove("d-none");
+      try {
+        els.deleteVersionPanel.scrollIntoView({ block: "nearest" });
+      } catch (err) {
+        els.deleteVersionPanel.scrollIntoView();
+      }
+    }
+  }
+
   function fillAddPreviewAnchorOptions() {
     if (!els.addAnchorSelect) return;
-    const filtered = previewItems.filter((item) => {
+    const live = visiblePreviewItems();
+    const filtered = live.filter((item) => {
       if (previewVersionFilter && previewVersionKey(item) !== previewVersionFilter) return false;
       return itemMatchesColFilters(item);
     });
-    const source = filtered.length ? filtered : previewItems;
+    const source = filtered.length ? filtered : live;
     els.addAnchorSelect.innerHTML = source
       .map((item) => {
         const idx = previewItems.indexOf(item);
@@ -3238,18 +3803,17 @@
     }
     syncPreviewItemsFromDom();
     flushPreviewLocate();
-    if (!previewItems.length) {
+    if (!visiblePreviewItems().length) {
       addPreviewRow(null, "after");
       return;
     }
     const locate = locatePreviewItem();
     if (locate) {
-      hideMovePreviewPanel();
-      hideAddPreviewPanel();
+      hidePreviewOpPanels();
       addPreviewRow(locate, "after");
       return;
     }
-    hideMovePreviewPanel();
+    hidePreviewOpPanels();
     fillAddPreviewAnchorOptions();
     if (els.addPlaceSelect) els.addPlaceSelect.value = "after";
     if (els.addPreviewPanel) {
@@ -3343,6 +3907,95 @@
       .filter((item) => item && canCheckPreview(item) && previewSelectedKeys.has(taskIdentity(item)));
   }
 
+  function sharedSelectedDueDate(items) {
+    const dates = (items || [])
+      .map((item) => String((item && item.dueDate) || "").trim())
+      .filter(Boolean);
+    if (!dates.length) return "";
+    const first = dates[0];
+    return dates.every((d) => d === first) ? first : "";
+  }
+
+  function updateBatchDueDateHint() {
+    if (!els.batchDueDateHint) return;
+    const selected = listSelectedItemsForMove();
+    if (!selected.length) {
+      els.batchDueDateHint.textContent = "请先勾选要设置完成日期的记录。";
+      return;
+    }
+    const current = sharedSelectedDueDate(selected);
+    els.batchDueDateHint.textContent = current
+      ? `将把已勾选的 ${selected.length} 条完成日期设为同一天（当前同为 ${current}）。`
+      : `将把已勾选的 ${selected.length} 条完成日期设为同一天。`;
+  }
+
+  function openBatchDueDatePanel() {
+    if (!currentJobId) {
+      toast("请先生成预览后再设置完成日期", "warning");
+      return;
+    }
+    const selected = listSelectedItemsForMove();
+    if (!selected.length) {
+      toast("请先勾选要设置完成日期的记录", "warning");
+      return;
+    }
+    hidePreviewOpPanels();
+    if (els.batchDueDateInput) els.batchDueDateInput.value = sharedSelectedDueDate(selected);
+    updateBatchDueDateHint();
+    if (els.batchDueDatePanel) {
+      els.batchDueDatePanel.classList.remove("d-none");
+      try {
+        els.batchDueDatePanel.scrollIntoView({ block: "nearest" });
+      } catch (err) {
+        els.batchDueDatePanel.scrollIntoView();
+      }
+    }
+    if (els.batchDueDateInput) els.batchDueDateInput.focus();
+  }
+
+  function confirmBatchDueDate() {
+    if (!currentJobId) {
+      toast("请先生成预览后再设置完成日期", "warning");
+      return;
+    }
+    const selected = listSelectedItemsForMove();
+    if (!selected.length) {
+      toast("请先勾选要设置完成日期的记录", "warning");
+      return;
+    }
+    const next = String((els.batchDueDateInput && els.batchDueDateInput.value) || "").trim();
+    if (next && !/^\d{4}-\d{2}-\d{2}$/.test(next)) {
+      toast("完成日期格式无效", "warning");
+      return;
+    }
+    if (!next && !window.confirm(`确定清空已勾选 ${selected.length} 条的完成日期？`)) {
+      return;
+    }
+    let changed = 0;
+    selected.forEach((item) => {
+      const prev = String((item && item.dueDate) || "").trim();
+      if (prev === next) return;
+      item.dueDate = next;
+      refreshItemChangeMark(item);
+      changed += 1;
+    });
+    hideBatchDueDatePanel();
+    renderPreviewTable(previewItems);
+    if (!changed) {
+      toast("勾选记录的完成日期已是该值，无需修改", "info");
+      return;
+    }
+    toast(
+      next
+        ? `已将 ${changed} 条完成日期设为 ${next}`
+        : `已清空 ${changed} 条完成日期`,
+      "info"
+    );
+    persistPreviewEdits({ quietSuccess: true }).catch((e) =>
+      toast(e.message || "完成日期已写入表格，但保存失败，请点「保存预览修改」", "warning")
+    );
+  }
+
   function applyCategoryFromAnchor(item, anchor) {
     if (!item || !anchor) return;
     const prevVer = previewVersionKey(item);
@@ -3433,6 +4086,7 @@
       .toLowerCase();
     const prev = String((els.moveAnchorSelect && els.moveAnchorSelect.value) || "");
     const source = previewItems.filter((item) => {
+      if (isHiddenPreviewItem(item)) return false;
       if (movingKeys.has(originKeyOf(item))) return false;
       if (!q) return true;
       return previewRecordLabel(item).toLowerCase().includes(q);
@@ -3474,7 +4128,7 @@
       toast("请先勾选要调整顺序的记录", "warning");
       return;
     }
-    hideAddPreviewPanel();
+    hidePreviewOpPanels();
     if (els.movePlaceSelect) els.movePlaceSelect.value = "after";
     if (els.moveAnchorFilter) els.moveAnchorFilter.value = "";
     fillMoveAnchorOptions();
@@ -3602,22 +4256,23 @@
     toast(data.message || "已从文控台账同步", "info");
   }
 
-  async function savePreviewEdits() {
+  async function persistPreviewEdits(options) {
+    const opts = options || {};
     if (!currentJobId) {
-      toast("请先生成预览后再保存修改", "warning");
-      return;
+      if (!opts.quietSuccess) toast("请先生成预览后再保存修改", "warning");
+      return false;
     }
     const items = getPreviewItems();
     const conflicts = listPreviewFilenameConflicts(items);
     if (conflicts.length) {
       markPreviewFilenameConflicts();
       toast(formatFilenameConflicts(conflicts), "warning");
-      return;
+      return false;
     }
     const { changedItems, removedOriginKeys } = collectChangedPreviewItems(items);
     if (!changedItems.length && !removedOriginKeys.length) {
-      toast("没有需要保存的增删改", "info");
-      return;
+      if (!opts.quietSuccess) toast("没有需要保存的增删改", "info");
+      return false;
     }
     const adjustments = collectAdjustments(items);
     const data = await requestJson("/api/document-control/version-tasks/preview/save-edits", {
@@ -3626,17 +4281,13 @@
       body: JSON.stringify({
         jobId: currentJobId,
         projectId: String(els.projectId.value || "").trim() || null,
-        changedItems,
-        removedOriginKeys,
+        items,
         adjustments,
       }),
     });
-    const savedItems = Array.isArray(data.items) ? data.items : items;
-    originalPreviewItems = JSON.parse(JSON.stringify(savedItems));
-    if (Array.isArray(data.ruleItems) && data.ruleItems.length) {
-      rulePreviewItems = JSON.parse(JSON.stringify(data.ruleItems));
-    }
-    renderPreviewTable(savedItems);
+    const savedItems = combinePreviewPayloadItems(data, items);
+    adoptPreviewBaselines(savedItems, data.ruleItems, data.manualDeletedKeys);
+    renderPreviewTable(originalPreviewItems);
     loadFeedbackHistory().catch(() => {});
     const addCount = adjustments.filter((row) => row && row.type === "add").length;
     const updateCount = adjustments.filter((row) => row && row.type === "update").length;
@@ -3645,28 +4296,33 @@
       const stamp = data.updatedAt
         ? String(data.updatedAt).replace("T", " ").slice(0, 19)
         : "";
-      const extraBits = [`当前 ${savedItems.length} 条`];
+      const extraBits = [`当前可见 ${visiblePreviewItems(savedItems).length} 条`];
       const patchedN = Number(data.patchedCount || changedItems.length);
       if (patchedN) extraBits.push(`增量 ${patchedN}`);
       if (addCount) extraBits.push(`新增 ${addCount}`);
       if (updateCount) extraBits.push(`修改 ${updateCount}`);
       if (deletedCount) extraBits.push(`删除 ${deletedCount}`);
-      const extra = extraBits.join("，") + "（再次生成会按规则重建）";
+      const extra = extraBits.join("，") + "（刷新后仍隐藏；再次生成预览会按规则加回来）";
       els.previewSaveBanner.innerHTML = `<div class="alert alert-success py-2 px-3 mb-2 small">已保存预览修改${
         stamp ? `（${escapeHtml(stamp)}）` : ""
       } · ${escapeHtml(extra)}${
         data.feedbackSaved ? ` · 采集 ${Number(data.feedbackSaved)} 条` : ""
       }</div>`;
     }
-    toast(data.message || `已保存预览清单（${savedItems.length} 条）`, "success");
+    if (!opts.quietSuccess) {
+      toast(data.message || `已保存预览清单（可见 ${visiblePreviewItems(savedItems).length} 条）`, "success");
+    }
+    return true;
+  }
+
+  async function savePreviewEdits() {
+    await persistPreviewEdits({});
   }
 
   async function loadLatestPreview(options) {
     const opts = options || {};
     const projectId =
-      opts.projectId != null
-        ? String(opts.projectId || "").trim()
-        : String(els.projectId.value || "").trim();
+      opts.projectId != null ? String(opts.projectId || "").trim() : selectedProjectId();
     let url = "/api/document-control/version-tasks/latest-preview";
     if (projectId) {
       url += `?projectId=${encodeURIComponent(projectId)}`;
@@ -3680,8 +4336,8 @@
       }
       return null;
     }
-    if (data.projectId && !String(els.projectId.value || "").trim()) {
-      els.projectId.value = data.projectId;
+    if (data.projectId && !selectedProjectId()) {
+      setProjectSelectValue(data.projectId);
     }
     applyPreviewPayload(data, {
       metaPrefix: "已加载上次预览",
@@ -3698,8 +4354,8 @@
         `以下版本缺少发布时间：${missing.join("、")}。请先填写，或点「检索候选发布日期」后再预览`
       );
     }
-    const fromVersion = String(els.fromVersion.value || "").trim();
-    const toVersion = String(els.toVersion.value || "").trim();
+    const fromVersion = inputValue(els.fromVersion);
+    const toVersion = inputValue(els.toVersion);
     if (!fromVersion || !toVersion) {
       throw new Error("请先填写开始版本号和最新版本号");
     }
@@ -3708,8 +4364,8 @@
       toVersion,
       intermediateVersions: parseIntermediateVersions(),
       versionReleaseDates: out,
-      projectId: String(els.projectId.value || "").trim() || null,
-      productName: String(els.productName.value || "").trim(),
+      projectId: selectedProjectId() || null,
+      productName: inputValue(els.productName),
       registrationCountry: currentRegistrationCountry(),
       overwrite: Boolean(overwrite),
     };
@@ -3740,8 +4396,8 @@
       metaPrefix: data.previewUpdated ? "已覆盖既有预览快照" : "已新建预览快照",
       fillForm: false,
     });
-    const projectId = String(els.projectId.value || "").trim();
-    const productName = String(els.productName.value || "").trim();
+    const projectId = selectedProjectId();
+    const productName = inputValue(els.productName);
     if (projectId && productName) {
       writeLocalProductName(projectId, productName);
       persistProductName().catch(() => {});
@@ -3755,24 +4411,43 @@
   }
 
   async function loadProjects() {
+    if (!els.projectId) return;
+    const previous = selectedProjectId() || readLastProjectId();
+    els.projectId.innerHTML = '<option value="">项目加载中…</option>';
+    if (els.batchProjectId) {
+      els.batchProjectId.innerHTML = '<option value="">项目加载中…</option>';
+    }
     const data = await requestJson("/api/projects");
-    const arr = Array.isArray(data) ? data : [];
+    const arr = Array.isArray(data)
+      ? data
+      : Array.isArray(data && data.items)
+        ? data.items
+        : Array.isArray(data && data.projects)
+          ? data.projects
+          : [];
     projectsById.clear();
     const options = ['<option value="">请选择项目</option>'];
     arr.forEach((p) => {
-      const id = String(p.id || "");
-      const name = String(p.name || "");
+      const id = String((p && p.id) || "");
+      const name = String((p && p.name) || "");
       if (!id || !name) return;
       projectsById.set(id, p);
-      const country = String(p.registeredCountry || "").trim();
+      const country = String((p && (p.registeredCountry || p.country)) || "").trim();
       const label = country ? `${name}（${country}）` : name;
-      options.push(`<option value="${id}">${escapeHtml(label)}</option>`);
+      options.push(`<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`);
     });
+    if (!projectsById.size) {
+      const emptyHtml = '<option value="">暂无可见项目</option>';
+      els.projectId.innerHTML = emptyHtml;
+      if (els.batchProjectId) els.batchProjectId.innerHTML = emptyHtml;
+      toast("未获取到项目。请确认当前账号对该公司有可见项目，或到任务管理查看。", "warning");
+      return;
+    }
     els.projectId.innerHTML = options.join("");
     if (els.batchProjectId) {
       els.batchProjectId.innerHTML = options.join("");
     }
-    restoreLastProject();
+    if (!setProjectSelectValue(previous)) restoreLastProject();
   }
 
 
@@ -3919,12 +4594,14 @@
       }),
     });
     await loadProjectRecords();
-    els.applyMsg.textContent = `${data.message || "下发完成"}${saved ? `（已记录反馈 ${saved} 条）` : ""}`;
+    if (els.applyMsg) {
+      els.applyMsg.textContent = `${data.message || "下发完成"}${saved ? `（已记录反馈 ${saved} 条）` : ""}`;
+    }
     toast(data.message || "下发完成", "success");
   }
 
   async function onProjectChanged() {
-    const projectId = String(els.projectId.value || "").trim();
+    const projectId = selectedProjectId();
     writeLastProjectId(projectId);
     await loadSavedRecords();
     if (!projectId) {
@@ -4019,15 +4696,17 @@
         );
       });
     }
-    els.suggestBtn.addEventListener("click", () => {
-      if (suggestInFlight) {
-        toast("检索进行中，请稍候…", "info");
-        return;
-      }
-      withButtonBusy(els.suggestBtn, "检索中…", () => suggestReleaseDate(null)).catch((e) =>
-        toast(e.message || "检索失败", "danger")
-      );
-    });
+    if (els.suggestBtn) {
+      els.suggestBtn.addEventListener("click", () => {
+        if (suggestInFlight) {
+          toast("检索进行中，请稍候…", "info");
+          return;
+        }
+        withButtonBusy(els.suggestBtn, "检索中…", () => suggestReleaseDate(null)).catch((e) =>
+          toast(e.message || "检索失败", "danger")
+        );
+      });
+    }
     if (els.diagnoseBtn) {
       els.diagnoseBtn.addEventListener("click", () => {
         withButtonBusy(els.diagnoseBtn, "诊断中…", () => diagnoseReleaseDate(null)).catch((e) =>
@@ -4035,16 +4714,20 @@
         );
       });
     }
-    els.previewBtn.addEventListener("click", () => {
-      withButtonBusy(els.previewBtn, "预览中…", () => doPreview()).catch((e) =>
-        toast(e.message || "预览失败", "danger")
-      );
-    });
-    els.applyBtn.addEventListener("click", () => {
-      withButtonBusy(els.applyBtn, "下发中…", () => applyTasks()).catch((e) =>
-        toast(e.message || "下发失败", "danger")
-      );
-    });
+    if (els.previewBtn) {
+      els.previewBtn.addEventListener("click", () => {
+        withButtonBusy(els.previewBtn, "预览中…", () => doPreview()).catch((e) =>
+          toast(e.message || "预览失败", "danger")
+        );
+      });
+    }
+    if (els.applyBtn) {
+      els.applyBtn.addEventListener("click", () => {
+        withButtonBusy(els.applyBtn, "下发中…", () => applyTasks()).catch((e) =>
+          toast(e.message || "下发失败", "danger")
+        );
+      });
+    }
     if (els.savePreviewEditsBtn) {
       els.savePreviewEditsBtn.addEventListener("click", () => {
         withButtonBusy(els.savePreviewEditsBtn, "保存中…", () => savePreviewEdits()).catch(
@@ -4083,6 +4766,53 @@
     }
     if (els.movePreviewCancelBtn) {
       els.movePreviewCancelBtn.addEventListener("click", () => hideMovePreviewPanel());
+    }
+    if (els.copyPreviewBtn) {
+      els.copyPreviewBtn.addEventListener("click", () => openCopyPreviewPanel());
+    }
+    if (els.copyFromVersion) {
+      els.copyFromVersion.addEventListener("change", () => fillCopyVersionOptions({ keepSelection: true }));
+    }
+    if (els.copyToVersion) {
+      els.copyToVersion.addEventListener("change", () => updateCopyPreviewHint());
+    }
+    if (els.copySelectedOnly) {
+      els.copySelectedOnly.addEventListener("change", () => updateCopyPreviewHint());
+    }
+    if (els.copyPreviewConfirmBtn) {
+      els.copyPreviewConfirmBtn.addEventListener("click", () => confirmCopyPreviewRows());
+    }
+    if (els.copyPreviewCancelBtn) {
+      els.copyPreviewCancelBtn.addEventListener("click", () => hideCopyPreviewPanel());
+    }
+    if (els.batchDueDateBtn) {
+      els.batchDueDateBtn.addEventListener("click", () => openBatchDueDatePanel());
+    }
+    if (els.batchDueDateConfirmBtn) {
+      els.batchDueDateConfirmBtn.addEventListener("click", () => confirmBatchDueDate());
+    }
+    if (els.batchDueDateCancelBtn) {
+      els.batchDueDateCancelBtn.addEventListener("click", () => hideBatchDueDatePanel());
+    }
+    if (els.batchDueDateInput) {
+      els.batchDueDateInput.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          confirmBatchDueDate();
+        }
+      });
+    }
+    if (els.deleteVersionBtn) {
+      els.deleteVersionBtn.addEventListener("click", () => openDeleteVersionPanel());
+    }
+    if (els.deleteVersionSelect) {
+      els.deleteVersionSelect.addEventListener("change", () => updateDeleteVersionHint());
+    }
+    if (els.deleteVersionConfirmBtn) {
+      els.deleteVersionConfirmBtn.addEventListener("click", () => confirmDeletePreviewVersion());
+    }
+    if (els.deleteVersionCancelBtn) {
+      els.deleteVersionCancelBtn.addEventListener("click", () => hideDeleteVersionPanel());
     }
     if (els.moveAnchorFilter) {
       els.moveAnchorFilter.addEventListener("input", () => fillMoveAnchorOptions({ keepSelection: true }));
@@ -4179,9 +4909,8 @@
                 ev.target.value = prevItem.fileName || "";
               } else {
                 item.targetVersion = prevItem.targetVersion;
-                item.fileVersion = prevItem.fileVersion;
                 item.registrationVersion = prevItem.registrationVersion;
-                ev.target.value = prevItem.targetVersion || prevItem.fileVersion || "";
+                ev.target.value = prevItem.targetVersion || prevItem.registrationVersion || "";
               }
               toast(
                 `同一版本下文件名不能重复：${previewVersionKey(other)} 已有「${String(
@@ -4223,6 +4952,7 @@
             return;
           }
           item.changeKind = "";
+          delete item.hideInPreview;
           refreshItemChangeMark(item);
           if (canSelectPreview(item)) previewSelectedKeys.add(taskIdentity(item));
           renderPreviewTable(previewItems);
@@ -4238,25 +4968,39 @@
           const idx = Number(removeBtn.getAttribute("data-vtg-remove-preview"));
           if (Number.isNaN(idx) || idx < 0 || idx >= previewItems.length) return;
           const item = previewItems[idx];
-          const inRules = Boolean(ruleItemOf(item));
-          const savedAlready = originalPreviewItems.some(
-            (x) => originKeyOf(x) === originKeyOf(item)
-          );
-          if (!inRules && !savedAlready) {
+          const mode = markPreviewItemDeleted(item);
+          if (mode === "remove") {
             previewItems.splice(idx, 1);
-            previewSelectedKeys.delete(taskIdentity(item));
             renderPreviewTable(previewItems);
             toast("已移除未保存的新增记录", "info");
+            persistPreviewEdits({ quietSuccess: true }).catch((e) =>
+              toast(e.message || "移除已生效，但保存失败，请点「保存预览修改」", "warning")
+            );
             return;
           }
-          item.changeKind = "delete";
-          previewSelectedKeys.delete(taskIdentity(item));
           renderPreviewTable(previewItems);
-          toast("已标记删除，原因可后补", "info");
+          toast("已从列表删除", "info");
+          persistPreviewEdits({ quietSuccess: true }).catch((e) =>
+            toast(e.message || "删除已生效，但保存失败，请点「保存预览修改」", "warning")
+          );
           return;
         }
         if (ev.target.closest(".vtg-drag-handle")) return;
         if (ev.target.closest("input, select, textarea, a")) return;
+        const copyVerBtn = ev.target.closest("[data-vtg-copy-ver]");
+        if (copyVerBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openCopyPreviewPanel(copyVerBtn.getAttribute("data-vtg-copy-ver") || "");
+          return;
+        }
+        const delVerBtn = ev.target.closest("[data-vtg-delete-ver]");
+        if (delVerBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openDeleteVersionPanel(delVerBtn.getAttribute("data-vtg-delete-ver") || "");
+          return;
+        }
         const header = ev.target.closest("tr.vtg-version-row");
         if (!header) return;
         const ver = header.getAttribute("data-vtg-ver") || "";
@@ -4267,6 +5011,7 @@
       });
       els.previewBody.addEventListener("keydown", (ev) => {
         if (ev.key !== "Enter" && ev.key !== " ") return;
+        if (ev.target.closest("button, input, select, textarea, a")) return;
         const header = ev.target.closest("tr.vtg-version-row");
         if (!header) return;
         ev.preventDefault();
@@ -4279,20 +5024,31 @@
     if (els.diagnoseBtn && window.__PAGE13_SUPER_ADMIN__) {
       els.diagnoseBtn.classList.remove("d-none");
     }
-    renderVersionDatesTable();
-    renderSavedRecordsTable();
-    bindEvents();
+    if (els.projectId) {
+      els.projectId.innerHTML = '<option value="">项目加载中…</option>';
+    }
+    try {
+      renderVersionDatesTable();
+      renderSavedRecordsTable();
+      bindEvents();
+    } catch (err) {
+      toast(err.message || "页面初始化失败", "danger");
+    }
     try {
       await loadProjects();
+    } catch (err) {
+      const failHtml = '<option value="">项目加载失败，请刷新</option>';
+      if (els.projectId) els.projectId.innerHTML = failHtml;
+      if (els.batchProjectId) els.batchProjectId.innerHTML = failHtml;
+      toast(err.message || "加载项目列表失败", "danger");
+    }
+    try {
       let projectId = restoreLastProject();
       if (!projectId) {
         try {
           const hint = await requestJson("/api/document-control/version-tasks/latest-preview");
           const hintId = String((hint && hint.lastRecordProjectId) || "").trim();
-          if (hintId && projectsById.has(hintId)) {
-            els.projectId.value = hintId;
-            projectId = hintId;
-          }
+          projectId = setProjectSelectValue(hintId);
         } catch (e) {
           /* 仅用于回填项目，失败则保持未选 */
         }
@@ -4314,7 +5070,7 @@
       }
       loadFeedbackHistory().catch(() => {});
     } catch (err) {
-      toast(err.message || "页面初始化失败", "danger");
+      toast(err.message || "加载上次预览失败", "danger");
     }
   }
 

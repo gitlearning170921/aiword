@@ -303,7 +303,7 @@
                 <span id="saveAllProgressHint" class="small text-primary ms-2 d-none" aria-live="polite"></span>
             </div>
         </div>
-        <p class="text-muted small mb-3">重复校验：项目名称 + 文件名称 + 任务类型 + 编写人。可下载模板填写后导入（表头与下方录入区字段一致，由服务端统一生成），或从下方已保存任务快速带入项目信息。</p>
+        <p class="text-muted small mb-3">重复校验：同一项目、同一目标版本下，文件名称 + 任务类型 + 编写人不可重复；不同目标版本可以下发相同任务。可下载模板填写后导入（表头与下方录入区字段一致，由服务端统一生成），或从下方已保存任务快速带入项目信息。</p>
 
         <div class="d-flex flex-wrap align-items-center gap-2 mb-3 py-2 px-3 rounded task-entry-quick-pick">
             <span class="small text-muted text-nowrap">从已保存任务选项目：</span>
@@ -367,10 +367,13 @@
                         <option value="">全部项目</option>
                     </select>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <input type="text" class="form-control form-control-sm" id="filterRecordFile" placeholder="文件名称">
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
+                    <input type="text" class="form-control form-control-sm" id="filterRecordTargetVersion" placeholder="目标版本">
+                </div>
+                <div class="col-md-2">
                     <input type="text" class="form-control form-control-sm" id="filterRecordAuthor" placeholder="编写人员">
                 </div>
                 <div class="col-md-3 d-flex align-items-center gap-3">
@@ -398,6 +401,8 @@
                 <label class="btn btn-outline-secondary" for="recordsGroupByAuthor">按编写人</label>
                 <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByProjectAuthor" value="project_author">
                 <label class="btn btn-outline-secondary" for="recordsGroupByProjectAuthor">按项目+编写人</label>
+                <input type="radio" class="btn-check" name="recordsGroupBy" id="recordsGroupByProjectVersion" value="project_target_version">
+                <label class="btn btn-outline-secondary" for="recordsGroupByProjectVersion">按项目+目标版本</label>
             </div>
             <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="batchEditRecordsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-outline-danger ms-2" id="batchDeleteRecordsBtn" disabled title="仅支持同一项目内批量删除">批量删除</button>
@@ -438,6 +443,7 @@
                         <th style="width:35px" data-col="seq">序号</th>
                         <th class="th-sortable col-wide" data-sort-key="projectName" data-col="projectName">项目名称 <span class="sort-indicator"></span></th>
                         <th class="th-sortable col-wide" data-sort-key="fileName" data-col="fileName">文件名称 <span class="sort-indicator"></span></th>
+                        <th class="th-sortable col-narrow" data-sort-key="targetVersion" data-col="targetVersion">目标版本 <span class="sort-indicator"></span></th>
                         <th class="th-sortable" data-sort-key="taskType" data-col="taskType">任务类型 <span class="sort-indicator"></span></th>
                         <th class="th-sortable col-narrow" data-sort-key="belongingModule" data-col="belongingModule">所属模块 <span class="sort-indicator"></span></th>
                         <th data-col="source">来源</th>
@@ -498,6 +504,10 @@
                     <div class="col-md-6">
                         <label class="form-label small">文件名称 *</label>
                         <input type="text" class="form-control form-control-sm" id="editRecordFile" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">目标版本</label>
+                        <input type="text" class="form-control form-control-sm font-monospace" id="editRecordTargetVersion" placeholder="如 1.0.0.0，可与版本清单下发对齐">
                     </div>
                     <div class="col-md-3">
                         <label class="form-label small">任务类别</label>

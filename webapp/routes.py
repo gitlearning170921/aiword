@@ -49,6 +49,11 @@ from .doc_service import (
     generate_document,
 )
 from .task_template_archive import resolve_task_template_from_saved_path
+from .upload_task_identity import (
+    duplicate_task_message,
+    find_upload_task_duplicate,
+    normalize_target_version,
+)
 from .models import (
     GenerateRecord, GenerationSummary, NoteAttachmentFile, UploadRecord, User,
     TaskTypeConfig, CompletionStatusConfig, AuditStatusConfig, NotifyTemplateConfig, AppConfig,
@@ -4623,6 +4628,7 @@ def _summary_payload():
             "documentNumber": getattr(u, "document_number", None),
             "projectPriority": int((proj_meta.get(u.project_name) or {}).get("priority") or Project.PRIORITY_MEDIUM),
             "fileVersion": getattr(u, "file_version", None),
+            "targetVersion": getattr(u, "target_version", None) or "",
             "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(u, "document_display_date", None)),
             "reviewer": getattr(u, "reviewer", None),
             "approver": getattr(u, "approver", None),
@@ -9906,6 +9912,9 @@ def api_upload():
     model = request.form.get("model", "").strip() or None
     registration_version = request.form.get("registrationVersion", "").strip() or None
     file_version = request.form.get("fileVersion", "").strip() or None
+    target_version = normalize_target_version(
+        request.form.get("targetVersion") or request.form.get("target_version")
+    )
     document_display_date_str = request.form.get("documentDisplayDate", "").strip() or None
     reviewer = request.form.get("reviewer", "").strip() or None
     approver = request.form.get("approver", "").strip() or None
@@ -9940,15 +9949,19 @@ def api_upload():
         if not existing:
             return jsonify({"message": "未找到要更新的记录"}), 404
     if existing is None:
-        existing = UploadRecord.query.filter_by(
-            project_name=project_name, file_name=file_name, task_type=task_type, author=author
-        ).first()
+        existing = find_upload_task_duplicate(
+            project_name=project_name,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+            target_version=target_version,
+        )
 
     if existing and not replace:
         return (
             jsonify(
                 {
-                    "message": f"存在同名项目+文件+类型+编写人({task_type or '无'}/{author})，是否需要替换原有内容？",
+                    "message": duplicate_task_message(target_version, task_type, author),
                     "needsConfirmation": True,
                 }
             ),
@@ -10086,6 +10099,7 @@ def api_upload():
             existing.document_number = document_number
         if _sent("fileVersion"):
             existing.file_version = file_version
+        existing.target_version = target_version
         if _sent("documentDisplayDate"):
             existing.document_display_date = document_display_date
         if _sent("reviewer"):
@@ -10115,14 +10129,20 @@ def api_upload():
                 existing.completion_status = None
                 existing.task_status = "pending"
                 existing.quick_completed = False
-        other = UploadRecord.query.filter(
-            UploadRecord.project_name == existing.project_name,
-            UploadRecord.file_name == existing.file_name,
-            UploadRecord.author == existing.author,
-            UploadRecord.id != existing.id,
-        ).first()
-        if other and (existing.task_type or None) == (other.task_type or None):
-            return jsonify({"message": "更新后会与另一条记录（项目+文件名称+任务类型+编写人员）重复"}), 409
+        other = find_upload_task_duplicate(
+            project_name=existing.project_name,
+            file_name=existing.file_name,
+            task_type=existing.task_type,
+            author=existing.author,
+            target_version=getattr(existing, "target_version", None) or "",
+            exclude_id=existing.id,
+        )
+        if other:
+            return jsonify(
+                {
+                    "message": "更新后会与另一条记录（项目+目标版本+文件名称+任务类型+编写人员）重复"
+                }
+            ), 409
         summary = _prepare_summary(existing)
         summary.project_name = project_name
         summary.project_id = project_id
@@ -10204,6 +10224,7 @@ def api_upload():
         registered_product_name=registered_product_name,
         model=model,
         registration_version=registration_version,
+        target_version=target_version,
         file_version=file_version,
         document_display_date=document_display_date,
         reviewer=reviewer,
@@ -10587,6 +10608,7 @@ def api_uploads_import():
             continue
 
         task_type = (d.get("task_type") or "").strip() or None
+        target_version = normalize_target_version(d.get("target_version") or d.get("targetVersion"))
         template_links = (d.get("template_links") or "").strip() or None
         if template_links:
             template_links = _normalize_template_links(template_links) or None
@@ -10605,12 +10627,13 @@ def api_uploads_import():
                 "message": f"文档体现日期「{doc_disp_raw}」无法识别，已忽略该日期（请用 YYYY-MM-DD）",
             })
 
-        existing = UploadRecord.query.filter_by(
+        existing = find_upload_task_duplicate(
             project_name=project_name,
             file_name=file_name,
             task_type=task_type,
             author=author,
-        ).first()
+            target_version=target_version,
+        )
 
         notes_raw = d.get("notes") or ""
         notes_val = "\n".join(ln.strip() for ln in notes_raw.replace(";", "\n").replace("；", "\n").split("\n") if ln.strip()) or None
@@ -10636,26 +10659,21 @@ def api_uploads_import():
         import_pcode = (d.get("project_code") or "").strip() or None
         effective_pcode = project_table_code or import_pcode
         if import_pcode and not project_table_code:
-            from webapp.project_code_uniqueness import gate_project_code_save
+            # 更新已有任务：不拦；仅新建且项目表尚无编号时做轻量跨项目占用检查
+            if not existing:
+                from webapp.project_code_uniqueness import gate_project_code_for_record
 
-            gate = gate_project_code_save(
-                import_org_id,
-                import_pcode,
-                project_id=getattr(resolved_proj, "id", None) if resolved_proj else None,
-                project_name=project_name,
-                registered_country=row_country
-                or getattr(resolved_proj, "registered_country", None),
-                exclude_upload_id=existing.id if existing else None,
-                confirm_sync=False,
-            )
-            if gate:
-                kind, payload = gate
-                if kind == "confirm" and isinstance(payload, dict):
-                    msg = payload.get("message") or "项目编号需在项目管理中确认后再导入"
-                else:
-                    msg = payload
-                errors.append({"row": row_no, "message": f"项目编号：{msg}"})
-                continue
+                conflict = gate_project_code_for_record(
+                    import_org_id,
+                    import_pcode,
+                    project_id=getattr(resolved_proj, "id", None) if resolved_proj else None,
+                    project_name=project_name,
+                    registered_country=row_country
+                    or getattr(resolved_proj, "registered_country", None),
+                )
+                if conflict:
+                    errors.append({"row": row_no, "message": f"项目编号：{conflict}"})
+                    continue
             effective_pcode = import_pcode
 
         document_number = (d.get("document_number") or "").strip() or None
@@ -10679,6 +10697,7 @@ def api_uploads_import():
                 if has_document_number_col:
                     existing.document_number = document_number
                 existing.file_version = (d.get("file_version") or "").strip() or None
+                existing.target_version = target_version
                 existing.document_display_date = document_display_date
                 existing.reviewer = (d.get("reviewer") or "").strip() or None
                 existing.approver = (d.get("approver") or "").strip() or None
@@ -10709,6 +10728,7 @@ def api_uploads_import():
                     product=(d.get("product") or "").strip() or None,
                     country=(d.get("country") or "").strip() or None,
                     document_number=document_number,
+                    target_version=target_version,
                     file_version=(d.get("file_version") or "").strip() or None,
                     document_display_date=document_display_date,
                     reviewer=(d.get("reviewer") or "").strip() or None,
@@ -10860,6 +10880,7 @@ def api_uploads_list():
                 "projectCode": getattr(r, "project_code", None),
                 "documentNumber": getattr(r, "document_number", None),
                 "fileVersion": getattr(r, "file_version", None),
+                "targetVersion": getattr(r, "target_version", None) or "",
                 "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
                 "reviewer": getattr(r, "reviewer", None),
                 "approver": getattr(r, "approver", None),
@@ -11040,6 +11061,8 @@ def api_upload_update(upload_id: str):
     assignee_name = (data.get("assigneeName") or "").strip() or None
     document_number = (data.get("documentNumber") or "").strip() or None
     file_version = (data.get("fileVersion") or "").strip() or None
+    has_target_version = "targetVersion" in data or "target_version" in data
+    target_version = normalize_target_version(data.get("targetVersion") or data.get("target_version"))
     document_display_date_str = (data.get("documentDisplayDate") or "").strip() or None
     reviewer = (data.get("reviewer") or "").strip() or None
     approver = (data.get("approver") or "").strip() or None
@@ -11103,6 +11126,8 @@ def api_upload_update(upload_id: str):
         upload.document_number = document_number
     if file_version is not None:
         upload.file_version = file_version
+    if has_target_version:
+        upload.target_version = target_version
     if document_display_date_str is not None:
         if not document_display_date_str:
             upload.document_display_date = None
@@ -11165,14 +11190,24 @@ def api_upload_update(upload_id: str):
                 return jsonify({"message": "截止日期格式应为 YYYY-MM-DD"}), 400
     
     if upload.project_name and upload.file_name and upload.author:
-        other = UploadRecord.query.filter(
-            UploadRecord.project_name == upload.project_name,
-            UploadRecord.file_name == upload.file_name,
-            UploadRecord.author == upload.author,
-            UploadRecord.id != upload.id,
-        ).first()
-        if other and (upload.task_type or None) == (other.task_type or None):
-            return jsonify({"message": "项目名称+文件名称+任务类型+编写人与已有记录重复"}), 409
+        other = find_upload_task_duplicate(
+            project_name=upload.project_name,
+            file_name=upload.file_name,
+            task_type=upload.task_type,
+            author=upload.author,
+            target_version=getattr(upload, "target_version", None) or "",
+            exclude_id=upload.id,
+        )
+        if other:
+            return jsonify(
+                {
+                    "message": duplicate_task_message(
+                        getattr(upload, "target_version", None),
+                        upload.task_type,
+                        upload.author,
+                    ).replace("，是否需要替换原有内容？", "")
+                }
+            ), 409
     
     db.session.add(upload)
     if upload.summary:
@@ -11282,6 +11317,7 @@ def api_my_tasks():
                 "projectCode": getattr(r, "project_code", None),
                 "documentNumber": getattr(r, "document_number", None),
                 "fileVersion": getattr(r, "file_version", None),
+                "targetVersion": getattr(r, "target_version", None) or "",
                 "documentDisplayDate": (lambda d: d.strftime("%Y-%m-%d") if d else None)(getattr(r, "document_display_date", None)),
                 "reviewer": getattr(r, "reviewer", None),
                 "approver": getattr(r, "approver", None),

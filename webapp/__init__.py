@@ -265,6 +265,118 @@ def ensure_schema(app: Flask):
                     pass
                 conn.commit()
 
+    def _upload_unique_col_sets():
+        live = inspect(engine)
+        out = []
+        if "upload_records" not in live.get_table_names():
+            return out
+        for uq in live.get_unique_constraints("upload_records") or []:
+            cols = tuple(uq.get("column_names") or [])
+            if cols:
+                out.append(cols)
+        for idx in live.get_indexes("upload_records") or []:
+            if not idx.get("unique"):
+                continue
+            cols = tuple(idx.get("column_names") or [])
+            if cols:
+                out.append(cols)
+        return out
+
+    def fix_upload_records_unique_include_target_version():
+        """唯一约束改为 (项目, 文件, 类型, 编写人, 目标版本)，允许同项目不同目标版本重复任务。"""
+        if "upload_records" not in inspect(engine).get_table_names():
+            return
+        new_uq = ("project_name", "file_name", "task_type", "author", "target_version")
+        old_uqs = {
+            ("project_name", "file_name", "task_type", "author"),
+            ("project_name", "file_name", "task_type"),
+        }
+        try:
+            with engine.connect() as conn:
+                conn.execute(
+                    text("UPDATE upload_records SET target_version = '' WHERE target_version IS NULL")
+                )
+                conn.commit()
+        except Exception:
+            pass
+        current = set(_upload_unique_col_sets())
+        if new_uq in current and not (current & old_uqs):
+            return
+        if is_sqlite:
+            live = inspect(engine)
+            columns = live.get_columns("upload_records")
+            if not any(c.get("name") == "target_version" for c in columns):
+                return
+            col_ddls = []
+            col_names = []
+            for col in columns:
+                name = col.get("name")
+                if not name:
+                    continue
+                col_names.append(name)
+                typ = col.get("type")
+                type_str = str(typ) if typ is not None else "TEXT"
+                if not type_str or type_str.upper() in ("NULLTYPE", "NULL", "NONE"):
+                    type_str = "TEXT"
+                nullable = bool(col.get("nullable", True))
+                pk = bool(col.get("primary_key"))
+                parts = [name, type_str]
+                if pk:
+                    parts.append("NOT NULL PRIMARY KEY")
+                elif name == "target_version":
+                    parts.append("NOT NULL DEFAULT ''")
+                elif not nullable:
+                    parts.append("NOT NULL")
+                col_ddls.append(" ".join(parts))
+            unique_sql = (
+                "UNIQUE (project_name, file_name, task_type, author, target_version)"
+            )
+            create_sql = (
+                "CREATE TABLE upload_records_new (\n  "
+                + ",\n  ".join(col_ddls + [unique_sql])
+                + "\n)"
+            )
+            cols_str = ", ".join(col_names)
+            with engine.connect() as conn:
+                conn.execute(text("PRAGMA foreign_keys=OFF"))
+                conn.execute(text("DROP TABLE IF EXISTS upload_records_new"))
+                conn.execute(text(create_sql))
+                conn.execute(
+                    text(
+                        f"INSERT INTO upload_records_new ({cols_str}) "
+                        f"SELECT {cols_str} FROM upload_records"
+                    )
+                )
+                conn.execute(text("DROP TABLE upload_records"))
+                conn.execute(text("ALTER TABLE upload_records_new RENAME TO upload_records"))
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.commit()
+            return
+        with engine.connect() as conn:
+            for idx_name in (
+                "uq_project_file_type_author",
+                "uq_project_file_type",
+                "uq_project_file_type_author_version",
+            ):
+                try:
+                    conn.execute(text(f"ALTER TABLE upload_records DROP INDEX {idx_name}"))
+                except Exception:
+                    try:
+                        conn.execute(text(f"ALTER TABLE upload_records DROP CONSTRAINT {idx_name}"))
+                    except Exception:
+                        pass
+            try:
+                conn.execute(
+                    text(
+                        "ALTER TABLE upload_records ADD UNIQUE INDEX "
+                        "uq_project_file_type_author_version "
+                        "(project_name, file_name, task_type, author, target_version)"
+                    )
+                )
+            except Exception:
+                pass
+            conn.commit()
+
     # 先修复 nullable 约束问题
     fix_upload_records_nullable()
 
@@ -385,6 +497,12 @@ def ensure_schema(app: Flask):
         "file_version",
         "ALTER TABLE upload_records ADD COLUMN file_version TEXT",
         "ALTER TABLE upload_records ADD COLUMN file_version VARCHAR(64)",
+    )
+    ensure_column(
+        "upload_records",
+        "target_version",
+        "ALTER TABLE upload_records ADD COLUMN target_version VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE upload_records ADD COLUMN target_version VARCHAR(64) NOT NULL DEFAULT ''",
     )
     ensure_column(
         "upload_records",
@@ -872,6 +990,7 @@ def ensure_schema(app: Flask):
         "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
         "ALTER TABLE upload_records ADD COLUMN last_audit_at DATETIME",
     )
+    fix_upload_records_unique_include_target_version()
 
     # 文献检索批次：检索参数快照（用于「续抓」时复用完全一致的参数）
     ensure_column(

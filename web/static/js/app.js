@@ -17,6 +17,26 @@ const App = {
             fetchOpts.signal = controller.signal;
             timer = setTimeout(() => controller.abort(), timeoutMs);
         }
+        const friendlyUpstreamMessage = (raw) => {
+            const s = String(raw || "");
+            const sl = s.toLowerCase();
+            const looksDown =
+                sl.includes("httpconnectionpool") ||
+                sl.includes("connection refused") ||
+                sl.includes("winerror 10061") ||
+                s.includes("积极拒绝") ||
+                sl.includes("failed to establish a new connection") ||
+                sl.includes("newconnectionerror") ||
+                sl.includes("max retries exceeded") ||
+                sl.includes("errno 111");
+            if (!looksDown) return s;
+            return typeof window.ufText === "function"
+                ? window.ufText(
+                    "文档服务（API）未启动或无法连接。请先启动 API（本地常见端口 8000，可运行 aicheckword/dev/local-run/start_api.bat）后再刷新本页。",
+                    "文档服务未启动。请先启动后再刷新本页；若无法处理请联系管理员。"
+                )
+                : "文档服务未启动。请先启动后再刷新本页。";
+        };
         let response;
         try {
             response = await fetch(url, { credentials: "include", ...fetchOpts });
@@ -121,7 +141,7 @@ const App = {
                 return this.request(url, { ...options, body: nextBody });
             }
             
-            throw new Error(message);
+            throw new Error(friendlyUpstreamMessage(message));
         }
         
         const text = await response.text();
@@ -757,6 +777,7 @@ function _updateProjectBlockTaskRowCount(block) {
 
 function _copyPrevTaskRowFields(prevRow, newRowEl, newCatSelect) {
     newRowEl.querySelector(".task-filename").value = prevRow.querySelector(".task-filename")?.value ?? "";
+    newRowEl.querySelector(".task-target-version").value = prevRow.querySelector(".task-target-version")?.value ?? "";
     const prevCatSelect = prevRow.querySelector(".task-type-cell .task-category");
     const prevTypeSelect = prevRow.querySelector(".task-type-cell .task-type");
     const newTypeSelect = newRowEl.querySelector(".task-type-cell .task-type");
@@ -1024,6 +1045,7 @@ function createProjectBlock() {
                         <tr class="project-entry-head-row1">
                             <th class="task-row-select-col"></th>
                             <th>文件名称 *</th>
+                            <th>目标版本</th>
                             <th>任务类型</th>
                             <th>所属模块</th>
                             <th>文档链接/模板</th>
@@ -1035,7 +1057,7 @@ function createProjectBlock() {
                         </tr>
                         <tr class="project-entry-head-row2">
                             <th class="task-row-select-col"></th>
-                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                             <th>文件编号</th>
                             <th>文件版本号</th>
                             <th>文档体现日期</th>
@@ -1090,6 +1112,7 @@ function createTaskRowUnderProject(projectBlock) {
     tr.innerHTML = `
         <td class="task-row-select-col"><input type="checkbox" class="form-check-input task-row-select" title="勾选后可批量删除"></td>
         <td><input type="text" class="form-control form-control-sm task-filename" placeholder="文件名称"></td>
+        <td><input type="text" class="form-control form-control-sm font-monospace task-target-version" placeholder="如 1.0.0.0"></td>
         <td class="task-type-cell">
             <div class="d-flex flex-column gap-1 task-type-cell-inner"></div>
         </td>
@@ -2118,7 +2141,8 @@ async function initUploadPage() {
                     const author = (row.querySelector(".task-author")?.value || "").trim();
                     if (!fileName || !author) return;
                     const taskType = (row.querySelector(".task-type-cell .task-type")?.value || "").trim();
-                    const dupKey = `${fileName}\t${taskType || ""}\t${author}`;
+                    const targetVersion = (row.querySelector(".task-target-version")?.value || "").trim();
+                    const dupKey = `${fileName}\t${taskType || ""}\t${author}\t${targetVersion || ""}`;
                     if (dupSeen.has(dupKey)) return;
                     dupSeen.add(dupKey);
                     plannedSaveCount++;
@@ -2147,6 +2171,7 @@ async function initUploadPage() {
                 const dupSeen = new Set();
                 for (const row of rows) {
                     const fileName = (row.querySelector(".task-filename")?.value || "").trim();
+                    const targetVersion = (row.querySelector(".task-target-version")?.value || "").trim();
                     const taskTypeSelect = row.querySelector(".task-type-cell .task-type");
                     const taskType = taskTypeSelect ? (taskTypeSelect.value || "").trim() : "";
                     const link = (row.querySelector(".task-link")?.value || "").trim();
@@ -2168,10 +2193,10 @@ async function initUploadPage() {
                         continue;
                     }
 
-                    const dupKey = `${fileName}\t${taskType || ""}\t${author}`;
+                    const dupKey = `${fileName}\t${taskType || ""}\t${author}\t${targetVersion || ""}`;
                     if (dupSeen.has(dupKey)) {
                         App.notify(
-                            `本项目中存在多行「文件名称 + 任务类型 + 编写人员」完全相同（${fileName}）。数据库只允许保留一条，请修改后再保存；若多行共用同一模板文件，请为每行填写不同的文件名称。`,
+                            `本项目中存在多行「文件名称 + 任务类型 + 编写人员 + 目标版本」完全相同（${fileName}${targetVersion ? " / " + targetVersion : ""}）。同一目标版本只允许一条，请修改后再保存。`,
                             "warning"
                         );
                         _setButtonBusy(btn, false);
@@ -2186,6 +2211,7 @@ async function initUploadPage() {
                     formData.append("projectId", projectId);
                     formData.append("projectName", projectKey);
                     formData.append("fileName", fileName);
+                    formData.append("targetVersion", targetVersion);
                     formData.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
                     if (taskType) formData.append("taskType", taskType);
                     formData.append("author", author);
@@ -2228,7 +2254,7 @@ async function initUploadPage() {
                             const uploadingFile = fileInput && fileInput.files.length > 0;
                             let replaceMsg =
                                 (msg || "存在重复记录，是否替换？") +
-                                "\n\n提示：选「确定」将用本行内容覆盖库里已有同一条（同项目+文件名称+任务类型+编写人员）；选「取消」则跳过本行，可继续保存其余行。";
+                                "\n\n提示：选「确定」将用本行内容覆盖库里已有同一条（同项目+同目标版本+文件名称+任务类型+编写人员）；选「取消」则跳过本行，可继续保存其余行。";
                             if (uploadingFile) {
                                 replaceMsg +=
                                     "\n\n若上传了模板文件，将覆盖已有文件或链接，且来源将改为「文件」。";
@@ -2248,6 +2274,7 @@ async function initUploadPage() {
                             formDataReplace.append("projectId", projectId);
                             formDataReplace.append("projectName", projectKey);
                             formDataReplace.append("fileName", fileName);
+                            formDataReplace.append("targetVersion", targetVersion);
                             formDataReplace.append("projectNotes", (block.querySelector(".project-notes")?.value || "").trim());
                             if (taskType) formDataReplace.append("taskType", taskType);
                             formDataReplace.append("author", author);
@@ -3110,6 +3137,8 @@ async function openEditRecordModal(r) {
         projectCodeEl.value = code || "—";
     }
     document.getElementById("editRecordFile").value = r.fileName || "";
+    const targetVersionEl = document.getElementById("editRecordTargetVersion");
+    if (targetVersionEl) targetVersionEl.value = r.targetVersion || "";
     const taskTypeEl = document.getElementById("editRecordTaskType");
     const taskCategoryEl = document.getElementById("editRecordTaskCategory");
     if (taskTypeEl) {
@@ -3322,6 +3351,7 @@ function initEditRecordModal() {
         const payload = {
             projectName: document.getElementById("editRecordProject").value.trim(),
             fileName: document.getElementById("editRecordFile").value.trim(),
+            targetVersion: (document.getElementById("editRecordTargetVersion")?.value || "").trim(),
             taskType: document.getElementById("editRecordTaskType").value.trim() || null,
             author: (document.querySelector("#editRecordAuthorPicker .task-author")?.value || "").trim(),
             dueDate: document.getElementById("editRecordDueDate").value || null,
@@ -3371,6 +3401,7 @@ function initEditRecordModal() {
                 if (pid) fd.append("projectId", pid);
                 fd.append("projectName", payload.projectName);
                 fd.append("fileName", payload.fileName);
+                fd.append("targetVersion", payload.targetVersion || "");
                 fd.append("author", payload.author);
                 fd.append("taskType", payload.taskType || "");
                 fd.append("notes", (document.getElementById("editRecordNotes").value || "").trim());
@@ -3957,6 +3988,7 @@ function refreshRecordsProjectFilterOptions() {
 function initRecordsFilter() {
     const filterProject = document.getElementById("filterRecordProject");
     const filterFile = document.getElementById("filterRecordFile");
+    const filterTargetVersion = document.getElementById("filterRecordTargetVersion");
     const filterAuthor = document.getElementById("filterRecordAuthor");
     const filterStatus = document.getElementById("filterRecordStatus");
     
@@ -3964,9 +3996,10 @@ function initRecordsFilter() {
     
     const applyFilter = () => {
         const projectVal = String(filterProject.value || "").trim().toLowerCase();
-        const fileVal = filterFile.value.toLowerCase();
-        const authorVal = filterAuthor.value.toLowerCase();
-        const statusVal = filterStatus.value;
+        const fileVal = (filterFile?.value || "").toLowerCase();
+        const targetVersionVal = (filterTargetVersion?.value || "").toLowerCase().trim();
+        const authorVal = (filterAuthor?.value || "").toLowerCase();
+        const statusVal = filterStatus ? filterStatus.value : "";
         
         const tbody = document.getElementById("recordsTableBody");
         if (!tbody) return;
@@ -3985,6 +4018,11 @@ function initRecordsFilter() {
                 }
             }
             if (fileVal && !(String(r.fileName || "").toLowerCase().includes(fileVal))) return false;
+            if (targetVersionVal) {
+                const tv = String(r.targetVersion || "").toLowerCase();
+                const display = _displayTargetVersion(r.targetVersion).toLowerCase();
+                if (!tv.includes(targetVersionVal) && !display.includes(targetVersionVal)) return false;
+            }
             if (authorVal && !(String(r.author || "").toLowerCase().includes(authorVal))) return false;
             if (statusVal === "pending" && (r.completionStatus || r.taskStatus === "completed")) return false;
             if (statusVal === "completed" && !r.completionStatus && r.taskStatus !== "completed") return false;
@@ -3997,7 +4035,7 @@ function initRecordsFilter() {
     _applyRecordsFilter = applyFilter;
     refreshRecordsProjectFilterOptions();
     
-    [filterProject, filterFile, filterAuthor, filterStatus].forEach(el => {
+    [filterProject, filterFile, filterTargetVersion, filterAuthor, filterStatus].forEach(el => {
         el?.addEventListener("input", applyFilter);
         el?.addEventListener("change", applyFilter);
     });
@@ -4322,18 +4360,52 @@ async function downloadUploadTemplateFile(uploadId, triggerBtn) {
     }
 }
 
+function _displayTargetVersion(value) {
+    const s = String(value == null ? "" : value).trim();
+    return s || "未指定";
+}
+
+function _theadColspan(tableEl, fallback) {
+    const n = tableEl && tableEl.tHead
+        ? tableEl.tHead.querySelectorAll("tr:first-child th").length
+        : 0;
+    return n || fallback;
+}
+
+function _groupByProjectThenField(records, groupBy) {
+    const isVersion = groupBy === "project_target_version";
+    const l2Of = isVersion
+        ? (r) => _displayTargetVersion(r.targetVersion)
+        : (r) => (r.author ?? "");
+    const projectMap = new Map();
+    (records || []).forEach((r) => {
+        const p = r.projectName ?? "";
+        const l2 = l2Of(r);
+        if (!projectMap.has(p)) projectMap.set(p, new Map());
+        const inner = projectMap.get(p);
+        if (!inner.has(l2)) inner.set(l2, []);
+        inner.get(l2).push(r);
+    });
+    return {
+        projectMap,
+        l2Label: isVersion ? "目标版本" : "编写人",
+        l2KeyPrefix: isVersion ? "version:" : "author:",
+    };
+}
+
 function renderRecordsTable(records) {
     const tbody = document.getElementById("recordsTableBody");
     if (!tbody) return;
     lastRenderedRecords = records || [];
     const groupBy = (document.querySelector('input[name="recordsGroupBy"]:checked') || {}).value || "none";
+    const colspan = _theadColspan(document.getElementById("recordsTable"), 29);
 
     try {
         _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy);
     } catch (e) {
         console.error("renderRecordsTable:", e);
         tbody.innerHTML =
-            '<tr><td colspan="28" class="text-danger small">任务列表渲染失败：' +
+            `<tr><td colspan="${colspan}" class="text-danger small">任务列表渲染失败：` +
             _escTitle(e && e.message ? e.message : String(e)) +
             "。请刷新页面或查看浏览器控制台。</td></tr>";
     }
@@ -4396,6 +4468,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             <td class="seq-cell">${idx + 1}</td>
             <td data-col="projectName" class="col-wide project-name-pick-entry" title="${_escTitle(r.projectName)}（双击：新建录入块并带入该项目）">${r.projectName}</td>
             <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td data-col="targetVersion" class="font-monospace" title="${_escTitle(_displayTargetVersion(r.targetVersion))}">${_escTitle(_displayTargetVersion(r.targetVersion))}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceHtml}</td>
@@ -4431,12 +4504,13 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
         return tr;
     };
     
+    const colspan = _theadColspan(document.getElementById("recordsTable"), 29);
     tbody.innerHTML = "";
     if (!lastRenderedRecords.length) {
         const emptyRow =
             window.ScopeBar && ScopeBar.emptyTableRow
-                ? ScopeBar.emptyTableRow(28, "page1_records")
-                : '<tr><td colspan="28" class="text-muted small text-center py-4">暂无任务记录</td></tr>';
+                ? ScopeBar.emptyTableRow(colspan, "page1_records")
+                : `<tr><td colspan="${colspan}" class="text-muted small text-center py-4">暂无任务记录</td></tr>`;
         tbody.insertAdjacentHTML("beforeend", emptyRow);
         return;
     }
@@ -4445,40 +4519,32 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             const tr = makeRow(r, idx);
             tbody.appendChild(tr);
         });
-    } else if (groupBy === "project_author") {
-        const projectMap = new Map();
-        lastRenderedRecords.forEach((r) => {
-            const p = r.projectName ?? "";
-            const a = r.author ?? "";
-            if (!projectMap.has(p)) projectMap.set(p, new Map());
-            const authorMap = projectMap.get(p);
-            if (!authorMap.has(a)) authorMap.set(a, []);
-            authorMap.get(a).push(r);
-        });
+    } else if (groupBy === "project_author" || groupBy === "project_target_version") {
+        const { projectMap, l2Label, l2KeyPrefix } = _groupByProjectThenField(lastRenderedRecords, groupBy);
         let globalIdx = 0;
         let groupIndexL1 = 0;
         let groupIndexL2 = 0;
-        projectMap.forEach((authorMap, projectName) => {
+        projectMap.forEach((innerMap, projectName) => {
             const key1 = "project:" + projectName;
-            const totalProject = [...authorMap.values()].reduce((s, arr) => s + arr.length, 0);
+            const totalProject = [...innerMap.values()].reduce((s, arr) => s + arr.length, 0);
             const collapsed1 = recordsCollapsedGroups.has(key1);
             const header1 = document.createElement("tr");
             header1.className = "group-header-row group-header-level1 bg-light" + (collapsed1 ? " group-collapsed" : "");
             header1.dataset.groupKey = key1;
             header1.dataset.groupLevel = "1";
             header1.dataset.groupIndex = String(groupIndexL1++);
-            header1.innerHTML = `<td colspan="28" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
+            header1.innerHTML = `<td colspan="${colspan}" class="cursor-pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
             header1.style.cursor = "pointer";
             tbody.appendChild(header1);
-            authorMap.forEach((arr, authorName) => {
-                const key2 = key1 + "|author:" + authorName;
+            innerMap.forEach((arr, l2Name) => {
+                const key2 = key1 + "|" + l2KeyPrefix + l2Name;
                 const collapsed2 = recordsCollapsedGroups.has(key2);
                 const header2 = document.createElement("tr");
                 header2.className = "group-header-row group-header-level2 bg-light" + (collapsed2 ? " group-collapsed" : "");
                 header2.dataset.groupKey = key2;
                 header2.dataset.groupLevel = "2";
                 header2.dataset.groupIndex = String(groupIndexL2);
-                header2.innerHTML = `<td colspan="28" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> 编写人：${authorName || "（空）"} (${arr.length}条)</td>`;
+                header2.innerHTML = `<td colspan="${colspan}" class="cursor-pointer ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> ${l2Label}：${l2Name || "（空）"} (${arr.length}条)</td>`;
                 header2.style.cursor = "pointer";
                 tbody.appendChild(header2);
                 const rowHidden = collapsed1 || collapsed2;
@@ -4536,7 +4602,7 @@ function _renderRecordsTableBody(tbody, lastRenderedRecords, groupBy) {
             headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
             headerTr.dataset.groupKey = key;
             headerTr.dataset.groupIndex = String(gidx);
-            headerTr.innerHTML = `<td colspan="28" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+            headerTr.innerHTML = `<td colspan="${colspan}" class="cursor-pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
             headerTr.style.cursor = "pointer";
             tbody.appendChild(headerTr);
             arr.forEach((r) => {
@@ -7241,6 +7307,7 @@ async function _initDashboardPageInner() {
                 <td class="col-drag seq-cell"><span class="drag-handle" draggable="true" title="拖动排序">⋮⋮</span>${row.seq}</td>
                 <td title="${_escTitle(row.projectName)}">${row.projectName}</td>
                 <td title="${_escTitle(row.fileName)}">${row.fileName}</td>
+                <td class="font-monospace" title="${_escTitle(_displayTargetVersion(row.targetVersion))}">${_escTitle(_displayTargetVersion(row.targetVersion))}</td>
                 <td title="${_escTitle(row.taskType)}">${row.taskType || "-"}</td>
                 <td title="${_escTitle(row.belongingModule)}">${(row.belongingModule != null && row.belongingModule !== "") ? row.belongingModule : "-"}</td>
                 <td title="${_escTitle(row.author)}">${row.author}</td>
@@ -7270,41 +7337,34 @@ async function _initDashboardPageInner() {
             tableBody.appendChild(tr);
         };
 
+        const detailColspan = _theadColspan(document.getElementById("detailTable"), 27);
         if (groupBy === "none") {
             lastRenderedDetailRows.forEach((row) => addDetailRow(row));
-        } else if (groupBy === "project_author") {
-            const projectMap = new Map();
-            lastRenderedDetailRows.forEach((row) => {
-                const p = row.projectName ?? "";
-                const a = row.author ?? "";
-                if (!projectMap.has(p)) projectMap.set(p, new Map());
-                const authorMap = projectMap.get(p);
-                if (!authorMap.has(a)) authorMap.set(a, []);
-                authorMap.get(a).push(row);
-            });
+        } else if (groupBy === "project_author" || groupBy === "project_target_version") {
+            const { projectMap, l2Label, l2KeyPrefix } = _groupByProjectThenField(lastRenderedDetailRows, groupBy);
             let groupIndexL1 = 0;
             let groupIndexL2 = 0;
-            projectMap.forEach((authorMap, projectName) => {
+            projectMap.forEach((innerMap, projectName) => {
                 const key1 = "project:" + projectName;
-                const totalProject = [...authorMap.values()].reduce((s, arr) => s + arr.length, 0);
+                const totalProject = [...innerMap.values()].reduce((s, arr) => s + arr.length, 0);
                 const collapsed1 = detailCollapsedGroups.has(key1);
                 const header1 = document.createElement("tr");
                 header1.className = "group-header-row group-header-level1 bg-light" + (collapsed1 ? " group-collapsed" : "");
                 header1.dataset.groupKey = key1;
                 header1.dataset.groupLevel = "1";
                 header1.dataset.groupIndex = String(groupIndexL1++);
-                header1.innerHTML = "<td colspan=\"24\" style=\"cursor:pointer\"><span class=\"group-toggle\">" + (collapsed1 ? "▶" : "▼") + "</span> 项目：" + (projectName || "（空）") + " (" + totalProject + "条)</td>";
+                header1.innerHTML = `<td colspan="${detailColspan}" style="cursor:pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> 项目：${projectName || "（空）"} (${totalProject}条)</td>`;
                 header1.style.cursor = "pointer";
                 tableBody.appendChild(header1);
-                authorMap.forEach((arr, authorName) => {
-                    const key2 = key1 + "|author:" + authorName;
+                innerMap.forEach((arr, l2Name) => {
+                    const key2 = key1 + "|" + l2KeyPrefix + l2Name;
                     const collapsed2 = detailCollapsedGroups.has(key2);
                     const header2 = document.createElement("tr");
                     header2.className = "group-header-row group-header-level2 bg-light" + (collapsed2 ? " group-collapsed" : "");
                     header2.dataset.groupKey = key2;
                     header2.dataset.groupLevel = "2";
                     header2.dataset.groupIndex = String(groupIndexL2);
-                    header2.innerHTML = "<td colspan=\"24\" style=\"cursor:pointer\" class=\"ps-4\"><span class=\"group-toggle\">" + (collapsed2 ? "▶" : "▼") + "</span> 编写人：" + (authorName || "（空）") + " (" + arr.length + "条)</td>";
+                    header2.innerHTML = `<td colspan="${detailColspan}" style="cursor:pointer" class="ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> ${l2Label}：${l2Name || "（空）"} (${arr.length}条)</td>`;
                     header2.style.cursor = "pointer";
                     tableBody.appendChild(header2);
                     const rowHidden = collapsed1 || collapsed2;
@@ -7354,7 +7414,7 @@ async function _initDashboardPageInner() {
                 headerTr.className = "group-header-row bg-light" + (collapsed ? " group-collapsed" : "");
                 headerTr.dataset.groupKey = key;
                 headerTr.dataset.groupIndex = String(gidx);
-                headerTr.innerHTML = `<td colspan="25" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
+                headerTr.innerHTML = `<td colspan="${detailColspan}" style="cursor:pointer"><span class="group-toggle">${collapsed ? "▶" : "▼"}</span> ${label}：${key || "（空）"} (${arr.length}条)</td>`;
                 headerTr.style.cursor = "pointer";
                 tableBody.appendChild(headerTr);
                 arr.forEach((row) => addDetailRow(row, key, gidx, collapsed));
@@ -7844,7 +7904,7 @@ function initColumnToggle(btnId, menuId, tableId, options) {
     const baseColNames = {
         seq: "序号", observerTeam: "项目组", observerPerson: "负责人",
         projectName: "项目名称", projectCode: "项目编号",
-        fileName: "文件名称", taskType: "任务类型", belongingModule: "所属模块",
+        fileName: "文件名称", targetVersion: "目标版本", taskType: "任务类型", belongingModule: "所属模块",
         source: "来源", documentNumber: "文件编号", fileVersion: "文件版本号", author: "编写人员",
         dueDate: "截止日期", docDisplayDate: "文档体现日期", businessSide: "影响业务方",
         product: "影响产品", country: "国家", taskStatus: "状态", auditStatus: "审核状态",

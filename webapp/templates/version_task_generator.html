@@ -250,11 +250,19 @@
     padding: 0.45rem 0.6rem;
   }
   tr.vtg-version-row:hover td { background: #c7def3; }
-  tr.vtg-version-row .vtg-caret {
-    display: inline-block;
-    width: 1.1rem;
-    font-size: 0.75rem;
+  tr.vtg-version-row .vtg-ver-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
+  tr.vtg-version-row .vtg-ver-head-label { flex: 1 1 auto; min-width: 12rem; }
+  tr.vtg-version-row .vtg-ver-actions {
+    display: inline-flex;
+    gap: 0.3rem;
+    flex: 0 0 auto;
+  }
+  tr.vtg-version-row .vtg-ver-actions .btn { cursor: pointer; user-select: none; }
   tr.vtg-preview-hidden { display: none; }
   tr.vtg-status-discard td { opacity: 0.58; }
   tr.vtg-status-pending .vtg-status-select { border-color: #d97706; }
@@ -438,27 +446,14 @@
   .vtg-col-version { min-width: 7rem; }
   .vtg-col-author { min-width: 6rem; }
   .vtg-col-date { min-width: 8.2rem; }
-  .vtg-preview-table thead tr:first-child th[data-vtg-col="dueDate"],
-  .vtg-preview-table thead tr.vtg-preview-filter-row th[data-vtg-col="dueDate"] {
-    background: #d1fae5;
-    color: #065f46;
-  }
   .vtg-preview-table thead tr:first-child th[data-vtg-col="documentDisplayDate"],
   .vtg-preview-table thead tr.vtg-preview-filter-row th[data-vtg-col="documentDisplayDate"] {
     background: #fde68a;
     color: #92400e;
   }
-  .vtg-preview-table.table > tbody > tr > [data-vtg-col="dueDate"],
-  .vtg-preview-table.table-hover > tbody > tr:hover > [data-vtg-col="dueDate"] {
-    background-color: #ecfdf5 !important;
-  }
   .vtg-preview-table.table > tbody > tr > [data-vtg-col="documentDisplayDate"],
   .vtg-preview-table.table-hover > tbody > tr:hover > [data-vtg-col="documentDisplayDate"] {
     background-color: #fffbeb !important;
-  }
-  .vtg-preview-table [data-vtg-col="dueDate"] input.form-control {
-    background-color: #f0fdf9;
-    border-color: #5eead4;
   }
   .vtg-preview-table [data-vtg-col="documentDisplayDate"] input.form-control {
     background-color: #fffbeb;
@@ -679,7 +674,7 @@
       <span class="vtg-step-badge">3</span>
       <div class="flex-grow-1">
         <h2 id="vtgStep3Title">任务预览（可编辑）</h2>
-        <p class="vtg-sub">生成预览按「项目 + 起止版本」判重入库：已有快照会询问是否覆盖，没有则新建。同一项目、同一版本下文件名不可重复。表格可手工增、删、改；删除为标记保留，便于对照规则。变更原因可后补，保存后写入采集，用来优化规则文件。</p>
+        <p class="vtg-sub">生成预览按「项目 + 起止版本」判重入库：已有快照会询问是否覆盖，没有则新建。同一项目、同一版本下文件名不可重复。不同目标版本的清单可互相复制；也可按目标版本批量删除。表格可手工增、删、改；删除后立即从列表隐藏并写入快照，刷新或重启服务仍不显示。只有再次点「生成预览」才会按规则把清单加回来。</p>
       </div>
       <span id="vtgPreviewCount" class="badge text-bg-secondary vtg-count-slot">0 条</span>
     </div>
@@ -700,8 +695,17 @@
           <button id="vtgMovePreviewBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
             批量调整顺序
           </button>
+          <button id="vtgCopyPreviewBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
+            复制到版本
+          </button>
+          <button id="vtgBatchDueDateBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
+            批量设置完成日期
+          </button>
+          <button id="vtgDeleteVersionBtn" class="btn btn-outline-danger btn-sm" type="button" disabled>
+            按版本删除
+          </button>
           <span id="vtgLocateHint" class="small vtg-locate-hint is-empty">点一下目标行或把鼠标停在上面，该行会标蓝条；再点「添加记录」会插到这行后面。</span>
-          <span class="small text-muted">勾选多条后可批量调整顺序。点表头排序，拖动表头可改列位置，表头下方可筛选。完成日期为青绿列，文档日期为琥珀列。</span>
+          <span class="small text-muted">勾选后可下发、调序、复制到其它目标版本，或批量设置完成日期。点版本分组上的「复制本版 / 删除本版」可整组操作。点表头排序，拖动表头可改列位置。文档日期为琥珀列。</span>
           <button id="vtgClearColFiltersBtn" class="btn btn-outline-secondary btn-sm d-none" type="button">清除筛选/排序</button>
         </div>
         <div id="vtgAddPreviewPanel" class="vtg-add-panel d-none mb-2">
@@ -747,6 +751,56 @@
           </div>
           <div class="small text-muted mt-1">默认对准鼠标停留的那一行（可改）。已勾选记录会作为一组插入，并跟参照文件同一版本、同一章节。移动后请点「保存预览修改」。</div>
         </div>
+        <div id="vtgCopyPreviewPanel" class="vtg-add-panel d-none mb-2">
+          <div class="small mb-2" id="vtgCopyPreviewHint">选择源版本和目标版本后，把清单复制过去（原版本保留）。</div>
+          <div class="d-flex flex-wrap gap-2 align-items-end">
+            <div>
+              <label class="form-label small mb-1" for="vtgCopyFromVersion">从版本</label>
+              <select id="vtgCopyFromVersion" class="form-select form-select-sm" aria-label="源目标版本"></select>
+            </div>
+            <div>
+              <label class="form-label small mb-1" for="vtgCopyToVersion">复制到</label>
+              <select id="vtgCopyToVersion" class="form-select form-select-sm" aria-label="目标版本"></select>
+            </div>
+            <div class="form-check mb-1">
+              <input class="form-check-input" type="checkbox" id="vtgCopySelectedOnly">
+              <label class="form-check-label small" for="vtgCopySelectedOnly">仅复制已勾选记录</label>
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" id="vtgCopyPreviewConfirmBtn" class="btn btn-primary btn-sm">确定复制</button>
+              <button type="button" id="vtgCopyPreviewCancelBtn" class="btn btn-outline-secondary btn-sm">取消</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-1">复制后的记录算手工新增，原版本不变。同一目标版本下文件名不能重复。复制后请点「保存预览修改」。</div>
+        </div>
+        <div id="vtgBatchDueDatePanel" class="vtg-add-panel d-none mb-2">
+          <div class="small mb-2" id="vtgBatchDueDateHint">请先勾选要设置完成日期的记录。</div>
+          <div class="d-flex flex-wrap gap-2 align-items-end">
+            <div>
+              <label class="form-label small mb-1" for="vtgBatchDueDateInput">完成日期</label>
+              <input id="vtgBatchDueDateInput" class="form-control form-control-sm" type="date" aria-label="批量完成日期">
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" id="vtgBatchDueDateConfirmBtn" class="btn btn-primary btn-sm">应用到已勾选</button>
+              <button type="button" id="vtgBatchDueDateCancelBtn" class="btn btn-outline-secondary btn-sm">取消</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-1">将同一完成日期写入当前勾选的可见记录。日期留空表示清空这些记录的完成日期。</div>
+        </div>
+        <div id="vtgDeleteVersionPanel" class="vtg-add-panel d-none mb-2">
+          <div class="small mb-2" id="vtgDeleteVersionHint">选择要清空的目标版本。</div>
+          <div class="d-flex flex-wrap gap-2 align-items-end">
+            <div>
+              <label class="form-label small mb-1" for="vtgDeleteVersionSelect">目标版本</label>
+              <select id="vtgDeleteVersionSelect" class="form-select form-select-sm" aria-label="要删除的目标版本"></select>
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" id="vtgDeleteVersionConfirmBtn" class="btn btn-danger btn-sm">确定删除</button>
+              <button type="button" id="vtgDeleteVersionCancelBtn" class="btn btn-outline-secondary btn-sm">取消</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-1">按目标版本删除后，这些记录不再出现在预览列表中，仍会写入采集。尚未保存的新增会直接移除。</div>
+        </div>
         <div id="vtgPreviewMeta" class="small text-muted mb-2">尚未生成预览。</div>
         <div id="vtgPreviewVersionBar" class="vtg-version-bar d-none" aria-label="按版本筛选预览"></div>
         <div class="vtg-preview-select-bar" aria-label="预览勾选">
@@ -788,7 +842,7 @@
                 <button type="button" class="vtg-th-sort" data-vtg-sort="author" title="点击排序">责任人<span class="vtg-sort-ind">⇅</span></button>
               </th>
               <th class="vtg-col-date" data-vtg-col="dueDate">
-                <button type="button" class="vtg-th-sort" data-vtg-sort="dueDate" title="完成日期，青绿列；点击排序">完成日期<span class="vtg-sort-ind">⇅</span></button>
+                <button type="button" class="vtg-th-sort" data-vtg-sort="dueDate" title="点击排序">完成日期<span class="vtg-sort-ind">⇅</span></button>
               </th>
               <th class="vtg-col-date" data-vtg-col="documentDisplayDate">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="documentDisplayDate" title="文档日期，琥珀列；点击排序">文档日期<span class="vtg-sort-ind">⇅</span></button>

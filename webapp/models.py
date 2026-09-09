@@ -626,7 +626,14 @@ class UploadRecord(db.Model):
     """
     __tablename__ = "upload_records"
     __table_args__ = (
-        UniqueConstraint("project_name", "file_name", "task_type", "author", name="uq_project_file_type_author"),
+        UniqueConstraint(
+            "project_name",
+            "file_name",
+            "task_type",
+            "author",
+            "target_version",
+            name="uq_project_file_type_author_version",
+        ),
     )
 
     id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
@@ -657,6 +664,7 @@ class UploadRecord(db.Model):
     registration_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)  # 注册版本号
     project_code: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     document_number: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    target_version: Mapped[str] = mapped_column(db.String(64), nullable=False, default="", server_default="")
     file_version: Mapped[Optional[str]] = mapped_column(db.String(64), nullable=True)
     document_display_date: Mapped[Optional[datetime]] = mapped_column(db.Date, nullable=True)
     reviewer: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)

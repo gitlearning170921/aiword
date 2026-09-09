@@ -9,12 +9,12 @@ import requests
 from flask import jsonify
 
 from ._integration_common import (
-    format_upstream_request_error,
     integration_api_base,
     integration_request,
     integration_requests_timeout,
     msg_upstream_http,
     msg_upstream_not_configured_env,
+    upstream_connect_error_payload,
     upstream_headers,
 )
 
@@ -49,7 +49,7 @@ def upstream_form_post(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
+        return jsonify(upstream_connect_error_payload(exc, base)), 502
     try:
         body = resp.json()
     except Exception:
@@ -85,7 +85,7 @@ def upstream_json_post(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
+        return jsonify(upstream_connect_error_payload(exc, base)), 502
     try:
         payload = resp.json()
     except Exception:
@@ -117,7 +117,7 @@ def upstream_get(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
+        return jsonify(upstream_connect_error_payload(exc, base)), 502
     try:
         payload = resp.json()
     except Exception:
@@ -147,7 +147,7 @@ def upstream_delete(
             timeout=integration_requests_timeout(read_seconds=read_seconds),
         )
     except requests.RequestException as exc:
-        return jsonify({"message": format_upstream_request_error(exc, base)}), 502
+        return jsonify(upstream_connect_error_payload(exc, base)), 502
     try:
         payload = resp.json()
     except Exception:

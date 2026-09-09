@@ -277,7 +277,7 @@
             </style>
             <p class="small text-muted mb-3">
                 先录入发补记录（意见、方案、状态等），整改前/后文档可后续补充再训练入库。
-                下游初稿/审核等将按同一注册国家+类别自动注入修正意见（含未完成发补）。
+                下游初稿/审核等将按同一注册国家+类别自动注入修正意见（含未完成、正在整改中与已完成）。
             </p>
             <div class="card mb-3">
                 <form id="defFilterForm" class="card-body" autocomplete="off">
@@ -301,6 +301,7 @@
                             <select class="form-select form-select-sm" id="defStatusFilter">
                                 <option value="">全部</option>
                                 <option value="open">未完成</option>
+                                <option value="in_progress">正在整改中</option>
                                 <option value="done">已完成</option>
                             </select>
                         </div>
@@ -403,6 +404,7 @@
                                 <label class="form-check-label small" for="defBatchChkStatus">修改整改状态</label>
                                 <select id="defBatchStatus" class="form-select form-select-sm mt-1" disabled>
                                     <option value="open">未完成</option>
+                                    <option value="in_progress">正在整改中</option>
                                     <option value="done">已完成</option>
                                 </select>
                             </div>
@@ -479,6 +481,7 @@
                                     <label class="form-label small mb-1" for="defRemediationStatus">整改状态</label>
                                     <select class="form-select form-select-sm" id="defRemediationStatus">
                                         <option value="open">未完成</option>
+                                        <option value="in_progress">正在整改中</option>
                                         <option value="done">已完成</option>
                                     </select>
                                 </div>

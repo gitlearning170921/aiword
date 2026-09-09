@@ -40,6 +40,7 @@ from webapp.models import (
     now_local,
 )
 from webapp.tenant_context import resolve_organization_context
+from webapp.upload_task_identity import find_upload_task_duplicate, normalize_target_version
 from webapp.user_facing import api_debug_fields, user_facing_upstream_error
 from webapp.authz import is_page13_super_admin
 from .version_task_generator import (
@@ -48,6 +49,7 @@ from .version_task_generator import (
     diagnose_release_dates,
     feedback_rows_for_org,
     generate_task_preview,
+    hydrate_preview_deleted_markers,
     enrich_preview_items_from_document_control,
     get_latest_version_task_preview,
     get_project_version_record,
@@ -99,7 +101,6 @@ from .numbering_engine import (
 )
 from .subtype_resolver import SubtypeChoiceRequired, find_existing_controlled_doc_by_title
 from .title_en_resolver import persist_title_en_cache, resolve_title_en_for_issue
-from webapp.project_code_uniqueness import gate_project_code_save
 from .project_link import (
     backfill_controlled_document_project_ids,
     link_controlled_document_to_page1_project,
@@ -154,24 +155,23 @@ def _project_code_gate_response(
     exclude_document_id: Optional[str] = None,
     confirm_sync: bool = False,
 ):
+    """台账「新增」轻量占用校验。修改已有记录请勿调用。"""
+    del exclude_upload_id, exclude_document_id, confirm_sync
+    from webapp.project_code_uniqueness import gate_project_code_for_record
+
     code = (project_code or "").strip()
     if not code:
         return None
-    gate = gate_project_code_save(
+    err = gate_project_code_for_record(
         org_id,
         code,
         project_id=project_id,
         project_name=project_name,
         registered_country=registered_country,
-        exclude_upload_id=exclude_upload_id,
-        exclude_document_id=exclude_document_id,
-        confirm_sync=confirm_sync,
     )
-    if not gate:
+    if not err:
         return None
-    if gate[0] == "confirm":
-        return jsonify(gate[1]), 409
-    return jsonify({"message": gate[1]}), 409
+    return jsonify({"message": err}), 409
 
 
 def _documents_base_query(org_id: str):
@@ -1956,16 +1956,17 @@ def api_version_task_preview_save_edits():
     stored_job = VersionTaskGenerationJob.query.filter_by(
         id=job_id, organization_id=org_id
     ).first()
-    stored_items: list[dict[str, Any]] = []
-    if stored_job and isinstance(stored_job.preview_json, dict):
-        raw_stored = stored_job.preview_json.get("items") or []
-        if isinstance(raw_stored, list):
-            stored_items = [x for x in raw_stored if isinstance(x, dict)]
-    result["items"] = stored_items
-    result["itemCount"] = len(stored_items)
     stored_preview = stored_job.preview_json if stored_job and isinstance(stored_job.preview_json, dict) else {}
-    result["changeLog"] = stored_preview.get("changeLog") or result.get("changeLog") or []
-    result["ruleItems"] = stored_preview.get("ruleItems") or result.get("ruleItems") or []
+    hydrated = hydrate_preview_deleted_markers(stored_preview)
+    stored_items = [x for x in (hydrated.get("items") or []) if isinstance(x, dict)]
+    result["items"] = stored_items
+    result["deletedItems"] = [
+        x for x in (hydrated.get("deletedItems") or []) if isinstance(x, dict)
+    ]
+    result["itemCount"] = len(stored_items)
+    result["manualDeletedKeys"] = hydrated.get("manualDeletedKeys") or []
+    result["changeLog"] = hydrated.get("changeLog") or result.get("changeLog") or []
+    result["ruleItems"] = hydrated.get("ruleItems") or result.get("ruleItems") or []
     saved_n = int(result.get("feedbackSaved") or 0)
     patched_n = int(result.get("patchedCount") or 0)
     if result.get("unchanged"):
@@ -2101,12 +2102,16 @@ def api_version_task_apply():
             author = "待分配"
         if not task_type:
             task_type = "版本变更任务"
-        existing = UploadRecord.query.filter_by(
+        target_version = normalize_target_version(
+            row.get("targetVersion") or row.get("registrationVersion")
+        )
+        existing = find_upload_task_duplicate(
             project_name=project.name,
             file_name=file_name,
             task_type=task_type,
             author=author,
-        ).first()
+            target_version=target_version,
+        )
         due_date = _parse_optional_date(row.get("dueDate"))
         document_display_date = _parse_optional_date(row.get("documentDisplayDate"))
         notes = str(row.get("notes") or "").strip() or None
@@ -2127,9 +2132,7 @@ def api_version_task_apply():
             existing.is_system_record = is_system_record
             existing.document_number = str(row.get("documentNumber") or "").strip() or None
             existing.file_version = str(row.get("fileVersion") or "").strip() or None
-            existing.registration_version = str(
-                row.get("registrationVersion") or row.get("targetVersion") or ""
-            ).strip() or None
+            existing.target_version = target_version
             existing.task_status = "pending"
             existing.completion_status = None
             db.session.add(existing)
@@ -2151,9 +2154,7 @@ def api_version_task_apply():
                 is_system_record=is_system_record,
                 document_number=str(row.get("documentNumber") or "").strip() or None,
                 file_version=str(row.get("fileVersion") or "").strip() or None,
-                registration_version=str(
-                    row.get("registrationVersion") or row.get("targetVersion") or ""
-                ).strip() or None,
+                target_version=target_version,
                 task_status="pending",
                 completion_status=None,
             )
@@ -2789,7 +2790,6 @@ def _controlled_document_from_manual_item(
     *,
     user_id: Optional[str],
     existing_norms: Optional[set[str]] = None,
-    confirm_sync: bool = False,
 ) -> tuple[Optional[ControlledDocument], Optional[str]]:
     doc_num = (data.get("documentNumber") or "").strip()
     norm = normalize_document_number(doc_num)
@@ -2807,18 +2807,17 @@ def _controlled_document_from_manual_item(
             return None, conflict_msg
     pc = (data.get("projectCode") or "").strip() or None
     if pc:
-        gate = gate_project_code_save(
+        from webapp.project_code_uniqueness import gate_project_code_for_record
+
+        err = gate_project_code_for_record(
             org_id,
             pc,
             project_id=(data.get("projectId") or "").strip() or None,
             project_name=(data.get("projectName") or "").strip() or None,
             registered_country=(data.get("registeredCountry") or "").strip() or None,
-            confirm_sync=confirm_sync,
         )
-        if gate:
-            if gate[0] == "confirm":
-                return None, gate[1].get("message") or "项目编号变更需确认"
-            return None, gate[1]
+        if err:
+            return None, err
     title_en = (data.get("titleEn") or "").strip()
     metadata_json = {"titleEn": title_en} if title_en else None
     doc = ControlledDocument(
@@ -2872,27 +2871,24 @@ def api_document_control_batch_create():
     if not items:
         return jsonify({"message": "请提供要新增的记录"}), 400
     user_id = (session.get("user_id") or "").strip() or None
-    confirm_sync = bool(data.get("confirmProjectCodeSync"))
     existing = _load_existing_docs_by_norm(org_id)
     batch_norms: set[str] = set()
     created = 0
     failed: list[dict[str, Any]] = []
     created_items: list[dict[str, Any]] = []
-    if not confirm_sync:
-        for item in items:
-            pc = (item.get("projectCode") or "").strip()
-            if not pc:
-                continue
-            blocked = _project_code_gate_response(
-                org_id,
-                pc,
-                project_id=(item.get("projectId") or "").strip() or None,
-                project_name=(item.get("projectName") or "").strip() or None,
-                registered_country=(item.get("registeredCountry") or "").strip() or None,
-                confirm_sync=False,
-            )
-            if blocked:
-                return blocked
+    for item in items:
+        pc = (item.get("projectCode") or "").strip()
+        if not pc:
+            continue
+        blocked = _project_code_gate_response(
+            org_id,
+            pc,
+            project_id=(item.get("projectId") or "").strip() or None,
+            project_name=(item.get("projectName") or "").strip() or None,
+            registered_country=(item.get("registeredCountry") or "").strip() or None,
+        )
+        if blocked:
+            return blocked
     for index, item in enumerate(items):
         doc_num = (item.get("documentNumber") or "").strip()
         norm = normalize_document_number(doc_num)
@@ -2909,7 +2905,6 @@ def api_document_control_batch_create():
             item,
             user_id=user_id,
             existing_norms=batch_norms,
-            confirm_sync=confirm_sync,
         )
         if err or not doc:
             failed.append({**row_ref, "message": err or "无法创建"})
@@ -2976,18 +2971,7 @@ def api_document_control_document_detail(doc_id: str):
     err = _apply_document_payload(doc, data)
     if err:
         return jsonify({"message": err}), 400
-    if "projectCode" in data and (doc.project_code or "").strip():
-        blocked = _project_code_gate_response(
-            org_id,
-            doc.project_code,
-            project_id=doc.project_id,
-            project_name=doc.project_name,
-            registered_country=doc.registered_country,
-            exclude_document_id=doc.id,
-            confirm_sync=bool(data.get("confirmProjectCodeSync")),
-        )
-        if blocked:
-            return blocked
+    # 修改记录：不校验项目编号唯一性（编号权威在「项目管理」；台账仅带入/展示）
     if doc.status == _DOC_STATUS_CONTROLLED:
         conflict_msg = controlled_number_conflict_message(
             org_id, doc.normalized_document_number, exclude_id=doc.id
@@ -3070,7 +3054,6 @@ def api_document_control_batch_update():
     payload, err = _build_batch_update_payload(data)
     if err:
         return jsonify({"message": err}), 400
-    confirm_sync = bool(data.get("confirmProjectCodeSync"))
     docs = (
         ControlledDocument.query.filter(
             ControlledDocument.organization_id == org_id,
@@ -3084,29 +3067,7 @@ def api_document_control_batch_update():
     failed: list[dict[str, str]] = []
     for doc_id in missing:
         failed.append({"id": doc_id, "message": "记录不存在"})
-    if "projectCode" in payload and (payload.get("projectCode") or "").strip() and not confirm_sync:
-        for doc in docs:
-            eff_name = (
-                payload.get("projectName")
-                if "projectName" in payload
-                else doc.project_name
-            )
-            eff_country = (
-                payload.get("registeredCountry")
-                if "registeredCountry" in payload
-                else doc.registered_country
-            )
-            blocked = _project_code_gate_response(
-                org_id,
-                payload["projectCode"],
-                project_id=doc.project_id,
-                project_name=eff_name,
-                registered_country=eff_country,
-                exclude_document_id=doc.id,
-                confirm_sync=False,
-            )
-            if blocked:
-                return blocked
+    # 批量修改记录：不校验项目编号唯一性
     for doc in docs:
         next_status = (
             payload["status"]
@@ -3119,31 +3080,6 @@ def api_document_control_batch_update():
             )
             if conflict_msg:
                 failed.append({"id": doc.id, "message": conflict_msg})
-                continue
-        if "projectCode" in payload and (payload.get("projectCode") or "").strip():
-            eff_name = (
-                payload.get("projectName")
-                if "projectName" in payload
-                else doc.project_name
-            )
-            eff_country = (
-                payload.get("registeredCountry")
-                if "registeredCountry" in payload
-                else doc.registered_country
-            )
-            gate = gate_project_code_save(
-                org_id,
-                payload["projectCode"],
-                project_id=doc.project_id,
-                project_name=eff_name,
-                registered_country=eff_country,
-                exclude_document_id=doc.id,
-                confirm_sync=confirm_sync,
-            )
-            if gate:
-                if gate[0] == "confirm":
-                    return jsonify(gate[1]), 409
-                failed.append({"id": doc.id, "message": gate[1]})
                 continue
         apply_err = _apply_document_payload(doc, payload)
         if apply_err:
@@ -5283,11 +5219,12 @@ def _import_project_code_block_reason(
     exclude_document_id: Optional[str] = None,
     confirm_sync: bool = False,
 ) -> Optional[str]:
-    """导入场景：先解析页面1项目 id，再判唯一性。
+    """导入场景：仅拦截「编号已被其他页面1项目占用」。
 
-    同项目多条受控文件/任务共用同一项目编号是正常业务，不应拦截；
-    仅当编号已被「其他项目」占用时才返回错误。
+    同项目多条受控文件共用编号、增量更新已有记录均不拦截、不要求确认。
     """
+    del exclude_document_id, confirm_sync
+    from webapp.project_code_uniqueness import gate_project_code_for_record
     from webapp.project_identity import find_page1_project
 
     resolved = find_page1_project(
@@ -5304,24 +5241,13 @@ def _import_project_code_block_reason(
     eff_country = (registered_country or "").strip() or (
         str(getattr(resolved, "registered_country", "") or "").strip() or None
     )
-
-    gate = gate_project_code_save(
+    return gate_project_code_for_record(
         org_id,
         project_code,
         project_id=eff_pid,
         project_name=eff_name,
         registered_country=eff_country,
-        exclude_document_id=exclude_document_id,
-        confirm_sync=confirm_sync,
     )
-    if not gate:
-        return None
-    if gate[0] == "confirm":
-        payload = gate[1] if isinstance(gate[1], dict) else {}
-        return (payload.get("message") or "项目编号变更需确认") + (
-            "；请先在页面确认修改后再导入，或导入时勾选同步确认"
-        )
-    return str(gate[1])
 
 
 def _import_excel_rows(
@@ -5501,38 +5427,7 @@ def _import_excel_rows(
             )
             continue
         row_with_batch = {**row, "importBatchId": batch_id}
-        project_code_in_row = _excel_row_optional_text(row, "projectCode")
-        if project_code_in_row:
-            project_name_in_row = _excel_row_optional_text(row, "projectName")
-            country_in_row = _excel_row_optional_text(row, "registeredCountry")
-            eff_name = (
-                _normalize_scope_field_value(project_name_in_row)
-                or doc.project_name
-            )
-            eff_country = (
-                _normalize_scope_field_value(country_in_row)
-                or doc.registered_country
-            )
-            pcode_conflict = _import_project_code_block_reason(
-                org_id,
-                project_code_in_row,
-                project_id=doc.project_id,
-                project_name=eff_name,
-                registered_country=eff_country,
-                exclude_document_id=doc.id,
-                confirm_sync=confirm_project_code_sync,
-            )
-            if pcode_conflict:
-                skipped.append({**row, "skipReason": pcode_conflict})
-                _append_import_log(
-                    org_id=org_id,
-                    batch_id=batch_id,
-                    user_id=user_id,
-                    event_type="import_fail",
-                    row=row,
-                    reason=pcode_conflict,
-                )
-                continue
+        # 增量更新已有台账：不校验项目编号唯一性
         updated_fields = _apply_excel_row_to_document(doc, row_with_batch)
         link_controlled_document_to_page1_project(doc, organization_id=org_id)
         if not doc.import_batch_id:
@@ -5576,38 +5471,7 @@ def _import_excel_rows(
                 continue
             if (doc.status or "").strip().lower() == _DOC_STATUS_VOIDED:
                 continue
-            project_code_in_row = _excel_row_optional_text(row, "projectCode")
-            if project_code_in_row:
-                project_name_in_row = _excel_row_optional_text(row, "projectName")
-                country_in_row = _excel_row_optional_text(row, "registeredCountry")
-                eff_name = (
-                    _normalize_scope_field_value(project_name_in_row)
-                    or doc.project_name
-                )
-                eff_country = (
-                    _normalize_scope_field_value(country_in_row)
-                    or doc.registered_country
-                )
-                pcode_conflict = _import_project_code_block_reason(
-                    org_id,
-                    project_code_in_row,
-                    project_id=doc.project_id,
-                    project_name=eff_name,
-                    registered_country=eff_country,
-                    exclude_document_id=doc.id,
-                    confirm_sync=confirm_project_code_sync,
-                )
-                if pcode_conflict:
-                    skipped.append({**row, "skipReason": pcode_conflict})
-                    _append_import_log(
-                        org_id=org_id,
-                        batch_id=batch_id,
-                        user_id=user_id,
-                        event_type="import_fail",
-                        row=row,
-                        reason=pcode_conflict,
-                    )
-                    continue
+            # 注册关联更新已有台账：不校验项目编号唯一性
             link_row = {
                 **row,
                 "statusDetail": (

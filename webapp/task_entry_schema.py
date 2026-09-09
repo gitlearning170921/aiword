@@ -33,6 +33,7 @@ TASK_ENTRY_IMPORT_COLUMNS: Sequence[Dict[str, str]] = (
     {"key": "model", "label": "型号", "layer": "project"},
     {"key": "registration_version", "label": "注册版本号", "layer": "project"},
     {"key": "fileName", "label": "文件名称", "layer": "task"},
+    {"key": "target_version", "label": "目标版本", "layer": "task"},
     {"key": "task_category", "label": "任务类别", "layer": "task"},
     {"key": "task_type", "label": "任务类型", "layer": "task"},
     {"key": "belonging_module", "label": "所属模块", "layer": "task"},
@@ -81,6 +82,10 @@ _IMPORT_HEADER_ALIASES: Dict[str, str] = {
     "registeredProductName": "registered_product_name",
     "model": "model",
     "registrationVersion": "registration_version",
+    "targetVersion": "target_version",
+    "target_version": "target_version",
+    "软件目标版本": "target_version",
+    "目标版本号": "target_version",
 }
 
 
@@ -161,6 +166,7 @@ def _values_from_upload_record(record: UploadRecord) -> Dict[str, str]:
         "model": str(getattr(record, "model", None) or ""),
         "registration_version": str(getattr(record, "registration_version", None) or ""),
         "fileName": record.file_name or "",
+        "target_version": str(getattr(record, "target_version", None) or ""),
         "task_category": task_category_label(cat),
         "task_type": record.task_type or "",
         "belonging_module": str(getattr(record, "belonging_module", None) or ""),
@@ -196,6 +202,7 @@ def default_sample_import_row() -> List[str]:
         "model": "型号示例",
         "registration_version": "V1.0",
         "fileName": "示例文件.docx",
+        "target_version": "1.0.0.0",
         "task_category": "文件型",
         "task_type": "初稿待编写",
         "belonging_module": "开发",

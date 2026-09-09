@@ -166,6 +166,48 @@ def _task_identity(item: dict[str, Any]) -> tuple[str, str, str]:
     return _task_dedupe_key(item)
 
 
+def _mark_preview_row_deleted(rec: dict[str, Any]) -> dict[str, Any]:
+    row = dict(rec)
+    row["changeKind"] = "delete"
+    row["hideInPreview"] = True
+    return row
+
+
+def _preview_row_is_deleted(
+    rec: dict[str, Any],
+    deleted_keys: Optional[set[tuple[str, str, str]]] = None,
+) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    kind = str(rec.get("changeKind") or "").strip().lower()
+    if kind == "delete" or rec.get("hideInPreview"):
+        return True
+    if deleted_keys is not None and _task_dedupe_key(rec) in deleted_keys:
+        return True
+    return False
+
+
+def collect_deleted_dedupe_keys(
+    previous_items: Optional[list[dict[str, Any]]] = None,
+    deleted_keys: Optional[list[Any]] = None,
+) -> set[tuple[str, str, str]]:
+    """从上次快照与 manualDeletedKeys 收集应排除的任务键。"""
+    deleted: set[tuple[str, str, str]] = set()
+    for raw in deleted_keys or []:
+        parsed = _parse_dedupe_key(raw)
+        if parsed:
+            deleted.add(parsed)
+    for row in previous_items or []:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("changeKind") or "").strip().lower()
+        if kind != "delete" and not row.get("hideInPreview"):
+            continue
+        cleaned = split_legacy_file_version_alias(row)
+        deleted.add(_task_dedupe_key(cleaned))
+    return deleted
+
+
 def apply_feedback_rules(
     generated_items: list[dict[str, Any]],
     feedback_rows: list[VersionTaskGenerationFeedback],
@@ -173,11 +215,13 @@ def apply_feedback_rules(
     items = [dict(x) for x in generated_items]
     hit = 0
     for row in feedback_rows:
+        if is_legacy_file_version_alias_feedback(row):
+            continue
         kind = (row.adjust_type or "").strip().lower()
         original = row.original_item_json if isinstance(row.original_item_json, dict) else {}
         adjusted = row.adjusted_item_json if isinstance(row.adjusted_item_json, dict) else {}
         if kind == "delete":
-            # 删除只保存在当前预览快照里；再次「生成预览」按规则重建
+            # 删除只写在已保存快照里。再次「生成预览」按规则重建，不把删除套回去。
             continue
         identity = _task_identity(original if kind != "add" else adjusted)
         if kind != "add" and identity == ("", "", ""):
@@ -203,7 +247,7 @@ def find_preview_filename_conflicts(items: Optional[list[Any]]) -> list[dict[str
     for rec in items or []:
         if not isinstance(rec, dict):
             continue
-        if str(rec.get("changeKind") or "").strip().lower() == "delete":
+        if _preview_row_is_deleted(rec):
             continue
         name = str(rec.get("fileName") or "").strip()
         if not name:
@@ -244,7 +288,11 @@ def _serialize_dedupe_key(key: tuple[str, str, str]) -> list[str]:
 
 def _parse_dedupe_key(raw: Any) -> Optional[tuple[str, str, str]]:
     if isinstance(raw, (list, tuple)) and len(raw) == 3:
-        return (str(raw[0] or ""), str(raw[1] or ""), str(raw[2] or ""))
+        return (
+            str(raw[0] or "").strip().casefold(),
+            str(raw[1] or "").strip().casefold(),
+            str(raw[2] or "").strip().casefold(),
+        )
     return None
 
 
@@ -589,7 +637,7 @@ def generate_task_preview(
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    # 再次「生成预览」按规则重建：不把上次删除/手工编辑套回去。
+    # 再次「生成预览」按规则重建：不把上次删除套回去。刷新页面只读已保存快照。
     _ = previous_deleted_keys
     _ = previous_manual_edited
     chain = parse_version_chain(from_version, to_version, intermediate_versions or [])
@@ -743,6 +791,8 @@ def generate_task_preview(
         "releaseDate": release_dates[chain[-1].normalized],
         "items": deduped,
         "ruleItems": deepcopy(deduped),
+        "deletedItems": [],
+        "manualDeletedKeys": [],
         "changeLog": [],
         "note": note,
         "explanation": explanation,
@@ -1169,12 +1219,15 @@ def summarize_item_diff(
     original: Optional[dict[str, Any]],
     adjusted: Optional[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    before = original if isinstance(original, dict) else {}
-    after = adjusted if isinstance(adjusted, dict) else {}
+    before = split_legacy_file_version_alias(original) if isinstance(original, dict) else {}
+    after = split_legacy_file_version_alias(adjusted) if isinstance(adjusted, dict) else {}
     out: list[dict[str, str]] = []
     for key, label in CHANGE_FIELD_LABELS.items():
         left = str(before.get(key) or "").strip()
         right = str(after.get(key) or "").strip()
+        if key == "targetVersion":
+            left = left or str(before.get("registrationVersion") or "").strip()
+            right = right or str(after.get("registrationVersion") or "").strip()
         if key == "recordStatus":
             left = RECORD_STATUS_LABELS.get(normalize_record_status(left), left)
             right = RECORD_STATUS_LABELS.get(normalize_record_status(right), right)
@@ -1188,6 +1241,76 @@ def summarize_item_diff(
             continue
         out.append({"field": key, "label": label, "from": left, "to": right})
     return out
+
+
+def _summary_is_legacy_file_version_only(summary: Any) -> bool:
+    if not isinstance(summary, list) or not summary:
+        return False
+    for row in summary:
+        if not isinstance(row, dict):
+            return False
+        field = str(row.get("field") or "").strip()
+        if field != "fileVersion":
+            return False
+        frm = str(row.get("from") or "").strip()
+        to = str(row.get("to") or "").strip()
+        if to or not _looks_like_software_version(frm):
+            return False
+    return True
+
+
+def is_legacy_file_version_alias_feedback(row: VersionTaskGenerationFeedback) -> bool:
+    """旧逻辑把目标版本写进 fileVersion，再对比成「2.1.0.0→空」的误采集。"""
+    kind = str(getattr(row, "adjust_type", "") or "").strip().lower()
+    if kind not in {"update", "replace"}:
+        return False
+    original = row.original_item_json if isinstance(row.original_item_json, dict) else {}
+    adjusted = row.adjusted_item_json if isinstance(row.adjusted_item_json, dict) else {}
+    if summarize_item_diff(original, adjusted):
+        return False
+    summary = row.change_summary_json
+    if _summary_is_legacy_file_version_only(summary):
+        return True
+    orig_fv = str(original.get("fileVersion") or "").strip()
+    adj_fv = str(adjusted.get("fileVersion") or "").strip()
+    tv = str(
+        original.get("targetVersion")
+        or original.get("registrationVersion")
+        or adjusted.get("targetVersion")
+        or adjusted.get("registrationVersion")
+        or ""
+    ).strip()
+    return bool(
+        orig_fv
+        and not adj_fv
+        and _looks_like_software_version(orig_fv)
+        and orig_fv == tv
+    )
+
+
+def purge_legacy_file_version_alias_feedbacks(
+    *,
+    org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    query = VersionTaskGenerationFeedback.query
+    if org_id:
+        query = query.filter_by(organization_id=org_id)
+    pid = str(project_id or "").strip()
+    if pid:
+        query = query.filter_by(project_id=pid)
+    removed_ids: list[str] = []
+    for row in query.all():
+        if not is_legacy_file_version_alias_feedback(row):
+            continue
+        removed_ids.append(str(row.id))
+        db.session.delete(row)
+    if removed_ids and commit:
+        db.session.commit()
+    elif removed_ids:
+        db.session.flush()
+    return {"removed": len(removed_ids), "ids": removed_ids}
 
 
 def serialize_version_task_feedback(row: VersionTaskGenerationFeedback) -> dict[str, Any]:
@@ -1233,21 +1356,29 @@ def list_version_task_feedbacks(
     pid = str(project_id or "").strip()
     if pid:
         query = query.filter_by(project_id=pid)
+    purge_legacy_file_version_alias_feedbacks(
+        org_id=org_id, project_id=pid or None, commit=True
+    )
     rows = (
         query.order_by(VersionTaskGenerationFeedback.created_at.desc())
         .limit(max(1, min(int(limit or 80), 200)))
         .all()
     )
-    return [serialize_version_task_feedback(row) for row in rows]
+    return [
+        serialize_version_task_feedback(row)
+        for row in rows
+        if not is_legacy_file_version_alias_feedback(row)
+    ]
 
 
 def feedback_rows_for_org(org_id: str) -> list[VersionTaskGenerationFeedback]:
-    return (
+    rows = (
         VersionTaskGenerationFeedback.query.filter_by(organization_id=org_id)
         .order_by(VersionTaskGenerationFeedback.created_at.desc())
         .limit(200)
         .all()
     )
+    return [row for row in rows if not is_legacy_file_version_alias_feedback(row)]
 
 
 def build_adjustment_rows(
@@ -1785,32 +1916,69 @@ def stamp_manual_preview_items(
             rule_items = [
                 annotate_preview_item(x, fresh=True)
                 for x in cleaned_items
-                if str(x.get("changeKind") or "") != "add"
+                if str(x.get("changeKind") or "") not in {"add", "delete"}
             ]
     else:
-        rule_items = [x for x in rule_raw if isinstance(x, dict)]
+        rule_items = [
+            split_legacy_file_version_alias(x) for x in rule_raw if isinstance(x, dict)
+        ]
     rule_map = {_origin_key_of(x): x for x in rule_items}
+    rule_by_dedupe = {_task_dedupe_key(x): x for x in rule_items}
+
+    def _rule_baseline(rec: dict[str, Any]) -> Optional[dict[str, Any]]:
+        hit = rule_map.get(_origin_key_of(rec))
+        if hit:
+            return hit
+        return rule_by_dedupe.get(_task_dedupe_key(rec))
+
     for rec in cleaned_items:
         key = _origin_key_of(rec)
         if recompute_keys is not None and key not in recompute_keys:
             continue
         kind = str(rec.get("changeKind") or "")
         if kind == "update":
-            rec["changeFields"] = summarize_item_diff(rule_map.get(rec["originKey"]), rec)
+            rec["changeFields"] = summarize_item_diff(_rule_baseline(rec), rec)
+            if not rec["changeFields"]:
+                rec["changeKind"] = ""
         elif kind in {"add", "delete"} and not rec.get("changeFields"):
             rec["changeFields"] = []
 
+    prev_rows = [
+        x
+        for x in list(out.get("items") or []) + list(out.get("deletedItems") or [])
+        if isinstance(x, dict)
+    ]
     deleted_now = {
         _task_dedupe_key(x)
         for x in cleaned_items
-        if str(x.get("changeKind") or "") == "delete"
+        if _preview_row_is_deleted(x)
     }
-    out["items"] = cleaned_items
+    prev_deleted = collect_deleted_dedupe_keys(prev_rows, out.get("manualDeletedKeys"))
+    live_keys = {
+        _task_dedupe_key(x)
+        for x in cleaned_items
+        if not _preview_row_is_deleted(x)
+    }
+    merged_deleted = (prev_deleted | deleted_now) - live_keys
+    seen_keys = {_task_dedupe_key(x) for x in cleaned_items}
+    for rec in prev_rows:
+        key = _task_dedupe_key(rec)
+        if key in merged_deleted and key not in seen_keys:
+            cleaned_items.append(_mark_preview_row_deleted(rec))
+            seen_keys.add(key)
+    for rec in cleaned_items:
+        if _task_dedupe_key(rec) in merged_deleted:
+            rec["changeKind"] = "delete"
+            rec["hideInPreview"] = True
     out["ruleItems"] = rule_items
-    out["changeLog"] = preview_change_log_from_items(cleaned_items)
     out["editedAt"] = now_local().isoformat()
     out["manualEdited"] = True
-    out["manualDeletedKeys"] = [_serialize_dedupe_key(k) for k in sorted(deleted_now)]
+    out["manualDeletedKeys"] = [_serialize_dedupe_key(k) for k in sorted(merged_deleted)]
+    split = split_preview_live_and_deleted({**out, "items": cleaned_items})
+    out.update(split)
+    out["changeLog"] = preview_change_log_from_items(
+        list(out.get("items") or []) + list(out.get("deletedItems") or [])
+    )
     return out
 
 
@@ -1841,7 +2009,12 @@ def merge_preview_item_patches(
 ) -> tuple[dict[str, Any], set[str]]:
     """把增删改补丁合并进已有快照，未出现在补丁里的行保持原样。"""
     existing_preview = dict(preview) if isinstance(preview, dict) else {}
-    existing = [x for x in (existing_preview.get("items") or []) if isinstance(x, dict)]
+    existing = [
+        x
+        for x in list(existing_preview.get("items") or [])
+        + list(existing_preview.get("deletedItems") or [])
+        if isinstance(x, dict)
+    ]
     by_key: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for rec in existing:
@@ -1986,6 +2159,7 @@ def save_version_task_preview_edits(
         "items": cleaned_items,
         "ruleItems": payload.get("ruleItems") or [],
         "changeLog": payload.get("changeLog") or [],
+        "manualDeletedKeys": payload.get("manualDeletedKeys") or [],
         "feedbacks": [serialize_version_task_feedback(row) for row in rows],
     }
 
@@ -2019,6 +2193,46 @@ def find_version_task_preview_job(
     )
 
 
+def split_preview_live_and_deleted(preview: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """快照里 items 只保留可见行；删除行放到 deletedItems。刷新只读这个结构。"""
+    out = dict(preview) if isinstance(preview, dict) else {}
+    raw_items = [dict(x) for x in (out.get("items") or []) if isinstance(x, dict)]
+    sidecar = [dict(x) for x in (out.get("deletedItems") or []) if isinstance(x, dict)]
+    deleted_keys = collect_deleted_dedupe_keys(raw_items + sidecar, out.get("manualDeletedKeys"))
+    live: list[dict[str, Any]] = []
+    deleted: list[dict[str, Any]] = []
+    seen_del: set[tuple[str, str, str]] = set()
+    live_keys: set[tuple[str, str, str]] = set()
+
+    def take_deleted(rec: dict[str, Any]) -> None:
+        key = _task_dedupe_key(rec)
+        if key in seen_del or key in live_keys:
+            return
+        seen_del.add(key)
+        deleted.append(_mark_preview_row_deleted(rec))
+
+    for rec in raw_items:
+        key = _task_dedupe_key(rec)
+        if _preview_row_is_deleted(rec, deleted_keys):
+            take_deleted(rec)
+            continue
+        live.append(rec)
+        live_keys.add(key)
+    for rec in sidecar:
+        take_deleted(rec)
+    out["items"] = live
+    out["deletedItems"] = deleted
+    out["manualDeletedKeys"] = [
+        _serialize_dedupe_key(k) for k in sorted((deleted_keys | seen_del) - live_keys)
+    ]
+    return out
+
+
+def hydrate_preview_deleted_markers(preview: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """读取已保存快照：可见行在 items，删除行只在 deletedItems。不用于再次生成。"""
+    return split_preview_live_and_deleted(preview)
+
+
 def get_latest_version_task_preview(
     *,
     org_id: str,
@@ -2033,7 +2247,7 @@ def get_latest_version_task_preview(
     job = query.order_by(VersionTaskGenerationJob.updated_at.desc()).first()
     if not job or not isinstance(job.preview_json, dict):
         return None
-    payload = dict(job.preview_json)
+    payload = hydrate_preview_deleted_markers(job.preview_json)
     product_name = str(payload.get("productName") or "").strip()
     if not product_name and job.project_id:
         product_name = resolve_project_product_name(
