@@ -17,6 +17,7 @@ globs:
   - `USER_FEATURE_PERM_GROUP_DEFS`
   - `USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS`
   - `USER_FEATURE_LABELS`
+- `USER_FEATURE_KEYS_DEFAULT_DENY`（新入口缺省禁止，不跟随系统）
 - API：`GET /api/users/feature-permission-schema`
 - 前端：`ensureUserFeaturePermSchema()` + `_renderUserFeaturePermSelects(..., mode)`（`user` / `batch`）
 
@@ -34,5 +35,6 @@ globs:
 
 ## 自检
 
-- `GET /api/users/feature-permission-schema` 的 `groups` 与账号管理三处 UI 字段一致。
+- `GET /api/users/feature-permission-schema` 的 `groups` 与账号管理三处 UI 字段一致，且含 `defaultDenyKeys`。
 - 批量弹窗比单账号多「不修改」选项，其余 key/label 相同。
+- 新入口（`USER_FEATURE_KEYS_DEFAULT_DENY`）缺省禁止，不跟随系统；写入/读取/合并均须补 `false`。

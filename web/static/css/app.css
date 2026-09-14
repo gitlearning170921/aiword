@@ -1176,6 +1176,20 @@ body.app-page-loading-active {
     padding-top: 0.85rem;
     padding-bottom: 0.75rem;
 }
+.page1-projects-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    line-height: 1.2;
+}
+.page1-projects-toggle-icon {
+    display: inline-block;
+    font-size: 0.7rem;
+    transition: transform 0.15s ease;
+}
+.page1-projects-toggle[aria-expanded="true"] .page1-projects-toggle-icon {
+    transform: rotate(90deg);
+}
 .page1-projects-table-wrap {
     max-height: min(68vh, 720px);
     overflow: auto;

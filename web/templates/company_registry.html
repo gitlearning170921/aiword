@@ -57,10 +57,14 @@
 </div>
 {% endif %}
 
+{% set page0_has_kb_train = feature_flags.FEATURE_PAGE0_KNOWLEDGE_TRAIN %}
+{% set page0_has_deficiency = feature_flags.FEATURE_PAGE0_DEFICIENCY %}
+{% if page0_has_kb_train or page0_has_deficiency %}
 <div class="card mb-4" id="companyKnowledgeTrainCard">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-        <span>知识库训练与发补记录</span>
+        <span>{% if page0_has_kb_train and page0_has_deficiency %}知识库训练与发补记录{% elif page0_has_kb_train %}知识库训练{% else %}发补记录{% endif %}</span>
         <ul class="nav nav-pills nav-pills-sm gap-1" id="companyTrainTabs" role="tablist">
+            {% if page0_has_kb_train %}
             <li class="nav-item" role="presentation">
                 <button class="nav-link active btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabFiles" type="button">文件训练</button>
             </li>
@@ -70,12 +74,16 @@
             <li class="nav-item" role="presentation">
                 <button class="nav-link btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabKnowledge" type="button">知识库管理</button>
             </li>
+            {% endif %}
+            {% if page0_has_deficiency %}
             <li class="nav-item" role="presentation">
-                <button class="nav-link btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabDeficiency" type="button">发补记录</button>
+                <button class="nav-link {% if not page0_has_kb_train %}active {% endif %}btn btn-sm" data-bs-toggle="tab" data-bs-target="#trainTabDeficiency" type="button">发补记录</button>
             </li>
+            {% endif %}
         </ul>
     </div>
     <div class="card-body tab-content">
+        {% if page0_has_kb_train %}
         <div class="tab-pane fade show active" id="trainTabFiles" role="tabpanel">
         <p class="small text-muted mb-3">
             选择公司后，上传文件将训练到该公司在 aicheckword 中对应的独立知识库（collection）。
@@ -222,6 +230,8 @@
         </div>
         </div>
 
+        {% endif %}
+        {% if page0_has_kb_train %}
         <div class="tab-pane fade" id="trainTabChecklist" role="tabpanel">
             <p class="small text-muted mb-2">与 aicheckword 第一步「生成审核点清单 → 训练入库」一致。生成后可编辑 JSON，再入库向量化。</p>
             <div class="row g-2 mb-2">
@@ -254,7 +264,9 @@
                 <p class="small text-muted mb-0">打开本页或点「刷新统计」加载。</p>
             </div>
         </div>
-        <div class="tab-pane fade" id="trainTabDeficiency" role="tabpanel">
+        {% endif %}
+        {% if page0_has_deficiency %}
+        <div class="tab-pane fade{% if not page0_has_kb_train %} show active{% endif %}" id="trainTabDeficiency" role="tabpanel">
             <style>
                 .def-group-scroll { max-height: 26rem; overflow-y: auto; }
                 .def-group-scroll thead th {
@@ -556,8 +568,10 @@
                 </div>
             </div>
         </div>
+        {% endif %}
     </div>
 </div>
+{% endif %}
 
 <div class="card mb-4 company-projects-card">
     <div class="card-header company-projects-card-header">

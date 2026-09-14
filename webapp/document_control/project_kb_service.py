@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import or_
@@ -13,7 +14,18 @@ from webapp.models import (
     ProjectKnowledgeSyncOutbox,
     UploadRecord,
     generate_uuid,
+    now_local,
 )
+
+# 任务保存/删除曾顺带刷新整库并向上游推文件（单次超时可达 180s），导致保存很慢甚至失败。
+# 自动同步改由系统配置 FEATURE_PROJECT_KB_SYNC 控制（默认关闭）。
+
+
+def is_project_kb_sync_enabled() -> bool:
+    from webapp.app_settings import feature_flags_for_template
+
+    flags = feature_flags_for_template()
+    return bool(flags.get("FEATURE_PROJECT_KB")) and bool(flags.get("FEATURE_PROJECT_KB_SYNC"))
 
 
 def normalize_project_kb_document_number(value: str) -> str:
@@ -399,6 +411,8 @@ def enqueue_project_kb_sync_events(
     trigger: str = "manual",
     force_retry: bool = False,
 ) -> int:
+    if not is_project_kb_sync_enabled():
+        return 0
     queued = 0
     for item in documents or []:
         norm = str(item.get("normalizedDocumentNumber") or "").strip()
@@ -455,6 +469,51 @@ def enqueue_project_kb_sync_events(
             row.last_error = None
             queued += 1
     return queued
+
+
+def recover_stuck_project_kb_outbox(*, older_than_seconds: int = 120) -> int:
+    """把中断在 syncing 的 outbox 改回 pending，重启后可续传，避免卡死。"""
+    q = ProjectKnowledgeSyncOutbox.query.filter(ProjectKnowledgeSyncOutbox.status == "syncing")
+    if int(older_than_seconds or 0) > 0:
+        cutoff = now_local() - timedelta(seconds=int(older_than_seconds))
+        q = q.filter(
+            or_(
+                ProjectKnowledgeSyncOutbox.updated_at.is_(None),
+                ProjectKnowledgeSyncOutbox.updated_at <= cutoff,
+            )
+        )
+    rows = q.all()
+    for row in rows:
+        row.status = "pending"
+        prev = str(row.last_error or "").strip()
+        note = "进程中断，已重新排队"
+        row.last_error = (f"{prev}；{note}" if prev and note not in prev else note)[:500]
+        db.session.add(row)
+    if rows:
+        db.session.commit()
+    return len(rows)
+
+
+def list_pending_project_kb_outbox_scopes(*, limit: int = 20) -> list[tuple[str, str]]:
+    rows = (
+        db.session.query(
+            ProjectKnowledgeSyncOutbox.organization_id,
+            ProjectKnowledgeSyncOutbox.project_id,
+        )
+        .filter(ProjectKnowledgeSyncOutbox.status.in_(("pending", "failed")))
+        .distinct()
+        .limit(max(1, min(int(limit or 20), 100)))
+        .all()
+    )
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for oid, pid in rows:
+        key = (str(oid or "").strip(), str(pid or "").strip())
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
 
 
 def list_project_kb_latest_documents(*, org_id: str, project_id: str) -> list[dict[str, Any]]:

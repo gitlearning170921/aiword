@@ -181,12 +181,37 @@ SYSTEM_CONFIG_KEYS: list[tuple[str, str, bool]] = [
     ),
     (
         "FEATURE_DOCUMENT_CONTROL",
-        "受控编号管理（文控中心 / 版本任务清单生成）开关（1=开启；空或0=关闭）",
+        "文控中心（受控编号/台账）开关（1=开启；空或0=关闭）",
+        False,
+    ),
+    (
+        "FEATURE_VERSION_TASK_GENERATOR",
+        "版本任务清单生成开关（1=开启；空或0=关闭；默认关闭）",
+        False,
+    ),
+    (
+        "FEATURE_PROJECT_KB",
+        "项目知识库协同开关（1=开启；空或0=关闭；默认关闭）",
+        False,
+    ),
+    (
+        "FEATURE_PROJECT_KB_SYNC",
+        "项目知识库向上游自动同步（1=开启；空或0=关闭。默认关闭，需同时开启项目知识库协同；与页面入口分开）",
         False,
     ),
     (
         "FEATURE_LITERATURE_SEARCH",
-        "文献检索（注册工具）开关（1=开启；空或0=关闭；未保存过时默认开启）",
+        "文献检索（注册工具）开关（1=开启；空或0=关闭；默认关闭）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+        "页面0 · 知识库训练（文件训练 / 审核点 / 知识库管理）（1=开启；空或0=关闭；默认关闭）",
+        False,
+    ),
+    (
+        "FEATURE_PAGE0_DEFICIENCY",
+        "页面0 · 发补记录开关（1=开启；空或0=关闭；默认关闭）",
         False,
     ),
     (
@@ -227,7 +252,12 @@ FEATURE_FLAG_KEYS: tuple[str, ...] = (
     "FEATURE_COMPANY_REGISTRY",
     "FEATURE_MULTI_TENANT",
     "FEATURE_DOCUMENT_CONTROL",
+    "FEATURE_VERSION_TASK_GENERATOR",
+    "FEATURE_PROJECT_KB",
+    "FEATURE_PROJECT_KB_SYNC",
     "FEATURE_LITERATURE_SEARCH",
+    "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+    "FEATURE_PAGE0_DEFICIENCY",
     "FEATURE_ENV_SEPARATION",
     "FEATURE_PAGE0_AUDIT_TODO",
 )
@@ -266,6 +296,9 @@ def _page_tools_section_hint() -> str:
         f"{_line('0', '页面0')}。"
         f"{_line('1', '页面1（含页面3 顶栏考试中心）')}。"
         f"{_line('2', '页面2')}。"
+        "独立模块开关默认关闭，需填 1 才开放：文献检索、文控中心、版本任务清单、"
+        "项目知识库协同、页面0 知识库训练、页面0 发补记录。"
+        "项目知识库向上游自动同步默认关闭，与页面入口分开。"
         "账号级权限仍见「账号管理」· 按分级角色展示页面0/1/2 分组。"
     )
 
@@ -283,7 +316,12 @@ SYSTEM_CONFIG_SECTIONS: list[dict[str, Any]] = [
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
             "FEATURE_DOCUMENT_CONTROL",
+            "FEATURE_VERSION_TASK_GENERATOR",
+            "FEATURE_PROJECT_KB",
+            "FEATURE_PROJECT_KB_SYNC",
             "FEATURE_LITERATURE_SEARCH",
+            "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+            "FEATURE_PAGE0_DEFICIENCY",
             "FEATURE_ENV_SEPARATION",
             "FEATURE_PAGE0_AUDIT_TODO",
             "FEATURE_PAGE1_AUDIT_TODO",
@@ -523,18 +561,6 @@ def _apply_audit_todo_default_flags(
             flags[todo_key] = bool(flags.get(audit_key))
 
 
-def _apply_literature_default_flags(
-    flags: dict[str, bool], app: Optional["Flask"] = None
-) -> None:
-    """未在系统配置中保存过文献检索开关时默认开启（与改前顶栏对登录用户开放一致）。"""
-    if _feature_flag_configured_in_db("FEATURE_LITERATURE_SEARCH", app):
-        flags["FEATURE_LITERATURE_SEARCH"] = _parse_flag(
-            get_setting("FEATURE_LITERATURE_SEARCH", default="", app=app)
-        )
-    else:
-        flags["FEATURE_LITERATURE_SEARCH"] = True
-
-
 def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]:
     """返回当前数据库内功能开关布尔值，便于注入 Jinja / 前端。"""
     out: dict[str, bool] = {}
@@ -547,7 +573,6 @@ def feature_flags_for_template(app: Optional["Flask"] = None) -> dict[str, bool]
     for key in PAGE0_DERIVED_FLAG_KEYS:
         out.setdefault(key, False)
     _apply_audit_todo_default_flags(out, app)
-    _apply_literature_default_flags(out, app)
     return out
 
 
@@ -688,6 +713,19 @@ def register_exam_center_feature_gate(app: "Flask") -> None:
             )
         if rel.startswith("/literature"):
             return feature_gate_response("FEATURE_LITERATURE_SEARCH")
+        if rel.startswith("/api/company/training"):
+            return feature_gate_response("FEATURE_PAGE0_KNOWLEDGE_TRAIN")
+        if rel.startswith("/api/company/deficiency") or rel.startswith("/company/deficiency"):
+            return feature_gate_response("FEATURE_PAGE0_DEFICIENCY")
+        if (
+            "/version-task" in rel
+            or rel.startswith("/api/document-control/version-tasks")
+        ):
+            return feature_gate_response("FEATURE_VERSION_TASK_GENERATOR")
+        if "/project-kb" in rel or rel.startswith("/api/project-kb"):
+            return feature_gate_response("FEATURE_PROJECT_KB")
+        if rel.startswith("/document-control") or rel.startswith("/api/document-control"):
+            return feature_gate_response("FEATURE_DOCUMENT_CONTROL")
         if rel.startswith("/go/sign") or rel.startswith("/api/go/batch-sign"):
             return feature_gate_response("FEATURE_PAGE1_SIGN")
         if rel.startswith("/go/print") or rel.startswith("/api/go/batch-print"):

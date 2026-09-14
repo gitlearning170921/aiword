@@ -23,6 +23,8 @@ FEEDBACK_FAB_EXCLUDED_ENDPOINTS = frozenset(
 
 FEEDBACK_FEATURE_MODULES: tuple[tuple[str, str], ...] = (
     ("page0", "页面0 · 公司总览"),
+    ("page0_knowledge_train", "页面0 · 知识库训练"),
+    ("page0_deficiency", "页面0 · 发补记录"),
     ("page1_upload", "页面1 · 任务上传/登记"),
     ("page1_draft", "页面1 · 初稿生成"),
     ("page1_audit", "页面1 · 文档审核"),
@@ -32,6 +34,10 @@ FEEDBACK_FEATURE_MODULES: tuple[tuple[str, str], ...] = (
     ("page1_exam_teacher", "考试训练中心 · 老师端"),
     ("page1_exam_analytics", "考试训练中心 · 统计端"),
     ("page1_sign_print", "页面1 · 签批/打印"),
+    ("page1_literature", "页面1 · 文献检索"),
+    ("page1_document_control", "页面1 · 文控中心"),
+    ("page1_project_kb", "页面1 · 项目知识库协同"),
+    ("page1_version_task", "页面1 · 版本任务清单生成"),
     ("page2", "页面2 · 生成"),
     ("page3", "页面3 · 统计"),
     ("other", "其他"),

@@ -20,6 +20,9 @@ USER_PAGE0_FEATURE_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE0_AUDIT_MODIFY",
     "FEATURE_PAGE0_AUDIT_TODO",
     "FEATURE_PAGE0_TRANSLATE",
+    "FEATURE_LITERATURE_SEARCH",
+    "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+    "FEATURE_PAGE0_DEFICIENCY",
 )
 
 # 页面1：文档工具、任务列表签字/打印/单审、考试中心（含页面3 顶栏入口）
@@ -32,6 +35,10 @@ USER_PAGE1_FEATURE_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE1_EXAM_CENTER",
     "FEATURE_PAGE1_SIGN",
     "FEATURE_PAGE1_PRINT",
+    "FEATURE_LITERATURE_SEARCH",
+    "FEATURE_DOCUMENT_CONTROL",
+    "FEATURE_PROJECT_KB",
+    "FEATURE_VERSION_TASK_GENERATOR",
 )
 
 # 页面2：任务行按钮与考试中心
@@ -43,8 +50,10 @@ USER_PAGE2_FEATURE_KEYS: tuple[str, ...] = (
     "FEATURE_PAGE2_EXAM_CENTER",
 )
 
-USER_MANAGED_FEATURE_KEYS: tuple[str, ...] = (
-    USER_PAGE0_FEATURE_KEYS + USER_PAGE1_FEATURE_KEYS + USER_PAGE2_FEATURE_KEYS
+USER_MANAGED_FEATURE_KEYS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        USER_PAGE0_FEATURE_KEYS + USER_PAGE1_FEATURE_KEYS + USER_PAGE2_FEATURE_KEYS
+    )
 )
 
 # 账号管理 · 功能权限 UI 分组（新建/编辑/批量共用；前端通过 API 拉取，勿在 app.js 重复维护）
@@ -85,6 +94,8 @@ USER_FEATURE_LABELS: dict[str, str] = {
     "FEATURE_PAGE0_AUDIT_MODIFY": "页面0 · 审核后修改",
     "FEATURE_PAGE0_AUDIT_TODO": "页面0 · 生成审核待办",
     "FEATURE_PAGE0_TRANSLATE": "页面0 · 文档翻译",
+    "FEATURE_PAGE0_KNOWLEDGE_TRAIN": "页面0 · 知识库训练",
+    "FEATURE_PAGE0_DEFICIENCY": "页面0 · 发补记录",
     "FEATURE_PAGE1_DRAFT_GEN": "页面1 · 初稿生成",
     "FEATURE_PAGE1_AUDIT": "页面1 · 文档审核",
     "FEATURE_PAGE1_AUDIT_MODIFY": "页面1 · 审核后修改",
@@ -98,9 +109,25 @@ USER_FEATURE_LABELS: dict[str, str] = {
     "FEATURE_PAGE2_AUDIT_MODIFY": "页面2 · 审核后修改",
     "FEATURE_PAGE2_TRANSLATE": "页面2 · 文档翻译",
     "FEATURE_PAGE2_EXAM_CENTER": "页面2 · 考试训练中心",
-    "FEATURE_DOCUMENT_CONTROL": "文控中心",
     "FEATURE_LITERATURE_SEARCH": "文献检索",
+    "FEATURE_DOCUMENT_CONTROL": "文控中心",
+    "FEATURE_PROJECT_KB": "项目知识库协同",
+    "FEATURE_VERSION_TASK_GENERATOR": "版本任务清单生成",
 }
+
+# 账号未配置时禁止、不跟随系统全局开关（含 1.0.5 后新入口，以及签字/打印）。
+USER_FEATURE_KEYS_DEFAULT_DENY: frozenset[str] = frozenset(
+    {
+        "FEATURE_LITERATURE_SEARCH",
+        "FEATURE_DOCUMENT_CONTROL",
+        "FEATURE_PROJECT_KB",
+        "FEATURE_VERSION_TASK_GENERATOR",
+        "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+        "FEATURE_PAGE0_DEFICIENCY",
+        "FEATURE_PAGE1_SIGN",
+        "FEATURE_PAGE1_PRINT",
+    }
+)
 
 # 旧版账号 JSON 键 → 新键（读取时复制，写入时不再使用旧键）
 _USER_LEGACY_PERM_MIRROR: dict[str, tuple[str, ...]] = {
@@ -134,6 +161,7 @@ def feature_permission_schema_for_client() -> dict[str, Any]:
         "roleVisibleGroupIds": {
             role: list(ids) for role, ids in USER_FEATURE_PERM_ROLE_VISIBLE_GROUP_IDS.items()
         },
+        "defaultDenyKeys": sorted(USER_FEATURE_KEYS_DEFAULT_DENY),
     }
 
 
@@ -177,11 +205,19 @@ def _expand_legacy_user_permissions(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def apply_default_deny_permissions(perms: Optional[dict[str, bool]]) -> dict[str, bool]:
+    """新功能入口未配置时写入禁止，避免跟随系统后自动开放。"""
+    out = dict(perms or {})
+    for key in USER_FEATURE_KEYS_DEFAULT_DENY:
+        out.setdefault(key, False)
+    return out
+
+
 def normalize_user_feature_permissions(raw: Any) -> dict[str, bool]:
     """仅保留受管键且值为 bool 的显式覆盖。"""
     raw = _coerce_feature_permissions_raw(raw)
     if not isinstance(raw, dict):
-        return {}
+        return apply_default_deny_permissions({})
     raw = _expand_legacy_user_permissions(raw)
     out: dict[str, bool] = {}
     for key in USER_MANAGED_FEATURE_KEYS:
@@ -192,17 +228,17 @@ def normalize_user_feature_permissions(raw: Any) -> dict[str, bool]:
             out[key] = val
         elif val in (0, 1, "0", "1", "true", "false", "True", "False"):
             out[key] = str(val).lower() in {"1", "true"}
-    return out
+    return apply_default_deny_permissions(out)
 
 
 def read_user_feature_permissions(user: Optional[User]) -> dict[str, bool]:
     if not user:
-        return {}
+        return apply_default_deny_permissions({})
     return normalize_user_feature_permissions(getattr(user, "feature_permissions_json", None))
 
 
 def parse_feature_permissions_field(data: dict[str, Any]) -> Optional[dict[str, bool]]:
-    """API 入参：省略=不修改；null=不修改；{}=清空覆盖。"""
+    """API 入参：省略=不修改；null=不修改；{}=新入口禁止、其余无覆盖。"""
     if "featurePermissions" not in data:
         return None
     raw = data.get("featurePermissions")
@@ -217,7 +253,8 @@ def write_user_feature_permissions(user: User, perms: Optional[dict[str, bool]])
     """写入账号功能权限并标记 JSON 列已变更（避免 ORM 漏刷）。"""
     from sqlalchemy.orm.attributes import flag_modified
 
-    user.feature_permissions_json = perms or None
+    normalized = apply_default_deny_permissions(normalize_user_feature_permissions(perms))
+    user.feature_permissions_json = normalized
     flag_modified(user, "feature_permissions_json")
 
 
@@ -225,22 +262,27 @@ def merge_user_feature_flags(
     global_flags: dict[str, bool],
     user_overrides: dict[str, bool],
 ) -> dict[str, bool]:
-    """全局开关 ∧ 账号覆盖：禁止优先；允许须全局已开启；无覆盖则跟随全局。"""
+    """全局开关 ∧ 账号覆盖：禁止优先；允许须全局已开启；新入口缺省禁止；其余无覆盖则跟随全局。"""
+    overrides = apply_default_deny_permissions(user_overrides)
     out = dict(global_flags)
     for key in USER_MANAGED_FEATURE_KEYS:
-        if key not in user_overrides:
+        if key not in overrides:
             continue
-        if user_overrides[key] is False:
+        if overrides[key] is False:
             out[key] = False
         else:
-            out[key] = bool(global_flags.get(key)) and bool(user_overrides[key])
+            out[key] = bool(global_flags.get(key)) and bool(overrides[key])
     return out
 
 
 def _feature_permission_page_label(key: str) -> str:
-    if key in USER_PAGE0_FEATURE_KEYS:
+    in_p0 = key in USER_PAGE0_FEATURE_KEYS
+    in_p1 = key in USER_PAGE1_FEATURE_KEYS
+    if in_p0 and in_p1:
+        return "0/1"
+    if in_p0:
         return "0"
-    if key in USER_PAGE1_FEATURE_KEYS:
+    if in_p1:
         return "1"
     return "2"
 
@@ -264,7 +306,8 @@ def apply_feature_permission_patch(
     existing: dict[str, bool],
     patch: dict[str, str],
 ) -> dict[str, bool]:
-    """批量合并功能权限：patch 值为 allow / deny / inherit（跟随系统=移除覆盖）。"""
+    """批量合并功能权限：patch 值为 allow / deny / inherit。
+    inherit：原有项移除覆盖（跟随系统）；新入口仍落成禁止。"""
     out = dict(existing)
     for key, action in patch.items():
         if key not in USER_MANAGED_FEATURE_KEYS:
@@ -273,12 +316,15 @@ def apply_feature_permission_patch(
         if act in ("", "skip", "unchanged", "nochange"):
             continue
         if act == "inherit":
-            out.pop(key, None)
+            if key in USER_FEATURE_KEYS_DEFAULT_DENY:
+                out[key] = False
+            else:
+                out.pop(key, None)
         elif act in ("allow", "true", "1"):
             out[key] = True
         elif act in ("deny", "false", "0"):
             out[key] = False
-    return out
+    return apply_default_deny_permissions(out)
 
 
 def parse_batch_feature_permission_patch(data: dict[str, Any]) -> dict[str, str]:
@@ -342,3 +388,28 @@ def validate_homogeneous_batch_users(users: list[User]) -> tuple[str | None, str
             "（普通用户 / 项目管理员 / 公司管理员）后再批量设置功能权限"
         )
     return next(iter(roles)), None
+
+
+def backfill_default_deny_user_feature_permissions() -> int:
+    """已有账号未配置的新功能入口从「跟随系统」落成禁止。返回更新条数。"""
+    from . import db
+    from .models import User
+
+    updated = 0
+    try:
+        users = User.query.all()
+    except Exception:
+        return 0
+    for user in users:
+        raw = _coerce_feature_permissions_raw(getattr(user, "feature_permissions_json", None))
+        stored = raw if isinstance(raw, dict) else {}
+        if stored:
+            stored = _expand_legacy_user_permissions(stored)
+        if all(k in stored for k in USER_FEATURE_KEYS_DEFAULT_DENY):
+            continue
+        write_user_feature_permissions(user, stored)
+        db.session.add(user)
+        updated += 1
+    if updated:
+        db.session.commit()
+    return updated

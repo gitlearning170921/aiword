@@ -1148,7 +1148,9 @@ function createTaskRowUnderProject(projectBlock) {
         <td>
             <div class="input-group input-group-sm">
                 <input type="text" class="form-control task-document-number" placeholder="文件编号">
-                <button type="button" class="btn btn-outline-secondary task-document-number-pick" title="从文控中心带入，未命中则自动建议">带入/生成</button>
+                ${_page1Feature("FEATURE_DOCUMENT_CONTROL")
+                    ? '<button type="button" class="btn btn-outline-secondary task-document-number-pick" title="从文控中心带入，未命中则自动建议">带入/生成</button>'
+                    : ""}
             </div>
         </td>
         <td><input type="text" class="form-control form-control-sm task-file-version" placeholder="版本号"></td>
@@ -1568,7 +1570,9 @@ async function initUploadPage() {
                             <option value="ended" ${st === "ended" ? "selected" : ""}>已结束</option>
                         </select></td>
                     <td class="p1-actions-cell text-end">
-                        <button type="button" class="btn btn-sm btn-outline-secondary btn-project-doc-control me-1" data-id="${esc(p.id)}" data-code="${esc(p.projectCode || "")}" data-name="${esc(p.name || "")}">文控中心</button>
+                        ${_page1Feature("FEATURE_DOCUMENT_CONTROL")
+                            ? '<button type="button" class="btn btn-sm btn-outline-secondary btn-project-doc-control me-1" data-id="' + esc(p.id) + '" data-code="' + esc(p.projectCode || "") + '" data-name="' + esc(p.name || "") + '">文控中心</button>'
+                            : ""}
                         <button type="button" class="btn btn-sm btn-outline-primary btn-save-project" data-id="${esc(p.id)}">保存</button>
                         <button type="button" class="btn btn-sm btn-outline-danger btn-delete-project" data-id="${esc(p.id)}">删除</button>
                     </td>
@@ -1716,6 +1720,16 @@ async function initUploadPage() {
         }
     };
     document.getElementById("refreshProjectsBtn")?.addEventListener("click", loadProjectsManage);
+    (function bindPage1ProjectsCollapse() {
+        const panel = document.getElementById("page1ProjectsCollapse");
+        const filterBtn = document.getElementById("page1ProjectsFilterBtn");
+        if (!panel || !filterBtn || !window.bootstrap?.Collapse) return;
+        const ensureExpanded = () => {
+            const inst = window.bootstrap.Collapse.getOrCreateInstance(panel, { toggle: false });
+            if (!panel.classList.contains("show")) inst.show();
+        };
+        filterBtn.addEventListener("click", ensureExpanded);
+    })();
     document.getElementById("syncCompanyRegistryProjectsBtn")?.addEventListener("click", async () => {
         try {
             const res = await App.request("/api/projects/sync-from-company-registry", { method: "POST" });
@@ -2771,6 +2785,9 @@ const USER_FEATURE_PERM_GROUPS_FALLBACK = [
             { key: "FEATURE_PAGE0_AUDIT_MODIFY", label: "审核后修改" },
             { key: "FEATURE_PAGE0_AUDIT_TODO", label: "生成审核待办" },
             { key: "FEATURE_PAGE0_TRANSLATE", label: "文档翻译" },
+            { key: "FEATURE_LITERATURE_SEARCH", label: "文献检索" },
+            { key: "FEATURE_PAGE0_KNOWLEDGE_TRAIN", label: "知识库训练" },
+            { key: "FEATURE_PAGE0_DEFICIENCY", label: "发补记录" },
         ],
     },
     {
@@ -2785,6 +2802,10 @@ const USER_FEATURE_PERM_GROUPS_FALLBACK = [
             { key: "FEATURE_PAGE1_EXAM_CENTER", label: "考试训练中心" },
             { key: "FEATURE_PAGE1_SIGN", label: "去签字" },
             { key: "FEATURE_PAGE1_PRINT", label: "去打印" },
+            { key: "FEATURE_LITERATURE_SEARCH", label: "文献检索" },
+            { key: "FEATURE_DOCUMENT_CONTROL", label: "文控中心" },
+            { key: "FEATURE_PROJECT_KB", label: "项目知识库协同" },
+            { key: "FEATURE_VERSION_TASK_GENERATOR", label: "版本任务清单生成" },
         ],
     },
     {
@@ -2798,6 +2819,17 @@ const USER_FEATURE_PERM_GROUPS_FALLBACK = [
             { key: "FEATURE_PAGE2_EXAM_CENTER", label: "考试训练中心" },
         ],
     },
+];
+
+const USER_FEATURE_PERM_DEFAULT_DENY_KEYS_FALLBACK = [
+    "FEATURE_LITERATURE_SEARCH",
+    "FEATURE_DOCUMENT_CONTROL",
+    "FEATURE_PROJECT_KB",
+    "FEATURE_VERSION_TASK_GENERATOR",
+    "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+    "FEATURE_PAGE0_DEFICIENCY",
+    "FEATURE_PAGE1_SIGN",
+    "FEATURE_PAGE1_PRINT",
 ];
 
 /** @deprecated 兼容旧引用；运行时以 ensureUserFeaturePermSchema() 为准 */
@@ -2814,11 +2846,15 @@ async function ensureUserFeaturePermSchema() {
             roleVisibleGroupIds: res.roleVisibleGroupIds && typeof res.roleVisibleGroupIds === "object"
                 ? res.roleVisibleGroupIds
                 : { company: ["page0"], project: ["page1", "page2"], none: ["page2"] },
+            defaultDenyKeys: Array.isArray(res.defaultDenyKeys) && res.defaultDenyKeys.length
+                ? res.defaultDenyKeys
+                : USER_FEATURE_PERM_DEFAULT_DENY_KEYS_FALLBACK,
         };
     } catch (_e) {
         _userFeaturePermSchema = {
             groups: USER_FEATURE_PERM_GROUPS_FALLBACK,
             roleVisibleGroupIds: { company: ["page0"], project: ["page1", "page2"], none: ["page2"] },
+            defaultDenyKeys: USER_FEATURE_PERM_DEFAULT_DENY_KEYS_FALLBACK,
         };
     }
     return _userFeaturePermSchema;
@@ -2844,17 +2880,26 @@ function userFeaturePermGroupsForRole(role) {
 /** @deprecated 兼容旧引用 */
 const USER_FEATURE_PERM_DEFS = USER_FEATURE_PERM_GROUPS_FALLBACK.flatMap((g) => g.defs);
 
+function _userFeaturePermDefaultDenyKeys() {
+    const keys = (_userFeaturePermSchema && _userFeaturePermSchema.defaultDenyKeys)
+        || USER_FEATURE_PERM_DEFAULT_DENY_KEYS_FALLBACK;
+    return new Set(keys);
+}
+
 function _renderUserFeaturePermSelects(container, permissions, selectClass, groups, mode) {
     if (!container) return;
     const perms = permissions && typeof permissions === "object" ? permissions : {};
     const cls = selectClass || "user-feature-perm";
     const activeGroups = groups && groups.length ? groups : _userFeaturePermGroupsAll();
     const isBatch = mode === "batch";
+    const defaultDenyKeys = _userFeaturePermDefaultDenyKeys();
     container.innerHTML = activeGroups.map((group) => {
         const fields = group.defs.map(({ key, label }) => {
             let sel = isBatch ? "skip" : "inherit";
             if (!isBatch && Object.prototype.hasOwnProperty.call(perms, key)) {
                 sel = perms[key] ? "allow" : "deny";
+            } else if (!isBatch && defaultDenyKeys.has(key)) {
+                sel = "deny";
             }
             const skipOpt = isBatch
                 ? `<option value="skip"${sel === "skip" ? " selected" : ""}>不修改</option>`
@@ -5687,10 +5732,7 @@ function syncPage2TableHeader() {
 }
 
 function page2TableColSpan() {
-    let span = 26;
-    if (page2ObserverMode && page2ViewMode === "super_admin_readonly") span += 1;
-    if (page2ObserverMode) span += 1;
-    return span;
+    return _theadColspan(document.getElementById("myTasksTable"), 27);
 }
 
 function applyPage2ObserverChrome() {
@@ -5840,6 +5882,7 @@ async function initGeneratePage() {
 function initMyTasksFilter() {
     const filterProject = document.getElementById("filterTaskProject");
     const filterFile = document.getElementById("filterTaskFile");
+    const filterTargetVersion = document.getElementById("filterTaskTargetVersion");
     const filterType = document.getElementById("filterTaskType");
     const filterStatus = document.getElementById("filterTaskStatus");
     
@@ -5862,12 +5905,18 @@ function initMyTasksFilter() {
     const applyFilter = () => {
         const projectVal = filterProject.value.toLowerCase();
         const fileVal = filterFile.value.toLowerCase();
+        const targetVersionVal = (filterTargetVersion?.value || "").toLowerCase().trim();
         const typeVal = filterType.value;
         const statusVal = filterStatus.value;
         
         const filtered = myTasksCache.filter(r => {
             if (projectVal && !(String(r.projectName || "").toLowerCase().includes(projectVal))) return false;
             if (fileVal && !(String(r.fileName || "").toLowerCase().includes(fileVal))) return false;
+            if (targetVersionVal) {
+                const tv = String(r.targetVersion || "").toLowerCase();
+                const display = _displayTargetVersion(r.targetVersion).toLowerCase();
+                if (!tv.includes(targetVersionVal) && !display.includes(targetVersionVal)) return false;
+            }
             if (typeVal && r.taskType !== typeVal) return false;
             if (statusVal === "未完成" && r.completionStatus) return false;
             if (statusVal && statusVal !== "未完成" && r.completionStatus !== statusVal) return false;
@@ -5877,7 +5926,7 @@ function initMyTasksFilter() {
         renderMyTasksTable(sorted);
     };
     
-    [filterProject, filterFile, filterType, filterStatus].forEach(el => {
+    [filterProject, filterFile, filterTargetVersion, filterType, filterStatus].forEach(el => {
         el?.addEventListener("input", applyFilter);
         el?.addEventListener("change", applyFilter);
     });
@@ -6074,7 +6123,7 @@ function renderMyTasksTable(records) {
     const showTeamCol = page2ObserverMode && page2ViewMode === "super_admin_readonly";
     const showPersonCol = page2ObserverMode;
     
-    const addOneRow = (r, idx, groupKey, groupIndex, collapsed) => {
+    const addOneRow = (r, idx, groupKey, groupIndex, collapsed, twoLevelKeys) => {
         const tr = document.createElement("tr");
         tr.dataset.id = r.id;
         const rowMutable = page2RowCanMutate(r);
@@ -6082,6 +6131,10 @@ function renderMyTasksTable(records) {
             tr.classList.add("group-data-row");
             tr.dataset.groupKey = groupKey;
             tr.dataset.groupIndex = String(groupIndex);
+            if (twoLevelKeys) {
+                tr.dataset.groupKey1 = twoLevelKeys.key1;
+                tr.dataset.groupKey2 = twoLevelKeys.key2;
+            }
             if (collapsed) tr.classList.add("d-none");
         }
         const firstLink = r.templateLinks ? (r.templateLinks.split("\n")[0] || "").trim() : "";
@@ -6135,6 +6188,7 @@ function renderMyTasksTable(records) {
             ${personCol}
             <td data-col="projectName" class="col-wide" title="${_escTitle(r.projectName)}">${r.projectName}</td>
             <td data-col="fileName" class="col-wide" title="${_escTitle(r.fileName)}">${r.fileName}</td>
+            <td data-col="targetVersion" class="font-monospace" title="${_escTitle(_displayTargetVersion(r.targetVersion))}">${_escTitle(_displayTargetVersion(r.targetVersion))}</td>
             <td title="${_escTitle(r.taskType)}">${r.taskType || "-"}</td>
             <td title="${_escTitle(r.belongingModule)}">${(r.belongingModule != null && r.belongingModule !== "") ? r.belongingModule : "-"}</td>
             <td>${sourceTd}</td>
@@ -6291,6 +6345,72 @@ function renderMyTasksTable(records) {
             myTasksBody.appendChild(sep);
             ended.forEach((r) => addOneRow(r, idx++));
         }
+    } else if (groupBy === "project_target_version") {
+        const { projectMap, l2Label, l2KeyPrefix } = _groupByProjectThenField(lastRenderedMyTasks, groupBy);
+        let globalIdx = 0;
+        let groupIndexL1 = 0;
+        let groupIndexL2 = 0;
+        projectMap.forEach((innerMap, projectName) => {
+            const key1 = "project:" + projectName;
+            const totalProject = [...innerMap.values()].reduce((s, arr) => s + arr.length, 0);
+            const collapsed1 = myTasksCollapsedGroups.has(key1);
+            const firstArr = [...innerMap.values()][0] || [];
+            const prLabel = firstArr[0]?.projectPriorityLabel ? `【${firstArr[0].projectPriorityLabel}】` : "";
+            const header1 = document.createElement("tr");
+            header1.className = "group-header-row group-header-level1 table-secondary" + (collapsed1 ? " group-collapsed" : "");
+            header1.dataset.groupKey = key1;
+            header1.dataset.groupLevel = "1";
+            header1.dataset.groupIndex = String(groupIndexL1++);
+            header1.innerHTML = `<td colspan="${colSpan}" style="cursor:pointer"><span class="group-toggle">${collapsed1 ? "▶" : "▼"}</span> <strong>项目：${prLabel}${projectName || "（空）"}</strong> <span class="text-muted">(${totalProject}条)</span></td>`;
+            header1.style.cursor = "pointer";
+            myTasksBody.appendChild(header1);
+            innerMap.forEach((arr, l2Name) => {
+                const key2 = key1 + "|" + l2KeyPrefix + l2Name;
+                const collapsed2 = myTasksCollapsedGroups.has(key2);
+                const header2 = document.createElement("tr");
+                header2.className = "group-header-row group-header-level2 table-secondary" + (collapsed2 ? " group-collapsed" : "");
+                header2.dataset.groupKey = key2;
+                header2.dataset.groupLevel = "2";
+                header2.dataset.groupIndex = String(groupIndexL2);
+                if (collapsed1) header2.classList.add("d-none");
+                header2.innerHTML = `<td colspan="${colSpan}" style="cursor:pointer" class="ps-4"><span class="group-toggle">${collapsed2 ? "▶" : "▼"}</span> <strong>${l2Label}：${l2Name || "（空）"}</strong> <span class="text-muted">(${arr.length}条)</span></td>`;
+                header2.style.cursor = "pointer";
+                myTasksBody.appendChild(header2);
+                const rowHidden = collapsed1 || collapsed2;
+                arr.forEach((r) => addOneRow(r, globalIdx++, key2, groupIndexL2, rowHidden, { key1, key2 }));
+                groupIndexL2++;
+            });
+        });
+        myTasksBody.querySelectorAll(".group-header-row").forEach((headerTr) => {
+            headerTr.addEventListener("click", () => {
+                const key = headerTr.dataset.groupKey;
+                const level = headerTr.dataset.groupLevel;
+                if (myTasksCollapsedGroups.has(key)) myTasksCollapsedGroups.delete(key);
+                else myTasksCollapsedGroups.add(key);
+                const collapsed = myTasksCollapsedGroups.has(key);
+                headerTr.classList.toggle("group-collapsed", collapsed);
+                headerTr.querySelector(".group-toggle").textContent = collapsed ? "▶" : "▼";
+                if (level === "1") {
+                    myTasksBody.querySelectorAll("tr.group-data-row[data-group-key1]").forEach((row) => {
+                        if (row.dataset.groupKey1 !== key) return;
+                        const key2 = row.dataset.groupKey2;
+                        const collapsed2 = myTasksCollapsedGroups.has(key2);
+                        row.classList.toggle("d-none", collapsed || collapsed2);
+                    });
+                    myTasksBody.querySelectorAll("tr.group-header-level2").forEach((h2) => {
+                        if (!String(h2.dataset.groupKey || "").startsWith(key + "|")) return;
+                        h2.classList.toggle("d-none", collapsed);
+                    });
+                } else {
+                    myTasksBody.querySelectorAll("tr.group-data-row[data-group-key2]").forEach((row) => {
+                        if (row.dataset.groupKey2 !== key) return;
+                        const key1 = row.dataset.groupKey1;
+                        const collapsed1 = myTasksCollapsedGroups.has(key1);
+                        row.classList.toggle("d-none", collapsed || collapsed1);
+                    });
+                }
+            });
+        });
     } else {
         let keyFn;
         let label;
@@ -6484,6 +6604,16 @@ const CLIENT_SYSTEM_CONFIG_SECTIONS = [
             "FEATURE_TOOLS_PAGE2",
             "FEATURE_COMPANY_REGISTRY",
             "FEATURE_MULTI_TENANT",
+            "FEATURE_DOCUMENT_CONTROL",
+            "FEATURE_VERSION_TASK_GENERATOR",
+            "FEATURE_PROJECT_KB",
+            "FEATURE_PROJECT_KB_SYNC",
+            "FEATURE_LITERATURE_SEARCH",
+            "FEATURE_PAGE0_KNOWLEDGE_TRAIN",
+            "FEATURE_PAGE0_DEFICIENCY",
+            "FEATURE_ENV_SEPARATION",
+            "FEATURE_PAGE0_AUDIT_TODO",
+            "FEATURE_PAGE1_AUDIT_TODO",
         ],
     },
     {

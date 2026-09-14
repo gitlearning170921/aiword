@@ -52,6 +52,17 @@ from .version_task_rules import (
     process_branch_label,
 )
 
+# 版本清单下发到任务列表时的默认任务类型（与系统默认 TaskTypeConfig 一致）
+DEFAULT_VERSION_TASK_TYPE = "初稿待编写"
+LEGACY_DEFAULT_VERSION_TASK_TYPE = "版本变更任务"
+LEGACY_AUTO_VERSION_TASK_TYPES = {
+    LEGACY_DEFAULT_VERSION_TASK_TYPE,
+    "归档文件",
+    "变更控制流程",
+    "缺陷管理流程",
+    "生产发布流程",
+}
+
 
 def parse_version(raw: str) -> ParsedVersion:
     text = (raw or "").strip()
@@ -142,12 +153,37 @@ def _fmt_date(d: date) -> str:
     return d.strftime("%Y-%m-%d")
 
 
+def normalize_preview_item_fields(rec: dict[str, Any]) -> bool:
+    """统一任务类型默认值，并把历史「备注」(规则原因)迁到「说明」。
+
+    就地改写传入字典。去重仍按改写前的 taskType 进行，本函数应在去重之后调用。
+    """
+    if not isinstance(rec, dict):
+        return False
+    rec.update(split_legacy_file_version_alias(rec))
+    changed = False
+    kind = str(rec.get("taskType") or "").strip()
+    if not kind or kind in LEGACY_AUTO_VERSION_TASK_TYPES:
+        if kind != DEFAULT_VERSION_TASK_TYPE:
+            rec["taskType"] = DEFAULT_VERSION_TASK_TYPE
+            changed = True
+    if rec.get("explanation") is None:
+        rec["explanation"] = str(rec.get("notes") or rec.get("reason") or "").strip()
+        rec["notes"] = ""
+        changed = True
+    else:
+        rec["explanation"] = str(rec.get("explanation") or "").strip()
+        rec["notes"] = str(rec.get("notes") or "").strip()
+    return changed
+
+
 def _merge_generated_item(target: dict[str, Any], patch: dict[str, Any]) -> None:
     allow_keys = {
         "fileName",
         "taskType",
         "author",
         "belongingModule",
+        "explanation",
         "notes",
         "dueDate",
         "documentDisplayDate",
@@ -164,6 +200,12 @@ def _merge_generated_item(target: dict[str, Any], patch: dict[str, Any]) -> None
 
 def _task_identity(item: dict[str, Any]) -> tuple[str, str, str]:
     return _task_dedupe_key(item)
+
+
+def _feedback_identity(item: dict[str, Any]) -> tuple[str, str, str]:
+    rec = dict(item) if isinstance(item, dict) else {}
+    normalize_preview_item_fields(rec)
+    return _task_identity(rec)
 
 
 def _mark_preview_row_deleted(rec: dict[str, Any]) -> dict[str, Any]:
@@ -223,20 +265,28 @@ def apply_feedback_rules(
         if kind == "delete":
             # 删除只写在已保存快照里。再次「生成预览」按规则重建，不把删除套回去。
             continue
-        identity = _task_identity(original if kind != "add" else adjusted)
+        identity = _feedback_identity(original if kind != "add" else adjusted)
         if kind != "add" and identity == ("", "", ""):
             continue
         if kind == "add":
             candidate = dict(adjusted)
-            if candidate and _task_identity(candidate) not in {_task_identity(x) for x in items}:
+            if candidate.get("explanation") is None:
+                candidate["explanation"] = str(candidate.get("notes") or "").strip()
+                candidate["notes"] = ""
+            if candidate and _feedback_identity(candidate) not in {_feedback_identity(x) for x in items}:
                 items.append(candidate)
                 hit += 1
             continue
-        idx = next((i for i, x in enumerate(items) if _task_identity(x) == identity), None)
+        idx = next((i for i, x in enumerate(items) if _feedback_identity(x) == identity), None)
         if idx is None:
             continue
         if kind in {"update", "replace"}:
             _merge_generated_item(items[idx], adjusted)
+            # 旧反馈只有 notes（当时存的是规则原因），不要写进新的下发备注列
+            if "explanation" not in adjusted and "notes" in adjusted:
+                if not str(items[idx].get("explanation") or "").strip():
+                    items[idx]["explanation"] = str(adjusted.get("notes") or "").strip()
+                items[idx]["notes"] = ""
             hit += 1
     return items, hit
 
@@ -501,6 +551,7 @@ def enrich_preview_items_from_document_control(
 
 def annotate_preview_item(item: dict[str, Any], *, fresh: bool = False) -> dict[str, Any]:
     rec = split_legacy_file_version_alias(item)
+    normalize_preview_item_fields(rec)
     rec["originKey"] = _origin_key_of(rec)
     rec["recordStatus"] = normalize_record_status(rec.get("recordStatus"))
     rec["isSystemRecord"] = normalize_is_system_record(
@@ -691,7 +742,8 @@ def generate_task_preview(
                     "author": task["author"],
                     "belongingModule": task["belongingModule"],
                     "dueDate": _fmt_date(due),
-                    "notes": task["reason"],
+                    "explanation": task["reason"],
+                    "notes": "",
                     "fileVersion": "",
                     "documentNumber": "",
                     "registrationVersion": target_version,
@@ -1202,6 +1254,7 @@ CHANGE_FIELD_LABELS = {
     "dueDate": "完成日期",
     "documentDisplayDate": "文档日期",
     "belongingModule": "模块",
+    "explanation": "说明",
     "notes": "备注",
     "recordStatus": "状态",
     "chapter": "章节分类",
@@ -2228,9 +2281,26 @@ def split_preview_live_and_deleted(preview: Optional[dict[str, Any]]) -> dict[st
     return out
 
 
+def _normalize_preview_payload_items(preview: dict[str, Any]) -> dict[str, Any]:
+    for key in ("items", "deletedItems", "ruleItems"):
+        rows = preview.get(key)
+        if not isinstance(rows, list):
+            continue
+        cleaned: list[Any] = []
+        for x in rows:
+            if isinstance(x, dict):
+                normalize_preview_item_fields(x)
+                cleaned.append(x)
+            else:
+                cleaned.append(x)
+        preview[key] = cleaned
+    return preview
+
+
 def hydrate_preview_deleted_markers(preview: Optional[dict[str, Any]]) -> dict[str, Any]:
     """读取已保存快照：可见行在 items，删除行只在 deletedItems。不用于再次生成。"""
-    return split_preview_live_and_deleted(preview)
+    out = split_preview_live_and_deleted(preview)
+    return _normalize_preview_payload_items(out)
 
 
 def get_latest_version_task_preview(
@@ -2247,6 +2317,7 @@ def get_latest_version_task_preview(
     job = query.order_by(VersionTaskGenerationJob.updated_at.desc()).first()
     if not job or not isinstance(job.preview_json, dict):
         return None
+    persist_normalized_preview_job(job)
     payload = hydrate_preview_deleted_markers(job.preview_json)
     product_name = str(payload.get("productName") or "").strip()
     if not product_name and job.project_id:
@@ -2263,5 +2334,31 @@ def get_latest_version_task_preview(
         }
     )
     return payload
+
+
+def persist_normalized_preview_job(job: VersionTaskGenerationJob) -> bool:
+    """把历史快照的任务类型/说明/备注迁到新字段并写回，避免只在内存里改。"""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    payload = job.preview_json if job is not None else None
+    if not isinstance(payload, dict):
+        return False
+    dirty = False
+    for key in ("items", "deletedItems", "ruleItems"):
+        rows = payload.get(key)
+        if not isinstance(rows, list):
+            continue
+        for rec in rows:
+            if isinstance(rec, dict) and normalize_preview_item_fields(rec):
+                dirty = True
+    if not dirty:
+        return False
+    try:
+        flag_modified(job, "preview_json")
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return False
+    return True
 
 

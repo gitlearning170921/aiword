@@ -17,8 +17,8 @@
 
 {% set page1_has_doc_tools = feature_flags.FEATURE_PAGE1_DRAFT_GEN or feature_flags.FEATURE_PAGE1_AUDIT or feature_flags.FEATURE_PAGE1_AUDIT_MODIFY or feature_flags.FEATURE_PAGE1_TRANSLATE %}
 {% set page1_has_reg_tools = feature_flags.FEATURE_LITERATURE_SEARCH %}
-{% set page1_has_qms_tools = feature_flags.FEATURE_DOCUMENT_CONTROL %}
-{% set page1_has_pm_tools = feature_flags.FEATURE_DOCUMENT_CONTROL %}
+{% set page1_has_qms_tools = feature_flags.FEATURE_DOCUMENT_CONTROL or feature_flags.FEATURE_PROJECT_KB %}
+{% set page1_has_pm_tools = feature_flags.FEATURE_VERSION_TASK_GENERATOR %}
 {% if page1_has_doc_tools or page1_has_reg_tools or page1_has_qms_tools or page1_has_pm_tools %}
 <div class="card mb-4">
     <div class="card-header">工具入口</div>
@@ -58,8 +58,12 @@
                 <div class="fw-semibold mb-1">体系工具</div>
                 <p class="small text-muted mb-2">受控文件编号与文控台账。</p>
                 <div class="d-flex flex-wrap gap-2">
+                    {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
                     <a href="{{ url_for('document_control.document_control_page') }}" class="btn btn-outline-secondary">文控中心</a>
+                    {% endif %}
+                    {% if feature_flags.FEATURE_PROJECT_KB %}
                     <a href="{{ url_for('document_control.project_kb_page') }}" class="btn btn-outline-primary">项目知识库协同</a>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}
@@ -68,7 +72,9 @@
                 <div class="fw-semibold mb-1">项目管理工具</div>
                 <p class="small text-muted mb-2">按版本生成任务清单。</p>
                 <div class="d-flex flex-wrap gap-2">
+                    {% if feature_flags.FEATURE_VERSION_TASK_GENERATOR %}
                     <a href="{{ url_for('document_control.version_task_generator_page') }}" class="btn btn-outline-secondary">版本任务清单生成</a>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}
@@ -80,9 +86,17 @@
 <div class="card mb-4 page1-projects-card">
     <div class="card-header page1-projects-card-header">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-            <span class="fw-semibold">项目管理（优先级 / 状态）</span>
+            <button type="button" class="btn btn-link text-decoration-none p-0 fw-semibold text-body page1-projects-toggle"
+                id="page1ProjectsToggle"
+                data-bs-toggle="collapse"
+                data-bs-target="#page1ProjectsCollapse"
+                aria-expanded="false"
+                aria-controls="page1ProjectsCollapse">
+                <span class="page1-projects-toggle-icon" aria-hidden="true">▶</span>
+                项目管理（优先级 / 状态）
+            </button>
             <div class="d-flex gap-2 flex-wrap align-items-center">
-                <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
+                <button type="button" class="btn btn-sm btn-outline-info" id="page1ProjectsFilterBtn" data-bs-toggle="collapse" data-bs-target="#projectsFilterRow">筛选</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="syncCompanyRegistryProjectsBtn" title="{% if is_page13_super_admin %}从页面0 同步分配到本账号所属项目组的公司总览项目{% else %}从公司总览同步分配到本账号所属项目组的项目{% endif %}">{% if is_page13_super_admin %}同步页面0项目{% else %}同步公司总览项目{% endif %}</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshProjectsBtn">刷新</button>
                 <div class="col-toggle-wrap">
@@ -92,10 +106,12 @@
                 <button type="button" class="btn btn-sm btn-primary" id="openNewProjectModalBtn">新增项目</button>
             </div>
         </div>
+    </div>
+    <div id="page1ProjectsCollapse" class="collapse">
         {% if is_page13_super_admin %}
-        <p class="small text-muted mb-0 mt-2 pt-2 border-top border-light-subtle">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在{% if is_page13_super_admin %}页面1/2{% else %}任务管理与我的任务{% endif %}展示，{% if is_page13_super_admin %}页面3{% else %}统计{% endif %}与自动通知也不计入。</p>
+        <p class="small text-muted mb-0 px-3 pt-2">优先级用于任务列表与自动通知的展示顺序（高→中→低）。已结束项目默认不在{% if is_page13_super_admin %}页面1/2{% else %}任务管理与我的任务{% endif %}展示，{% if is_page13_super_admin %}页面3{% else %}统计{% endif %}与自动通知也不计入。</p>
         {% endif %}
-        <div id="projectsFilterRow" class="collapse mt-2 pt-2 border-top border-light-subtle">
+        <div id="projectsFilterRow" class="collapse px-3 mt-2 pt-2 border-top border-light-subtle">
             <div class="row g-2 align-items-end">
                 <div class="col-md-4">
                     <label class="form-label small mb-0">项目名称搜索</label>
@@ -120,8 +136,7 @@
                 </div>
             </div>
         </div>
-    </div>
-    <div class="card-body pt-2 pb-0">
+        <div class="card-body pt-2 pb-0">
         <div class="mb-2 d-flex flex-wrap align-items-center gap-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="batchEditProjectsBtn" disabled>批量编辑</button>
             <button type="button" class="btn btn-sm btn-success" id="saveAllProjectsBtn">一键保存</button>
@@ -154,6 +169,7 @@
                 <tbody id="projectsManageBody"></tbody>
             </table>
         </div>
+    </div>
     </div>
 </div>
 

@@ -11,9 +11,9 @@ from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
 import requests
-from flask import Blueprint, current_app, jsonify, render_template, request, session
+from flask import Blueprint, Response, current_app, jsonify, render_template, request, session
 from openpyxl import load_workbook
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from webapp import db
@@ -25,7 +25,6 @@ from webapp._integration_common import (
     login_wall,
     upstream_headers,
 )
-from webapp.app_settings import is_effective_feature_enabled
 from webapp.models import (
     ControlledDocument,
     DocumentControlImportLog,
@@ -40,10 +39,26 @@ from webapp.models import (
     now_local,
 )
 from webapp.tenant_context import resolve_organization_context
-from webapp.upload_task_identity import find_upload_task_duplicate, normalize_target_version
+from webapp.upload_task_identity import (
+    expand_preview_items_by_author,
+    find_upload_task_duplicate_for_project,
+    list_upload_tasks_same_file_type_version,
+    normalize_target_version,
+    pick_latest_upload_task,
+    project_upload_name_aliases,
+)
 from webapp.user_facing import api_debug_fields, user_facing_upstream_error
-from webapp.authz import is_page13_super_admin
+from webapp.authz import (
+    filter_upload_records_in_scope,
+    filter_uploads_by_organization,
+    is_page13_super_admin,
+    project_display_label,
+    project_in_scope,
+    rbac_enforced,
+)
 from .version_task_generator import (
+    DEFAULT_VERSION_TASK_TYPE,
+    LEGACY_AUTO_VERSION_TASK_TYPES,
     build_adjustment_rows,
     delete_project_version_record,
     diagnose_release_dates,
@@ -75,6 +90,7 @@ from .version_task_generator import (
 from .project_kb_service import (
     refresh_project_kb_document_versions,
     enqueue_project_kb_sync_events,
+    is_project_kb_sync_enabled,
     list_project_kb_latest_documents,
     list_project_kb_document_history,
     list_project_kb_overview_stats,
@@ -610,10 +626,22 @@ def _doc_lifecycle_label(status: Optional[str]) -> str:
     return "受控"
 
 
-def _require_feature():
-    if not is_effective_feature_enabled("FEATURE_DOCUMENT_CONTROL"):
-        return jsonify({"message": "文控中心功能未开启"}), 403
-    return None
+def _require_feature(feature_key: str | None = None):
+    from flask import request as req
+
+    from webapp.app_settings import feature_gate_response
+
+    key = feature_key or _feature_key_for_request_path(req.path or "")
+    return feature_gate_response(key)
+
+
+def _feature_key_for_request_path(path: str) -> str:
+    p = (path or "").lower()
+    if "/version-task" in p:
+        return "FEATURE_VERSION_TASK_GENERATOR"
+    if "/project-kb" in p:
+        return "FEATURE_PROJECT_KB"
+    return "FEATURE_DOCUMENT_CONTROL"
 
 
 def _org_context() -> tuple[str, str]:
@@ -752,6 +780,401 @@ def _project_in_org(project: Project, org_id: str) -> bool:
     if project.organization_id and str(project.organization_id).strip() != org_id:
         return False
     return True
+
+
+def _project_task_display_name(project: Project) -> str:
+    label = project_display_label(
+        project.name,
+        getattr(project, "registered_country", None),
+        getattr(project, "registered_category", None),
+    ).strip()
+    return label or (project.name or "").strip()
+
+
+def _display_target_version(value: Any) -> str:
+    text = normalize_target_version(value)
+    return text or "未指定"
+
+
+def _target_version_sort_key(ver: str) -> tuple:
+    text = str(ver or "").strip()
+    if not text or text == "未指定":
+        return (1, 0, 0, 0, 0, text)
+    try:
+        parsed = parse_version(text)
+        return (0, parsed.x, parsed.y, parsed.z, parsed.b, parsed.normalized)
+    except ValueError:
+        return (0, 0, 0, 0, 0, text)
+
+
+def _dt_label(value: Any) -> str:
+    if not value:
+        return ""
+    try:
+        return value.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(value)[:16]
+
+
+def _serialize_apply_version_stats(by_version: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    rows = list(by_version.values())
+    rows.sort(key=lambda row: _target_version_sort_key(str(row.get("targetVersion") or "")))
+    return rows
+
+
+def _issued_identity_key(file_name: Any, task_type: Any, author: Any, target_version: Any) -> str:
+    author_text = str(author or "").strip() or "待分配"
+    return "|".join(
+        [
+            str(file_name or "").strip().lower(),
+            str(task_type or "").strip().lower(),
+            author_text.lower(),
+            _display_target_version(target_version).lower(),
+        ]
+    )
+
+
+def _issued_item_dict(file_name: Any, task_type: Any, author: Any, target_version: Any) -> dict[str, Any]:
+    author_text = str(author or "").strip() or "待分配"
+    target = _display_target_version(target_version)
+    task = _canonical_task_type(task_type)
+    raw_type = str(task_type or "").strip() or task
+    file_text = str(file_name or "").strip()
+    item = {
+        "fileName": file_text,
+        "taskType": task,
+        "author": author_text,
+        "targetVersion": target,
+        "key": _issued_identity_key(file_text, task, author_text, target),
+    }
+    variant_keys = _issued_variant_keys({file_text.lower()} if file_text else set(), raw_type, author_text, target)
+    variant_keys.add(item["key"])
+    item["keys"] = sorted(variant_keys)
+    return item
+
+
+def _issued_item_from_payload(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    file_name = str(raw.get("fileName") or "").strip()
+    if not file_name:
+        return None
+    return _issued_item_dict(
+        file_name,
+        raw.get("taskType"),
+        raw.get("author"),
+        raw.get("targetVersion") or raw.get("registrationVersion"),
+    )
+
+
+def _canonical_task_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text in LEGACY_AUTO_VERSION_TASK_TYPES:
+        return DEFAULT_VERSION_TASK_TYPE
+    return text
+
+
+def _file_name_keys(*values: Any) -> set[str]:
+    out: set[str] = set()
+    for raw in values:
+        text = str(raw or "").strip().lower()
+        if text:
+            out.add(text)
+    return out
+
+
+def _issued_variant_keys(
+    file_names: set[str],
+    task_type: Any,
+    author: Any,
+    target_version: Any,
+) -> set[str]:
+    canon = _canonical_task_type(task_type)
+    raw_type = str(task_type or "").strip() or canon
+    types = {canon.lower(), raw_type.lower()}
+    author_text = (str(author or "").strip() or "待分配").lower()
+    ver = _display_target_version(target_version).lower()
+    keys: set[str] = set()
+    for file_name in file_names:
+        for task in types:
+            keys.add("|".join([file_name, task, author_text, ver]))
+    return keys
+
+
+def _preview_row_is_live(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("changeKind") or "").strip().lower() == "delete":
+        return False
+    if row.get("hideInPreview"):
+        return False
+    return bool(str(row.get("fileName") or row.get("taskKey") or "").strip())
+
+
+def _project_upload_records(org_id: str, project: Project) -> list[UploadRecord]:
+    aliases = list(project_upload_name_aliases(project) or [])
+    clauses = [UploadRecord.project_id == project.id]
+    if aliases:
+        clauses.append(UploadRecord.project_name.in_(aliases))
+    q = UploadRecord.query.filter(or_(*clauses))
+    if org_id:
+        q = q.filter(
+            or_(
+                UploadRecord.organization_id == org_id,
+                UploadRecord.organization_id.is_(None),
+                UploadRecord.organization_id == "",
+            )
+        )
+    return filter_uploads_by_organization(filter_upload_records_in_scope(q.all()))
+
+
+def _preview_job_belongs_to_project(job: VersionTaskGenerationJob, project: Project, payload: dict[str, Any]) -> bool:
+    pid = str(project.id or "").strip()
+    if not pid:
+        return False
+    job_pid = str(getattr(job, "project_id", None) or "").strip()
+    payload_pid = str((payload or {}).get("projectId") or "").strip()
+    if job_pid and job_pid != pid:
+        return False
+    if payload_pid and payload_pid != pid:
+        return False
+    return bool(job_pid or payload_pid)
+
+
+def _live_preview_rows(payload: Any) -> list[dict[str, Any]]:
+    hydrated = hydrate_preview_deleted_markers(payload if isinstance(payload, dict) else {})
+    return [row for row in (hydrated.get("items") or []) if _preview_row_is_live(row)]
+
+
+def _collect_preview_catalog_items(org_id: str, project: Project) -> list[dict[str, Any]]:
+    """当前版本清单：优先最近一次预览；没有可用行时用历史预览补全（不去重过程批次）。"""
+    latest = get_latest_version_task_preview(org_id=org_id, project_id=str(project.id or "").strip())
+    latest_rows = _live_preview_rows(latest) if latest else []
+    if latest_rows:
+        return latest_rows
+
+    q = VersionTaskGenerationJob.query.filter(VersionTaskGenerationJob.preview_json.isnot(None))
+    if org_id:
+        q = q.filter(
+            or_(
+                VersionTaskGenerationJob.organization_id == org_id,
+                VersionTaskGenerationJob.organization_id.is_(None),
+                VersionTaskGenerationJob.organization_id == "",
+            )
+        )
+    jobs = q.order_by(VersionTaskGenerationJob.updated_at.desc()).all()
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = job.preview_json if isinstance(job.preview_json, dict) else {}
+        if not _preview_job_belongs_to_project(job, project, payload):
+            continue
+        for row in _live_preview_rows(payload):
+            file_name = str(row.get("fileName") or row.get("taskKey") or "").strip().lower()
+            task_type = _canonical_task_type(row.get("taskType")).lower()
+            author = str(row.get("author") or "").strip().lower()
+            ver = _display_target_version(row.get("targetVersion") or row.get("registrationVersion")).lower()
+            key = (file_name, task_type, author, ver)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def _index_upload_identity_keys(records: list[UploadRecord]) -> dict[str, UploadRecord]:
+    index: dict[str, UploadRecord] = {}
+    for rec in records:
+        names = _file_name_keys(getattr(rec, "file_name", None))
+        keys = _issued_variant_keys(
+            names,
+            getattr(rec, "task_type", None),
+            getattr(rec, "author", None),
+            getattr(rec, "target_version", None),
+        )
+        for key in keys:
+            prev = index.get(key)
+            if prev is None:
+                index[key] = rec
+                continue
+            picked = pick_latest_upload_task([prev, rec])
+            if picked is rec:
+                index[key] = rec
+    return index
+
+
+def _match_upload_for_preview_row(
+    row: dict[str, Any],
+    project: Project,
+    upload_index: dict[str, UploadRecord],
+) -> UploadRecord | None:
+    file_name = str(row.get("fileName") or "").strip()
+    task_key = str(row.get("taskKey") or "").strip()
+    lookup_name = file_name or task_key
+    names = _file_name_keys(lookup_name)
+    target = row.get("targetVersion") or row.get("registrationVersion")
+    author = row.get("author")
+    keys = _issued_variant_keys(names, row.get("taskType"), author, target)
+    for key in keys:
+        rec = upload_index.get(key)
+        if rec is not None:
+            return rec
+    if not lookup_name:
+        return None
+    types: list[str] = []
+    seen: set[str] = set()
+    for raw in (_canonical_task_type(row.get("taskType")), str(row.get("taskType") or "").strip(), *sorted(LEGACY_AUTO_VERSION_TASK_TYPES)):
+        text = str(raw or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        types.append(text)
+    author_text = str(author or "").strip() or "待分配"
+    target_norm = normalize_target_version(target)
+    for task_type in types:
+        hit = find_upload_task_duplicate_for_project(
+            project=project,
+            file_name=lookup_name,
+            task_type=task_type,
+            author=author_text,
+            target_version=target_norm,
+        )
+        if hit is not None:
+            return hit
+    if target_norm:
+        unspecified_keys = _issued_variant_keys(names, row.get("taskType"), author, "")
+        for key in unspecified_keys:
+            rec = upload_index.get(key)
+            if rec is not None:
+                return rec
+        for task_type in types:
+            hit = find_upload_task_duplicate_for_project(
+                project=project,
+                file_name=lookup_name,
+                task_type=task_type,
+                author=author_text,
+                target_version="",
+            )
+            if hit is not None:
+                return hit
+    return None
+
+
+def _collect_latest_issued_records(org_id: str, project: Project) -> list[dict[str, Any]]:
+    catalog = expand_preview_items_by_author(_collect_preview_catalog_items(org_id, project))
+    if not catalog:
+        return []
+    uploads = _project_upload_records(org_id, project)
+    upload_index = _index_upload_identity_keys(uploads)
+    issued: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in catalog:
+        rec = _match_upload_for_preview_row(row, project, upload_index)
+        if rec is None:
+            continue
+        file_name = str(row.get("fileName") or getattr(rec, "file_name", "") or "").strip()
+        if not file_name:
+            continue
+        item = _issued_item_dict(
+            file_name,
+            row.get("taskType") or getattr(rec, "task_type", None),
+            row.get("author") or getattr(rec, "author", None),
+            row.get("targetVersion")
+            or row.get("registrationVersion")
+            or getattr(rec, "target_version", None),
+        )
+        extra = _issued_variant_keys(
+            _file_name_keys(file_name, getattr(rec, "file_name", None)),
+            getattr(rec, "task_type", None),
+            getattr(rec, "author", None),
+            getattr(rec, "target_version", None),
+        )
+        item["keys"] = sorted(set(item.get("keys") or []) | extra | {item["key"]})
+        if item["key"] in seen:
+            continue
+        seen.add(item["key"])
+        issued.append(item)
+    issued.sort(
+        key=lambda row: (
+            _target_version_sort_key(str(row.get("targetVersion") or "")),
+            str(row.get("fileName") or ""),
+            str(row.get("author") or ""),
+        )
+    )
+    return issued
+
+
+def _issued_records_to_groups(project: Project, issued_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    versions: dict[str, list[dict[str, Any]]] = {}
+    for item in issued_items:
+        ver = _display_target_version(item.get("targetVersion"))
+        versions.setdefault(ver, []).append(item)
+    version_rows = []
+    for ver, records in versions.items():
+        version_rows.append(
+            {
+                "targetVersion": ver,
+                "taskCount": len(records),
+                "records": [
+                    {
+                        "fileName": str(row.get("fileName") or "").strip(),
+                        "taskType": str(row.get("taskType") or "").strip(),
+                        "author": str(row.get("author") or "").strip() or "待分配",
+                        "targetVersion": ver,
+                        "key": str(row.get("key") or ""),
+                    }
+                    for row in records
+                ],
+            }
+        )
+    version_rows.sort(key=lambda row: _target_version_sort_key(str(row.get("targetVersion") or "")))
+    return [
+        {
+            "projectId": project.id,
+            "projectName": _project_task_display_name(project),
+            "taskCount": sum(int(row.get("taskCount") or 0) for row in version_rows),
+            "versions": version_rows,
+        }
+    ]
+
+
+def _sibling_project_layer_fields(project: Project) -> dict[str, Any]:
+    aliases = project_upload_name_aliases(project)
+    clauses = []
+    if (project.id or "").strip():
+        clauses.append(UploadRecord.project_id == project.id)
+    if aliases:
+        clauses.append(UploadRecord.project_name.in_(aliases))
+    if not clauses:
+        return {}
+    sibling = (
+        UploadRecord.query.filter(or_(*clauses))
+        .order_by(UploadRecord.updated_at.desc())
+        .first()
+    )
+    if not sibling:
+        country = str(getattr(project, "registered_country", None) or "").strip() or None
+        return {"country": country} if country else {}
+    return {
+        "business_side": sibling.business_side,
+        "product": sibling.product,
+        "country": sibling.country
+        or (str(getattr(project, "registered_country", None) or "").strip() or None),
+        "project_notes": sibling.project_notes,
+        "registered_product_name": sibling.registered_product_name,
+        "model": sibling.model,
+        "registration_version": sibling.registration_version,
+    }
+
+
+def _apply_project_layer_fields(upload: UploadRecord, fields: dict[str, Any]) -> None:
+    for key, value in (fields or {}).items():
+        if value in (None, ""):
+            continue
+        current = getattr(upload, key, None)
+        if current in (None, ""):
+            setattr(upload, key, value)
 
 
 def _suggest_release_dates_upstream(
@@ -941,6 +1364,14 @@ def _sync_project_kb_outbox(
     project_id: str,
     limit: int = 20,
 ) -> dict[str, Any]:
+    if not is_project_kb_sync_enabled():
+        return {
+            "processed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "paused": True,
+            "message": "项目知识库同步已暂时关闭",
+        }
     base = integration_api_base()
     if not base:
         return {
@@ -949,6 +1380,9 @@ def _sync_project_kb_outbox(
             "failed": 0,
             "message": "未配置文档服务地址",
         }
+    from webapp.document_control.project_kb_service import recover_stuck_project_kb_outbox
+
+    recover_stuck_project_kb_outbox(older_than_seconds=120)
     rows = (
         ProjectKnowledgeSyncOutbox.query.filter_by(
             organization_id=org_id,
@@ -2089,42 +2523,157 @@ def api_version_task_apply():
     conflicts = find_preview_filename_conflicts(issue_items)
     if conflicts:
         return jsonify({"message": format_preview_filename_conflicts(conflicts)}), 400
+    issue_items = expand_preview_items_by_author(issue_items)
 
-    created = 0
-    updated = 0
-    skipped_exist = 0
-    upload_ids: list[str] = []
-    for row in issue_items:
+    project_label = _project_task_display_name(project)
+    project_layer = _sibling_project_layer_fields(project)
+    if project.id and project_label:
+        UploadRecord.query.filter(
+            UploadRecord.project_id == project.id,
+            UploadRecord.project_name != project_label,
+        ).update({"project_name": project_label}, synchronize_session="fetch")
+        db.session.flush()
+
+    author_action = str(payload.get("authorConflictAction") or "").strip().lower()
+    if author_action not in {"replace", "create"}:
+        author_action = ""
+
+    def _issue_identity(row: dict[str, Any]) -> tuple[str, str, str, str]:
         file_name = str(row.get("fileName") or "").strip()
-        author = str(row.get("author") or "").strip()
-        task_type = str(row.get("taskType") or "").strip()
-        if not author:
-            author = "待分配"
-        if not task_type:
-            task_type = "版本变更任务"
+        author = str(row.get("author") or "").strip() or "待分配"
+        task_type = str(row.get("taskType") or "").strip() or DEFAULT_VERSION_TASK_TYPE
         target_version = normalize_target_version(
             row.get("targetVersion") or row.get("registrationVersion")
         )
-        existing = find_upload_task_duplicate(
-            project_name=project.name,
+        return file_name, author, task_type, target_version
+
+    author_conflicts: list[dict[str, Any]] = []
+    for row in issue_items:
+        file_name, author, task_type, target_version = _issue_identity(row)
+        exact = find_upload_task_duplicate_for_project(
+            project=project,
             file_name=file_name,
             task_type=task_type,
             author=author,
             target_version=target_version,
         )
+        if exact:
+            continue
+        if int(row.get("_authorGroupSize") or 1) > 1:
+            continue
+        others = [
+            rec
+            for rec in list_upload_tasks_same_file_type_version(
+                project=project,
+                file_name=file_name,
+                task_type=task_type,
+                target_version=target_version,
+            )
+            if str(getattr(rec, "author", "") or "").strip() != author
+        ]
+        if not others:
+            continue
+        authors = sorted(
+            {str(getattr(rec, "author", "") or "").strip() or "空" for rec in others}
+        )
+        author_conflicts.append(
+            {
+                "fileName": file_name,
+                "taskType": task_type,
+                "targetVersion": target_version or "未指定",
+                "newAuthor": author,
+                "existingAuthors": authors,
+                "existingIds": [str(rec.id) for rec in others if getattr(rec, "id", None)],
+            }
+        )
+    if author_conflicts and not author_action:
+        bits = [
+            f"「{item['fileName']}」{item['targetVersion']}：{'、'.join(item['existingAuthors'])} → {item['newAuthor']}"
+            for item in author_conflicts[:8]
+        ]
+        extra = f"等共 {len(author_conflicts)} 条" if len(author_conflicts) > 8 else f"共 {len(author_conflicts)} 条"
+        return jsonify(
+            {
+                "needsAuthorChoice": True,
+                "authorConflicts": author_conflicts,
+                "message": (
+                    f"有{extra}与已有任务「同项目+同文件+同类型+同目标版本」但责任人不同。"
+                    + "；".join(bits)
+                    + "。请选择替换原记录，或新增为新任务。"
+                ),
+            }
+        ), 409
+
+    created = 0
+    updated = 0
+    skipped_exist = 0
+    upload_ids: list[str] = []
+    issued_items: list[dict[str, str]] = []
+    issued_keys: set[str] = set()
+    by_version: dict[str, dict[str, int]] = {}
+
+    def _bump_apply_version(ver: Any, field: str) -> None:
+        label = _display_target_version(ver)
+        slot = by_version.setdefault(
+            label,
+            {
+                "targetVersion": label,
+                "created": 0,
+                "updated": 0,
+                "skippedExist": 0,
+                "issued": 0,
+            },
+        )
+        slot[field] = int(slot.get(field) or 0) + 1
+        if field in {"created", "updated"}:
+            slot["issued"] = int(slot.get("issued") or 0) + 1
+
+    def _remember_issued(file_name: str, task_type: str, author: str, target_version: str) -> None:
+        item = _issued_item_dict(file_name, task_type, author, target_version)
+        key = item["key"]
+        if key in issued_keys:
+            return
+        issued_keys.add(key)
+        issued_items.append(item)
+
+    for row in issue_items:
+        file_name, author, task_type, target_version = _issue_identity(row)
+        existing = find_upload_task_duplicate_for_project(
+            project=project,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+            target_version=target_version,
+        )
+        if existing is None and author_action == "replace" and int(row.get("_authorGroupSize") or 1) <= 1:
+            others = [
+                rec
+                for rec in list_upload_tasks_same_file_type_version(
+                    project=project,
+                    file_name=file_name,
+                    task_type=task_type,
+                    target_version=target_version,
+                )
+                if str(getattr(rec, "author", "") or "").strip() != author
+            ]
+            existing = pick_latest_upload_task(others)
         due_date = _parse_optional_date(row.get("dueDate"))
         document_display_date = _parse_optional_date(row.get("documentDisplayDate"))
         notes = str(row.get("notes") or "").strip() or None
         module = str(row.get("belongingModule") or "").strip() or None
         is_system_record = normalize_is_system_record(row.get("isSystemRecord"), default=False)
         if existing:
-            if apply_mode == "increment":
+            if apply_mode == "increment" and str(existing.author or "").strip() == author:
                 skipped_exist += 1
+                _bump_apply_version(target_version, "skippedExist")
+                _remember_issued(file_name, task_type, author, target_version)
                 continue
             existing.organization_id = org_id
             existing.project_id = project.id
-            existing.project_name = project.name
+            existing.project_name = project_label
             existing.project_code = project.project_code
+            existing.task_type = task_type
+            existing.author = author
             existing.notes = notes
             existing.due_date = due_date
             existing.document_display_date = document_display_date
@@ -2135,14 +2684,17 @@ def api_version_task_apply():
             existing.target_version = target_version
             existing.task_status = "pending"
             existing.completion_status = None
+            _apply_project_layer_fields(existing, project_layer)
             db.session.add(existing)
             upload_ids.append(existing.id)
             updated += 1
+            _bump_apply_version(target_version, "updated")
+            _remember_issued(file_name, task_type, author, target_version)
         else:
             created_row = UploadRecord(
                 organization_id=org_id,
                 project_id=project.id,
-                project_name=project.name,
+                project_name=project_label,
                 project_code=project.project_code,
                 file_name=file_name,
                 task_type=task_type,
@@ -2158,12 +2710,17 @@ def api_version_task_apply():
                 task_status="pending",
                 completion_status=None,
             )
+            _apply_project_layer_fields(created_row, project_layer)
             db.session.add(created_row)
             db.session.flush()
             _ensure_generation_summary(created_row)
             upload_ids.append(created_row.id)
             created += 1
+            _bump_apply_version(target_version, "created")
+            _remember_issued(file_name, task_type, author, target_version)
 
+    version_stats = _serialize_apply_version_stats(by_version)
+    issued = created + updated
     if source_job is not None:
         source_job.project_id = project.id
         source_job.status = "applied"
@@ -2174,6 +2731,11 @@ def api_version_task_apply():
             "skippedStatus": skipped_status,
             "applyMode": apply_mode,
             "uploadIds": upload_ids,
+            "issued": issued,
+            "projectId": project.id,
+            "projectName": project_label,
+            "byTargetVersion": version_stats,
+            "issuedItems": issued_items,
         }
         db.session.add(source_job)
 
@@ -2214,8 +2776,139 @@ def api_version_task_apply():
             "skippedStatus": skipped_status,
             "applyMode": apply_mode,
             "uploadIds": upload_ids,
+            "issued": issued,
+            "projectId": project.id,
+            "projectName": project_label,
+            "byTargetVersion": version_stats,
+            "issuedItems": issued_items,
             "message": f"已{mode_label}下发到任务列表：新增 {created} 条，更新 {updated} 条{extra_text}",
         }
+    )
+
+
+@document_control_bp.get("/api/document-control/version-tasks/apply-batches")
+def api_version_task_apply_batches():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    org_id, _ = _org_context()
+    project_id = str(request.args.get("projectId") or "").strip()
+    project = None
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if not project:
+            return jsonify({"message": "未找到所选项目"}), 404
+        if not _project_in_org(project, org_id):
+            return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+        if rbac_enforced() and not project_in_scope(project):
+            return jsonify({"message": "没有该项目权限"}), 403
+
+    if project is None:
+        return jsonify(
+            {
+                "groups": [],
+                "batches": [],
+                "issuedItems": [],
+                "taskCount": 0,
+                "batchCount": 0,
+            }
+        )
+
+    issued_items = _collect_latest_issued_records(org_id, project)
+    groups = _issued_records_to_groups(project, issued_items)
+    return jsonify(
+        {
+            "groups": groups,
+            "batches": [],
+            "issuedItems": issued_items,
+            "taskCount": sum(int(row.get("taskCount") or 0) for row in groups),
+            "batchCount": 0,
+        }
+    )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/export-list")
+def api_version_task_export_list():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    payload = request.get_json(silent=True) or {}
+    kind = str(payload.get("kind") or "").strip().lower()
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    product_name = str(payload.get("productName") or "").strip()
+    from .list_export import export_version_task_list_docx
+
+    try:
+        raw, filename, ascii_name = export_version_task_list_docx(
+            kind=kind,
+            items=items,
+            product_name=product_name,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except FileNotFoundError as exc:
+        return jsonify({"message": str(exc)}), 404
+    from urllib.parse import quote
+
+    disposition = (
+        f"attachment; filename=\"{ascii_name}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        raw,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": disposition},
+    )
+
+
+@document_control_bp.post("/api/document-control/version-tasks/export-excel")
+def api_version_task_export_excel():
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    org_id, _ = _org_context()
+    project_id = str(payload.get("projectId") or "").strip()
+    from .preview_excel import export_version_task_preview_excel, stamp_preview_applied_status
+
+    if project_id:
+        project = Project.query.filter_by(id=project_id).first()
+        if project and _project_in_org(project, org_id) and (
+            not rbac_enforced() or project_in_scope(project)
+        ):
+            items = stamp_preview_applied_status(
+                items, _collect_latest_issued_records(org_id, project)
+            )
+
+    try:
+        raw, filename, ascii_name = export_version_task_preview_excel(
+            items=items,
+            product_name=str(payload.get("productName") or "").strip(),
+            from_version=str(payload.get("fromVersion") or "").strip(),
+            to_version=str(payload.get("toVersion") or "").strip(),
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    from urllib.parse import quote
+
+    disposition = (
+        f"attachment; filename=\"{ascii_name}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        raw,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
     )
 
 
@@ -2318,7 +3011,7 @@ def api_project_kb_documents_latest():
         return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
     do_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
     queued = 0
-    if do_refresh:
+    if do_refresh and is_project_kb_sync_enabled():
         refreshed = refresh_project_kb_document_versions(org_id=org_id, project_id=project_id)
         queued = enqueue_project_kb_sync_events(
             org_id=org_id,
@@ -2434,6 +3127,18 @@ def api_project_kb_sync_retry():
         return jsonify({"message": "未找到所选项目"}), 404
     if not _project_in_org(project, org_id):
         return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    if not is_project_kb_sync_enabled():
+        return jsonify(
+            {
+                "message": "项目知识库同步已暂时关闭",
+                "paused": True,
+                "projectId": project_id,
+                "queued": 0,
+                "processed": 0,
+                "succeeded": 0,
+                "failed": 0,
+            }
+        )
     doc_no = normalize_project_kb_document_number(str(payload.get("documentNumber") or "").strip())
     force_retry = bool(payload.get("forceRetry", True))
     latest = list_project_kb_latest_documents(org_id=org_id, project_id=project_id)
@@ -2480,6 +3185,18 @@ def api_project_kb_backfill():
         return jsonify({"message": "未找到所选项目"}), 404
     if not _project_in_org(project, org_id):
         return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    if not is_project_kb_sync_enabled():
+        return jsonify(
+            {
+                "message": "项目知识库同步已暂时关闭",
+                "paused": True,
+                "projectId": project_id,
+                "queued": 0,
+                "processed": 0,
+                "succeeded": 0,
+                "failed": 0,
+            }
+        )
     refreshed = refresh_project_kb_document_versions(org_id=org_id, project_id=project_id)
     queued = enqueue_project_kb_sync_events(
         org_id=org_id,

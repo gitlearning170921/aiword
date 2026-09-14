@@ -359,6 +359,65 @@
     padding: 0.12rem 0.28rem;
   }
   .vtg-apply-mode { margin-bottom: 0.45rem; }
+  .vtg-apply-pending-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0 0 0.5rem;
+    font-size: 0.86rem;
+    color: #334155;
+  }
+  .vtg-apply-pending-list li { padding: 0.05rem 0 0.05rem 0.75rem; }
+  .vtg-apply-ledger {
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed #bcd4f0;
+  }
+  .vtg-apply-ledger-h {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.35rem 0.75rem;
+    margin-bottom: 0.35rem;
+  }
+  .vtg-apply-ledger-h .vtg-subpanel-title { margin-bottom: 0; }
+  .vtg-apply-group { margin: 0.4rem 0 0.65rem; }
+  .vtg-apply-group-title { font-weight: 650; font-size: 0.9rem; color: #1e293b; }
+  .vtg-apply-ver {
+    margin: 0.18rem 0 0.12rem 0.85rem;
+    font-size: 0.86rem;
+    color: #334155;
+  }
+  button.vtg-apply-ver {
+    display: block;
+    width: calc(100% - 0.85rem);
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 0.05rem 0;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+  }
+  button.vtg-apply-ver:hover { color: #1d4ed8; }
+  .vtg-apply-ver .vtg-caret {
+    display: inline-block;
+    width: 0.95rem;
+    font-size: 0.72rem;
+  }
+  .vtg-apply-batch,
+  .vtg-apply-rec {
+    margin: 0.08rem 0 0.08rem 1.7rem;
+    font-size: 0.8rem;
+    color: #475569;
+  }
+  .vtg-apply-recs {
+    max-height: 14rem;
+    overflow: auto;
+    padding-bottom: 0.15rem;
+  }
+  .vtg-apply-recs.is-collapsed { display: none; }
+  .vtg-apply-muted { color: #64748b; font-weight: 400; }
   .vtg-preview-table {
     width: 100%;
     table-layout: auto;
@@ -423,6 +482,7 @@
     min-height: 10.5rem;
   }
   .vtg-col-status { width: 5.8rem; }
+  .vtg-col-applied { width: 5.4rem; text-align: center; white-space: nowrap; }
   .vtg-col-system { width: 4.2rem; white-space: nowrap; text-align: center; }
   .vtg-system-check {
     display: inline-flex;
@@ -461,9 +521,35 @@
   }
   .vtg-col-module { min-width: 5.5rem; }
   .vtg-col-freq { min-width: 6.5rem; }
+  .vtg-col-explanation { min-width: 10rem; }
   .vtg-col-notes { min-width: 8rem; }
   .vtg-col-trigger { min-width: 4.5rem; white-space: nowrap; }
   .vtg-col-reason { min-width: 10rem; }
+  .vtg-author-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1080;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.45);
+    padding: 1rem;
+  }
+  .vtg-author-modal.d-none { display: none; }
+  .vtg-author-modal-card {
+    width: min(36rem, 100%);
+    max-height: min(80vh, 32rem);
+    overflow: auto;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(15, 23, 42, 0.2);
+    padding: 1rem 1.1rem 0.9rem;
+  }
+  .vtg-author-modal-list {
+    margin: 0.6rem 0 0.9rem;
+    padding-left: 1.1rem;
+    font-size: 0.875rem;
+  }
   .vtg-col-action { width: 4.2rem; white-space: nowrap; }
   .vtg-changelog {
     margin-top: 0.85rem;
@@ -473,9 +559,17 @@
     padding: 0.75rem 0.9rem;
   }
   .vtg-changelog h3 {
-    margin: 0 0 0.35rem;
+    margin: 0;
     font-size: 0.92rem;
   }
+  .vtg-changelog-h {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+  }
+  .vtg-changelog-h .badge { margin-left: auto; }
   .vtg-changelog-list {
     margin: 0;
     padding-left: 1.1rem;
@@ -517,7 +611,9 @@
       </div>
       <div class="d-flex gap-2 flex-wrap">
         <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pages.upload_page') }}">返回页面1</a>
+        {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
         <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('document_control.document_control_page') }}">文控中心</a>
+        {% endif %}
       </div>
     </div>
     <ol class="vtg-steps" aria-label="操作步骤">
@@ -704,6 +800,15 @@
           <button id="vtgDeleteVersionBtn" class="btn btn-outline-danger btn-sm" type="button" disabled>
             按版本删除
           </button>
+          <button id="vtgExportPreviewExcelBtn" class="btn btn-outline-secondary btn-sm" type="button">
+            导出任务清单
+          </button>
+          <button id="vtgExportMasterListBtn" class="btn btn-outline-primary btn-sm" type="button">
+            导出主文档清单
+          </button>
+          <button id="vtgExportTechListBtn" class="btn btn-outline-primary btn-sm" type="button">
+            导出技术文件清单
+          </button>
           <span id="vtgLocateHint" class="small vtg-locate-hint is-empty">点一下目标行或把鼠标停在上面，该行会标蓝条；再点「添加记录」会插到这行后面。</span>
           <span class="small text-muted">勾选后可下发、调序、复制到其它目标版本，或批量设置完成日期。点版本分组上的「复制本版 / 删除本版」可整组操作。点表头排序，拖动表头可改列位置。文档日期为琥珀列。</span>
           <button id="vtgClearColFiltersBtn" class="btn btn-outline-secondary btn-sm d-none" type="button">清除筛选/排序</button>
@@ -807,7 +912,7 @@
           <button id="vtgPreviewSelectAll" class="btn btn-outline-secondary btn-sm" type="button">全选</button>
           <button id="vtgPreviewUnselectAll" class="btn btn-outline-secondary btn-sm" type="button">取消全选</button>
           <button id="vtgPreviewUnselectVisible" class="btn btn-outline-secondary btn-sm" type="button">取消选择</button>
-          <span id="vtgPreviewSelectHint" class="small text-muted">仅「选用」可勾选下发。全选作用于当前可见行。</span>
+          <span id="vtgPreviewSelectHint" class="small text-muted">仅「选用」可勾选下发。勾选会记住，刷新后不默认全选。</span>
         </div>
       </div>
       <div id="vtgPreviewTableWrap" class="vtg-preview-table-wrap table-responsive border rounded">
@@ -822,6 +927,9 @@
               </th>
               <th class="vtg-col-status" data-vtg-col="recordStatus">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="recordStatus" title="点击排序">状态<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-applied" data-vtg-col="applied">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="applied" title="是否已从本清单下发">下发<span class="vtg-sort-ind">⇅</span></button>
               </th>
               <th class="vtg-col-system" data-vtg-col="isSystemRecord">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="isSystemRecord" title="点击排序">体系记录<span class="vtg-sort-ind">⇅</span></button>
@@ -865,8 +973,11 @@
               <th class="vtg-col-filever" data-vtg-col="fileVersion">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="fileVersion" title="文件版本号，可填写；点击排序">文件版本号<span class="vtg-sort-ind">⇅</span></button>
               </th>
+              <th class="vtg-col-explanation" data-vtg-col="explanation">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="explanation" title="规则或生成原因，不下发到任务">说明<span class="vtg-sort-ind">⇅</span></button>
+              </th>
               <th class="vtg-col-notes" data-vtg-col="notes">
-                <button type="button" class="vtg-th-sort" data-vtg-sort="notes" title="点击排序">备注<span class="vtg-sort-ind">⇅</span></button>
+                <button type="button" class="vtg-th-sort" data-vtg-sort="notes" title="填写后下发到任务列表备注">备注<span class="vtg-sort-ind">⇅</span></button>
               </th>
               <th class="vtg-col-action" data-vtg-col="action"></th>
             </tr>
@@ -879,6 +990,14 @@
                   <option value="adopt">选用</option>
                   <option value="pending">待定</option>
                   <option value="discard">弃用</option>
+                </select>
+              </th>
+              <th data-vtg-col="applied">
+                <select class="form-select form-select-sm vtg-filter-input" data-vtg-filter="applied" aria-label="筛选是否已下发">
+                  <option value="">全部</option>
+                  <option value="applied">已下发</option>
+                  <option value="partial">部分下发</option>
+                  <option value="none">未下发</option>
                 </select>
               </th>
               <th data-vtg-col="isSystemRecord">
@@ -909,30 +1028,39 @@
               <th data-vtg-col="changeReason"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="changeReason" placeholder="筛选" aria-label="筛选变更原因"></th>
               <th data-vtg-col="documentNumber"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="documentNumber" placeholder="筛选" aria-label="筛选文件编号"></th>
               <th data-vtg-col="fileVersion"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="fileVersion" placeholder="筛选" aria-label="筛选文件版本号"></th>
+              <th data-vtg-col="explanation"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="explanation" placeholder="筛选" aria-label="筛选说明"></th>
               <th data-vtg-col="notes"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="notes" placeholder="筛选" aria-label="筛选备注"></th>
               <th data-vtg-col="action"></th>
             </tr>
           </thead>
           <tbody id="vtgPreviewBody">
             <tr>
-              <td colspan="17" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
+              <td colspan="20" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <div id="vtgChangeLogWrap" class="vtg-changelog">
-        <h3>规则优化采集</h3>
-        <p class="small text-muted mb-2">对照规则的增删改会采集到这里，用来优化 YY-IW-020。未保存的标「本次」，已保存的带时间。每页 20 条。</p>
-        <div id="vtgChangeLog"><p class="vtg-changelog-empty">暂无增删改。对预览表操作或保存后将在此列出。</p></div>
-        <div id="vtgChangeLogPager" class="vtg-changelog-pager d-none"></div>
+        <div class="vtg-changelog-h" data-bs-toggle="collapse" data-bs-target="#vtgChangeLogCollapse" aria-expanded="false" aria-controls="vtgChangeLogCollapse" role="button">
+          <h3 class="mb-0">规则优化采集</h3>
+          <span id="vtgChangeLogCount" class="badge text-bg-secondary">0 条</span>
+          <button type="button" class="vtg-collapse-toggle ms-2" tabindex="-1">展开 / 收起</button>
+        </div>
+        <div id="vtgChangeLogCollapse" class="collapse">
+          <p class="small text-muted mb-2 mt-2">对照规则的增删改会采集到这里，用来优化 YY-IW-020。未保存的标「本次」，已保存的带时间。每页 20 条。</p>
+          <div id="vtgChangeLog"><p class="vtg-changelog-empty">暂无增删改。对预览表操作或保存后将在此列出。</p></div>
+          <div id="vtgChangeLogPager" class="vtg-changelog-pager d-none"></div>
+        </div>
       </div>
 
       <div class="vtg-apply-box" aria-labelledby="vtgStep4Title">
         <p class="vtg-subpanel-title" id="vtgStep4Title">
           <span class="badge text-bg-primary me-1">4</span>转换为任务列表
         </p>
-        <p class="vtg-subpanel-hint mb-2">仅勾选且状态为「选用」的记录会下发。同一预览可多次下发：替换更新覆盖已存在的同名任务，增量更新则跳过已存在项。</p>
+        <p class="vtg-subpanel-hint mb-2">仅勾选且状态为「选用」的记录会下发，并归入所选项目（与任务列表已有项目同一展示名，带上该项目已有的业务方/产品/国家等）。判重按「项目 + 文件名 + 任务类型 + 责任人 + 目标版本」：替换更新覆盖完全相同的已有任务，增量更新则跳过。责任人可用英文逗号写多人，下发时拆成多条。若单人责任人与已有记录不同，会提示你选择替换原记录或新增。</p>
+        <p id="vtgApplyCount" class="small fw-semibold mb-1">尚未勾选可下发记录</p>
+        <ul id="vtgApplyPendingList" class="vtg-apply-pending-list"></ul>
         <div class="vtg-apply-mode">
           <div class="form-check form-check-inline">
             <input class="form-check-input" type="radio" name="vtgApplyMode" id="vtgApplyModeReplace" value="replace" checked>
@@ -945,9 +1073,29 @@
         </div>
         <button id="vtgApplyBtn" class="btn btn-success btn-sm" type="button">确认下发到任务列表</button>
         <div id="vtgApplyMsg" class="small text-muted mt-2"></div>
+        <div class="vtg-apply-ledger">
+          <div class="vtg-apply-ledger-h">
+            <p class="vtg-subpanel-title mb-0">已下发记录</p>
+            <button type="button" class="vtg-collapse-toggle" id="vtgApplyBatchReload">刷新</button>
+          </div>
+          <p class="small text-muted mb-1">按项目、目标版本展示当前版本清单与任务列表对照后的最新唯一记录；不含中间下发过程，也不含任务列表里手工录入的记录。</p>
+          <div id="vtgApplyBatchList" class="small">加载中…</div>
+        </div>
       </div>
     </div>
   </section>
+</div>
+<div id="vtgAuthorConflictModal" class="vtg-author-modal d-none" role="dialog" aria-modal="true" aria-labelledby="vtgAuthorConflictTitle">
+  <div class="vtg-author-modal-card">
+    <h3 class="h6 mb-2" id="vtgAuthorConflictTitle">责任人不同，请选择如何下发</h3>
+    <p class="small text-muted mb-0">下列任务与已有记录「同项目 + 同文件 + 同类型 + 同目标版本」，但责任人不同。</p>
+    <ul id="vtgAuthorConflictList" class="vtg-author-modal-list"></ul>
+    <div class="d-flex flex-wrap gap-2 justify-content-end">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="vtgAuthorConflictCancel">取消</button>
+      <button type="button" class="btn btn-outline-primary btn-sm" id="vtgAuthorConflictCreate">新增新记录</button>
+      <button type="button" class="btn btn-primary btn-sm" id="vtgAuthorConflictReplace">替换原记录</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
 

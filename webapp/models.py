@@ -72,7 +72,7 @@ class User(db.Model):
     admin_role: Mapped[str] = mapped_column(db.String(16), nullable=False, default="none")
     #: 可访问页面0（公司总览）；公司管理员默认可访问，亦可单独勾选
     can_access_company_registry: Mapped[bool] = mapped_column(default=False)
-    #: 账号级功能权限覆盖：{FEATURE_*: true|false}；缺省键表示跟随系统配置
+    #: 账号级功能权限覆盖：{FEATURE_*: true|false}；新入口缺省禁止，其余缺省跟随系统配置
     feature_permissions_json: Mapped[Optional[dict]] = mapped_column(db.JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
     updated_at: Mapped[datetime] = mapped_column(

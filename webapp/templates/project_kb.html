@@ -8,7 +8,9 @@
       <p class="text-muted mb-0">统计按页面1任务全量分区。已同步/失败/待同步是指写入<strong>本项目知识库</strong>（供初稿、审核、翻译共用），不是文控中心。</p>
     </div>
     <div class="d-flex gap-2 flex-wrap">
+      {% if feature_flags.FEATURE_DOCUMENT_CONTROL %}
       <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('document_control.document_control_page') }}">文控中心</a>
+      {% endif %}
       <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pages.upload_page') }}">返回页面1</a>
     </div>
   </div>

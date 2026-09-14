@@ -992,6 +992,30 @@ def ensure_schema(app: Flask):
     )
     fix_upload_records_unique_include_target_version()
 
+    # 版本清单历史任务类型：旧默认/规则目录类型改为系统默认「初稿待编写」
+    if "upload_records" in existing_tables and not is_sqlite:
+        try:
+            with engine.connect() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE upload_records u "
+                        "LEFT JOIN upload_records clash "
+                        "  ON clash.id <> u.id "
+                        " AND clash.task_type = '初稿待编写' "
+                        " AND IFNULL(clash.project_name,'') = IFNULL(u.project_name,'') "
+                        " AND IFNULL(clash.file_name,'') = IFNULL(u.file_name,'') "
+                        " AND IFNULL(clash.author,'') = IFNULL(u.author,'') "
+                        " AND IFNULL(clash.target_version,'') = IFNULL(u.target_version,'') "
+                        "SET u.task_type = '初稿待编写' "
+                        "WHERE u.task_type IN ("
+                        "  '版本变更任务','归档文件','变更控制流程','缺陷管理流程','生产发布流程'"
+                        ") AND clash.id IS NULL"
+                    )
+                )
+                conn.commit()
+        except Exception:
+            pass
+
     # 文献检索批次：检索参数快照（用于「续抓」时复用完全一致的参数）
     ensure_column(
         "literature_search_batches",
@@ -2205,6 +2229,23 @@ def create_app() -> Flask:
         except Exception:
             db.session.rollback()
             app.logger.exception("historical_migration failed")
+
+        try:
+            from .user_feature_permissions import backfill_default_deny_user_feature_permissions
+
+            n = backfill_default_deny_user_feature_permissions()
+            if n:
+                app.logger.info("user feature permissions: backfilled default-deny on %s users", n)
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("user feature permission default-deny backfill failed")
+
+        try:
+            from .routes import _resume_project_kb_outbox_after_startup
+
+            _resume_project_kb_outbox_after_startup(app)
+        except Exception:
+            app.logger.exception("project-kb 启动续传失败")
 
     try:
         from .scheduler import init_scheduler

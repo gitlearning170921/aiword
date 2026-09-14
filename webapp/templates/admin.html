@@ -480,7 +480,7 @@
                     </div>
                     <div class="mb-0 mt-2 border-top pt-2" id="newUserFeaturePermsWrap">
                         <label class="form-label small mb-0">功能权限</label>
-                        <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关；「跟随系统」表示不因本账号单独限制。</p>
+                        <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关。文献检索、文控中心、项目知识库、版本任务清单、知识库训练、发补记录、去签字、去打印默认禁止，不跟随系统；其余项「跟随系统」表示不因本账号单独限制。</p>
                         <div id="newUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
                     </div>
                 </form>
@@ -537,7 +537,7 @@
                 </div>
                 <div class="mb-2 border-top pt-2" id="editUserFeaturePermsWrap">
                     <label class="form-label small">功能权限</label>
-                    <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关；「跟随系统」表示不因本账号单独限制。</p>
+                    <p class="form-text small mb-2">按分级角色展示：公司管理员为页面0 文档工具；项目管理员为页面1（含页面3）+ 页面2（本人任务行按钮）；普通账号仅页面2。须先在「系统配置」开启全局开关。文献检索、文控中心、项目知识库、版本任务清单、知识库训练、发补记录、去签字、去打印默认禁止，不跟随系统；其余项「跟随系统」表示不因本账号单独限制。</p>
                     <div id="editUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
                 </div>
                 <button type="button" class="btn btn-success btn-sm w-100" id="saveUserMobileBtn">保存</button>
@@ -555,7 +555,7 @@
             </div>
             <div class="modal-body">
                 <p class="small text-muted mb-2" id="batchUserFeaturePermsHint">已选 0 个账号</p>
-                <p class="form-text small mb-2">字段与新建/编辑账号中「功能权限」一致，且<strong>仅展示所选账号分级角色可用的分组</strong>（普通用户仅页面2；项目管理员为页面1/2；公司管理员为页面0）。须勾选<strong>同一分级角色</strong>的账号方可批量设置。每项选「不修改」表示保持各账号原有设置；选「跟随系统」会清除该账号的单独覆盖。</p>
+                <p class="form-text small mb-2">字段与新建/编辑账号中「功能权限」一致，且<strong>仅展示所选账号分级角色可用的分组</strong>（普通用户仅页面2；项目管理员为页面1/2；公司管理员为页面0）。须勾选<strong>同一分级角色</strong>的账号方可批量设置。每项选「不修改」表示保持各账号原有设置。文献检索、文控、项目知识库、版本任务、知识库训练、发补记录、去签字、去打印选「跟随系统」仍视为禁止；其余项选「跟随系统」会清除该账号的单独覆盖。</p>
                 <div id="batchUserFeaturePermissions" class="row g-2 user-feature-perms"></div>
             </div>
             <div class="modal-footer">

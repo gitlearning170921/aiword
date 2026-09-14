@@ -91,6 +91,9 @@
     previewSelectHint: byId("vtgPreviewSelectHint"),
     previewHeadCheck: byId("vtgPreviewHeadCheck"),
     applyBtn: byId("vtgApplyBtn"),
+    exportMasterListBtn: byId("vtgExportMasterListBtn"),
+    exportTechListBtn: byId("vtgExportTechListBtn"),
+    exportPreviewExcelBtn: byId("vtgExportPreviewExcelBtn"),
     applyModeReplace: byId("vtgApplyModeReplace"),
     applyModeIncrement: byId("vtgApplyModeIncrement"),
     savePreviewEditsBtn: byId("vtgSavePreviewEditsBtn"),
@@ -136,10 +139,21 @@
     changeLogPager: byId("vtgChangeLogPager"),
     projectId: byId("vtgProjectId"),
     applyMsg: byId("vtgApplyMsg"),
+    applyCount: byId("vtgApplyCount"),
+    applyPendingList: byId("vtgApplyPendingList"),
+    applyBatchList: byId("vtgApplyBatchList"),
+    applyBatchReload: byId("vtgApplyBatchReload"),
+    changeLogCount: byId("vtgChangeLogCount"),
+    authorConflictModal: byId("vtgAuthorConflictModal"),
+    authorConflictList: byId("vtgAuthorConflictList"),
+    authorConflictCancel: byId("vtgAuthorConflictCancel"),
+    authorConflictCreate: byId("vtgAuthorConflictCreate"),
+    authorConflictReplace: byId("vtgAuthorConflictReplace"),
   };
 
   const PRODUCT_NAME_LS_PREFIX = "vtg.productName.";
   const LAST_PROJECT_LS_KEY = "vtg.lastProjectId";
+  const PREVIEW_SELECTED_LS_PREFIX = "vtg.previewSelected.v1.";
 
   let currentJobId = "";
   let originalPreviewItems = [];
@@ -148,17 +162,31 @@
   let previewVersionFilter = "";
   const previewCollapsedVersions = new Set();
   const previewSelectedKeys = new Set();
+  let previewSelectionPersistMuted = false;
+  let applyLedgerCache = { groups: [], batches: [], issuedItems: [] };
+  let applyLedgerLoaded = false;
+  const issuedKeySet = new Set();
+  const applyLedgerExpandedKeys = new Set();
   let previewColSort = null;
   let previewColFilters = {};
   let previewFilterTimer = 0;
   let previewLocateOriginKey = "";
   let previewLocateCandidateIdx = -1;
   let previewLocateTimer = 0;
-  const PREVIEW_COLSPAN = 19;
+  const PREVIEW_COLSPAN = 21;
+  const DEFAULT_VERSION_TASK_TYPE = "初稿待编写";
+  const LEGACY_AUTO_VERSION_TASK_TYPES = {
+    版本变更任务: true,
+    归档文件: true,
+    变更控制流程: true,
+    缺陷管理流程: true,
+    生产发布流程: true,
+  };
   const PREVIEW_COL_KEYS = [
     "check",
     "sortOrder",
     "recordStatus",
+    "applied",
     "isSystemRecord",
     "changeKind",
     "fileName",
@@ -173,10 +201,11 @@
     "changeReason",
     "documentNumber",
     "fileVersion",
+    "explanation",
     "notes",
     "action",
   ];
-  const PREVIEW_COL_ORDER_LS = "vtg.previewColOrder.v2";
+  const PREVIEW_COL_ORDER_LS = "vtg.previewColOrder.v4";
   let previewColOrder = [];
   let previewColDragKey = "";
   let previewColDropKey = "";
@@ -210,6 +239,7 @@
     dueDate: "完成日期",
     documentDisplayDate: "文档日期",
     belongingModule: "模块",
+    explanation: "说明",
     notes: "备注",
     recordStatus: "状态",
     chapter: "章节分类",
@@ -835,6 +865,7 @@
       item.dueDate = val("dueDate");
       item.documentDisplayDate = val("documentDisplayDate");
       item.belongingModule = val("belongingModule");
+      item.explanation = val("explanation");
       item.notes = val("notes");
       item.recordStatus = recordStatusOf({ recordStatus: val("recordStatus") });
       const sysEl = row.querySelector('[data-vtg-field="isSystemRecord"]');
@@ -1089,20 +1120,102 @@
     return copy;
   }
 
-  function defaultSelectAdoptItems(items) {
-    previewSelectedKeys.clear();
-    (items || []).forEach((item) => {
-      if (recordStatusOf(item) === "adopt" && !isPreviewDeleted(item)) {
-        previewSelectedKeys.add(taskIdentity(item));
+  function previewSelectionScope(override) {
+    const o = override || {};
+    return {
+      projectId: String(o.projectId != null ? o.projectId : selectedProjectId() || "").trim(),
+      fromVersion: String(
+        o.fromVersion != null ? o.fromVersion : inputValue(els.fromVersion) || ""
+      ).trim(),
+      toVersion: String(
+        o.toVersion != null ? o.toVersion : inputValue(els.toVersion) || ""
+      ).trim(),
+    };
+  }
+
+  function previewSelectionStorageKey(scope) {
+    const s = previewSelectionScope(scope);
+    if (!s.projectId || !s.fromVersion || !s.toVersion) return "";
+    return `${PREVIEW_SELECTED_LS_PREFIX}${s.projectId}|${s.fromVersion}|${s.toVersion}`;
+  }
+
+  function readStoredPreviewSelection(scope) {
+    const key = previewSelectionStorageKey(scope);
+    if (!key) return null;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || typeof data !== "object") return null;
+      const identities = Array.isArray(data.identities) ? data.identities.map(String) : [];
+      const originKeys = Array.isArray(data.originKeys) ? data.originKeys.map(String) : [];
+      return { identities, originKeys };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function savePreviewSelection(scope) {
+    const key = previewSelectionStorageKey(scope);
+    if (!key) return;
+    const identities = [];
+    const originKeys = [];
+    const seenIdent = new Set();
+    const seenOrigin = new Set();
+    (previewItems || []).forEach((item) => {
+      if (!canCheckPreview(item)) return;
+      const ident = taskIdentity(item);
+      if (!previewSelectedKeys.has(ident)) return;
+      if (!seenIdent.has(ident)) {
+        seenIdent.add(ident);
+        identities.push(ident);
+      }
+      const origin = originKeyOf(item);
+      if (origin && !seenOrigin.has(origin)) {
+        seenOrigin.add(origin);
+        originKeys.push(origin);
       }
     });
+    try {
+      localStorage.setItem(key, JSON.stringify({ identities, originKeys }));
+    } catch (err) {
+      /* ignore quota */
+    }
+  }
+
+  function restorePreviewSelection(items, scope) {
+    previewSelectedKeys.clear();
+    const stored = readStoredPreviewSelection(scope);
+    if (!stored) return false;
+    const idSet = new Set(stored.identities);
+    const originSet = new Set(stored.originKeys);
+    (items || []).forEach((item) => {
+      if (!canCheckPreview(item)) return;
+      const ident = taskIdentity(item);
+      const origin = originKeyOf(item);
+      if (idSet.has(ident) || (origin && originSet.has(origin))) {
+        previewSelectedKeys.add(ident);
+      }
+    });
+    return true;
+  }
+
+  function remapPreviewSelectionKey(oldIdent, item) {
+    const nextIdent = taskIdentity(item);
+    if (!oldIdent || oldIdent === nextIdent) return;
+    if (!previewSelectedKeys.has(oldIdent)) return;
+    previewSelectedKeys.delete(oldIdent);
+    if (canCheckPreview(item)) previewSelectedKeys.add(nextIdent);
   }
 
   function prunePreviewSelection(items) {
-    const live = new Set((items || []).map((item) => taskIdentity(item)));
-    Array.from(previewSelectedKeys).forEach((key) => {
-      if (!live.has(key)) previewSelectedKeys.delete(key);
+    const next = new Set();
+    (items || []).forEach((item) => {
+      const ident = taskIdentity(item);
+      if (previewSelectedKeys.has(ident) && canCheckPreview(item)) next.add(ident);
     });
+    previewSelectedKeys.clear();
+    next.forEach((key) => previewSelectedKeys.add(key));
   }
 
   function visiblePreviewRows() {
@@ -1215,9 +1328,305 @@
     }
     if (els.previewSelectHint) {
       els.previewSelectHint.textContent = previewItems.length
-        ? `勾选后可下发（仅选用）、批量调整顺序或设置完成日期。当前可见选用已选 ${visibleSelected} / ${visibleAdopt}。`
+        ? `勾选后可下发（仅选用）、批量调整顺序或设置完成日期。当前可见选用已选 ${visibleSelected} / ${visibleAdopt}。刷新后会记住勾选。`
         : "勾选后可下发（仅选用）、批量调整顺序或设置完成日期。已删除记录不能勾选。";
     }
+    updateApplyIssueCount();
+    refreshPreviewAppliedBadges();
+    if (!previewSelectionPersistMuted) savePreviewSelection();
+  }
+
+  function splitTaskAuthors(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return ["待分配"];
+    const names = [];
+    const seen = new Set();
+    String(text).split(",").forEach((part) => {
+      const name = String(part || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      names.push(name);
+    });
+    return names.length ? names : ["待分配"];
+  }
+
+  function selectedIssueItems() {
+    return (previewItems || []).filter(
+      (item) => canSelectPreview(item) && previewSelectedKeys.has(taskIdentity(item))
+    );
+  }
+
+  function countIssueRecords(items) {
+    return (items || []).reduce((n, item) => n + splitTaskAuthors(item && item.author).length, 0);
+  }
+
+  function displayTargetVersion(value) {
+    const text = String(value == null ? "" : value).trim();
+    return text || "未指定";
+  }
+
+  function issuedIdentityKey(fileName, taskType, author, targetVersion) {
+    return [
+      String(fileName || "").trim().toLowerCase(),
+      String(taskType || "").trim().toLowerCase(),
+      (String(author || "").trim() || "待分配").toLowerCase(),
+      displayTargetVersion(targetVersion).toLowerCase(),
+    ].join("|");
+  }
+
+  function canonicalTaskType(value) {
+    const text = String(value || "").trim();
+    if (!text || LEGACY_AUTO_VERSION_TASK_TYPES[text]) return DEFAULT_VERSION_TASK_TYPE;
+    return text;
+  }
+
+  function issuedFileNames(item) {
+    const fileName = String((item && item.fileName) || "").trim();
+    return fileName ? [fileName] : [];
+  }
+
+  function issuedIdentityKeysForAuthor(item, author) {
+    const names = issuedFileNames(item);
+    const rawType = String((item && item.taskType) || "").trim();
+    const types = [];
+    const seen = new Set();
+    [rawType, canonicalTaskType(rawType)].forEach((tp) => {
+      const key = String(tp || "").trim().toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      types.push(tp || canonicalTaskType(rawType));
+    });
+    const ver = (item && (item.targetVersion || item.registrationVersion)) || "";
+    const keys = [];
+    names.forEach((name) => {
+      types.forEach((tp) => {
+        keys.push(issuedIdentityKey(name, tp, author, ver));
+      });
+    });
+    return keys;
+  }
+
+  function syncIssuedKeySet(items) {
+    issuedKeySet.clear();
+    (items || []).forEach((row) => {
+      const extra = Array.isArray(row && row.keys) ? row.keys : [];
+      extra.forEach((key) => {
+        const text = String(key || "").trim();
+        if (text) issuedKeySet.add(text);
+      });
+      const key = String((row && row.key) || "").trim() || issuedIdentityKey(
+        row && row.fileName,
+        row && row.taskType,
+        row && row.author,
+        row && row.targetVersion
+      );
+      if (key) issuedKeySet.add(key);
+      issuedIdentityKeysForAuthor(row, (row && row.author) || "待分配").forEach((itemKey) => {
+        if (itemKey) issuedKeySet.add(itemKey);
+      });
+    });
+  }
+
+  function previewApplyState(item) {
+    if (!issuedKeySet.size) return "none";
+    const authors = splitTaskAuthors(item && item.author);
+    let hit = 0;
+    authors.forEach((author) => {
+      const keys = issuedIdentityKeysForAuthor(item, author);
+      if (keys.some((key) => issuedKeySet.has(key))) hit += 1;
+    });
+    if (authors.length && hit >= authors.length) return "applied";
+    if (hit) return "partial";
+    return "none";
+  }
+
+  function previewAppliedBadgeHtml(item) {
+    const state = previewApplyState(item);
+    if (state === "applied") return '<span class="badge text-bg-success">已下发</span>';
+    if (state === "partial") return '<span class="badge text-bg-warning text-dark">部分下发</span>';
+    return '<span class="badge text-bg-light text-muted">未下发</span>';
+  }
+
+  function refreshPreviewAppliedBadges() {
+    if (!els.previewBody) return;
+    els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]").forEach((row) => {
+      const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+      const cell = row.querySelector('[data-vtg-col="applied"]');
+      if (Number.isNaN(idx) || !previewItems[idx] || !cell) return;
+      cell.innerHTML = previewAppliedBadgeHtml(previewItems[idx]);
+    });
+  }
+
+  function selectedProjectLabel() {
+    if (!els.projectId) return "";
+    const opt = els.projectId.selectedOptions && els.projectId.selectedOptions[0];
+    const text = String((opt && opt.textContent) || "").trim();
+    if (!text || text.indexOf("请选择") === 0 || text.indexOf("加载") >= 0) return "";
+    return text;
+  }
+
+  function pendingCountsByVersion() {
+    const map = new Map();
+    selectedIssueItems().forEach((item) => {
+      const ver = displayTargetVersion((item && (item.targetVersion || item.registrationVersion)) || "");
+      map.set(ver, (map.get(ver) || 0) + splitTaskAuthors(item && item.author).length);
+    });
+    return map;
+  }
+
+  function applyLedgerVersionKey(projectId, projectName, ver) {
+    return `${String(projectId || "").trim() || String(projectName || "").trim()}::${ver}`;
+  }
+
+  function renderApplyLedger() {
+    if (!els.applyBatchList) return;
+    if (!applyLedgerLoaded) return;
+    const pending = pendingCountsByVersion();
+    const projectId = selectedProjectId();
+    const projectLabel = selectedProjectLabel();
+    const groups = (applyLedgerCache.groups || []).map((group) => ({
+      projectId: group.projectId || "",
+      projectName: group.projectName || "（空项目）",
+      taskCount: Number(group.taskCount || 0),
+      versions: Array.isArray(group.versions) ? group.versions.slice() : [],
+    }));
+    const isCurrentGroup = (group) =>
+      (projectId && String(group.projectId || "") === String(projectId)) ||
+      (!projectId && projectLabel && String(group.projectName || "") === projectLabel);
+    if (pending.size) {
+      let group = groups.find((row) => isCurrentGroup(row));
+      if (!group && (projectId || projectLabel)) {
+        group = {
+          projectId,
+          projectName: projectLabel || "当前项目",
+          taskCount: 0,
+          versions: [],
+        };
+        groups.unshift(group);
+      }
+      if (group) {
+        pending.forEach((_count, ver) => {
+          const exists = group.versions.some((row) => displayTargetVersion(row.targetVersion) === ver);
+          if (!exists) group.versions.push({ targetVersion: ver, taskCount: 0, records: [] });
+        });
+      }
+    }
+    if (!groups.length) {
+      els.applyBatchList.innerHTML = projectId
+        ? '<p class="text-muted mb-0">该项目还没有与当前版本清单对应的已下发记录。</p>'
+        : '<p class="text-muted mb-0">请选择项目后查看已下发的最新记录。</p>';
+      return;
+    }
+    const html = [];
+    groups.forEach((group, groupIdx) => {
+      html.push('<div class="vtg-apply-group">');
+      html.push(
+        `<div class="vtg-apply-group-title">项目：${escapeHtml(group.projectName)} <span class="vtg-apply-muted">已下发 ${Number(group.taskCount || 0)} 条</span></div>`
+      );
+      (group.versions || []).forEach((row, verIdx) => {
+        const ver = displayTargetVersion(row && row.targetVersion);
+        const records = Array.isArray(row && row.records) ? row.records : [];
+        const taskN = Number((row && row.taskCount) || records.length || 0);
+        const pendingN = isCurrentGroup(group) ? pending.get(ver) || 0 : 0;
+        const pendingBit = pendingN ? ` · 本次即将下发 ${pendingN} 条` : "";
+        const recKey = applyLedgerVersionKey(group.projectId, group.projectName, ver);
+        const expanded = applyLedgerExpandedKeys.has(recKey);
+        if (records.length) {
+          const recsId = `vtgApplyRecs-${groupIdx}-${verIdx}`;
+          html.push(
+            `<button type="button" class="vtg-apply-ver" data-vtg-apply-key="${escapeHtml(recKey)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${recsId}">` +
+              `<span class="vtg-caret" aria-hidden="true">${expanded ? "▼" : "▶"}</span>` +
+              `目标版本 ${escapeHtml(ver)}：已下发 <strong>${taskN}</strong> 条${pendingBit}` +
+              `<span class="vtg-apply-muted" data-vtg-apply-ver-hint> ${expanded ? "收起" : "展开"}</span>` +
+            `</button>`
+          );
+          html.push(`<div class="vtg-apply-recs${expanded ? "" : " is-collapsed"}" id="${recsId}">`);
+          records.forEach((item) => {
+            const name = String((item && item.fileName) || "").trim() || "未命名";
+            const type = String((item && item.taskType) || "").trim() || DEFAULT_VERSION_TASK_TYPE;
+            const author = String((item && item.author) || "").trim() || "待分配";
+            html.push(
+              `<div class="vtg-apply-rec">${escapeHtml(name)} · ${escapeHtml(type)} · ${escapeHtml(author)}</div>`
+            );
+          });
+          html.push("</div>");
+        } else {
+          html.push(
+            `<div class="vtg-apply-ver">目标版本 ${escapeHtml(ver)}：已下发 <strong>${taskN}</strong> 条${pendingBit}</div>`
+          );
+        }
+      });
+      html.push("</div>");
+    });
+    els.applyBatchList.innerHTML = html.join("");
+  }
+
+  async function loadApplyBatches() {
+    const projectId = selectedProjectId();
+    if (!projectId) {
+      applyLedgerCache = { groups: [], batches: [], issuedItems: [] };
+      issuedKeySet.clear();
+      applyLedgerLoaded = true;
+      renderApplyLedger();
+      refreshPreviewAppliedBadges();
+      return;
+    }
+    try {
+      const data = await requestJson(
+        `/api/document-control/version-tasks/apply-batches?projectId=${encodeURIComponent(projectId)}`
+      );
+      applyLedgerCache = {
+        groups: Array.isArray(data.groups) ? data.groups : [],
+        batches: Array.isArray(data.batches) ? data.batches : [],
+        issuedItems: Array.isArray(data.issuedItems) ? data.issuedItems : [],
+      };
+      syncIssuedKeySet(applyLedgerCache.issuedItems);
+      applyLedgerLoaded = true;
+      renderApplyLedger();
+      refreshPreviewAppliedBadges();
+    } catch (err) {
+      applyLedgerCache = { groups: [], batches: [], issuedItems: [] };
+      issuedKeySet.clear();
+      applyLedgerLoaded = true;
+      if (els.applyBatchList) {
+        els.applyBatchList.innerHTML = `<p class="text-danger mb-0">${escapeHtml(
+          err.message || "加载已下发记录失败"
+        )}</p>`;
+      }
+    }
+  }
+
+  function updateApplyIssueCount() {
+    if (!els.applyCount) return;
+    if (els.previewBody) {
+      Array.from(els.previewBody.querySelectorAll("tr[data-vtg-preview-idx]")).forEach((row) => {
+        const idx = Number(row.getAttribute("data-vtg-preview-idx"));
+        const el = row.querySelector('[data-vtg-field="author"]');
+        if (Number.isNaN(idx) || !previewItems[idx] || !el) return;
+        previewItems[idx].author = String(el.value || "").trim();
+      });
+    }
+    const rows = selectedIssueItems();
+    const n = countIssueRecords(rows);
+    if (els.applyPendingList) {
+      if (!n) {
+        els.applyPendingList.innerHTML = "";
+      } else {
+        els.applyPendingList.innerHTML = Array.from(pendingCountsByVersion().entries())
+          .map(([ver, count]) => `<li>目标版本 ${escapeHtml(ver)}：${count} 条</li>`)
+          .join("");
+      }
+    }
+    if (!n) {
+      els.applyCount.textContent = "尚未勾选可下发记录";
+    } else if (n === rows.length) {
+      els.applyCount.textContent = `即将下发 ${n} 条`;
+    } else {
+      els.applyCount.textContent = `即将下发 ${n} 条（勾选 ${rows.length} 行，按责任人拆分）`;
+    }
+    renderApplyLedger();
   }
 
   function previewVersionKey(item) {
@@ -1243,6 +1652,17 @@
     }
     item.documentNumber = String(item.documentNumber || "").trim();
     item.fileVersion = String(item.fileVersion || "").trim();
+    const kind = String(item.taskType || "").trim();
+    if (!kind || LEGACY_AUTO_VERSION_TASK_TYPES[kind]) {
+      item.taskType = DEFAULT_VERSION_TASK_TYPE;
+    }
+    if (item.explanation == null) {
+      item.explanation = String(item.notes || item.reason || "").trim();
+      item.notes = "";
+    } else {
+      item.explanation = String(item.explanation || "").trim();
+      item.notes = String(item.notes || "").trim();
+    }
     return item;
   }
 
@@ -1418,6 +1838,12 @@
   function previewColValue(item, key) {
     if (key === "sortOrder") return String(Number((item && item.sortOrder) || 0) + 1);
     if (key === "recordStatus") return RECORD_STATUS_LABELS[recordStatusOf(item)] || "";
+    if (key === "applied") {
+      const state = previewApplyState(item);
+      if (state === "applied") return "已下发";
+      if (state === "partial") return "部分下发";
+      return "未下发";
+    }
     if (key === "changeKind") return CHANGE_KIND_LABELS[changeKindOf(item)] || "无变更";
     if (key === "targetVersion") {
       const ver = previewVersionKey(item);
@@ -1435,6 +1861,10 @@
     if (key === "recordStatus") {
       const order = { adopt: 0, pending: 1, discard: 2 };
       return order[recordStatusOf(item)] ?? 9;
+    }
+    if (key === "applied") {
+      const order = { applied: 0, partial: 1, none: 2 };
+      return order[previewApplyState(item)] ?? 9;
     }
     if (key === "changeKind") {
       const order = { "": 0, add: 1, update: 2, delete: 3 };
@@ -1465,6 +1895,7 @@
       const q = String(previewColFilters[key] || "").trim();
       if (!q) return true;
       if (key === "recordStatus") return recordStatusOf(item) === q;
+      if (key === "applied") return previewApplyState(item) === q;
       if (key === "isSystemRecord") {
         if (q === "1" || q === "yes" || q === "是") return isSystemRecordOf(item);
         if (q === "0" || q === "no" || q === "否") return !isSystemRecordOf(item);
@@ -1847,8 +2278,8 @@
           return rec;
         })
       : [];
-    if (opts.resetSelection) {
-      defaultSelectAdoptItems(previewItems);
+    if (opts.restoreSelection) {
+      restorePreviewSelection(previewItems, opts.selectionScope);
     } else {
       prunePreviewSelection(previewItems);
     }
@@ -1856,6 +2287,7 @@
     if (!els.previewBody) return;
     if (!previewItems.length) {
       previewSelectedKeys.clear();
+      if (!opts.skipPersist && currentJobId) savePreviewSelection(opts.selectionScope);
       resetPreviewVersionUi();
       renderPreviewVersionBar();
       if (els.previewCount) els.previewCount.textContent = "0 条";
@@ -1978,12 +2410,13 @@
           <td class="text-center" data-vtg-col="check"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${checkable ? "" : "disabled"} title="${deleted ? "已删除，不能勾选" : adopted ? "勾选后可下发或批量调整顺序" : "勾选后可批量调整顺序；仅选用会下发"}"></td>
           <td class="vtg-col-idx" data-vtg-col="sortOrder"><span class="vtg-drag-handle" draggable="true" title="拖动调整顺序，也可拖到其他版本或章节">⋮⋮</span><span class="text-muted small">${Number(item.sortOrder) + 1}</span></td>
           <td data-vtg-col="recordStatus">${recordStatusSelectHtml(status, deleted)}</td>
+          <td class="text-center" data-vtg-col="applied">${previewAppliedBadgeHtml(item)}</td>
           <td class="vtg-col-system text-center" data-vtg-col="isSystemRecord">${isSystemRecordSelectHtml(item, deleted)}</td>
           <td class="vtg-change-cell" data-vtg-col="changeKind">${changeKindBadgeHtml(item)}</td>
           <td class="vtg-col-filename" data-vtg-col="fileName"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}"${disabledAttr}>${escapeHtml(item.fileName || "")}</textarea></td>
           <td data-vtg-col="taskType"><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"${disabledAttr}></td>
           <td data-vtg-col="targetVersion"><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"${disabledAttr}></td>
-          <td data-vtg-col="author"><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}"${disabledAttr}></td>
+          <td data-vtg-col="author"><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}" placeholder="张三,李四"${disabledAttr} title="多人用英文逗号分隔，下发时拆成多条"></td>
           <td data-vtg-col="dueDate"><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"${disabledAttr}></td>
           <td data-vtg-col="documentDisplayDate"><input type="date" class="form-control form-control-sm${
             isReleaseRecordName(item.fileName) ? " vtg-doc-date-alert" : ""
@@ -1998,7 +2431,8 @@
           <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
           <td class="vtg-col-docno" data-vtg-col="documentNumber"><input class="form-control form-control-sm font-monospace" data-vtg-field="documentNumber" value="${escapeHtml(item.documentNumber || "")}" placeholder="可从文控同步"${disabledAttr}></td>
           <td class="vtg-col-filever" data-vtg-col="fileVersion"><input class="form-control form-control-sm" data-vtg-field="fileVersion" value="${escapeHtml(item.fileVersion || "")}" placeholder="如 V1.0"${disabledAttr}></td>
-          <td data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="备注"${disabledAttr}></td>
+          <td class="vtg-col-explanation" data-vtg-col="explanation"><input class="form-control form-control-sm" data-vtg-field="explanation" value="${escapeHtml(item.explanation || "")}" placeholder="说明"${disabledAttr}></td>
+          <td class="vtg-col-notes" data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="下发到任务"${disabledAttr}></td>
           <td data-vtg-col="action">${actionBtn}</td>
         </tr>`);
       });
@@ -2628,6 +3062,7 @@
       dueDate: String((item && item.dueDate) || "").trim(),
       documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
       belongingModule: String((item && item.belongingModule) || "").trim(),
+      explanation: String((item && item.explanation) || "").trim(),
       notes: String((item && item.notes) || "").trim(),
       recordStatus: recordStatusOf(item),
       isSystemRecord: isSystemRecordOf(item),
@@ -2780,6 +3215,7 @@
     const saved = (collectionHistory || []).map(collectionRowFromHistory);
     const rows = pending.concat(saved);
     const total = rows.length;
+    if (els.changeLogCount) els.changeLogCount.textContent = `${total} 条`;
     const totalPages = Math.max(1, Math.ceil(total / COLLECTION_PAGE_SIZE) || 1);
     if (collectionPage > totalPages) collectionPage = totalPages;
     if (collectionPage < 1) collectionPage = 1;
@@ -3263,16 +3699,6 @@
     const rows = combinePreviewPayloadItems(data, []);
     adoptPreviewBaselines(rows, data.ruleItems, data.manualDeletedKeys);
     resetPreviewVersionUi();
-    try {
-      renderPreviewTable(originalPreviewItems, { resetSelection: true });
-    } catch (err) {
-      if (els.previewBody) {
-        els.previewBody.innerHTML = `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-danger small text-center py-3">清单渲染失败：${escapeHtml(
-          err.message || "未知错误"
-        )}</td></tr>`;
-      }
-      toast(err.message || "渲染清单失败", "danger");
-    }
     if (opts.fillForm !== false) {
       if (data.fromVersion && els.fromVersion) els.fromVersion.value = data.fromVersion;
       if (data.toVersion && els.toVersion) els.toVersion.value = data.toVersion;
@@ -3288,6 +3714,23 @@
       renderVersionDatesTable();
     } else {
       applyVersionReleaseDatesFromPreview(data.versionReleaseDates || {});
+    }
+    try {
+      renderPreviewTable(originalPreviewItems, {
+        restoreSelection: true,
+        selectionScope: {
+          projectId: data.projectId || selectedProjectId(),
+          fromVersion: data.fromVersion || inputValue(els.fromVersion),
+          toVersion: data.toVersion || inputValue(els.toVersion),
+        },
+      });
+    } catch (err) {
+      if (els.previewBody) {
+        els.previewBody.innerHTML = `<tr><td colspan="${PREVIEW_COLSPAN}" class="text-danger small text-center py-3">清单渲染失败：${escapeHtml(
+          err.message || "未知错误"
+        )}</td></tr>`;
+      }
+      toast(err.message || "渲染清单失败", "danger");
     }
     if (Array.isArray(data.savedRecords) && data.savedRecords.length) {
       applyProjectRecords(data.savedRecords);
@@ -3305,7 +3748,12 @@
     originalPreviewItems = [];
     rulePreviewItems = [];
     previewSelectedKeys.clear();
-    renderPreviewTable([]);
+    previewSelectionPersistMuted = true;
+    try {
+      renderPreviewTable([], { skipPersist: true });
+    } finally {
+      previewSelectionPersistMuted = false;
+    }
     if (els.previewMeta) {
       els.previewMeta.textContent = message || "尚未生成预览。";
     }
@@ -3844,7 +4292,7 @@
       taskKey: newManualTaskKey(),
       originKey: "",
       fileName: "",
-      taskType: "版本变更任务",
+      taskType: DEFAULT_VERSION_TASK_TYPE,
       targetVersion: version,
       fileVersion: "",
       documentNumber: "",
@@ -3853,7 +4301,8 @@
       dueDate: (anchor && anchor.dueDate) || "",
       documentDisplayDate: (anchor && anchor.documentDisplayDate) || "",
       belongingModule: "",
-      notes: "手工新增",
+      explanation: "",
+      notes: "",
       recordStatus: "adopt",
       isSystemRecord: false,
       archiveFrequency: "",
@@ -4551,7 +5000,7 @@
     return Number(data.saved || 0);
   }
 
-  async function applyTasks() {
+  async function applyTasks(authorConflictAction) {
     const projectId = String(els.projectId.value || "").trim();
     if (!projectId) {
       toast("请先选择项目再下发任务", "warning");
@@ -4578,26 +5027,226 @@
     const applyMode = currentApplyMode();
     const { out } = collectVersionReleaseDates();
     const saved = await saveFeedbackIfNeeded(items);
-    const data = await requestJson("/api/document-control/version-tasks/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sourceJobId: currentJobId || null,
-        projectId,
-        items: selectedItems,
-        previewItems: items,
-        applyMode,
-        versionReleaseDates: out,
-        fromVersion: String(els.fromVersion.value || "").trim(),
-        toVersion: String(els.toVersion.value || "").trim(),
-        productName: String(els.productName.value || "").trim(),
-      }),
-    });
+    let data;
+    try {
+      data = await requestJson("/api/document-control/version-tasks/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceJobId: currentJobId || null,
+          projectId,
+          items: selectedItems,
+          previewItems: items,
+          applyMode,
+          authorConflictAction: authorConflictAction || "",
+          versionReleaseDates: out,
+          fromVersion: String(els.fromVersion.value || "").trim(),
+          toVersion: String(els.toVersion.value || "").trim(),
+          productName: String(els.productName.value || "").trim(),
+        }),
+      });
+    } catch (err) {
+      const payload = err && err.payload;
+      if (err && err.status === 409 && payload && payload.needsAuthorChoice) {
+        const choice = await askAuthorConflictChoice(payload.authorConflicts || [], payload.message);
+        if (!choice) {
+          toast("已取消下发", "info");
+          return;
+        }
+        return applyTasks(choice);
+      }
+      throw err;
+    }
     await loadProjectRecords();
+    await loadApplyBatches();
     if (els.applyMsg) {
       els.applyMsg.textContent = `${data.message || "下发完成"}${saved ? `（已记录反馈 ${saved} 条）` : ""}`;
     }
     toast(data.message || "下发完成", "success");
+  }
+
+  function collectListExportItems() {
+    syncPreviewItemsFromDom();
+    return (previewItems || [])
+      .filter((item) => !isHiddenPreviewItem(item) && recordStatusOf(item) !== "discard")
+      .map((item) => ({
+        fileName: String((item && item.fileName) || "").trim(),
+        documentNumber: String((item && item.documentNumber) || "").trim(),
+        fileVersion: String((item && item.fileVersion) || "").trim(),
+        documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
+        targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
+        notes: String((item && item.notes) || "").trim(),
+        explanation: String((item && item.explanation) || "").trim(),
+      }))
+      .filter((item) => item.fileName);
+  }
+
+  function parseDispositionFilename(header, fallback) {
+    const cd = String(header || "");
+    const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    if (star && star[1]) {
+      try {
+        return decodeURIComponent(star[1]);
+      } catch (e) {
+        return star[1];
+      }
+    }
+    const plain = /filename="?([^";]+)"?/i.exec(cd);
+    return (plain && plain[1]) || fallback;
+  }
+
+  async function exportVersionTaskList(kind) {
+    const items = collectListExportItems();
+    if (!items.length) {
+      toast("请先生成预览清单再导出", "warning");
+      return;
+    }
+    const fallback =
+      kind === "tech" ? "QR-QP4.2.4-07 技术文件清单.docx" : "QR-QP4.2.3-01 医疗器械主文档清单.docx";
+    const resp = await fetch(withScriptRoot("/api/document-control/version-tasks/export-list"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        items,
+        productName: String((els.productName && els.productName.value) || "").trim(),
+      }),
+    });
+    if (!resp.ok) {
+      let msg = `导出失败（${resp.status}）`;
+      try {
+        const data = await resp.json();
+        if (data && data.message) msg = data.message;
+      } catch (e) {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const filename = parseDispositionFilename(resp.headers.get("Content-Disposition"), fallback);
+    downloadBlob(blob, filename);
+    toast(`已导出：${filename}`, "success");
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "download";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (a.parentNode) a.parentNode.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 300);
+  }
+
+  function collectPreviewExcelItems() {
+    return getPreviewItems()
+      .filter((item) => !isHiddenPreviewItem(item))
+      .map((item) => ({
+        fileName: String((item && item.fileName) || "").trim(),
+        taskType: String((item && item.taskType) || "").trim(),
+        targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
+        author: String((item && item.author) || "").trim(),
+        dueDate: String((item && item.dueDate) || "").trim(),
+        documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
+        belongingModule: String((item && item.belongingModule) || "").trim(),
+        archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
+        triggeredBy: Array.isArray(item && item.triggeredBy)
+          ? item.triggeredBy
+          : String((item && item.triggeredBy) || "").trim(),
+        changeReason: String((item && item.changeReason) || "").trim(),
+        documentNumber: String((item && item.documentNumber) || "").trim(),
+        fileVersion: String((item && item.fileVersion) || "").trim(),
+        explanation: String((item && item.explanation) || "").trim(),
+        notes: String((item && item.notes) || "").trim(),
+        recordStatus: recordStatusOf(item),
+        isSystemRecord: isSystemRecordOf(item),
+        changeKind: changeKindOf(item),
+        chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
+        applied: previewApplyState(item),
+      }));
+  }
+
+  async function exportPreviewExcel() {
+    await loadApplyBatches();
+    const items = collectPreviewExcelItems();
+    if (!items.length) {
+      toast("请先生成预览清单再导出", "warning");
+      return;
+    }
+    const resp = await fetch(withScriptRoot("/api/document-control/version-tasks/export-excel"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items,
+        projectId: selectedProjectId() || "",
+        productName: String((els.productName && els.productName.value) || "").trim(),
+        fromVersion: String((els.fromVersion && els.fromVersion.value) || "").trim(),
+        toVersion: String((els.toVersion && els.toVersion.value) || "").trim(),
+      }),
+    });
+    if (!resp.ok) {
+      let msg = `导出失败（${resp.status}）`;
+      try {
+        const data = await resp.json();
+        if (data && data.message) msg = data.message;
+      } catch (e) {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const filename = parseDispositionFilename(
+      resp.headers.get("Content-Disposition"),
+      "版本任务清单.xlsx"
+    );
+    downloadBlob(blob, filename);
+    toast(`已导出：${filename}`, "success");
+  }
+
+  function askAuthorConflictChoice(conflicts, message) {
+    return new Promise((resolve) => {
+      const modal = els.authorConflictModal;
+      const list = els.authorConflictList;
+      if (!modal || !list) {
+        const ok = window.confirm(
+          `${message || "存在责任人不同的已有任务。"}确定替换原记录？取消则新增为新任务。`
+        );
+        resolve(ok ? "replace" : "create");
+        return;
+      }
+      const rows = Array.isArray(conflicts) ? conflicts : [];
+      list.innerHTML = rows.length
+        ? rows
+            .map((row) => {
+              const fileName = escapeHtml((row && row.fileName) || "");
+              const ver = escapeHtml((row && row.targetVersion) || "未指定");
+              const from = escapeHtml(((row && row.existingAuthors) || []).join("、") || "空");
+              const to = escapeHtml((row && row.newAuthor) || "");
+              return `<li>${fileName}（${ver}）：责任人 ${from} → ${to}</li>`;
+            })
+            .join("")
+        : `<li>${escapeHtml(message || "责任人不同")}</li>`;
+      modal.classList.remove("d-none");
+      const finish = (value) => {
+        modal.classList.add("d-none");
+        els.authorConflictCancel && els.authorConflictCancel.removeEventListener("click", onCancel);
+        els.authorConflictCreate && els.authorConflictCreate.removeEventListener("click", onCreate);
+        els.authorConflictReplace && els.authorConflictReplace.removeEventListener("click", onReplace);
+        resolve(value);
+      };
+      const onCancel = () => finish("");
+      const onCreate = () => finish("create");
+      const onReplace = () => finish("replace");
+      if (els.authorConflictCancel) els.authorConflictCancel.addEventListener("click", onCancel);
+      if (els.authorConflictCreate) els.authorConflictCreate.addEventListener("click", onCreate);
+      if (els.authorConflictReplace) els.authorConflictReplace.addEventListener("click", onReplace);
+    });
   }
 
   async function onProjectChanged() {
@@ -4607,6 +5256,7 @@
     if (!projectId) {
       clearPreviewPanel("请选择项目后查看该项目上次预览，或直接生成新预览。");
       loadFeedbackHistory().catch(() => {});
+      loadApplyBatches().catch(() => {});
       return;
     }
     const latest = await loadLatestPreview({ projectId, clearIfEmpty: true });
@@ -4614,6 +5264,7 @@
       applySavedRecordsToChainForm();
     }
     loadFeedbackHistory().catch(() => {});
+    loadApplyBatches().catch(() => {});
   }
 
   function bindEvents() {
@@ -4726,6 +5377,54 @@
         withButtonBusy(els.applyBtn, "下发中…", () => applyTasks()).catch((e) =>
           toast(e.message || "下发失败", "danger")
         );
+      });
+    }
+    if (els.exportMasterListBtn) {
+      els.exportMasterListBtn.addEventListener("click", () => {
+        withButtonBusy(els.exportMasterListBtn, "导出中…", () => exportVersionTaskList("master")).catch((e) =>
+          toast(e.message || "导出失败", "danger")
+        );
+      });
+    }
+    if (els.exportTechListBtn) {
+      els.exportTechListBtn.addEventListener("click", () => {
+        withButtonBusy(els.exportTechListBtn, "导出中…", () => exportVersionTaskList("tech")).catch((e) =>
+          toast(e.message || "导出失败", "danger")
+        );
+      });
+    }
+    if (els.exportPreviewExcelBtn) {
+      els.exportPreviewExcelBtn.addEventListener("click", () => {
+        withButtonBusy(els.exportPreviewExcelBtn, "导出中…", () => exportPreviewExcel()).catch((e) =>
+          toast(e.message || "导出失败", "danger")
+        );
+      });
+    }
+    if (els.applyBatchReload) {
+      els.applyBatchReload.addEventListener("click", () => {
+        withButtonBusy(els.applyBatchReload, "刷新中…", () => loadApplyBatches()).catch((e) =>
+          toast(e.message || "刷新条数失败", "danger")
+        );
+      });
+    }
+    if (els.applyBatchList) {
+      els.applyBatchList.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("[data-vtg-apply-key]");
+        if (!btn || !els.applyBatchList.contains(btn)) return;
+        const key = btn.getAttribute("data-vtg-apply-key") || "";
+        if (!key) return;
+        if (applyLedgerExpandedKeys.has(key)) applyLedgerExpandedKeys.delete(key);
+        else applyLedgerExpandedKeys.add(key);
+        const expanded = applyLedgerExpandedKeys.has(key);
+        btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+        const caret = btn.querySelector(".vtg-caret");
+        if (caret) caret.textContent = expanded ? "▼" : "▶";
+        const hint = btn.querySelector("[data-vtg-apply-ver-hint]");
+        if (hint) hint.textContent = expanded ? " 收起" : " 展开";
+        const recs = btn.nextElementSibling;
+        if (recs && recs.classList.contains("vtg-apply-recs")) {
+          recs.classList.toggle("is-collapsed", !expanded);
+        }
       });
     }
     if (els.savePreviewEditsBtn) {
@@ -4857,6 +5556,14 @@
     }
     if (els.previewBody) {
       els.previewBody.addEventListener("input", (ev) => {
+        if (ev.target.matches("[data-vtg-field=\"author\"]")) {
+          const row = ev.target.closest("tr[data-vtg-preview-idx]");
+          const idx = row ? Number(row.getAttribute("data-vtg-preview-idx")) : NaN;
+          if (!Number.isNaN(idx) && previewItems[idx]) {
+            previewItems[idx].author = String(ev.target.value || "").trim();
+            updateApplyIssueCount();
+          }
+        }
         if (!ev.target.matches(".vtg-filename-input")) return;
         ev.target.title = ev.target.value || "";
         ev.target.style.height = "auto";
@@ -4888,6 +5595,7 @@
         }
         if (ev.target.matches("[data-vtg-field]")) {
           const field = ev.target.getAttribute("data-vtg-field") || "";
+          const oldIdent = taskIdentity(previewItems[idx]);
           const prevItem = {
             fileName: previewItems[idx].fileName,
             targetVersion: previewItems[idx].targetVersion,
@@ -4896,6 +5604,7 @@
           };
           syncPreviewItemsFromDom();
           const item = previewItems[idx];
+          remapPreviewSelectionKey(oldIdent, item);
           if (field === "isSystemRecord") {
             const wrap = ev.target.closest(".vtg-system-check");
             const span = wrap && wrap.querySelector("span");
@@ -5069,8 +5778,10 @@
         clearPreviewPanel("尚未生成预览。选择项目可加载该项目上次结果，或填写版本后生成。");
       }
       loadFeedbackHistory().catch(() => {});
+      loadApplyBatches().catch(() => {});
     } catch (err) {
       toast(err.message || "加载上次预览失败", "danger");
+      loadApplyBatches().catch(() => {});
     }
   }
 

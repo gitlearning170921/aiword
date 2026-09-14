@@ -237,7 +237,9 @@ def apply_user_access_fields(user: User, data: dict) -> None:
 
     fp = parse_feature_permissions_field(data)
     if fp is not None:
-        write_user_feature_permissions(user, fp or None)
+        write_user_feature_permissions(user, fp)
+    elif getattr(user, "feature_permissions_json", None) is None:
+        write_user_feature_permissions(user, {})
 
 
 def preview_user_access_cleanup(user: User) -> dict[str, Any]:

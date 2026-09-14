@@ -12,6 +12,7 @@ import secrets
 import hashlib
 import uuid
 import socket
+import threading
 import time as pytime
 from datetime import date, datetime, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9843,10 +9844,66 @@ def api_audit_statuses_delete(item_id: str):
 
 # ---------- 上传与任务管理 API ----------
 
-def _refresh_and_sync_project_kb_for_scope(org_id: str, project_id: str, *, trigger: str) -> None:
+def _queue_project_kb_after_upload_change(
+    org_id: str,
+    project_id: str,
+    *,
+    trigger: str,
+    deleted_only: bool = False,
+) -> int:
+    """删除/变更后立刻把知识库状态和 outbox 写入数据库。不调上游，重启可续传。"""
+    from webapp.document_control.project_kb_service import is_project_kb_sync_enabled
+
+    if not is_project_kb_sync_enabled():
+        return 0
     oid = str(org_id or "").strip()
     pid = str(project_id or "").strip()
     if not oid or not pid:
+        return 0
+    from webapp.document_control.project_kb_service import (
+        enqueue_project_kb_sync_events,
+        refresh_project_kb_document_versions,
+    )
+
+    refreshed = refresh_project_kb_document_versions(org_id=oid, project_id=pid)
+    docs = refreshed
+    if deleted_only:
+        docs = [item for item in (refreshed or []) if isinstance(item, dict) and item.get("isDeleted")]
+    queued = enqueue_project_kb_sync_events(
+        org_id=oid,
+        project_id=pid,
+        documents=docs,
+        trigger=trigger,
+        force_retry=True,
+    )
+    db.session.commit()
+    current_app.logger.info(
+        "project-kb outbox 已排队 trigger=%s org=%s project=%s queued=%s deletedOnly=%s",
+        trigger,
+        oid,
+        pid,
+        queued,
+        deleted_only,
+    )
+    return int(queued or 0)
+
+
+def _refresh_and_sync_project_kb_for_scope(
+    org_id: str,
+    project_id: str,
+    *,
+    trigger: str,
+    force_retry: bool = True,
+    sync_now: bool = True,
+    deleted_only: bool = False,
+) -> None:
+    oid = str(org_id or "").strip()
+    pid = str(project_id or "").strip()
+    if not oid or not pid:
+        return
+    from webapp.document_control.project_kb_service import is_project_kb_sync_enabled
+
+    if not is_project_kb_sync_enabled():
         return
     try:
         from webapp.document_control.project_kb_service import (
@@ -9857,19 +9914,33 @@ def _refresh_and_sync_project_kb_for_scope(org_id: str, project_id: str, *, trig
         from webapp.tenant_context import collection_for_organization
 
         refreshed = refresh_project_kb_document_versions(org_id=oid, project_id=pid)
+        docs = refreshed
+        if deleted_only:
+            docs = [item for item in (refreshed or []) if isinstance(item, dict) and item.get("isDeleted")]
         enqueue_project_kb_sync_events(
             org_id=oid,
             project_id=pid,
-            documents=refreshed,
+            documents=docs,
             trigger=trigger,
-            force_retry=True,
+            force_retry=force_retry,
         )
         db.session.commit()
-        _sync_project_kb_outbox(
+        if not sync_now:
+            return
+        result = _sync_project_kb_outbox(
             org_id=oid,
             collection=collection_for_organization(oid),
             project_id=pid,
             limit=80,
+        )
+        current_app.logger.info(
+            "project-kb 上游同步完成 trigger=%s org=%s project=%s processed=%s succeeded=%s failed=%s",
+            trigger,
+            oid,
+            pid,
+            (result or {}).get("processed"),
+            (result or {}).get("succeeded"),
+            (result or {}).get("failed"),
         )
     except Exception as exc:
         db.session.rollback()
@@ -9880,6 +9951,110 @@ def _refresh_and_sync_project_kb_for_scope(org_id: str, project_id: str, *, trig
             trigger,
             exc,
         )
+
+
+def _push_project_kb_outbox_in_background(org_id: str, project_id: str, *, trigger: str) -> None:
+    """只把上游 HTTP 放到后台；队列已在库里，中途重启不会丢。"""
+    oid = str(org_id or "").strip()
+    pid = str(project_id or "").strip()
+    if not oid or not pid:
+        return
+    from webapp.document_control.project_kb_service import is_project_kb_sync_enabled
+
+    if not is_project_kb_sync_enabled():
+        return
+    app = current_app._get_current_object()
+
+    def _run() -> None:
+        with app.app_context():
+            try:
+                from webapp.document_control.routes import _sync_project_kb_outbox
+                from webapp.tenant_context import collection_for_organization
+
+                current_app.logger.info(
+                    "project-kb 上游同步开始 trigger=%s org=%s project=%s",
+                    trigger,
+                    oid,
+                    pid,
+                )
+                result = _sync_project_kb_outbox(
+                    org_id=oid,
+                    collection=collection_for_organization(oid),
+                    project_id=pid,
+                    limit=80,
+                )
+                current_app.logger.info(
+                    "project-kb 上游同步完成 trigger=%s org=%s project=%s processed=%s succeeded=%s failed=%s msg=%s",
+                    trigger,
+                    oid,
+                    pid,
+                    (result or {}).get("processed"),
+                    (result or {}).get("succeeded"),
+                    (result or {}).get("failed"),
+                    (result or {}).get("message"),
+                )
+            except Exception:
+                current_app.logger.exception(
+                    "project-kb 上游同步异常 trigger=%s org=%s project=%s",
+                    trigger,
+                    oid,
+                    pid,
+                )
+
+    threading.Thread(target=_run, daemon=True, name="project-kb-outbox-push").start()
+
+
+def _resume_project_kb_outbox_after_startup(app) -> None:
+    """启动时把中断的 syncing 改回 pending，并后台续传，避免重启留下半同步。"""
+    from webapp.document_control.project_kb_service import is_project_kb_sync_enabled
+
+    if not is_project_kb_sync_enabled():
+        app.logger.info("project-kb 同步已暂时关闭，跳过启动续传")
+        return
+    try:
+        from webapp.document_control.project_kb_service import (
+            recover_stuck_project_kb_outbox,
+            list_pending_project_kb_outbox_scopes,
+        )
+        from webapp.document_control.routes import _sync_project_kb_outbox
+        from webapp.tenant_context import collection_for_organization
+
+        recovered = recover_stuck_project_kb_outbox(older_than_seconds=0)
+        scopes = list_pending_project_kb_outbox_scopes(limit=20)
+        app.logger.info(
+            "project-kb 启动续传：收回中断 %s 条，待同步项目 %s 个",
+            recovered,
+            len(scopes),
+        )
+        if not scopes:
+            return
+
+        def _run() -> None:
+            with app.app_context():
+                for oid, pid in scopes:
+                    try:
+                        result = _sync_project_kb_outbox(
+                            org_id=oid,
+                            collection=collection_for_organization(oid),
+                            project_id=pid,
+                            limit=40,
+                        )
+                        current_app.logger.info(
+                            "project-kb 启动续传完成 org=%s project=%s processed=%s succeeded=%s failed=%s",
+                            oid,
+                            pid,
+                            (result or {}).get("processed"),
+                            (result or {}).get("succeeded"),
+                            (result or {}).get("failed"),
+                        )
+                    except Exception:
+                        current_app.logger.exception(
+                            "project-kb 启动续传失败 org=%s project=%s", oid, pid
+                        )
+
+        threading.Thread(target=_run, daemon=True, name="project-kb-startup-resume").start()
+    except Exception:
+        app.logger.exception("project-kb 启动续传准备失败")
 
 
 @bp.post("/api/upload")
@@ -10912,12 +11087,28 @@ def api_upload_delete(upload_id: str):
 
     _delete_upload_record_files_and_row(upload)
     db.session.commit()
-    _refresh_and_sync_project_kb_for_scope(
-        org_id,
-        project_id,
-        trigger="upload_delete",
+    queued = 0
+    try:
+        queued = _queue_project_kb_after_upload_change(
+            org_id,
+            project_id,
+            trigger="upload_delete",
+            deleted_only=True,
+        )
+        _push_project_kb_outbox_in_background(
+            org_id,
+            project_id,
+            trigger="upload_delete",
+        )
+    except Exception:
+        current_app.logger.exception(
+            "project-kb 删除后排队失败 org=%s project=%s", org_id, project_id
+        )
+    msg = user_facing_text(
+        f"已删除。文档库同步已写入队列（{queued} 条），结果见服务日志；重启会按队列续传，不会丢本地删除。",
+        "已删除",
     )
-    return jsonify({"message": "已删除"})
+    return jsonify({"message": msg, "kbQueued": queued})
 
 
 def _upload_same_project_key(upload: UploadRecord) -> str:
@@ -11019,15 +11210,30 @@ def api_uploads_batch_delete():
         db.session.rollback()
         return jsonify({"success": False, "message": f"删除失败：{e}"}), 500
     for org_id, project_id in affected_scopes:
-        _refresh_and_sync_project_kb_for_scope(
-            org_id,
-            project_id,
-            trigger="upload_batch_delete",
-        )
+        try:
+            _queue_project_kb_after_upload_change(
+                org_id,
+                project_id,
+                trigger="upload_batch_delete",
+                deleted_only=True,
+            )
+            _push_project_kb_outbox_in_background(
+                org_id,
+                project_id,
+                trigger="upload_batch_delete",
+            )
+        except Exception:
+            current_app.logger.exception(
+                "project-kb 批量删除后排队失败 org=%s project=%s", org_id, project_id
+            )
 
     msg = f"已删除 {deleted} 条任务"
     if errors:
         msg += f"，{len(errors)} 条失败"
+    msg = user_facing_text(
+        f"{msg}。文档库同步已写入队列，结果见服务日志；重启会按队列续传。",
+        msg,
+    )
     return jsonify({
         "success": True,
         "deleted": deleted,
