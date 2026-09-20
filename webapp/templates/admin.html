@@ -9,8 +9,6 @@
         </div>
         <div class="text-end">
             <div class="small text-muted mb-1" id="adminDeployVersionBar">系统版本：加载中…</div>
-            <span class="badge bg-warning text-dark">超级管理员</span>
-            <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="adminLogoutPage13Btn">退出超级管理员</button>
         </div>
     </div>
 
@@ -570,13 +568,6 @@
 {% block body_extra %}
 <script src="{{ url_for('static', filename='js/company_registry.js', v=static_version) }}"></script>
 <script>
-document.getElementById("adminLogoutPage13Btn")?.addEventListener("click", async function () {
-    try {
-        await App.request("/api/logout", { method: "POST" });
-    } catch (_) { /* ignore */ }
-    window.location.href = (window.__SCRIPT_ROOT__ || "") + "/login";
-});
-
 function renderScopeDiagnosticsPanel(data) {
     const panel = document.getElementById("scopeDiagnosticsPanel");
     if (!panel) return;

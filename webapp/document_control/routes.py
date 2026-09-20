@@ -59,6 +59,7 @@ from webapp.authz import (
 from .version_task_generator import (
     DEFAULT_VERSION_TASK_TYPE,
     LEGACY_AUTO_VERSION_TASK_TYPES,
+    apply_preview_signoff_defaults,
     build_adjustment_rows,
     delete_project_version_record,
     diagnose_release_dates,
@@ -2662,6 +2663,18 @@ def api_version_task_apply():
         notes = str(row.get("notes") or "").strip() or None
         module = str(row.get("belongingModule") or "").strip() or None
         is_system_record = normalize_is_system_record(row.get("isSystemRecord"), default=False)
+        signoff = dict(row)
+        signoff["author"] = author
+        apply_preview_signoff_defaults(signoff)
+        displayed_author = (str(signoff.get("displayedAuthor") or "").strip() or None)
+        reviewer = (str(signoff.get("reviewer") or "").strip() or None)
+        approver = (str(signoff.get("approver") or "").strip() or None)
+        if displayed_author:
+            displayed_author = displayed_author[:128]
+        if reviewer:
+            reviewer = reviewer[:128]
+        if approver:
+            approver = approver[:128]
         if existing:
             if apply_mode == "increment" and str(existing.author or "").strip() == author:
                 skipped_exist += 1
@@ -2674,6 +2687,9 @@ def api_version_task_apply():
             existing.project_code = project.project_code
             existing.task_type = task_type
             existing.author = author
+            existing.displayed_author = displayed_author
+            existing.reviewer = reviewer
+            existing.approver = approver
             existing.notes = notes
             existing.due_date = due_date
             existing.document_display_date = document_display_date
@@ -2699,6 +2715,9 @@ def api_version_task_apply():
                 file_name=file_name,
                 task_type=task_type,
                 author=author,
+                displayed_author=displayed_author,
+                reviewer=reviewer,
+                approver=approver,
                 notes=notes,
                 due_date=due_date,
                 document_display_date=document_display_date,
@@ -2839,14 +2858,17 @@ def api_version_task_export_list():
     if wall is not None:
         return wall
     payload = request.get_json(silent=True) or {}
-    kind = str(payload.get("kind") or "").strip().lower()
+    kinds = payload.get("kinds")
+    if not isinstance(kinds, list) or not kinds:
+        kind = str(payload.get("kind") or "").strip().lower()
+        kinds = [kind] if kind else []
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
     product_name = str(payload.get("productName") or "").strip()
-    from .list_export import export_version_task_list_docx
+    from .list_export import export_version_task_lists
 
     try:
-        raw, filename, ascii_name = export_version_task_list_docx(
-            kind=kind,
+        raw, filename, ascii_name, fmt = export_version_task_lists(
+            kinds=kinds,
             items=items,
             product_name=product_name,
         )
@@ -2860,9 +2882,14 @@ def api_version_task_export_list():
         f"attachment; filename=\"{ascii_name}\"; "
         f"filename*=UTF-8''{quote(filename)}"
     )
+    mimetype = (
+        "application/zip"
+        if fmt == "zip"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
     return Response(
         raw,
-        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mimetype=mimetype,
         headers={"Content-Disposition": disposition},
     )
 

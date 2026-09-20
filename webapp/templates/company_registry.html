@@ -10,10 +10,6 @@
         <p class="text-muted mb-1">公司总览项目单独存储，可<strong>一对多</strong>关联多个{% if is_page13_super_admin %}页面1 {% endif %}任务项目。「移出总览」只删除公司层记录并解除关联，{% if is_page13_super_admin %}页面1/2/3 {% endif %}任务数据不变。</p>
         <p class="small text-muted mb-0">当前可见范围（注册国家）：<strong>{{ country_scope_label }}</strong></p>
     </div>
-    <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center">
-        <span id="companyUserInfo" class="badge bg-light text-dark border"></span>
-        <button type="button" class="btn btn-sm btn-outline-secondary" id="companyLogoutBtn">退出登录</button>
-    </div>
 </div>
 
 {% set page0_has_doc_tools = feature_flags.FEATURE_PAGE0_DRAFT_GEN or feature_flags.FEATURE_PAGE0_AUDIT or feature_flags.FEATURE_PAGE0_AUDIT_MODIFY or feature_flags.FEATURE_PAGE0_TRANSLATE %}

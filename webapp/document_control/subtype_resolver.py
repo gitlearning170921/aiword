@@ -1,4 +1,4 @@
-"""DHF/注册文件：由文件名称英文单词首字母生成子类编号。"""
+"""DHF/注册文件：由英文文件名称按单词取字母规则生成子类（第二段）编号。"""
 
 from __future__ import annotations
 
@@ -34,41 +34,63 @@ def english_words(title: str) -> list[str]:
     return [w for w in _WORD_RE.findall(title or "") if w]
 
 
-def _letter_pool(words: list[str]) -> list[str]:
-    if not words:
-        return []
-    max_len = max(len(w) for w in words)
-    pool: list[str] = []
-    for pos in range(max_len):
-        for w in words:
-            if len(w) > pos:
-                pool.append(w[pos].upper())
-    return pool
+def _secondary_letters_word_major(words: list[str]) -> list[str]:
+    """各单词第 2、3… 位：先穷尽第一个单词，再第二个单词，依次类推。"""
+    out: list[str] = []
+    for w in words:
+        for ch in (w or "")[1:]:
+            if ch.isalpha():
+                out.append(ch.upper())
+    return out
 
 
 def iter_subtype_candidates(title: str) -> Iterator[str]:
-    """子类候选：先取前 3～N 个英文单词首字母，用尽后按各单词第 2、3… 位字母递补。"""
+    """由英文文件名生成子类（第二段）候选，最少 3 位。
+
+    规则：
+    1. 优先从前到后取每个单词首字母；
+    2. 若首字母总数不足 3：按「第 1 词第 2/3… 位 → 第 2 词第 2/3… 位…」补足到至少 3 位；
+    3. 若单词数 ≥ 3：先取前 3 个首字母；若与已有编号冲突，再取第 4、5… 个首字母；
+    4. 全部首字母用尽仍冲突：同样按词序追加各词第 2、3… 位，直至不重复。
+    """
     words = english_words(title)
     if not words:
         return
     first_letters = [w[0].upper() for w in words if w]
+    if not first_letters:
+        return
+    secondary = _secondary_letters_word_major(words)
     n = len(first_letters)
-    pool = _letter_pool(words)
     seen: set[str] = set()
 
-    start_k = min(3, n)
-    for k in range(start_k, n + 1):
-        cand = "".join(first_letters[:k])
-        if cand and cand not in seen:
-            seen.add(cand)
-            yield cand
+    def emit(cand: str) -> Optional[str]:
+        text = (cand or "").strip().upper()
+        if len(text) < 3 or text in seen:
+            return None
+        seen.add(text)
+        return text
 
-    base_len = n
-    for length in range(max(base_len + 1, start_k + 1), len(pool) + 1):
-        cand = "".join(pool[:length])
-        if cand and cand not in seen:
-            seen.add(cand)
-            yield cand
+    if n >= 3:
+        for k in range(3, n + 1):
+            out = emit("".join(first_letters[:k]))
+            if out:
+                yield out
+        base = "".join(first_letters)
+        for i in range(1, len(secondary) + 1):
+            out = emit(base + "".join(secondary[:i]))
+            if out:
+                yield out
+        return
+
+    # 单词不足 3 个：首字母 + 词序后续字母，补足到 ≥3 后再逐位加长
+    base = "".join(first_letters)
+    need = 3 - len(base)
+    if need > 0 and len(secondary) < need:
+        secondary = secondary + (["X"] * (need - len(secondary)))
+    for i in range(max(need, 0), len(secondary) + 1):
+        out = emit(base + "".join(secondary[:i]))
+        if out:
+            yield out
 
 
 def extract_subtype_from_number(
@@ -353,7 +375,7 @@ def find_existing_subtype_for_title(
     prefix: str,
     title: str,
 ) -> Optional[str]:
-    """名称相关文件复用已有子类，流水号由取号引擎递增。"""
+    """精确同名或名称互相包含时，复用已有子类，流水号由取号引擎递增。"""
     for doc in find_controlled_docs_for_issue_title(
         organization_id=organization_id,
         prefix=prefix,
@@ -413,19 +435,17 @@ def resolve_subtype_from_title(
     if existing_sub:
         return existing_sub
 
-    subtype_source = (title_en or title or "").strip()
+    subtype_source = (title_en or "").strip() or (title or "").strip()
     words = english_words(subtype_source)
     if not words:
         raise ValueError("无法从文件名称生成子类编号，请补充英文或稍后重试自动翻译")
 
     doc_type_code = normalize_document_number(scheme.doc_type_code or "")
     mapping = _subtype_title_map(organization_id, scheme, prefix)
+    preferred = next(iter_subtype_candidates(subtype_source), "")
     for cand in iter_subtype_candidates(subtype_source):
-        if (
-            doc_type_code
-            and cand == doc_type_code
-            and cand != "".join(w[0].upper() for w in words[: min(3, len(words))])
-        ):
+        # 避免误用规则里的类型码（如 SRS）盖住真实标题缩写，除非它就是首选候选
+        if doc_type_code and cand == doc_type_code and cand != preferred:
             continue
         if not _subtype_conflicts_other_title(cand, title_key, mapping):
             return cand

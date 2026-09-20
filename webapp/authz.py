@@ -362,6 +362,7 @@ def super_admin_password_gate_response(
     return render_template(
         "page13_gate.html",
         next_url=gate_next_url(),
+        hide_main_nav=True,
         gate_page=True,
         gate_title=gate_title,
         gate_description=gate_description,

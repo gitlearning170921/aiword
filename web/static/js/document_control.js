@@ -200,6 +200,87 @@
         return query;
     }
 
+    function currentSearchName() {
+        return (document.getElementById("dcKeyword")?.value || "").trim();
+    }
+
+    function looksLikeDocumentNumber(value) {
+        const text = (value || "").trim();
+        if (!text || /\s/.test(text)) return false;
+        // 形如 PAPUWIS-UOS-001 / QP4.2.4-01
+        return /[A-Za-z]/.test(text) && /\d/.test(text) && /[-.]/.test(text);
+    }
+
+    function buildQuickCreateRowFromSearch(btn) {
+        const keyword = (btn?.getAttribute("data-title") || currentSearchName() || "").trim();
+        const sheetCategory =
+            (btn?.getAttribute("data-sheet-category") || "").trim() ||
+            (document.getElementById("dcSheetCategory")?.value || "").trim();
+        const projectCode =
+            (btn?.getAttribute("data-project-code") || "").trim() ||
+            (document.getElementById("dcProjectCode")?.value || "").trim();
+        const projectName =
+            (btn?.getAttribute("data-project-name") || "").trim() ||
+            (document.getElementById("dcProjectName")?.value || "").trim();
+        const registeredCountry =
+            (btn?.getAttribute("data-registered-country") || "").trim() ||
+            (document.getElementById("dcRegisteredCountry")?.value || "").trim();
+        const row = {
+            ...emptyBatchCreateRow(),
+            sheetCategory,
+            projectCode,
+            projectName,
+            registeredCountry,
+        };
+        if (looksLikeDocumentNumber(keyword)) row.documentNumber = keyword;
+        else row.title = keyword;
+        return row;
+    }
+
+    function renderEmptyLedgerResultHtml() {
+        const name = currentSearchName();
+        const sheetCategory = (document.getElementById("dcSheetCategory")?.value || "").trim();
+        const projectCode = (document.getElementById("dcProjectCode")?.value || "").trim();
+        const projectName = (document.getElementById("dcProjectName")?.value || "").trim();
+        const registeredCountry = (document.getElementById("dcRegisteredCountry")?.value || "").trim();
+        let html =
+            '<div class="alert alert-light border mb-0 d-flex flex-wrap align-items-center gap-2">' +
+            '<span>暂无匹配记录，可调整筛选条件或先导入 Excel。</span>';
+        if (name) {
+            html +=
+                `<button type="button" class="btn btn-sm btn-success dc-quick-create-from-search"` +
+                ` data-title="${esc(name)}"` +
+                ` data-sheet-category="${esc(sheetCategory)}"` +
+                ` data-project-code="${esc(projectCode)}"` +
+                ` data-project-name="${esc(projectName)}"` +
+                ` data-registered-country="${esc(registeredCountry)}"` +
+                `>用「${esc(name)}」新建台账</button>`;
+        } else {
+            html +=
+                '<button type="button" class="btn btn-sm btn-outline-success dc-quick-create-from-search">' +
+                "新建台账</button>";
+        }
+        html += "</div>";
+        return html;
+    }
+
+    function openQuickCreateFromSearch(btn) {
+        const keyword = (btn?.getAttribute("data-title") || currentSearchName() || "").trim();
+        openBatchCreateModal({
+            title: keyword ? `新建台账：${keyword}` : "新增台账",
+            rows: [buildQuickCreateRowFromSearch(btn)],
+        });
+        window.setTimeout(() => {
+            const titleInput = document.querySelector('#dcBatchCreateRowsBody [data-field="title"]');
+            const numInput = document.querySelector(
+                '#dcBatchCreateRowsBody [data-field="documentNumber"]'
+            );
+            if (looksLikeDocumentNumber(keyword) && numInput) numInput.focus();
+            else if (keyword && titleInput) titleInput.focus();
+            else if (numInput) numInput.focus();
+        }, 350);
+    }
+
     let sheetCategoryOptions = [];
 
     function updateBatchToolbar() {
@@ -301,7 +382,27 @@
     function renderDocRows(rows) {
         const list = rows || [];
         if (!list.length) {
-            return '<tr><td colspan="10" class="text-muted p-3">暂无匹配记录</td></tr>';
+            const name = currentSearchName();
+            if (!name) {
+                return '<tr><td colspan="10" class="text-muted p-3">暂无匹配记录</td></tr>';
+            }
+            const sheetCategory = (document.getElementById("dcSheetCategory")?.value || "").trim();
+            const projectCode = (document.getElementById("dcProjectCode")?.value || "").trim();
+            const projectName = (document.getElementById("dcProjectName")?.value || "").trim();
+            const registeredCountry = (document.getElementById("dcRegisteredCountry")?.value || "").trim();
+            return (
+                '<tr><td colspan="10" class="p-3">' +
+                '<div class="d-flex flex-wrap align-items-center gap-2">' +
+                '<span class="text-muted">暂无匹配记录</span>' +
+                `<button type="button" class="btn btn-sm btn-success dc-quick-create-from-search"` +
+                ` data-title="${esc(name)}"` +
+                ` data-sheet-category="${esc(sheetCategory)}"` +
+                ` data-project-code="${esc(projectCode)}"` +
+                ` data-project-name="${esc(projectName)}"` +
+                ` data-registered-country="${esc(registeredCountry)}"` +
+                `>用「${esc(name)}」新建台账</button>` +
+                "</div></td></tr>"
+            );
         }
         return list
             .map(
@@ -522,8 +623,7 @@
                 if (current && allItems.includes(current)) sheetSel.value = current;
             }
             if (!categories.length) {
-                wrap.innerHTML =
-                    '<div class="alert alert-light border mb-0">暂无匹配记录，可调整筛选条件或先导入 Excel。</div>';
+                wrap.innerHTML = renderEmptyLedgerResultHtml();
                 if (summary) summary.textContent = "";
                 return;
             }
@@ -534,8 +634,7 @@
             const blocks = await Promise.all(
                 categories.map(async (name) => mountCategoryBlock(name, counts[name], autoLoad))
             );
-            wrap.innerHTML = blocks.filter(Boolean).join("") ||
-                '<div class="alert alert-light border mb-0">暂无匹配记录，可调整筛选条件或先导入 Excel。</div>';
+            wrap.innerHTML = blocks.filter(Boolean).join("") || renderEmptyLedgerResultHtml();
             const totalAll = categories.reduce((sum, name) => sum + (Number(counts[name]) || 0), 0);
             if (summary) {
                 summary.textContent = autoLoad
@@ -1409,6 +1508,11 @@
 
     function bindBatchCreateModal() {
         document.getElementById("dcBatchAddDocBtn")?.addEventListener("click", () => openBatchCreateModal());
+        document.getElementById("dcCategorySections")?.addEventListener("click", (e) => {
+            const btn = e.target.closest(".dc-quick-create-from-search");
+            if (!btn) return;
+            openQuickCreateFromSearch(btn);
+        });
         document.getElementById("dcBatchCreateAddRowBtn")?.addEventListener("click", () => addBatchCreateRow());
         document.getElementById("dcBatchCreateClearRowsBtn")?.addEventListener("click", () => {
             batchCreateFormRows = [emptyBatchCreateRow()];

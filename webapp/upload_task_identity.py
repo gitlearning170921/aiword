@@ -213,10 +213,14 @@ def expand_preview_items_by_author(items: list[Any]) -> list[dict[str, Any]]:
     for row in items or []:
         if not isinstance(row, dict):
             continue
+        orig_author = str(row.get("author") or "").strip()
+        displayed = str(row.get("displayedAuthor") or row.get("displayed_author") or "").strip()
         authors = split_task_authors(row.get("author"))
         for name in authors:
             rec = dict(row)
             rec["author"] = name
+            if not displayed or displayed == orig_author:
+                rec["displayedAuthor"] = name
             rec["_authorGroupSize"] = len(authors)
             out.append(rec)
     return out

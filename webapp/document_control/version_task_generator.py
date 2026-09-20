@@ -25,6 +25,9 @@ from webapp.models import (
     now_local,
 )
 
+DEFAULT_PREVIEW_REVIEWER = "陈亮"
+DEFAULT_PREVIEW_APPROVER = "汪津"
+
 VERSION_RE = re.compile(r"^[Vv]?\s*(\d+)\.(\d+)\.(\d+)\.(\d+)\s*$")
 DATE_PATTERNS = (
     re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b"),
@@ -153,6 +156,30 @@ def _fmt_date(d: date) -> str:
     return d.strftime("%Y-%m-%d")
 
 
+def apply_preview_signoff_defaults(rec: dict[str, Any]) -> bool:
+    """补齐体现编/审/批：编默认等于责任人，审默认陈亮，批默认汪津。"""
+    if not isinstance(rec, dict):
+        return False
+    changed = False
+    author = str(rec.get("author") or "").strip()
+    displayed = str(rec.get("displayedAuthor") or rec.get("displayed_author") or "").strip()
+    if not displayed:
+        displayed = author
+        changed = True
+    rec["displayedAuthor"] = displayed
+    reviewer = str(rec.get("reviewer") or "").strip()
+    if not reviewer:
+        reviewer = DEFAULT_PREVIEW_REVIEWER
+        changed = True
+    rec["reviewer"] = reviewer
+    approver = str(rec.get("approver") or "").strip()
+    if not approver:
+        approver = DEFAULT_PREVIEW_APPROVER
+        changed = True
+    rec["approver"] = approver
+    return changed
+
+
 def normalize_preview_item_fields(rec: dict[str, Any]) -> bool:
     """统一任务类型默认值，并把历史「备注」(规则原因)迁到「说明」。
 
@@ -174,6 +201,8 @@ def normalize_preview_item_fields(rec: dict[str, Any]) -> bool:
     else:
         rec["explanation"] = str(rec.get("explanation") or "").strip()
         rec["notes"] = str(rec.get("notes") or "").strip()
+    if apply_preview_signoff_defaults(rec):
+        changed = True
     return changed
 
 
@@ -182,6 +211,9 @@ def _merge_generated_item(target: dict[str, Any], patch: dict[str, Any]) -> None
         "fileName",
         "taskType",
         "author",
+        "displayedAuthor",
+        "reviewer",
+        "approver",
         "belongingModule",
         "explanation",
         "notes",
@@ -446,20 +478,55 @@ def _title_fuzzy_score(query: str, title: str) -> float:
     return ratio if ratio >= _DOC_FUZZY_MIN_SCORE else 0.0
 
 
+def _is_project_bound_sheet_category(sheet_category: str, doc_type_code: str = "") -> bool:
+    """DHF / 注册文件 / SOP 按项目绑定；程序文件、四级表单为公司级体系文件。"""
+    from .allocation_categories import DOC_TYPE_SHEET_CATEGORY, resolve_issue_category
+
+    cat = str(sheet_category or "").strip()
+    if not cat:
+        cat = DOC_TYPE_SHEET_CATEGORY.get(str(doc_type_code or "").strip().upper(), "")
+    cfg = resolve_issue_category(cat)
+    return bool(cfg and cfg.get("needsProjectCode"))
+
+
+def _controlled_doc_in_sync_scope(
+    row: Any, *, project_id: Optional[str], project_code: str
+) -> bool:
+    if not _is_project_bound_sheet_category(
+        str(getattr(row, "sheet_category", "") or ""),
+        str(getattr(row, "doc_type_code", "") or ""),
+    ):
+        return True
+    pid = str(project_id or "").strip()
+    code = str(project_code or "").strip()
+    if not pid and not code:
+        return False
+    row_pid = str(getattr(row, "project_id", "") or "").strip()
+    row_code = str(getattr(row, "project_code", "") or "").strip()
+    if pid and row_pid and row_pid == pid:
+        return True
+    if code and row_code and row_code.casefold() == code.casefold():
+        return True
+    return False
+
+
 def _build_controlled_doc_candidates(
     org_id: str, project_id: Optional[str] = None
 ) -> list[dict[str, Any]]:
     from .numbering_engine import is_controlled_document_status
 
     project_code = ""
-    if project_id:
-        project = Project.query.filter_by(id=project_id).first()
+    pid = str(project_id or "").strip() or None
+    if pid:
+        project = Project.query.filter_by(id=pid).first()
         if project:
             project_code = str(project.project_code or "").strip()
     rows = ControlledDocument.query.filter_by(organization_id=org_id).all()
     out: list[dict[str, Any]] = []
     for row in rows:
         if not is_controlled_document_status(row.status):
+            continue
+        if not _controlled_doc_in_sync_scope(row, project_id=pid, project_code=project_code):
             continue
         keys: list[str] = []
         for title in (row.title, row.title_en):
@@ -469,7 +536,7 @@ def _build_controlled_doc_candidates(
         if not keys:
             continue
         project_score = 0
-        if project_id and str(row.project_id or "") == str(project_id):
+        if pid and str(row.project_id or "") == str(pid):
             project_score += 4
         if project_code and str(row.project_code or "").strip() == project_code:
             project_score += 2
@@ -519,7 +586,10 @@ def enrich_preview_items_from_document_control(
     project_id: Optional[str] = None,
     overwrite: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    """按文件名模糊匹配文控台账，补齐文件编号 / 文件版本号。默认不覆盖已填值。"""
+    """按文件名模糊匹配文控台账，补齐文件编号 / 文件版本号。默认不覆盖已填值。
+
+    DHF、注册文件、SOP 只匹配当前项目；程序文件、四级表单可匹配全公司。
+    """
     rows = [dict(x) for x in (items or []) if isinstance(x, dict)]
     if not org_id or not rows:
         return rows, 0
@@ -740,6 +810,9 @@ def generate_task_preview(
                     "fileName": task["fileName"],
                     "taskType": task["taskType"],
                     "author": task["author"],
+                    "displayedAuthor": task["author"],
+                    "reviewer": DEFAULT_PREVIEW_REVIEWER,
+                    "approver": DEFAULT_PREVIEW_APPROVER,
                     "belongingModule": task["belongingModule"],
                     "dueDate": _fmt_date(due),
                     "explanation": task["reason"],
@@ -1251,6 +1324,9 @@ CHANGE_FIELD_LABELS = {
     "taskType": "任务类型",
     "targetVersion": "目标版本",
     "author": "责任人",
+    "displayedAuthor": "编",
+    "reviewer": "审",
+    "approver": "批",
     "dueDate": "完成日期",
     "documentDisplayDate": "文档日期",
     "belongingModule": "模块",

@@ -7,14 +7,12 @@
         <p class="mb-0">查看分配给您的任务列表，<span class="page2-completion-hint">请及时更新完成状态</span>。</p>
     </div>
     <div id="heroBarActions" class="text-end">
-        <span id="userInfo" class="badge bg-light text-dark me-2"></span>
         {% if feature_flags.FEATURE_PAGE2_DRAFT_GEN %}
         <a class="btn btn-outline-success btn-sm me-2" href="{{ url_for('draft_gen.draft_gen_page') }}">初稿生成</a>
         {% endif %}
         {% if feature_flags.FEATURE_PAGE2_EXAM_CENTER %}
         <a class="btn btn-outline-primary btn-sm me-2" href="{{ url_for('pages.exam_center_page', role='student') }}">进入考试训练中心</a>
         {% endif %}
-        <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
     </div>
 </div>
 

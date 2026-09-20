@@ -7,11 +7,9 @@
         <p>批量录入任务信息，支持上传模板文件（含 {% if is_page13_super_admin %}与 aicheckword 一致的 {% endif %}.zip/.tar 等压缩包，包内取 .docx）或输入文档链接，自动发送钉钉通知。</p>
     </div>
     <div id="heroBarActions" class="d-flex gap-2 flex-wrap align-items-center text-end">
-        <span id="userInfo" class="badge bg-light text-dark border"></span>
         {% if feature_flags.FEATURE_PAGE1_EXAM_CENTER %}
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('pages.exam_center_page', role='teacher') }}">进入考试训练中心</a>
         {% endif %}
-        <button type="button" id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
     </div>
 </div>
 

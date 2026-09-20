@@ -76,6 +76,9 @@
     diagnoseWrap: byId("vtgDiagnoseWrap"),
     diagnoseJson: byId("vtgDiagnoseJson"),
     previewBtn: byId("vtgPreviewBtn"),
+    regeneratePreviewModal: byId("vtgRegeneratePreviewModal"),
+    regeneratePreviewCancel: byId("vtgRegeneratePreviewCancel"),
+    regeneratePreviewConfirm: byId("vtgRegeneratePreviewConfirm"),
     suggestWrap: byId("vtgSuggestWrap"),
     suggestList: byId("vtgSuggestList"),
     previewMeta: byId("vtgPreviewMeta"),
@@ -91,8 +94,10 @@
     previewSelectHint: byId("vtgPreviewSelectHint"),
     previewHeadCheck: byId("vtgPreviewHeadCheck"),
     applyBtn: byId("vtgApplyBtn"),
-    exportMasterListBtn: byId("vtgExportMasterListBtn"),
-    exportTechListBtn: byId("vtgExportTechListBtn"),
+    exportSystemListBtn: byId("vtgExportSystemListBtn"),
+    exportSystemListModal: byId("vtgExportSystemListModal"),
+    exportSystemListCancel: byId("vtgExportSystemListCancel"),
+    exportSystemListConfirm: byId("vtgExportSystemListConfirm"),
     exportPreviewExcelBtn: byId("vtgExportPreviewExcelBtn"),
     applyModeReplace: byId("vtgApplyModeReplace"),
     applyModeIncrement: byId("vtgApplyModeIncrement"),
@@ -173,8 +178,10 @@
   let previewLocateOriginKey = "";
   let previewLocateCandidateIdx = -1;
   let previewLocateTimer = 0;
-  const PREVIEW_COLSPAN = 21;
+  const PREVIEW_COLSPAN = 24;
   const DEFAULT_VERSION_TASK_TYPE = "初稿待编写";
+  const DEFAULT_PREVIEW_REVIEWER = "陈亮";
+  const DEFAULT_PREVIEW_APPROVER = "汪津";
   const LEGACY_AUTO_VERSION_TASK_TYPES = {
     版本变更任务: true,
     归档文件: true,
@@ -196,16 +203,19 @@
     "dueDate",
     "documentDisplayDate",
     "belongingModule",
-    "archiveFrequency",
-    "triggeredBy",
-    "changeReason",
     "documentNumber",
     "fileVersion",
     "explanation",
     "notes",
+    "displayedAuthor",
+    "reviewer",
+    "approver",
+    "archiveFrequency",
+    "triggeredBy",
+    "changeReason",
     "action",
   ];
-  const PREVIEW_COL_ORDER_LS = "vtg.previewColOrder.v4";
+  const PREVIEW_COL_ORDER_LS = "vtg.previewColOrder.v6";
   let previewColOrder = [];
   let previewColDragKey = "";
   let previewColDropKey = "";
@@ -236,6 +246,9 @@
     taskType: "任务类型",
     targetVersion: "目标版本",
     author: "责任人",
+    displayedAuthor: "编",
+    reviewer: "审",
+    approver: "批",
     dueDate: "完成日期",
     documentDisplayDate: "文档日期",
     belongingModule: "模块",
@@ -862,6 +875,9 @@
       item.targetVersion = val("targetVersion");
       item.registrationVersion = val("targetVersion") || item.registrationVersion;
       item.author = val("author");
+      item.displayedAuthor = val("displayedAuthor");
+      item.reviewer = val("reviewer");
+      item.approver = val("approver");
       item.dueDate = val("dueDate");
       item.documentDisplayDate = val("documentDisplayDate");
       item.belongingModule = val("belongingModule");
@@ -1663,6 +1679,17 @@
       item.explanation = String(item.explanation || "").trim();
       item.notes = String(item.notes || "").trim();
     }
+    ensurePreviewSignoffDefaults(item);
+    return item;
+  }
+
+  function ensurePreviewSignoffDefaults(item) {
+    if (!item) return item;
+    const author = String(item.author || "").trim();
+    const displayed = String(item.displayedAuthor || item.displayed_author || "").trim();
+    item.displayedAuthor = displayed || author;
+    if (!String(item.reviewer || "").trim()) item.reviewer = DEFAULT_PREVIEW_REVIEWER;
+    if (!String(item.approver || "").trim()) item.approver = DEFAULT_PREVIEW_APPROVER;
     return item;
   }
 
@@ -2009,6 +2036,40 @@
         if (cell) tr.appendChild(cell);
       });
     });
+    schedulePreviewStickyOffsets();
+  }
+
+  function updatePreviewStickyOffsets() {
+    const table = els.previewTableWrap && els.previewTableWrap.querySelector(".vtg-preview-table");
+    if (!table) return;
+    const headerRow = table.querySelector("thead tr:first-child");
+    if (!headerRow) return;
+    const order = previewColOrder.length ? previewColOrder : PREVIEW_COL_KEYS;
+    const freezeAt = order.indexOf("fileName");
+    const freezeKeys = freezeAt >= 0 ? order.slice(0, freezeAt + 1) : [];
+    const leftByKey = {};
+    let left = 0;
+    freezeKeys.forEach((key) => {
+      leftByKey[key] = left;
+      const th = headerRow.querySelector(`[data-vtg-col="${key}"]`);
+      left += th ? th.getBoundingClientRect().width : 0;
+    });
+    const edgeKey = freezeKeys.length ? freezeKeys[freezeKeys.length - 1] : "";
+    table.querySelectorAll("[data-vtg-col]").forEach((cell) => {
+      const key = cell.getAttribute("data-vtg-col") || "";
+      if (Object.prototype.hasOwnProperty.call(leftByKey, key)) {
+        cell.classList.add("vtg-col-sticky-left");
+        cell.classList.toggle("vtg-col-sticky-edge", key === edgeKey);
+        cell.style.left = `${Math.round(leftByKey[key])}px`;
+      } else {
+        cell.classList.remove("vtg-col-sticky-left", "vtg-col-sticky-edge");
+        cell.style.left = "";
+      }
+    });
+  }
+
+  function schedulePreviewStickyOffsets() {
+    window.requestAnimationFrame(() => updatePreviewStickyOffsets());
   }
 
   function movePreviewCol(fromKey, toKey) {
@@ -2426,13 +2487,16 @@
               : ""
           }${disabledAttr}></td>
           <td data-vtg-col="belongingModule"><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"${disabledAttr}></td>
-          <td class="small text-muted" data-vtg-col="archiveFrequency">${escapeHtml(freq)}</td>
-          <td class="small text-muted" data-vtg-col="triggeredBy" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
-          <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
           <td class="vtg-col-docno" data-vtg-col="documentNumber"><input class="form-control form-control-sm font-monospace" data-vtg-field="documentNumber" value="${escapeHtml(item.documentNumber || "")}" placeholder="可从文控同步"${disabledAttr}></td>
           <td class="vtg-col-filever" data-vtg-col="fileVersion"><input class="form-control form-control-sm" data-vtg-field="fileVersion" value="${escapeHtml(item.fileVersion || "")}" placeholder="如 V1.0"${disabledAttr}></td>
           <td class="vtg-col-explanation" data-vtg-col="explanation"><input class="form-control form-control-sm" data-vtg-field="explanation" value="${escapeHtml(item.explanation || "")}" placeholder="说明"${disabledAttr}></td>
           <td class="vtg-col-notes" data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="下发到任务"${disabledAttr}></td>
+          <td data-vtg-col="displayedAuthor"><input class="form-control form-control-sm" data-vtg-field="displayedAuthor" value="${escapeHtml(item.displayedAuthor || "")}" placeholder="默认同责任人"${disabledAttr} title="体现编写人员，默认与责任人相同"></td>
+          <td data-vtg-col="reviewer"><input class="form-control form-control-sm" data-vtg-field="reviewer" value="${escapeHtml(item.reviewer || "")}" placeholder="${DEFAULT_PREVIEW_REVIEWER}"${disabledAttr} title="审核人，默认陈亮"></td>
+          <td data-vtg-col="approver"><input class="form-control form-control-sm" data-vtg-field="approver" value="${escapeHtml(item.approver || "")}" placeholder="${DEFAULT_PREVIEW_APPROVER}"${disabledAttr} title="批准人，默认汪津"></td>
+          <td class="small text-muted" data-vtg-col="archiveFrequency">${escapeHtml(freq)}</td>
+          <td class="small text-muted" data-vtg-col="triggeredBy" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
+          <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
           <td data-vtg-col="action">${actionBtn}</td>
         </tr>`);
       });
@@ -3003,6 +3067,7 @@
     ).filter((tr) => !tr.classList.contains("vtg-preview-hidden"));
     if (dataRows.length <= PREVIEW_VISIBLE_ROWS) {
       wrap.style.maxHeight = "";
+      schedulePreviewStickyOffsets();
       return;
     }
     const last = dataRows[PREVIEW_VISIBLE_ROWS - 1];
@@ -3014,6 +3079,7 @@
       rowBottom += theadH;
     }
     wrap.style.maxHeight = `${Math.max(160, Math.ceil(rowBottom + 8))}px`;
+    schedulePreviewStickyOffsets();
   }
 
   function taskIdentity(item) {
@@ -3059,6 +3125,9 @@
       taskType: String((item && item.taskType) || "").trim(),
       targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
       author: String((item && item.author) || "").trim(),
+      displayedAuthor: String((item && item.displayedAuthor) || "").trim(),
+      reviewer: String((item && item.reviewer) || "").trim(),
+      approver: String((item && item.approver) || "").trim(),
       dueDate: String((item && item.dueDate) || "").trim(),
       documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
       belongingModule: String((item && item.belongingModule) || "").trim(),
@@ -3784,6 +3853,45 @@
     hideCopyPreviewPanel();
     hideBatchDueDatePanel();
     hideDeleteVersionPanel();
+    updatePreviewButtonLabel();
+  }
+
+  function hasReplaceablePreview() {
+    return Boolean(currentJobId) || (Array.isArray(previewItems) && previewItems.length > 0);
+  }
+
+  function updatePreviewButtonLabel() {
+    if (!els.previewBtn) return;
+    els.previewBtn.textContent = hasReplaceablePreview() ? "重新生成任务清单" : "预览任务清单";
+  }
+
+  function askRegeneratePreview() {
+    return new Promise((resolve) => {
+      const modal = els.regeneratePreviewModal;
+      if (!modal) {
+        resolve(
+          window.confirm(
+            "重新生成会按规则替换当前任务清单（包括已手工增、删、改的内容）。确定继续？"
+          )
+        );
+        return;
+      }
+      modal.classList.remove("d-none");
+      const finish = (ok) => {
+        modal.classList.add("d-none");
+        if (els.regeneratePreviewCancel) {
+          els.regeneratePreviewCancel.removeEventListener("click", onCancel);
+        }
+        if (els.regeneratePreviewConfirm) {
+          els.regeneratePreviewConfirm.removeEventListener("click", onConfirm);
+        }
+        resolve(ok);
+      };
+      const onCancel = () => finish(false);
+      const onConfirm = () => finish(true);
+      if (els.regeneratePreviewCancel) els.regeneratePreviewCancel.addEventListener("click", onCancel);
+      if (els.regeneratePreviewConfirm) els.regeneratePreviewConfirm.addEventListener("click", onConfirm);
+    });
   }
 
   function setPreviewSaveEnabled() {
@@ -3808,6 +3916,7 @@
     if (els.deleteVersionBtn) {
       els.deleteVersionBtn.disabled = !currentJobId || !visiblePreviewItems().length;
     }
+    updatePreviewButtonLabel();
   }
 
   function newManualTaskKey() {
@@ -4298,6 +4407,9 @@
       documentNumber: "",
       registrationVersion: version,
       author: "",
+      displayedAuthor: "",
+      reviewer: DEFAULT_PREVIEW_REVIEWER,
+      approver: DEFAULT_PREVIEW_APPROVER,
       dueDate: (anchor && anchor.dueDate) || "",
       documentDisplayDate: (anchor && anchor.documentDisplayDate) || "",
       belongingModule: "",
@@ -4314,6 +4426,7 @@
       changeFields: [],
     };
     item.originKey = originKeyOf(item);
+    ensurePreviewSignoffDefaults(item);
     return item;
   }
 
@@ -5095,20 +5208,33 @@
     return (plain && plain[1]) || fallback;
   }
 
-  async function exportVersionTaskList(kind) {
+  async function exportVersionTaskLists(kinds) {
     const items = collectListExportItems();
     if (!items.length) {
       toast("请先生成预览清单再导出", "warning");
       return;
     }
+    const selected = (Array.isArray(kinds) ? kinds : [])
+      .map((kind) => String(kind || "").trim().toLowerCase())
+      .filter((kind) => kind);
+    if (!selected.length) {
+      toast("请至少选择一份清单", "warning");
+      return;
+    }
     const fallback =
-      kind === "tech" ? "QR-QP4.2.4-07 技术文件清单.docx" : "QR-QP4.2.3-01 医疗器械主文档清单.docx";
+      selected.length > 1
+        ? "体系文件清单.zip"
+        : selected[0] === "tech"
+          ? "QR-QP4.2.4-07 技术文件清单.docx"
+          : selected[0] === "catalog"
+            ? "中文目录.docx"
+            : "QR-QP4.2.3-01 医疗器械主文档清单.docx";
     const resp = await fetch(withScriptRoot("/api/document-control/version-tasks/export-list"), {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        kind,
+        kinds: selected,
         items,
         productName: String((els.productName && els.productName.value) || "").trim(),
       }),
@@ -5127,6 +5253,46 @@
     const filename = parseDispositionFilename(resp.headers.get("Content-Disposition"), fallback);
     downloadBlob(blob, filename);
     toast(`已导出：${filename}`, "success");
+  }
+
+  function selectedSystemListKinds() {
+    const modal = els.exportSystemListModal;
+    if (!modal) return ["master", "tech", "catalog"];
+    return Array.from(modal.querySelectorAll("[data-vtg-list-kind]"))
+      .filter((el) => el.checked)
+      .map((el) => String(el.getAttribute("data-vtg-list-kind") || el.value || "").trim())
+      .filter(Boolean);
+  }
+
+  function askSystemListKinds() {
+    return new Promise((resolve) => {
+      const modal = els.exportSystemListModal;
+      if (!modal) {
+        resolve(["master", "tech", "catalog"]);
+        return;
+      }
+      modal.querySelectorAll("[data-vtg-list-kind]").forEach((el) => {
+        el.checked = true;
+      });
+      modal.classList.remove("d-none");
+      const finish = (kinds) => {
+        modal.classList.add("d-none");
+        if (els.exportSystemListCancel) els.exportSystemListCancel.removeEventListener("click", onCancel);
+        if (els.exportSystemListConfirm) els.exportSystemListConfirm.removeEventListener("click", onConfirm);
+        resolve(kinds);
+      };
+      const onCancel = () => finish([]);
+      const onConfirm = () => {
+        const kinds = selectedSystemListKinds();
+        if (!kinds.length) {
+          toast("请至少选择一份清单", "warning");
+          return;
+        }
+        finish(kinds);
+      };
+      if (els.exportSystemListCancel) els.exportSystemListCancel.addEventListener("click", onCancel);
+      if (els.exportSystemListConfirm) els.exportSystemListConfirm.addEventListener("click", onConfirm);
+    });
   }
 
   function downloadBlob(blob, filename) {
@@ -5151,18 +5317,21 @@
         taskType: String((item && item.taskType) || "").trim(),
         targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
         author: String((item && item.author) || "").trim(),
+        displayedAuthor: String((item && item.displayedAuthor) || "").trim(),
+        reviewer: String((item && item.reviewer) || "").trim(),
+        approver: String((item && item.approver) || "").trim(),
         dueDate: String((item && item.dueDate) || "").trim(),
         documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
         belongingModule: String((item && item.belongingModule) || "").trim(),
+        documentNumber: String((item && item.documentNumber) || "").trim(),
+        fileVersion: String((item && item.fileVersion) || "").trim(),
+        explanation: String((item && item.explanation) || "").trim(),
+        notes: String((item && item.notes) || "").trim(),
         archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
         triggeredBy: Array.isArray(item && item.triggeredBy)
           ? item.triggeredBy
           : String((item && item.triggeredBy) || "").trim(),
         changeReason: String((item && item.changeReason) || "").trim(),
-        documentNumber: String((item && item.documentNumber) || "").trim(),
-        fileVersion: String((item && item.fileVersion) || "").trim(),
-        explanation: String((item && item.explanation) || "").trim(),
-        notes: String((item && item.notes) || "").trim(),
         recordStatus: recordStatusOf(item),
         isSystemRecord: isSystemRecordOf(item),
         changeKind: changeKindOf(item),
@@ -5270,6 +5439,7 @@
   function bindEvents() {
     window.addEventListener("resize", () => {
       fitPreviewTableViewport();
+      schedulePreviewStickyOffsets();
     });
     bindPreviewDrag();
     bindPreviewHead();
@@ -5367,9 +5537,24 @@
     }
     if (els.previewBtn) {
       els.previewBtn.addEventListener("click", () => {
-        withButtonBusy(els.previewBtn, "预览中…", () => doPreview()).catch((e) =>
-          toast(e.message || "预览失败", "danger")
-        );
+        const replacing = hasReplaceablePreview();
+        const run = () =>
+          withButtonBusy(
+            els.previewBtn,
+            replacing ? "重新生成中…" : "预览中…",
+            () => doPreview(replacing)
+          ).catch((e) => toast(e.message || "预览失败", "danger"));
+        if (!replacing) {
+          run();
+          return;
+        }
+        askRegeneratePreview().then((ok) => {
+          if (!ok) {
+            toast("已取消，未替换当前清单", "info");
+            return;
+          }
+          run();
+        });
       });
     }
     if (els.applyBtn) {
@@ -5379,18 +5564,19 @@
         );
       });
     }
-    if (els.exportMasterListBtn) {
-      els.exportMasterListBtn.addEventListener("click", () => {
-        withButtonBusy(els.exportMasterListBtn, "导出中…", () => exportVersionTaskList("master")).catch((e) =>
-          toast(e.message || "导出失败", "danger")
-        );
-      });
-    }
-    if (els.exportTechListBtn) {
-      els.exportTechListBtn.addEventListener("click", () => {
-        withButtonBusy(els.exportTechListBtn, "导出中…", () => exportVersionTaskList("tech")).catch((e) =>
-          toast(e.message || "导出失败", "danger")
-        );
+    if (els.exportSystemListBtn) {
+      els.exportSystemListBtn.addEventListener("click", () => {
+        const items = collectListExportItems();
+        if (!items.length) {
+          toast("请先生成预览清单再导出", "warning");
+          return;
+        }
+        askSystemListKinds().then((kinds) => {
+          if (!kinds.length) return;
+          withButtonBusy(els.exportSystemListBtn, "导出中…", () => exportVersionTaskLists(kinds)).catch((e) =>
+            toast(e.message || "导出失败", "danger")
+          );
+        });
       });
     }
     if (els.exportPreviewExcelBtn) {
@@ -5560,7 +5746,17 @@
           const row = ev.target.closest("tr[data-vtg-preview-idx]");
           const idx = row ? Number(row.getAttribute("data-vtg-preview-idx")) : NaN;
           if (!Number.isNaN(idx) && previewItems[idx]) {
-            previewItems[idx].author = String(ev.target.value || "").trim();
+            const prevAuthor = String(previewItems[idx].author || "").trim();
+            const nextAuthor = String(ev.target.value || "").trim();
+            const daEl = row.querySelector('[data-vtg-field="displayedAuthor"]');
+            const daVal = daEl
+              ? String(daEl.value || "").trim()
+              : String(previewItems[idx].displayedAuthor || "").trim();
+            previewItems[idx].author = nextAuthor;
+            if (!daVal || daVal === prevAuthor) {
+              if (daEl) daEl.value = nextAuthor;
+              previewItems[idx].displayedAuthor = nextAuthor;
+            }
             updateApplyIssueCount();
           }
         }

@@ -499,7 +499,38 @@
     color: #9f1239;
   }
   .vtg-col-change { width: 5.6rem; white-space: nowrap; }
+  .vtg-preview-table {
+    border-collapse: separate;
+    border-spacing: 0;
+  }
   .vtg-col-filename { min-width: 22rem; width: 32%; }
+  .vtg-col-signoff { min-width: 5.2rem; }
+  .vtg-preview-table [data-vtg-col].vtg-col-sticky-left {
+    position: sticky;
+  }
+  .vtg-preview-table thead tr:first-child th.vtg-col-sticky-left {
+    z-index: 8;
+  }
+  .vtg-preview-table thead tr.vtg-preview-filter-row th.vtg-col-sticky-left {
+    z-index: 7;
+  }
+  .vtg-preview-table tbody td.vtg-col-sticky-left {
+    z-index: 2;
+    background: #fff;
+  }
+  .vtg-preview-table tbody td.vtg-col-sticky-edge {
+    z-index: 3;
+    box-shadow: 2px 0 6px rgba(15, 23, 42, 0.12);
+  }
+  .vtg-preview-table thead th.vtg-col-sticky-edge {
+    box-shadow: 2px 0 6px rgba(15, 23, 42, 0.12), 0 1px 0 #dee2e6;
+  }
+  .vtg-preview-table.table-hover > tbody > tr:hover > td.vtg-col-sticky-left {
+    background-color: var(--bs-table-hover-bg, #f8fafc);
+  }
+  .vtg-preview-table.table > tbody > tr.vtg-row-locate > td.vtg-col-sticky-left {
+    background-color: #eff6ff;
+  }
   .vtg-col-docno { min-width: 8.5rem; }
   .vtg-col-filever { min-width: 6.2rem; }
   .vtg-col-tasktype { min-width: 6.5rem; }
@@ -549,6 +580,12 @@
     margin: 0.6rem 0 0.9rem;
     padding-left: 1.1rem;
     font-size: 0.875rem;
+  }
+  .vtg-export-list-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    margin: 0.7rem 0 0.95rem;
   }
   .vtg-col-action { width: 4.2rem; white-space: nowrap; }
   .vtg-changelog {
@@ -782,7 +819,7 @@
           <button id="vtgSavePreviewEditsBtn" class="btn btn-outline-primary btn-sm" type="button" disabled>
             保存预览修改
           </button>
-          <button id="vtgSyncDocMetaBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled title="按文件名模糊匹配文控台账，只补空着的文件编号和文件版本号">
+          <button id="vtgSyncDocMetaBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled title="DHF、注册文件、SOP 只同步当前项目的编号；程序文件和四级表单可同步全公司。只补空着的文件编号和文件版本号">
             从文控同步编号
           </button>
           <button id="vtgAddPreviewRowBtn" class="btn btn-outline-secondary btn-sm" type="button" disabled>
@@ -803,11 +840,8 @@
           <button id="vtgExportPreviewExcelBtn" class="btn btn-outline-secondary btn-sm" type="button">
             导出任务清单
           </button>
-          <button id="vtgExportMasterListBtn" class="btn btn-outline-primary btn-sm" type="button">
-            导出主文档清单
-          </button>
-          <button id="vtgExportTechListBtn" class="btn btn-outline-primary btn-sm" type="button">
-            导出技术文件清单
+          <button id="vtgExportSystemListBtn" class="btn btn-outline-primary btn-sm" type="button">
+            导出体系文件清单
           </button>
           <span id="vtgLocateHint" class="small vtg-locate-hint is-empty">点一下目标行或把鼠标停在上面，该行会标蓝条；再点「添加记录」会插到这行后面。</span>
           <span class="small text-muted">勾选后可下发、调序、复制到其它目标版本，或批量设置完成日期。点版本分组上的「复制本版 / 删除本版」可整组操作。点表头排序，拖动表头可改列位置。文档日期为琥珀列。</span>
@@ -958,15 +992,6 @@
               <th class="vtg-col-module" data-vtg-col="belongingModule">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="belongingModule" title="点击排序">模块<span class="vtg-sort-ind">⇅</span></button>
               </th>
-              <th class="vtg-col-freq" data-vtg-col="archiveFrequency">
-                <button type="button" class="vtg-th-sort" data-vtg-sort="archiveFrequency" title="点击排序">归档频率<span class="vtg-sort-ind">⇅</span></button>
-              </th>
-              <th class="vtg-col-trigger" data-vtg-col="triggeredBy">
-                <button type="button" class="vtg-th-sort" data-vtg-sort="triggeredBy" title="点击排序">触发位<span class="vtg-sort-ind">⇅</span></button>
-              </th>
-              <th class="vtg-col-reason" data-vtg-col="changeReason">
-                <button type="button" class="vtg-th-sort" data-vtg-sort="changeReason" title="点击排序">变更原因<span class="vtg-sort-ind">⇅</span></button>
-              </th>
               <th class="vtg-col-docno" data-vtg-col="documentNumber">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="documentNumber" title="可从文控台账同步；点击排序">文件编号<span class="vtg-sort-ind">⇅</span></button>
               </th>
@@ -978,6 +1003,24 @@
               </th>
               <th class="vtg-col-notes" data-vtg-col="notes">
                 <button type="button" class="vtg-th-sort" data-vtg-sort="notes" title="填写后下发到任务列表备注">备注<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-signoff" data-vtg-col="displayedAuthor">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="displayedAuthor" title="体现编写人员，默认与责任人相同">编<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-signoff" data-vtg-col="reviewer">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="reviewer" title="审核人，默认陈亮">审<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-signoff" data-vtg-col="approver">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="approver" title="批准人，默认汪津">批<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-freq" data-vtg-col="archiveFrequency">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="archiveFrequency" title="点击排序">归档频率<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-trigger" data-vtg-col="triggeredBy">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="triggeredBy" title="点击排序">触发位<span class="vtg-sort-ind">⇅</span></button>
+              </th>
+              <th class="vtg-col-reason" data-vtg-col="changeReason">
+                <button type="button" class="vtg-th-sort" data-vtg-sort="changeReason" title="点击排序">变更原因<span class="vtg-sort-ind">⇅</span></button>
               </th>
               <th class="vtg-col-action" data-vtg-col="action"></th>
             </tr>
@@ -1023,19 +1066,22 @@
               <th data-vtg-col="dueDate"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="dueDate" placeholder="筛选" aria-label="筛选完成日期"></th>
               <th data-vtg-col="documentDisplayDate"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="documentDisplayDate" placeholder="筛选" aria-label="筛选文档日期"></th>
               <th data-vtg-col="belongingModule"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="belongingModule" placeholder="筛选" aria-label="筛选模块"></th>
-              <th data-vtg-col="archiveFrequency"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="archiveFrequency" placeholder="筛选" aria-label="筛选归档频率"></th>
-              <th data-vtg-col="triggeredBy"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="triggeredBy" placeholder="筛选" aria-label="筛选触发位"></th>
-              <th data-vtg-col="changeReason"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="changeReason" placeholder="筛选" aria-label="筛选变更原因"></th>
               <th data-vtg-col="documentNumber"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="documentNumber" placeholder="筛选" aria-label="筛选文件编号"></th>
               <th data-vtg-col="fileVersion"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="fileVersion" placeholder="筛选" aria-label="筛选文件版本号"></th>
               <th data-vtg-col="explanation"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="explanation" placeholder="筛选" aria-label="筛选说明"></th>
               <th data-vtg-col="notes"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="notes" placeholder="筛选" aria-label="筛选备注"></th>
+              <th data-vtg-col="displayedAuthor"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="displayedAuthor" placeholder="筛选" aria-label="筛选编写人"></th>
+              <th data-vtg-col="reviewer"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="reviewer" placeholder="筛选" aria-label="筛选审核人"></th>
+              <th data-vtg-col="approver"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="approver" placeholder="筛选" aria-label="筛选批准人"></th>
+              <th data-vtg-col="archiveFrequency"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="archiveFrequency" placeholder="筛选" aria-label="筛选归档频率"></th>
+              <th data-vtg-col="triggeredBy"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="triggeredBy" placeholder="筛选" aria-label="筛选触发位"></th>
+              <th data-vtg-col="changeReason"><input class="form-control form-control-sm vtg-filter-input" data-vtg-filter="changeReason" placeholder="筛选" aria-label="筛选变更原因"></th>
               <th data-vtg-col="action"></th>
             </tr>
           </thead>
           <tbody id="vtgPreviewBody">
             <tr>
-              <td colspan="20" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
+              <td colspan="24" class="text-muted small text-center py-3">预览后将在此显示任务清单</td>
             </tr>
           </tbody>
         </table>
@@ -1094,6 +1140,40 @@
       <button type="button" class="btn btn-outline-secondary btn-sm" id="vtgAuthorConflictCancel">取消</button>
       <button type="button" class="btn btn-outline-primary btn-sm" id="vtgAuthorConflictCreate">新增新记录</button>
       <button type="button" class="btn btn-primary btn-sm" id="vtgAuthorConflictReplace">替换原记录</button>
+    </div>
+  </div>
+</div>
+<div id="vtgExportSystemListModal" class="vtg-author-modal d-none" role="dialog" aria-modal="true" aria-labelledby="vtgExportSystemListTitle">
+  <div class="vtg-author-modal-card">
+    <h3 class="h6 mb-2" id="vtgExportSystemListTitle">导出体系文件清单</h3>
+    <p class="small text-muted mb-0">按当前版本任务清单更新模板后，以 Word 附件下载。可多选；选多份时打包为 zip。</p>
+    <div class="vtg-export-list-choices" id="vtgExportSystemListChoices">
+      <label class="form-check">
+        <input class="form-check-input" type="checkbox" value="master" data-vtg-list-kind="master" checked>
+        <span class="form-check-label">主文档清单</span>
+      </label>
+      <label class="form-check">
+        <input class="form-check-input" type="checkbox" value="tech" data-vtg-list-kind="tech" checked>
+        <span class="form-check-label">技术文件清单</span>
+      </label>
+      <label class="form-check">
+        <input class="form-check-input" type="checkbox" value="catalog" data-vtg-list-kind="catalog" checked>
+        <span class="form-check-label">中文目录</span>
+      </label>
+    </div>
+    <div class="d-flex flex-wrap gap-2 justify-content-end">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="vtgExportSystemListCancel">取消</button>
+      <button type="button" class="btn btn-primary btn-sm" id="vtgExportSystemListConfirm">导出</button>
+    </div>
+  </div>
+</div>
+<div id="vtgRegeneratePreviewModal" class="vtg-author-modal d-none" role="dialog" aria-modal="true" aria-labelledby="vtgRegeneratePreviewTitle">
+  <div class="vtg-author-modal-card">
+    <h3 class="h6 mb-2" id="vtgRegeneratePreviewTitle">确定重新生成任务清单？</h3>
+    <p class="small text-muted mb-3">重新生成会按规则替换当前清单，已手工增、删、改的内容也会被覆盖，且不可撤销。若只想微调，请改表后点「保存预览修改」。</p>
+    <div class="d-flex flex-wrap gap-2 justify-content-end">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="vtgRegeneratePreviewCancel">取消</button>
+      <button type="button" class="btn btn-danger btn-sm" id="vtgRegeneratePreviewConfirm">确定重新生成</button>
     </div>
   </div>
 </div>

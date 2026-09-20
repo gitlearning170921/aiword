@@ -1157,22 +1157,9 @@
         return `${root}/login`;
     }
 
-    function wireCompanyLogoutButton() {
-        const logoutBtn = document.getElementById("companyLogoutBtn");
-        if (!logoutBtn || logoutBtn.getAttribute("data-wired") === "1") return;
-        logoutBtn.setAttribute("data-wired", "1");
-        logoutBtn.addEventListener("click", async () => {
-            try {
-                await apiRequest("/api/logout", { method: "POST" });
-            } catch (_) { /* ignore */ }
-            window.location.href = companyLoginUrl();
-        });
-    }
-
     async function initCompanySessionBar() {
-        wireCompanyLogoutButton();
-        const info = document.getElementById("companyUserInfo");
-        const logoutBtn = document.getElementById("companyLogoutBtn");
+        const info = document.getElementById("userInfo");
+        const logoutBtn = document.getElementById("logoutBtn");
         try {
             const me = await apiRequest("/api/me");
             const isPage13Super = Boolean(me?.page13SuperAdmin);
@@ -1196,7 +1183,6 @@
             }
         } catch (e) {
             if ((e.message || "").includes("登录")) return;
-            if (info) info.textContent = "";
         }
     }
 
@@ -3469,7 +3455,6 @@
 
     async function boot() {
         if (body) {
-            wireCompanyLogoutButton();
             initCompanySessionBar();
             initCompanyTrainingPanel();
             initTrainingHubExtras();

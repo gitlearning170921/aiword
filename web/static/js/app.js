@@ -1337,7 +1337,7 @@ function initDragSort(tbody, onReorder) {
     });
 }
 
-/** 页面1/2/3 顶部：当前账号与退出登录。 */
+/** 全局顶栏右上角：当前账号与退出登录。 */
 function initSessionUserBar() {
     const userInfo = document.getElementById("userInfo");
     const logoutBtn = document.getElementById("logoutBtn");
@@ -1354,9 +1354,15 @@ function initSessionUserBar() {
                         label += "（超级管理员 · 页面4）";
                     } else if (res.user.adminRole === "project") {
                         label += "（项目管理员）";
+                    } else if (res.user.adminRole === "company") {
+                        label += "（公司管理员）";
                     }
                     userInfo.textContent = label;
                 }
+            }
+            if (logoutBtn) {
+                logoutBtn.textContent =
+                    res.page13SuperAdmin && !res.loggedIn ? "退出超级管理员" : "退出登录";
             }
             if (res.featureFlags && typeof res.featureFlags === "object") {
                 window.__FEATURE_FLAGS__ = { ...window.__FEATURE_FLAGS__, ...res.featureFlags };
@@ -1367,7 +1373,9 @@ function initSessionUserBar() {
     if (logoutBtn && logoutBtn.getAttribute("data-wired") !== "1") {
         logoutBtn.setAttribute("data-wired", "1");
         logoutBtn.addEventListener("click", async () => {
-            await App.request("/api/logout", { method: "POST" });
+            try {
+                await App.request("/api/logout", { method: "POST" });
+            } catch (_) { /* ignore */ }
             window.location.href = _appPath("/login");
         });
     }
@@ -1382,7 +1390,6 @@ async function initUploadPage() {
 
     if (!projectBlocksContainer) return;
 
-    initSessionUserBar();
     await refreshEffectiveFeatureFlags();
 
     try {
@@ -5809,7 +5816,6 @@ async function initGeneratePage() {
     if (!myTasksBody) return;
 
     syncPage2TableHeader();
-    initSessionUserBar();
 
     // 进入页面时默认不显示历史项目；防止浏览器回退/表单恢复导致再次进入时仍保持勾选
     if (showHistoryEl) showHistoryEl.checked = false;
@@ -6936,7 +6942,6 @@ function initDashboardPage() {
 }
 
 async function _initDashboardPageInner() {
-    initSessionUserBar();
     let teamDingtalkRows = [];
     const teamSelect = document.getElementById("teamDingtalkTeamId");
     const teamWebhookInput = document.getElementById("teamDingtalkWebhook");
@@ -8379,6 +8384,7 @@ async function loadAdminDeployVersionBar() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    initSessionUserBar();
     App.onPageInit(async () => {
         if (
             !document.getElementById("recordsTableBody") &&

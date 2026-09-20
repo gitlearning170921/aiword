@@ -22,13 +22,16 @@ _PREVIEW_EXCEL_HEADERS: list[tuple[str, str, int]] = [
     ("dueDate", "完成日期", 14),
     ("documentDisplayDate", "文档日期", 14),
     ("belongingModule", "模块", 12),
-    ("archiveFrequency", "归档频率", 14),
-    ("triggeredBy", "触发位", 12),
-    ("changeReason", "变更原因", 22),
     ("documentNumber", "文件编号", 20),
     ("fileVersion", "文件版本号", 14),
     ("explanation", "说明", 28),
     ("notes", "备注", 18),
+    ("displayedAuthor", "编", 12),
+    ("reviewer", "审", 12),
+    ("approver", "批", 12),
+    ("archiveFrequency", "归档频率", 14),
+    ("triggeredBy", "触发位", 12),
+    ("changeReason", "变更原因", 22),
     ("chapter", "章节分类", 16),
 ]
 
@@ -192,7 +195,7 @@ def export_version_task_preview_excel(
         for col_idx, (key, _title, _width) in enumerate(_PREVIEW_EXCEL_HEADERS, start=1):
             cell = ws.cell(row=seq + 1, column=col_idx, value=_preview_cell_text(item, key, seq))
             cell.alignment = wrap
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "G2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(_PREVIEW_EXCEL_HEADERS))}{len(rows) + 1}"
 
     bits = [str(product_name or "").strip(), str(from_version or "").strip(), str(to_version or "").strip()]
