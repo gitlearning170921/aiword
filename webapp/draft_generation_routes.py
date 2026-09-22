@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -29,8 +31,6 @@ from flask import (
     send_file,
     session,
 )
-from werkzeug.utils import secure_filename
-
 from . import db
 from .user_facing import api_debug_fields, integration_error_message
 from .app_settings import get_setting
@@ -69,6 +69,8 @@ from .models import (
     DraftGenerationJob,
     Project,
     UploadRecord,
+    UserDraftPromptTemplate,
+    UserDraftPromptCoachSession,
     UserLlmCredential,
     now_local,
 )
@@ -130,6 +132,155 @@ _DRAFT_LLM_MODEL_ATTR: dict[str, str] = {
     "openai": "model_openai",
     "claude": "model_claude",
 }
+
+_PROMPT_TEMPLATE_NAME_MAX = 128
+_PROMPT_TEMPLATE_DOC_TYPE_MAX = 128
+_PROMPT_TEMPLATE_TEXT_MAX = 20000
+
+
+def _first_non_empty_text(*vals: Any) -> str:
+    for v in vals:
+        if isinstance(v, (dict, list, tuple)):
+            continue
+        s = str(v or "").strip()
+        if s:
+            return s
+    return ""
+
+
+def _format_upstream_error_message(data: Any, fallback: str) -> str:
+    """把 FastAPI detail（str / dict / 校验错误列表）收成可展示的一句话。"""
+    if isinstance(data, str) and data.strip():
+        return data.strip()
+    if not isinstance(data, dict):
+        return fallback
+    for key in ("message", "detail", "error", "reason"):
+        v = data.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            inner = v.get("message") or v.get("msg") or v.get("error")
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+        if isinstance(v, list) and v:
+            first = v[0]
+            if isinstance(first, dict):
+                msg = str(first.get("msg") or first.get("message") or "").strip()
+                loc = first.get("loc")
+                if msg and loc:
+                    return f"{msg}（字段 {loc}）"
+                if msg:
+                    return msg
+            s = str(first or "").strip()
+            if s:
+                return s[:400]
+    return fallback
+
+
+def _extract_prompt_coach_answer_fields(data: dict[str, Any]) -> tuple[str, str, list[Any]]:
+    """兼容上游多种返回形态，尽量提取可展示答案。"""
+    if not isinstance(data, dict):
+        return "", "", []
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    refs = (
+        data.get("references")
+        or inner.get("references")
+        or data.get("reference_list")
+        or inner.get("reference_list")
+        or []
+    )
+    if not isinstance(refs, list):
+        refs = []
+    answer = _first_non_empty_text(
+        data.get("answer_summary"),
+        data.get("answer"),
+        data.get("reply"),
+        inner.get("answer_summary"),
+        inner.get("answer"),
+        inner.get("reply"),
+    )
+    detail = _first_non_empty_text(
+        data.get("answer_detail"),
+        inner.get("answer_detail"),
+        answer,
+    )
+    if not detail:
+        items = data.get("detail_items") or inner.get("detail_items")
+        if isinstance(items, list):
+            lines: list[str] = []
+            for it in items[:10]:
+                if isinstance(it, dict):
+                    line = _first_non_empty_text(
+                        it.get("title"),
+                        it.get("name"),
+                        it.get("label"),
+                        it.get("text"),
+                        it.get("content"),
+                        it.get("value"),
+                    )
+                else:
+                    line = str(it or "").strip()
+                if line:
+                    lines.append(line)
+            if lines:
+                detail = "\n".join(lines)
+    if not answer:
+        answer = detail[:400] if detail else ""
+    return answer.strip(), detail.strip(), refs
+
+
+def _sanitize_prompt_template_name(value: Any) -> str:
+    s = str(value or "").strip()
+    if len(s) > _PROMPT_TEMPLATE_NAME_MAX:
+        s = s[:_PROMPT_TEMPLATE_NAME_MAX]
+    return s
+
+
+def _sanitize_prompt_template_doc_type(value: Any) -> str:
+    s = str(value or "").strip()
+    if len(s) > _PROMPT_TEMPLATE_DOC_TYPE_MAX:
+        s = s[:_PROMPT_TEMPLATE_DOC_TYPE_MAX]
+    return s
+
+
+def _sanitize_prompt_template_text(value: Any) -> str:
+    s = str(value or "").strip()
+    if len(s) > _PROMPT_TEMPLATE_TEXT_MAX:
+        s = s[:_PROMPT_TEMPLATE_TEXT_MAX]
+    return s
+
+
+def _current_prompt_template_org_id() -> Optional[str]:
+    """提示词模板按用户+公司隔离；优先显式 organizationId。"""
+    explicit = ""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        body = request.get_json(silent=True) or {}
+        if isinstance(body, dict):
+            explicit = str(
+                body.get("organizationId") or body.get("organization_id") or ""
+            ).strip()
+    if not explicit:
+        explicit = str(
+            request.args.get("organizationId") or request.args.get("organization_id") or ""
+        ).strip()
+    if explicit:
+        return explicit
+    org_ctx = integration_org_context_payload()
+    active = str(org_ctx.get("activeOrganizationId") or "").strip()
+    return active or None
+
+
+def _prompt_template_to_dict(row: UserDraftPromptTemplate) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "docType": row.doc_type or "",
+        "promptText": row.prompt_text or "",
+        "useCount": int(row.use_count or 0),
+        "lastUsedAt": row.last_used_at.isoformat() if row.last_used_at else None,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 def _draft_zip_output_dir() -> Path:
@@ -537,6 +688,50 @@ def _draft_connect_timeout_seconds() -> int:
 
 def _draft_requests_timeout(*, read_seconds: int) -> tuple[int, int]:
     return (_draft_connect_timeout_seconds(), max(5, int(read_seconds)))
+
+
+def _draft_prompt_chat_api_base() -> str:
+    """协作提示对话优先走聊天基址，未配置则回退初稿基址。"""
+    from ._integration_common import resolve_integration_api_base
+
+    raw = (get_setting("AICHECKWORD_CHAT_API_BASE", default="") or "").strip()
+    if raw:
+        return resolve_integration_api_base(raw)
+    raw = (get_setting("QUIZ_API_BASE_URL", default="") or "").strip()
+    if raw:
+        return resolve_integration_api_base(raw)
+    return _draft_api_base()
+
+
+def _draft_prompt_chat_api_key() -> str:
+    return (get_setting("AICHECKWORD_CHAT_API_KEY", default="") or "").strip()
+
+
+def _draft_prompt_chat_timeout_seconds() -> int:
+    """提示词协作：必须等模型返回。读超时须大于 LLM（300s），且小于浏览器（360s）。"""
+    raw = (get_setting("AICHECKWORD_CHAT_TIMEOUT_SECONDS", default="330") or "330").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        v = 330
+    return max(300, min(600, v))
+
+
+def _draft_prompt_chat_headers(
+    *, organization_id: Optional[str], provider: Optional[str], user_id: str
+) -> dict[str, str]:
+    token = _draft_prompt_chat_api_key()
+    headers = _upstream_headers(for_multipart=False, organization_id=organization_id)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.setdefault("Accept", "application/json")
+    headers.setdefault("Content-Type", "application/json; charset=utf-8")
+    llm_hdrs = _client_llm_headers(user_id, provider=provider)
+    if llm_hdrs:
+        headers.update(llm_hdrs)
+    if _draft_personal_keys_enforced():
+        headers["X-Client-Llm-Personal-Keys-Only"] = "true"
+    return headers
 
 
 def _refresh_upstream_interop_if_stale(*, force: bool = False) -> None:
@@ -1307,6 +1502,599 @@ def api_llm_settings_test():
     if not isinstance(data, dict):
         data = request.get_json(force=True) or {}
     return _llm_key_test_response(uid, data)
+
+
+@draft_gen_bp.get("/api/prompt-templates")
+def api_prompt_templates_list():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _current_prompt_template_org_id()
+    q = UserDraftPromptTemplate.query.filter_by(user_id=uid)
+    if org_id:
+        q = q.filter_by(organization_id=org_id)
+    else:
+        q = q.filter(
+            or_(
+                UserDraftPromptTemplate.organization_id.is_(None),
+                UserDraftPromptTemplate.organization_id == "",
+            )
+        )
+    doc_type = _sanitize_prompt_template_doc_type(request.args.get("docType") or "")
+    if doc_type:
+        q = q.filter(UserDraftPromptTemplate.doc_type == doc_type)
+    rows = (
+        q.order_by(
+            desc(UserDraftPromptTemplate.updated_at),
+            desc(UserDraftPromptTemplate.use_count),
+        )
+        .limit(200)
+        .all()
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "organizationId": org_id,
+            "templates": [_prompt_template_to_dict(r) for r in rows],
+        }
+    )
+
+
+@draft_gen_bp.post("/api/prompt-templates")
+def api_prompt_templates_save():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = request.get_json(force=True) or {}
+    org_id = _current_prompt_template_org_id()
+    tid = str(body.get("templateId") or body.get("id") or "").strip()
+    name = _sanitize_prompt_template_name(body.get("name"))
+    doc_type = _sanitize_prompt_template_doc_type(body.get("docType"))
+    prompt_text = _sanitize_prompt_template_text(body.get("promptText"))
+    if not name:
+        return jsonify({"message": "模板名称不能为空"}), 400
+    if not prompt_text:
+        return jsonify({"message": "提示词内容不能为空"}), 400
+    if len(prompt_text) > _PROMPT_TEMPLATE_TEXT_MAX:
+        return jsonify(
+            {"message": f"提示词内容超长（最多 {_PROMPT_TEMPLATE_TEXT_MAX} 字）"}
+        ), 400
+
+    row: Optional[UserDraftPromptTemplate] = None
+    if tid:
+        row = UserDraftPromptTemplate.query.filter_by(
+            id=tid, user_id=uid, organization_id=org_id
+        ).first()
+        if not row:
+            return jsonify({"message": "模板不存在或无权限修改"}), 404
+    else:
+        row = UserDraftPromptTemplate.query.filter_by(
+            user_id=uid, organization_id=org_id, name=name
+        ).first()
+
+    if row is None:
+        row = UserDraftPromptTemplate(
+            user_id=uid,
+            organization_id=org_id,
+            name=name,
+        )
+        db.session.add(row)
+    row.name = name
+    row.doc_type = doc_type or None
+    row.prompt_text = prompt_text
+    db.session.commit()
+    return jsonify(
+        {
+            "ok": True,
+            "message": "提示词模板已保存",
+            "template": _prompt_template_to_dict(row),
+        }
+    )
+
+
+@draft_gen_bp.delete("/api/prompt-templates/<template_id>")
+def api_prompt_templates_delete(template_id: str):
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _current_prompt_template_org_id()
+    row = UserDraftPromptTemplate.query.filter_by(
+        id=template_id, user_id=uid, organization_id=org_id
+    ).first()
+    if not row:
+        return jsonify({"message": "模板不存在或无权限删除"}), 404
+    db.session.delete(row)
+    db.session.commit()
+    return jsonify({"ok": True, "message": "模板已删除"})
+
+
+_PROMPT_COACH_TURNS_MAX = 40
+_PROMPT_COACH_TURN_CHARS = 12000
+
+
+def _prompt_coach_session_org_key() -> str:
+    return (_current_prompt_template_org_id() or "").strip()
+
+
+def _sanitize_prompt_coach_turns(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in raw[-_PROMPT_COACH_TURNS_MAX:]:
+        if not isinstance(it, dict):
+            continue
+        if it.get("pending"):
+            continue
+        role = str(it.get("role") or "").strip().lower()
+        if role not in ("user", "assistant"):
+            continue
+        content = str(it.get("content") or "").strip()
+        if not content:
+            continue
+        rec: dict[str, Any] = {
+            "role": role,
+            "content": content[:_PROMPT_COACH_TURN_CHARS],
+        }
+        at = it.get("at")
+        try:
+            rec["at"] = int(at)
+        except (TypeError, ValueError):
+            rec["at"] = 0
+        refs = it.get("references")
+        if isinstance(refs, list) and refs:
+            rec["references"] = refs[:8]
+        out.append(rec)
+    return out
+
+
+def _prompt_coach_session_to_dict(row: UserDraftPromptCoachSession) -> dict[str, Any]:
+    turns = row.turns_json if isinstance(row.turns_json, list) else []
+    return {
+        "ok": True,
+        "id": row.id,
+        "title": (row.title or "").strip() or "未命名对话",
+        "turns": turns,
+        "finalAgreed": row.final_agreed or "",
+        "currentPrompt": row.current_prompt or "",
+        "updatedAt": int(row.updated_at.timestamp() * 1000) if row.updated_at else 0,
+        "organizationId": row.organization_id or "",
+    }
+
+
+_PROMPT_COACH_TITLE_MAX = 20
+_PROMPT_COACH_PLACEHOLDER_TITLES = frozenset({"", "新对话", "未命名对话", "当前对话"})
+
+
+def _clip_prompt_coach_title(text: str, limit: int = _PROMPT_COACH_TITLE_MAX) -> str:
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[:limit].rstrip() + "…"
+
+
+def _prompt_coach_title_from_turns(turns: list[dict[str, Any]], fallback: str = "") -> str:
+    """首次有用户输入时用该句做会话名；已有名称则保留。过长截断。"""
+    title = (fallback or "").strip()
+    first_user = ""
+    for it in turns:
+        if str(it.get("role") or "") == "user":
+            first_user = str(it.get("content") or "").strip()
+            if first_user:
+                break
+    if title in _PROMPT_COACH_PLACEHOLDER_TITLES:
+        clipped = _clip_prompt_coach_title(first_user)
+        return clipped or "新对话"
+    return _clip_prompt_coach_title(title) or "新对话"
+
+
+def _prompt_coach_session_preview(row: UserDraftPromptCoachSession) -> str:
+    turns = row.turns_json if isinstance(row.turns_json, list) else []
+    for it in reversed(turns or []):
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("content") or "").strip().replace("\n", " ")
+        if t:
+            return t[:80]
+    fa = (row.final_agreed or "").strip()
+    if fa:
+        return fa.replace("\n", " ")[:80]
+    return ""
+
+
+def _prompt_coach_get_owned(uid: str, org_id: str, sid: str):
+    sid = (sid or "").strip()
+    if not sid:
+        return None
+    return UserDraftPromptCoachSession.query.filter_by(
+        id=sid, user_id=uid, organization_id=org_id
+    ).first()
+
+
+def _prompt_coach_list_rows(uid: str, org_id: str):
+    return (
+        UserDraftPromptCoachSession.query.filter_by(user_id=uid, organization_id=org_id)
+        .order_by(UserDraftPromptCoachSession.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+
+
+@draft_gen_bp.get("/api/prompt-coach/sessions")
+def api_prompt_coach_sessions_list():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _prompt_coach_session_org_key()
+    items = []
+    for row in _prompt_coach_list_rows(uid, org_id):
+        turns = row.turns_json if isinstance(row.turns_json, list) else []
+        items.append(
+            {
+                "id": row.id,
+                "title": (row.title or "").strip() or "未命名对话",
+                "updatedAt": int(row.updated_at.timestamp() * 1000) if row.updated_at else 0,
+                "turnCount": len(turns) if isinstance(turns, list) else 0,
+                "preview": _prompt_coach_session_preview(row),
+            }
+        )
+    return jsonify({"ok": True, "items": items, "organizationId": org_id})
+
+
+@draft_gen_bp.post("/api/prompt-coach/sessions")
+def api_prompt_coach_sessions_create():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _prompt_coach_session_org_key()
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+    title = str(body.get("title") or "").strip()[:160] or "新对话"
+    row = UserDraftPromptCoachSession(
+        user_id=uid,
+        organization_id=org_id,
+        title=title,
+        turns_json=[],
+        final_agreed="",
+        current_prompt="",
+    )
+    db.session.add(row)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"ok": False, "message": user_facing_text(
+            "无法开启新对话（可能仍受旧库 user+org 唯一索引限制，请重启服务后再试）",
+            "无法开启新对话，请稍后重试。",
+        )}), 500
+    return jsonify(_prompt_coach_session_to_dict(row))
+
+
+@draft_gen_bp.get("/api/prompt-coach/session")
+def api_prompt_coach_session_get():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _prompt_coach_session_org_key()
+    sid = str(request.args.get("id") or "").strip()
+    row = _prompt_coach_get_owned(uid, org_id, sid)
+    if not row and not sid:
+        row = (
+            UserDraftPromptCoachSession.query.filter_by(user_id=uid, organization_id=org_id)
+            .order_by(UserDraftPromptCoachSession.updated_at.desc())
+            .first()
+        )
+    if not row:
+        return jsonify(
+            {
+                "ok": True,
+                "id": "",
+                "title": "",
+                "turns": [],
+                "finalAgreed": "",
+                "currentPrompt": "",
+                "updatedAt": 0,
+                "organizationId": org_id,
+            }
+        )
+    return jsonify(_prompt_coach_session_to_dict(row))
+
+
+@draft_gen_bp.put("/api/prompt-coach/session")
+def api_prompt_coach_session_put():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+    org_id = _prompt_coach_session_org_key()
+    turns = _sanitize_prompt_coach_turns(body.get("turns"))
+    final_agreed = str(body.get("finalAgreed") or "")[:12000]
+    current_prompt = str(body.get("currentPrompt") or "")[:8000]
+    title_in = str(body.get("title") or "").strip()[:160]
+    sid = str(body.get("id") or "").strip()
+    row = _prompt_coach_get_owned(uid, org_id, sid) if sid else None
+    if not row:
+        row = UserDraftPromptCoachSession(
+            user_id=uid,
+            organization_id=org_id,
+        )
+        db.session.add(row)
+    row.turns_json = turns
+    row.final_agreed = final_agreed
+    row.current_prompt = current_prompt
+    row.title = _prompt_coach_title_from_turns(turns, title_in or (row.title or ""))
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"ok": False, "message": user_facing_text(
+            "对话保存失败，请查看服务日志",
+            "对话保存失败，请稍后重试。",
+        )}), 500
+    return jsonify(_prompt_coach_session_to_dict(row))
+
+
+@draft_gen_bp.delete("/api/prompt-coach/session")
+def api_prompt_coach_session_delete():
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    org_id = _prompt_coach_session_org_key()
+    sid = str(request.args.get("id") or "").strip()
+    if not sid:
+        return jsonify({"message": "请指定要删除的对话"}), 400
+    row = _prompt_coach_get_owned(uid, org_id, sid)
+    if row:
+        db.session.delete(row)
+        db.session.commit()
+    return jsonify({"ok": True})
+
+
+@draft_gen_bp.post("/api/prompt-coach/reply")
+def api_prompt_coach_reply():
+    """提示词协作对话：用户输入 + 历史 + 附件线索，调用知识库问答给出修订建议。"""
+    err = _login_wall()
+    if err:
+        return err
+    blocked, uid = _account_user_id_wall()
+    if blocked:
+        return blocked
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = request.get_json(force=True) or {}
+
+    query = str(body.get("message") or "").strip()
+    if not query:
+        return jsonify({"message": "message 不能为空"}), 400
+    provider = (body.get("provider") or "").strip() or None
+    if (provider or "").strip().lower() == "cursor":
+        return jsonify(
+            {
+                "message": "提示词协作请改用 DeepSeek / 通义 / OpenAI / Claude。"
+                "Cursor Agent 耗时长，超时后仍会计费。"
+            }
+        ), 400
+    ok_key, key_msg = _personal_key_ready(uid, provider=provider)
+    if not ok_key:
+        return jsonify({"message": key_msg}), 400
+
+    collection = str(body.get("collection") or "regulations").strip() or "regulations"
+    explicit_org = str(body.get("organizationId") or body.get("organization_id") or "").strip()
+    try:
+        org_id, resolved_collection = resolve_org_collection_for_integration(
+            preferred_collection=collection,
+            explicit_organization_id=explicit_org or None,
+        )
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+
+    base = _draft_api_base()
+    if not base:
+        return jsonify({"message": msg_upstream_not_configured_env()}), 503
+    url = f"{base.rstrip('/')}/api/integration/draft/prompt-coach"
+
+    history_raw = body.get("history")
+    history_lines: list[str] = []
+    if isinstance(history_raw, list):
+        for it in history_raw[-8:]:
+            if not isinstance(it, dict):
+                continue
+            role = str(it.get("role") or "").strip().lower()
+            txt = str(it.get("content") or "").strip()
+            if not txt:
+                continue
+            if role not in ("user", "assistant"):
+                role = "user"
+            prefix = "用户" if role == "user" else "AI"
+            history_lines.append(f"{prefix}: {txt[:400]}")
+
+    attachment_hints = body.get("attachmentHints")
+    attach_lines: list[str] = []
+    if isinstance(attachment_hints, list):
+        for it in attachment_hints[:8]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name") or "").strip()
+            typ = str(it.get("type") or "").strip()
+            excerpt = str(it.get("excerpt") or "").strip()
+            if not name:
+                continue
+            line = f"- {name}"
+            if typ:
+                line += f" ({typ})"
+            if excerpt:
+                line += f" 摘录: {excerpt[:180]}"
+            attach_lines.append(line)
+
+    current_prompt = str(body.get("currentPrompt") or "").strip()
+    task_ctx = body.get("taskContext") if isinstance(body.get("taskContext"), dict) else {}
+    template_names = task_ctx.get("templateNames")
+    template_names = template_names if isinstance(template_names, list) else []
+    template_names = [str(x).strip() for x in template_names if str(x).strip()][:8]
+    project_mode = str(task_ctx.get("projectMode") or "").strip()
+    project_id = str(task_ctx.get("projectId") or "").strip()
+    base_case_id = str(task_ctx.get("baseCaseId") or "").strip()
+    document_language = str(task_ctx.get("documentLanguage") or "").strip()
+    draft_strategy = str(task_ctx.get("draftStrategy") or "").strip()
+    inplace_patch = bool(task_ctx.get("inplacePatch"))
+
+    composed_query = query
+    if current_prompt:
+        composed_query += "\n\n【当前提示词草稿】\n" + current_prompt[:1200]
+    if attach_lines:
+        composed_query += "\n\n【附件线索】\n" + "\n".join(attach_lines)
+    task_lines = [
+        f"- collection: {resolved_collection}",
+        f"- base_case_id: {base_case_id or '未选'}",
+        f"- project_mode: {project_mode or '未选'}",
+        f"- project_id: {project_id or '未选'}",
+        f"- document_language: {document_language or '未选'}",
+        f"- draft_strategy: {draft_strategy or '未选'}",
+        f"- inplace_patch: {'是' if inplace_patch else '否'}",
+    ]
+    if template_names:
+        task_lines.append("- 模板文件: " + "；".join(template_names))
+    structured_instruction = (
+        "你是医疗器械注册文档提示词协作教练。"
+        "只基于知识库与用户输入给可执行修订，禁止空泛建议、禁止编造条款号。\n"
+        "用中文输出 4 段小标题：【可执行修订清单】（最多 5 条）"
+        "【冲突与待确认】【最终提示词草案】（不超过 500 字，可直接粘贴）"
+        "【引用依据】（文件名+一句要点）。总回复不超过 900 字。"
+    )
+    composed_query = (
+        structured_instruction
+        + "\n\n【当前任务上下文】\n"
+        + "\n".join(task_lines)
+        + "\n\n【本轮用户诉求】\n"
+        + composed_query
+    )
+
+    search_query = " ".join(
+        x
+        for x in (
+            query[:280],
+            " ".join(template_names[:4]),
+        )
+        if x
+    ).strip() or query[:280]
+    payload_obj = {
+        "query": composed_query[:4500],
+        "search_query": search_query[:400],
+        "collection": resolved_collection,
+        "current_provider": provider or "",
+        "history": history_lines,
+    }
+    headers = _upstream_headers(for_multipart=False, organization_id=org_id)
+    headers.update(_draft_personal_key_headers())
+    llm_hdrs = _client_llm_headers(uid, provider=provider)
+    if llm_hdrs:
+        headers.update(llm_hdrs)
+
+    try:
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload_obj,
+            timeout=_draft_requests_timeout(
+                read_seconds=_draft_prompt_chat_timeout_seconds()
+            ),
+        )
+    except requests.Timeout as exc:
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(
+                    f"协作对话等待模型超时：{exc}",
+                    "等待模型返回超时。请确认文档服务仍在运行后只发送一次，不要连点。",
+                )
+            }
+        ), 504
+    except requests.RequestException as exc:
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(
+                    f"协作对话失败：{exc}",
+                    "协作对话失败，请稍后重试",
+                )
+            }
+        ), 502
+
+    try:
+        data = r.json()
+    except Exception:
+        raw = (r.text or "")[:500]
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(
+                    f"上游返回非 JSON（HTTP {r.status_code}）：{raw}",
+                    "协作对话失败，请稍后重试",
+                )
+            }
+        ), 502
+    if r.status_code >= 400:
+        raw_msg = _format_upstream_error_message(data, msg_upstream_submit_failed())
+        return jsonify(
+            {
+                "message": user_facing_upstream_error(
+                    raw_msg, "协作对话失败，请检查个人 LLM 设置后重试"
+                )
+            }
+        ), 502
+    if not isinstance(data, dict):
+        return jsonify({"message": "服务响应格式异常"}), 502
+    answer, detail, refs = _extract_prompt_coach_answer_fields(data)
+    if not detail:
+        return jsonify(
+            {
+                "message": "AI 本轮未返回可用内容。已停止继续调用，避免额外消耗。"
+            }
+        ), 502
+    return jsonify(
+        {
+            "ok": True,
+            "answer": answer,
+            "answerDetail": detail,
+            "references": refs,
+            "detailItems": data.get("detail_items") or [],
+            "confidence": data.get("confidence"),
+            "reason": data.get("reason") or "",
+            "llmProviderUsed": data.get("llm_provider_used")
+            or data.get("effective_provider")
+            or provider
+            or "",
+            "collection": resolved_collection,
+            "organizationId": org_id,
+        }
+    )
 
 
 def _fetch_upstream_meta(
@@ -2218,6 +3006,22 @@ def api_check_input_vector_duplicates():
         return jsonify({"ok": False, "message": user_facing_upstream_error(f"上游检测失败：{e}")}), 502
 
 
+def _touch_prompt_template_use(
+    *, template_id: str, user_id: str, organization_id: Optional[str]
+) -> Optional[UserDraftPromptTemplate]:
+    if not template_id:
+        return None
+    row = UserDraftPromptTemplate.query.filter_by(
+        id=template_id, user_id=user_id, organization_id=organization_id
+    ).first()
+    if not row:
+        return None
+    row.use_count = int(row.use_count or 0) + 1
+    row.last_used_at = now_local()
+    db.session.add(row)
+    return row
+
+
 @draft_gen_bp.post("/api/jobs")
 def api_jobs_submit():
     err = _login_wall()
@@ -2260,6 +3064,10 @@ def api_jobs_submit():
         payload_obj: dict[str, Any] = json.loads(payload_str)
     except json.JSONDecodeError as e:
         return jsonify({"message": f"payload 不是有效 JSON: {e}"}), 400
+    prompt_template_id = str(payload_obj.get("user_prompt_template_id") or "").strip()
+    prompt_template_name = _sanitize_prompt_template_name(
+        payload_obj.get("user_prompt_template_name") or ""
+    )
 
     requested_prov = (payload_obj.get("provider") or "").strip() or None
     ok_key, key_msg = _personal_key_ready(uid, provider=requested_prov)
@@ -2307,7 +3115,7 @@ def api_jobs_submit():
         bdata, suggested_fn = _base_doc_bytes_from_upload(ur)
         if not bdata:
             return jsonify({"message": f"任务 {bid} 无可用模板文件作 Base（可能仅为链接）"}), 400
-        fn0 = secure_filename(suggested_fn) or "base.docx"
+        fn0 = Path(suggested_fn).name.strip() or "base.docx"
         base_from_uploads.append((fn0, bdata))
 
     from .archive_expand import ArchiveExpandError, flatten_upload_file_storage
@@ -2322,15 +3130,23 @@ def api_jobs_submit():
         )
     except ArchiveExpandError as exc:
         return jsonify({"message": str(exc)}), 400
-    base_multipart_names = [secure_filename(n) or "base.bin" for n, _ in base_expanded]
+    base_multipart_names = [Path(n).name.strip() or "base.bin" for n, _ in base_expanded]
     _auto_bind_base_files_by_target(payload_obj, base_multipart_names)
 
     payload_for_upstream = {
-        k: v for k, v in payload_obj.items() if k not in ("base_upload_id", "base_upload_ids")
+        k: v
+        for k, v in payload_obj.items()
+        if k
+        not in (
+            "base_upload_id",
+            "base_upload_ids",
+            "user_prompt_template_id",
+            "user_prompt_template_name",
+        )
     }
     payload_str2 = json.dumps(payload_for_upstream, ensure_ascii=False)
 
-    display_names = [secure_filename(n) or "file" for n, _ in input_expanded]
+    display_names = [Path(n).name.strip() or "file" for n, _ in input_expanded]
 
     snap = {
         k: payload_obj.get(k)
@@ -2351,6 +3167,10 @@ def api_jobs_submit():
     _uap_snap = (payload_obj.get("user_prompt_append") or "").strip()
     if _uap_snap:
         snap["user_prompt_append_preview"] = _uap_snap[:500] + ("…" if len(_uap_snap) > 500 else "")
+    if prompt_template_id:
+        snap["user_prompt_template_id"] = prompt_template_id
+    if prompt_template_name:
+        snap["user_prompt_template_name"] = prompt_template_name
 
     job = DraftGenerationJob(
         user_id=uid,
@@ -2364,16 +3184,21 @@ def api_jobs_submit():
         integration_scope=integration_scope_from_request(),
     )
     db.session.add(job)
+    _touch_prompt_template_use(
+        template_id=prompt_template_id,
+        user_id=uid,
+        organization_id=(org_id or None),
+    )
     db.session.commit()
 
     files: list[tuple[str, tuple[str, bytes, str]]] = []
     for fn, blob in input_expanded:
         files.append(
-            ("input_files", (secure_filename(fn) or "unnamed.bin", blob, "application/octet-stream"))
+            ("input_files", (Path(fn).name.strip() or "unnamed.bin", blob, "application/octet-stream"))
         )
     for fn_b, bdata in base_expanded:
         files.append(
-            ("base_files", (secure_filename(fn_b) or "base.bin", bdata, "application/octet-stream"))
+            ("base_files", (Path(fn_b).name.strip() or "base.bin", bdata, "application/octet-stream"))
         )
 
     from ._integration_common import client_llm_headers_for_session

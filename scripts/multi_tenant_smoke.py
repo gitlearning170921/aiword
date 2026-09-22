@@ -34,6 +34,8 @@ REQUIRED_ORG_COLUMN_TABLES = (
     "draft_generation_jobs",
     "audit_jobs",
     "translation_jobs",
+    "user_draft_prompt_templates",
+    "user_draft_prompt_coach_sessions",
     "exam_center_assignments",
     "exam_center_activities",
     "exam_attempts",

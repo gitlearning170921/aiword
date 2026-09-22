@@ -925,6 +925,90 @@ def ensure_schema(app: Flask):
         from .models import DraftGenerationJob
 
         DraftGenerationJob.__table__.create(bind=engine, checkfirst=True)
+    if "user_draft_prompt_templates" not in insp_jobs.get_table_names():
+        from .models import UserDraftPromptTemplate
+
+        UserDraftPromptTemplate.__table__.create(bind=engine, checkfirst=True)
+    if "user_draft_prompt_coach_sessions" not in insp_jobs.get_table_names():
+        from .models import UserDraftPromptCoachSession
+
+        UserDraftPromptCoachSession.__table__.create(bind=engine, checkfirst=True)
+    ensure_column(
+        "user_draft_prompt_coach_sessions",
+        "title",
+        "ALTER TABLE user_draft_prompt_coach_sessions ADD COLUMN title TEXT",
+        "ALTER TABLE user_draft_prompt_coach_sessions ADD COLUMN title VARCHAR(160)",
+    )
+    try:
+        with engine.connect() as conn:
+            dialect = engine.dialect.name
+            if dialect == "sqlite":
+                conn.execute(text("DROP INDEX IF EXISTS uq_user_draft_prompt_coach_user_org"))
+                try:
+                    idx_rows = conn.execute(
+                        text("PRAGMA index_list('user_draft_prompt_coach_sessions')")
+                    ).fetchall()
+                    for idx in idx_rows:
+                        # seq, name, unique, origin, partial
+                        idx_name = str(idx[1] or "")
+                        is_unique = int(idx[2] or 0) == 1
+                        if is_unique and idx_name and "user_org" in idx_name.lower():
+                            conn.execute(text('DROP INDEX IF EXISTS "' + idx_name.replace('"', "") + '"'))
+                except Exception:
+                    pass
+            elif dialect == "mysql":
+                try:
+                    idx_rows = conn.execute(
+                        text(
+                            "SHOW INDEX FROM user_draft_prompt_coach_sessions "
+                            "WHERE Non_unique = 0"
+                        )
+                    ).fetchall()
+                    names = set()
+                    for idx in idx_rows:
+                        key_name = str(idx[2] if len(idx) > 2 else "")
+                        if key_name and key_name.upper() != "PRIMARY":
+                            names.add(key_name)
+                    for name in names:
+                        safe = name.replace("`", "")
+                        try:
+                            conn.execute(
+                                text(
+                                    "ALTER TABLE user_draft_prompt_coach_sessions "
+                                    "DROP INDEX `" + safe + "`"
+                                )
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    try:
+                        conn.execute(
+                            text(
+                                "ALTER TABLE user_draft_prompt_coach_sessions "
+                                "DROP INDEX uq_user_draft_prompt_coach_user_org"
+                            )
+                        )
+                    except Exception:
+                        pass
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE user_draft_prompt_coach_sessions "
+                        "DROP CONSTRAINT IF EXISTS uq_user_draft_prompt_coach_user_org"
+                    )
+                )
+            try:
+                conn.execute(
+                    text(
+                        "UPDATE user_draft_prompt_coach_sessions "
+                        "SET title = '' WHERE title IS NULL"
+                    )
+                )
+            except Exception:
+                pass
+            conn.commit()
+    except Exception:
+        pass
 
     # 审核 / 翻译 集成任务表：与初稿任务同构，缺表则建表。
     insp_audit = inspect(engine)
@@ -2021,6 +2105,8 @@ def create_app() -> Flask:
     @app.context_processor
     def _inject_company_registry():
         try:
+            from flask import session
+
             from .authz import (
                 company_registry_enabled,
                 current_admin_role,
@@ -2040,6 +2126,7 @@ def create_app() -> Flask:
                 "is_company_admin": is_company_admin(),
                 "is_project_admin": is_project_admin(),
                 "is_page13_super_admin": is_page13_super_admin(),
+                "current_user_id": (session.get("user_id") or ""),
                 "can_access_company_registry": is_company_registry_user(),
                 "nav_show_page0": nav_show_page0(),
                 "nav_show_page123_staff": nav_show_page123_staff(),
@@ -2053,6 +2140,7 @@ def create_app() -> Flask:
                 "is_company_admin": False,
                 "is_project_admin": False,
                 "is_page13_super_admin": False,
+                "current_user_id": "",
                 "can_access_company_registry": False,
                 "nav_show_page0": False,
                 "nav_show_page123_staff": False,

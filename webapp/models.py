@@ -1006,6 +1006,54 @@ class UserLlmCredential(db.Model):
     updated_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local, onupdate=now_local)
 
 
+class UserDraftPromptTemplate(db.Model):
+    """个人初稿提示词模板：用于多轮修订后沉淀复用。"""
+
+    __tablename__ = "user_draft_prompt_templates"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "organization_id",
+            "name",
+            name="uq_user_draft_prompt_tpl_user_org_name",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(db.String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(db.String(128), nullable=False)
+    doc_type: Mapped[Optional[str]] = mapped_column(db.String(128), nullable=True)
+    prompt_text: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
+    use_count: Mapped[int] = mapped_column(db.Integer, nullable=False, default=0)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
+class UserDraftPromptCoachSession(db.Model):
+    """初稿提示词协作对话：同一用户+公司可多条，互不覆盖。"""
+
+    __tablename__ = "user_draft_prompt_coach_sessions"
+    __table_args__ = (
+        db.Index("ix_user_draft_prompt_coach_user_org", "user_id", "organization_id"),
+    )
+
+    id: Mapped[str] = mapped_column(db.String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(db.String(36), nullable=False, index=True)
+    organization_id: Mapped[str] = mapped_column(db.String(36), nullable=False, default="", index=True)
+    title: Mapped[str] = mapped_column(db.String(160), nullable=False, default="")
+    turns_json: Mapped[Optional[list]] = mapped_column(db.JSON, nullable=True)
+    final_agreed: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
+    current_prompt: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(db.DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime, default=now_local, onupdate=now_local
+    )
+
+
 class DraftGenerationJob(db.Model):
     """初稿生成：本地任务记录 + aicheckword upstream_job_id，供统计与下载。"""
 

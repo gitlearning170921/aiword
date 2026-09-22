@@ -1110,6 +1110,17 @@ def _bootstrap_database_url_file(project_root: Path) -> Optional[str]:
         return None
 
 
+def _pymysql_supports_public_key_retrieval() -> bool:
+    try:
+        import inspect
+
+        import pymysql
+
+        return "allow_public_key_retrieval" in inspect.signature(pymysql.connect).parameters
+    except Exception:
+        return False
+
+
 def normalize_database_uri_for_engine(uri: str, connect_timeout: int = 10) -> str:
     """
     规范 MySQL 连接 URI 的查询参数。
@@ -1125,6 +1136,11 @@ def normalize_database_uri_for_engine(uri: str, connect_timeout: int = 10) -> st
     for k, v in parse_qsl(parsed.query, keep_blank_values=True):
         q[k] = v
     q["connect_timeout"] = str(max(1, int(connect_timeout)))
+    # MySQL 8 远程认证需要该参数；本机旧版 PyMySQL 不支持则去掉，避免 TypeError
+    if _pymysql_supports_public_key_retrieval():
+        q.setdefault("allow_public_key_retrieval", "true")
+    else:
+        q.pop("allow_public_key_retrieval", None)
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 

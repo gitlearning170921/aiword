@@ -58,6 +58,14 @@
   var lastLlmProviderSelection = "deepseek";
   /** @type {any} */
   let lastBootstrap = null;
+  /** @type {Array<any>} */
+  var _dgPromptTemplates = [];
+  /** @type {Record<string, any>} */
+  var _dgPromptTemplateMap = {};
+  /** @type {Array<{role:string,content:string,references?:any[]}>} */
+  var _dgPromptCoachTurns = [];
+  /** @type {File[]} */
+  var _dgPromptCoachFiles = [];
 
   function dgUseCompanyRegistryProjects() {
     return !!window.__DG_USE_COMPANY_PROJECTS__;
@@ -93,6 +101,8 @@
   var _dgInputFilesAccum = [];
   /** @type {File[]} */
   var _dgBaseFilesAccum = [];
+  /** @type {string[]} 用户新增的未训练模板文件名 */
+  var _dgExtraTemplateNames = [];
   var _dgFilePickersWired = false;
   /** 页面2带入的任务 upload_id，提交时写入 payload.base_upload_id */
   var _dgBaseUploadId = "";
@@ -1108,6 +1118,1141 @@
     }
   }
 
+  function dgCurrentOrganizationId() {
+    var fromPrefill = "";
+    try {
+      if (window.IntegrationPrefill && window.IntegrationPrefill.readOrganizationId) {
+        fromPrefill = String(window.IntegrationPrefill.readOrganizationId("dg") || "").trim();
+      }
+    } catch (_) {}
+    if (fromPrefill) return fromPrefill;
+    var orgEl = el("dg_organization");
+    return orgEl && orgEl.value ? String(orgEl.value).trim() : "";
+  }
+
+  var _dgCoachPersistTimer = null;
+  var _dgCoachSessionId = "";
+  var _dgCoachList = [];
+  var _dgCoachIgnoreSelect = false;
+
+  function promptCoachStorageKey() {
+    var uid = String(window.__AIWORD_USER_ID__ || "").trim() || "anon";
+    var oid = dgCurrentOrganizationId() || "_";
+    return "aiword.draftPromptCoach.v2." + uid + "." + oid;
+  }
+
+  function promptCoachStorageKeyV1() {
+    var uid = String(window.__AIWORD_USER_ID__ || "").trim() || "anon";
+    var oid = dgCurrentOrganizationId() || "_";
+    return "aiword.draftPromptCoach.v1." + uid + "." + oid;
+  }
+
+  function promptCoachSnapshot() {
+    var turns = (_dgPromptCoachTurns || []).filter(function (t) {
+      return (
+        t &&
+        !t.pending &&
+        (t.role === "user" || t.role === "assistant") &&
+        String(t.content || "").trim()
+      );
+    }).slice(-40);
+    return {
+      id: _dgCoachSessionId || "",
+      turns: turns,
+      finalAgreed: el("dg_prompt_final_agreed") ? String(el("dg_prompt_final_agreed").value || "") : "",
+      currentPrompt: el("dg_user_prompt_append") ? String(el("dg_user_prompt_append").value || "") : "",
+      savedAt: Date.now(),
+    };
+  }
+
+  function promptCoachApplySnapshot(snap, opts) {
+    opts = opts || {};
+    if (!snap || typeof snap !== "object") return false;
+    if (snap.id) _dgCoachSessionId = String(snap.id);
+    var turns = Array.isArray(snap.turns) ? snap.turns : [];
+    var cleaned = [];
+    turns.forEach(function (t) {
+      if (!t || t.pending) return;
+      var role = t.role === "assistant" ? "assistant" : "user";
+      var content = String(t.content || "").trim();
+      if (!content) return;
+      cleaned.push({
+        role: role,
+        content: content,
+        at: t.at || 0,
+        references: Array.isArray(t.references) ? t.references : [],
+      });
+    });
+    _dgPromptCoachTurns = cleaned;
+    var fa = el("dg_prompt_final_agreed");
+    if (fa && snap.finalAgreed != null) fa.value = String(snap.finalAgreed || "");
+    var ta = el("dg_user_prompt_append");
+    if (ta && !opts.keepPrompt && snap.currentPrompt != null) {
+      ta.value = String(snap.currentPrompt || "");
+    }
+    renderPromptCoachHistory();
+    renderPromptCoachSessionSelect();
+    return cleaned.length > 0 || !!(snap.finalAgreed || snap.currentPrompt);
+  }
+
+  function promptCoachReadLocal() {
+    try {
+      var raw = window.localStorage.getItem(promptCoachStorageKey());
+      if (!raw) return null;
+      var j = JSON.parse(raw);
+      return j && typeof j === "object" ? j : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function promptCoachWriteLocal(snap) {
+    try {
+      var bag = promptCoachReadLocal() || { activeId: "", items: {} };
+      if (!bag.items || typeof bag.items !== "object") bag.items = {};
+      var id = String((snap && snap.id) || _dgCoachSessionId || "").trim() || "__draft__";
+      bag.items[id] = snap || promptCoachSnapshot();
+      bag.activeId = id === "__draft__" ? (bag.activeId || id) : id;
+      if (id === "__draft__") bag.activeId = "__draft__";
+      bag.savedAt = Date.now();
+      window.localStorage.setItem(promptCoachStorageKey(), JSON.stringify(bag));
+    } catch (_) {}
+  }
+
+  function promptCoachClipTitle(text, maxLen) {
+    var s = String(text || "").replace(/\s+/g, " ").trim();
+    var n = maxLen || 20;
+    if (!s) return "未命名对话";
+    if (s.length <= n) return s;
+    return s.slice(0, n).replace(/\s+$/, "") + "…";
+  }
+
+  function promptCoachSessionOptionLabel(item) {
+    var title = promptCoachClipTitle((item && item.title) || "", 20);
+    var n = Number((item && item.turnCount) || 0) || 0;
+    return title + (n ? " · " + n + " 条" : "");
+  }
+
+  function renderPromptCoachSessionSelect() {
+    var sel = el("dg_prompt_chat_session");
+    if (!sel) return;
+    _dgCoachIgnoreSelect = true;
+    sel.innerHTML = "";
+    var empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = _dgCoachSessionId ? "（当前未命名）" : "（新对话，尚未保存）";
+    sel.appendChild(empty);
+    (_dgCoachList || []).forEach(function (item) {
+      if (!item || !item.id) return;
+      var opt = document.createElement("option");
+      opt.value = String(item.id);
+      opt.textContent = promptCoachSessionOptionLabel(item);
+      var tip = String((item.preview || item.title || "")).replace(/\s+/g, " ").trim();
+      if (tip) opt.title = tip;
+      sel.appendChild(opt);
+    });
+    if (_dgCoachSessionId) sel.value = _dgCoachSessionId;
+    if (_dgCoachSessionId && sel.value !== _dgCoachSessionId) {
+      var extra = document.createElement("option");
+      extra.value = _dgCoachSessionId;
+      extra.textContent = "当前对话";
+      sel.appendChild(extra);
+      sel.value = _dgCoachSessionId;
+    }
+    _dgCoachIgnoreSelect = false;
+  }
+
+  function promptCoachRefreshList() {
+    var orgId = dgCurrentOrganizationId() || "";
+    var q = orgId ? ("?organizationId=" + encodeURIComponent(orgId)) : "";
+    return api("/draft-gen/api/prompt-coach/sessions" + q, { method: "GET" }).then(function (x) {
+      if (x && x.ok && x.json && Array.isArray(x.json.items)) {
+        _dgCoachList = x.json.items;
+      }
+      renderPromptCoachSessionSelect();
+    }).catch(function () {
+      renderPromptCoachSessionSelect();
+    });
+  }
+
+  function promptCoachPersistNow() {
+    var snap = promptCoachSnapshot();
+    promptCoachWriteLocal(snap);
+    var orgId = dgCurrentOrganizationId() || null;
+    return api("/draft-gen/api/prompt-coach/session", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: _dgCoachSessionId || "",
+        turns: snap.turns,
+        finalAgreed: snap.finalAgreed,
+        currentPrompt: snap.currentPrompt,
+        organizationId: orgId,
+      }),
+    }).then(function (x) {
+      if (!x || !x.ok || !x.json || !x.json.id) {
+        var fail = (x && x.json && x.json.message) || "对话未能保存到服务器";
+        showMsg(fail, true);
+        return Promise.reject(new Error(fail));
+      }
+      _dgCoachSessionId = String(x.json.id);
+      snap.id = _dgCoachSessionId;
+      promptCoachWriteLocal(snap);
+      try {
+        var bag = promptCoachReadLocal() || { items: {} };
+        if (bag.items && bag.items.__draft__) delete bag.items.__draft__;
+        window.localStorage.setItem(promptCoachStorageKey(), JSON.stringify(bag));
+      } catch (_) {}
+      return promptCoachRefreshList();
+    });
+  }
+
+  function promptCoachPersistSoon() {
+    if (_dgCoachPersistTimer) window.clearTimeout(_dgCoachPersistTimer);
+    _dgCoachPersistTimer = window.setTimeout(function () {
+      _dgCoachPersistTimer = null;
+      promptCoachPersistNow().catch(function () {});
+    }, 400);
+  }
+
+  function promptCoachBlankUi(keepPrompt) {
+    _dgPromptCoachTurns = [];
+    var fa = el("dg_prompt_final_agreed");
+    if (fa) fa.value = "";
+    var inp = el("dg_prompt_chat_input");
+    if (inp) inp.value = "";
+    if (!keepPrompt) {
+      var ta = el("dg_user_prompt_append");
+      if (ta) ta.value = "";
+    }
+    renderPromptCoachHistory();
+  }
+
+  function startNewPromptCoachSession() {
+    if (_dgPromptCoachBusy) {
+      showMsg("正在等待 AI 返回，请先等本轮结束。", true);
+      return;
+    }
+    promptCoachHideProgress();
+    var persistP = Promise.resolve();
+    if (_dgCoachSessionId || (_dgPromptCoachTurns || []).length) {
+      persistP = Promise.resolve(promptCoachPersistNow());
+    }
+    return persistP.then(function () {
+      var orgId = dgCurrentOrganizationId() || null;
+      return api("/draft-gen/api/prompt-coach/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "新对话", organizationId: orgId }),
+      });
+    }).then(function (x) {
+      if (!x || !x.ok || !x.json || !x.json.id) {
+        showMsg("无法开启新对话，请稍后重试。", true);
+        return;
+      }
+      _dgCoachSessionId = String(x.json.id);
+      promptCoachBlankUi(true);
+      promptCoachWriteLocal(promptCoachSnapshot());
+      return promptCoachRefreshList().then(function () {
+        showMsg("已开启新对话，不会与之前的记录混在一起。", false);
+      });
+    }).catch(function () {
+      showMsg("无法开启新对话，请稍后重试。", true);
+    });
+  }
+
+  function loadPromptCoachSessionById(sid, opts) {
+    opts = opts || {};
+    sid = String(sid || "").trim();
+    if (!sid) return Promise.resolve();
+    if (_dgPromptCoachBusy) {
+      showMsg("正在等待 AI 返回，请先等本轮结束再切换对话。", true);
+      renderPromptCoachSessionSelect();
+      return Promise.resolve();
+    }
+    var orgId = dgCurrentOrganizationId() || "";
+    var q = "?id=" + encodeURIComponent(sid) + (orgId ? "&organizationId=" + encodeURIComponent(orgId) : "");
+    return api("/draft-gen/api/prompt-coach/session" + q, { method: "GET" }).then(function (x) {
+      if (!x || !x.ok || !x.json || !x.json.id) {
+        showMsg("未找到该对话。", true);
+        return promptCoachRefreshList();
+      }
+      var srv = x.json;
+      promptCoachApplySnapshot({
+        id: srv.id,
+        turns: srv.turns || [],
+        finalAgreed: srv.finalAgreed || "",
+        currentPrompt: srv.currentPrompt || "",
+        savedAt: Number(srv.updatedAt || 0) || Date.now(),
+      }, opts);
+      promptCoachWriteLocal(promptCoachSnapshot());
+      if (!opts.silent && (_dgPromptCoachTurns || []).length) {
+        showMsg("已打开历史对话，可继续交流更新提示词。", false);
+      }
+    }).catch(function () {
+      showMsg("打开历史对话失败。", true);
+    });
+  }
+
+  function onPromptCoachSessionSelectChange() {
+    if (_dgCoachIgnoreSelect) return;
+    var sel = el("dg_prompt_chat_session");
+    var sid = sel && sel.value ? String(sel.value).trim() : "";
+    if (!sid || sid === _dgCoachSessionId) return;
+    if (_dgPromptCoachBusy) {
+      showMsg("正在等待 AI 返回，请先等本轮结束再切换对话。", true);
+      renderPromptCoachSessionSelect();
+      return;
+    }
+    var persistP = Promise.resolve();
+    if (_dgCoachSessionId || (_dgPromptCoachTurns || []).length) {
+      persistP = Promise.resolve(promptCoachPersistNow());
+    }
+    return persistP.then(function () {
+      return loadPromptCoachSessionById(sid);
+    }).catch(function () {});
+  }
+
+  function deleteCurrentPromptCoachSession() {
+    if (_dgPromptCoachBusy) {
+      showMsg("正在等待 AI 返回，请先等本轮结束。", true);
+      return;
+    }
+    if (!_dgCoachSessionId) {
+      promptCoachBlankUi(true);
+      renderPromptCoachHistory();
+      showMsg("当前还没有已保存的对话。", false);
+      return;
+    }
+    if (!window.confirm("删除当前对话？此记录无法恢复，已保存的提示词模板不会被删除。")) return;
+    var orgId = dgCurrentOrganizationId() || "";
+    var sid = _dgCoachSessionId;
+    var q = "?id=" + encodeURIComponent(sid) + (orgId ? "&organizationId=" + encodeURIComponent(orgId) : "");
+    api("/draft-gen/api/prompt-coach/session" + q, { method: "DELETE" }).then(function () {
+      try {
+        var bag = promptCoachReadLocal() || { items: {} };
+        if (bag.items) delete bag.items[sid];
+        if (bag.activeId === sid) bag.activeId = "";
+        window.localStorage.setItem(promptCoachStorageKey(), JSON.stringify(bag));
+      } catch (_) {}
+      _dgCoachSessionId = "";
+      promptCoachBlankUi(true);
+      return promptCoachRefreshList().then(function () {
+        var next = (_dgCoachList || [])[0];
+        if (next && next.id) return loadPromptCoachSessionById(next.id, { silent: true });
+        showMsg("已删除当前对话。", false);
+      });
+    }).catch(function () {
+      showMsg("删除对话失败。", true);
+    });
+  }
+
+  function promptCoachRestore() {
+    var localBag = promptCoachReadLocal();
+    if (!localBag) {
+      try {
+        var raw1 = window.localStorage.getItem(promptCoachStorageKeyV1());
+        if (raw1) {
+          var old = JSON.parse(raw1);
+          if (old && typeof old === "object" && Array.isArray(old.turns)) {
+            promptCoachApplySnapshot(old, { keepPrompt: false });
+          }
+        }
+      } catch (_) {}
+    } else if (localBag.items && localBag.activeId && localBag.items[localBag.activeId]) {
+      promptCoachApplySnapshot(localBag.items[localBag.activeId]);
+    }
+    return promptCoachRefreshList().then(function () {
+      var prefer = _dgCoachSessionId || (localBag && localBag.activeId) || "";
+      if (prefer === "__draft__") prefer = _dgCoachSessionId || "";
+      var found = (_dgCoachList || []).some(function (it) { return it && it.id === prefer; });
+      var localTurns = (_dgPromptCoachTurns || []).length;
+      if (localTurns && (!prefer || !found)) {
+        return promptCoachPersistNow().then(function () {
+          showMsg("已恢复上次协作对话，无需重新发送给 AI。", false);
+        });
+      }
+      var target = found ? prefer : ((_dgCoachList || [])[0] && _dgCoachList[0].id) || "";
+      if (!target) {
+        renderPromptCoachSessionSelect();
+        return;
+      }
+      return loadPromptCoachSessionById(target, { silent: true }).then(function () {
+        if ((_dgPromptCoachTurns || []).length) {
+          showMsg("已恢复协作对话。可新开对话，或从下拉框选择历史记录继续改提示词。", false);
+        }
+      });
+    }).catch(function () {});
+  }
+
+  function _promptTemplateLabel(row) {
+    if (!row) return "";
+    var name = String(row.name || "").trim() || "未命名模板";
+    var docType = String(row.docType || "").trim();
+    var cnt = Number(row.useCount || 0) || 0;
+    var tag = docType ? " [" + docType + "]" : "";
+    return name + tag + (cnt > 0 ? " · 已用 " + cnt + " 次" : "");
+  }
+
+  function renderPromptTemplateOptions(selectedId) {
+    var sel = el("dg_prompt_template_id");
+    if (!sel) return;
+    sel.innerHTML = "";
+    var emptyOpt = document.createElement("option");
+    emptyOpt.value = "";
+    emptyOpt.textContent = "（未选择）";
+    sel.appendChild(emptyOpt);
+    _dgPromptTemplateMap = {};
+    (_dgPromptTemplates || []).forEach(function (row) {
+      if (!row || !row.id) return;
+      _dgPromptTemplateMap[String(row.id)] = row;
+      var opt = document.createElement("option");
+      opt.value = String(row.id);
+      opt.textContent = _promptTemplateLabel(row);
+      sel.appendChild(opt);
+    });
+    if (selectedId && _dgPromptTemplateMap[String(selectedId)]) {
+      sel.value = String(selectedId);
+    }
+  }
+
+  function onPromptTemplateSelected() {
+    var sel = el("dg_prompt_template_id");
+    var id = sel && sel.value ? String(sel.value).trim() : "";
+    var row = id ? _dgPromptTemplateMap[id] : null;
+    var nameEl = el("dg_prompt_template_name");
+    var typeEl = el("dg_prompt_template_doc_type");
+    if (nameEl) nameEl.value = row ? String(row.name || "") : "";
+    if (typeEl) typeEl.value = row ? String(row.docType || "") : "";
+  }
+
+  function loadPromptTemplates(silent) {
+    var orgId = dgCurrentOrganizationId();
+    var path = "/draft-gen/api/prompt-templates";
+    if (orgId) path += "?organizationId=" + encodeURIComponent(orgId);
+    return api(path, { method: "GET" }).then(function (x) {
+      if (!x.ok || !x.json || x.json.ok === false) {
+        if (!silent) showMsg((x.json && x.json.message) || "加载提示词模板失败", true);
+        return;
+      }
+      var selectedId = (el("dg_prompt_template_id") && el("dg_prompt_template_id").value) || "";
+      _dgPromptTemplates = Array.isArray(x.json.templates) ? x.json.templates : [];
+      renderPromptTemplateOptions(selectedId);
+      onPromptTemplateSelected();
+    });
+  }
+
+  function applyPromptTemplate(mode) {
+    var sel = el("dg_prompt_template_id");
+    var ta = el("dg_user_prompt_append");
+    if (!sel || !ta) return;
+    var id = sel.value ? String(sel.value).trim() : "";
+    if (!id || !_dgPromptTemplateMap[id]) {
+      showMsg("请先选择一个提示词模板", true);
+      return;
+    }
+    var row = _dgPromptTemplateMap[id];
+    var txt = String(row.promptText || "").trim();
+    if (!txt) {
+      showMsg("该模板内容为空，请先编辑并保存", true);
+      return;
+    }
+    var cur = String(ta.value || "").trim();
+    if (mode === "append" && cur) {
+      ta.value = (cur + "\n\n" + txt).slice(0, 8000);
+    } else {
+      ta.value = txt.slice(0, 8000);
+    }
+    showMsg("已套用模板：" + (row.name || id), false);
+  }
+
+  function savePromptTemplate(opts) {
+    opts = opts || {};
+    var ta = el("dg_user_prompt_append");
+    var nameEl = el("dg_prompt_template_name");
+    var typeEl = el("dg_prompt_template_doc_type");
+    if (!ta || !nameEl || !typeEl) return Promise.resolve(false);
+    var promptText = String(opts.promptText != null ? opts.promptText : ta.value || "").trim();
+    if (!promptText) {
+      showMsg("请先在“自定义提示”中输入内容，再保存模板", true);
+      return Promise.resolve(false);
+    }
+    var name = String(nameEl.value || "").trim();
+    if (!name) {
+      showMsg("请先填写模板名称", true);
+      nameEl.focus();
+      return Promise.resolve(false);
+    }
+    var sel = el("dg_prompt_template_id");
+    var templateId = sel && sel.value ? String(sel.value).trim() : "";
+    var body = {
+      name: name,
+      docType: String(typeEl.value || "").trim(),
+      promptText: promptText,
+      organizationId: dgCurrentOrganizationId() || null,
+    };
+    if (templateId) body.templateId = templateId;
+    return api("/draft-gen/api/prompt-templates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (x) {
+      if (!x.ok || !x.json || x.json.ok === false) {
+        showMsg((x.json && x.json.message) || "保存提示词模板失败", true);
+        return false;
+      }
+      var saved = x.json.template || {};
+      if (!opts.silent) showMsg(x.json.message || "提示词模板已保存", false);
+      return loadPromptTemplates(true).then(function () {
+        if (saved.id && el("dg_prompt_template_id")) {
+          el("dg_prompt_template_id").value = String(saved.id);
+          onPromptTemplateSelected();
+        }
+        return true;
+      });
+    }).catch(function (e) {
+      showMsg(String((e && e.message) || e || "保存提示词模板失败"), true);
+      return false;
+    });
+  }
+
+  function deletePromptTemplate() {
+    var sel = el("dg_prompt_template_id");
+    if (!sel) return;
+    var id = sel.value ? String(sel.value).trim() : "";
+    if (!id) {
+      showMsg("请先选择要删除的模板", true);
+      return;
+    }
+    var row = _dgPromptTemplateMap[id];
+    var name = row ? String(row.name || id) : id;
+    if (!window.confirm("确认删除模板「" + name + "」？")) return;
+    var orgId = dgCurrentOrganizationId();
+    var path = "/draft-gen/api/prompt-templates/" + encodeURIComponent(id);
+    if (orgId) path += "?organizationId=" + encodeURIComponent(orgId);
+    return api(path, { method: "DELETE" }).then(function (x) {
+      if (!x.ok || !x.json || x.json.ok === false) {
+        showMsg((x.json && x.json.message) || "删除模板失败", true);
+        return;
+      }
+      showMsg(x.json.message || "模板已删除", false);
+      return loadPromptTemplates(true);
+    });
+  }
+
+  function appendPromptIterationNote() {
+    var inp = el("dg_prompt_iteration_note");
+    var ta = el("dg_user_prompt_append");
+    if (!inp || !ta) return;
+    var note = String(inp.value || "").trim();
+    if (!note) {
+      showMsg("请先输入本轮补充说明", true);
+      inp.focus();
+      return;
+    }
+    var now = new Date();
+    var stamp =
+      now.getFullYear() +
+      "-" +
+      String(now.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(now.getDate()).padStart(2, "0") +
+      " " +
+      String(now.getHours()).padStart(2, "0") +
+      ":" +
+      String(now.getMinutes()).padStart(2, "0");
+    var addLine = "【补充修订 " + stamp + "】" + note;
+    var cur = String(ta.value || "").trim();
+    ta.value = (cur ? cur + "\n" + addLine : addLine).slice(0, 8000);
+    inp.value = "";
+  }
+
+  function renderPromptCoachHistory() {
+    var box = el("dg_prompt_chat_history");
+    if (!box) return;
+    if (!_dgPromptCoachTurns.length) {
+      box.innerHTML = '<div class="text-muted small">暂无对话记录</div>';
+      return;
+    }
+    var html = [];
+    _dgPromptCoachTurns.forEach(function (t, idx) {
+      var pending = !!t.pending;
+      var who = t.role === "assistant" ? "AI" : "你";
+      var cls = t.role === "assistant" ? "bg-white border-primary-subtle" : "bg-white";
+      var refs = "";
+      if (!pending && t.role === "assistant" && Array.isArray(t.references) && t.references.length) {
+        refs = '<div class="small text-muted mt-1">参考: ' + t.references.slice(0, 3).map(function (r) {
+          return String((r && (r.title || r.name || r.source || r.file_name)) || "").trim();
+        }).filter(Boolean).join("；") + "</div>";
+      }
+      var body = pending
+        ? '<div class="d-flex align-items-center gap-2 small text-primary"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span><span>' +
+          String(t.content || "正在生成…").replace(/[&<>]/g, function (s) {
+            return s === "&" ? "&amp;" : s === "<" ? "&lt;" : "&gt;";
+          }) +
+          "</span></div>"
+        : '<div class="small" style="white-space:pre-wrap;">' +
+          String(t.content || "").replace(/[&<>]/g, function (s) {
+            return s === "&" ? "&amp;" : s === "<" ? "&lt;" : "&gt;";
+          }) +
+          "</div>";
+      var when = promptCoachFormatTime(t.at);
+      html.push(
+        '<div class="border rounded p-2 mb-2 ' +
+          cls +
+          '"><div class="small mb-1 d-flex justify-content-between align-items-baseline gap-2">' +
+          '<span class="fw-semibold">' +
+          who +
+          " #" +
+          (idx + 1) +
+          (pending ? "（生成中）" : "") +
+          "</span>" +
+          (when ? '<span class="text-muted">' + when + "</span>" : "") +
+          "</div>" +
+          body +
+          refs +
+          "</div>"
+      );
+    });
+    box.innerHTML = html.join("");
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function renderPromptCoachFiles() {
+    var ul = el("dg_prompt_chat_files_list");
+    if (!ul) return;
+    ul.innerHTML = "";
+    if (!_dgPromptCoachFiles.length) {
+      ul.innerHTML = '<li class="list-group-item text-muted">未选择附件</li>';
+      return;
+    }
+    _dgPromptCoachFiles.forEach(function (f, idx) {
+      var li = document.createElement("li");
+      li.className = "list-group-item py-1 d-flex justify-content-between align-items-start";
+      var left = document.createElement("div");
+      left.className = "me-2";
+      var kb = Math.max(1, Math.ceil((Number(f.size) || 0) / 1024));
+      left.textContent = (f.name || "unnamed") + " (" + kb + " KB)";
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-sm btn-link text-danger p-0";
+      btn.textContent = "移除";
+      btn.addEventListener("click", function () {
+        _dgPromptCoachFiles.splice(idx, 1);
+        renderPromptCoachFiles();
+      });
+      li.appendChild(left);
+      li.appendChild(btn);
+      ul.appendChild(li);
+    });
+  }
+
+  function wirePromptCoachFiles() {
+    var pickBtn = el("dg_btn_prompt_chat_pick_files");
+    var clearBtn = el("dg_btn_prompt_chat_clear_files");
+    var picker = el("dg_prompt_chat_files_picker");
+    if (pickBtn && picker && pickBtn.getAttribute("data-dg-wired") !== "1") {
+      pickBtn.setAttribute("data-dg-wired", "1");
+      pickBtn.addEventListener("click", function () { picker.click(); });
+    }
+    if (clearBtn && clearBtn.getAttribute("data-dg-wired") !== "1") {
+      clearBtn.setAttribute("data-dg-wired", "1");
+      clearBtn.addEventListener("click", function () {
+        _dgPromptCoachFiles = [];
+        renderPromptCoachFiles();
+      });
+    }
+    if (picker && picker.getAttribute("data-dg-wired") !== "1") {
+      picker.setAttribute("data-dg-wired", "1");
+      picker.addEventListener("change", function () {
+        if (picker.files && picker.files.length) {
+          draftMergeFiles(_dgPromptCoachFiles, picker.files);
+          renderPromptCoachFiles();
+        }
+        picker.value = "";
+      });
+    }
+    renderPromptCoachFiles();
+  }
+
+  function _readTextExcerptFromFile(file, maxChars) {
+    return new Promise(function (resolve) {
+      var fname = String((file && file.name) || "").toLowerCase();
+      var ftype = String((file && file.type) || "").toLowerCase();
+      var looksText =
+        (ftype && ftype.indexOf("text/") === 0) ||
+        /\.txt$|\.md$|\.json$|\.csv$|\.xml$|\.yaml$|\.yml$/.test(fname);
+      if (!looksText || !file) {
+        resolve("");
+        return;
+      }
+      try {
+        var reader = new FileReader();
+        reader.onload = function () {
+          var txt = String(reader.result || "").replace(/\s+/g, " ").trim();
+          resolve(txt.slice(0, maxChars || 500));
+        };
+        reader.onerror = function () {
+          resolve("");
+        };
+        reader.readAsText(file);
+      } catch (_) {
+        resolve("");
+      }
+    });
+  }
+
+  function _buildPromptCoachAttachmentHints() {
+    var tasks = (_dgPromptCoachFiles || []).slice(0, 4).map(function (f) {
+      return _readTextExcerptFromFile(f, 180).then(function (excerpt) {
+        return {
+          name: f.name || "",
+          type: f.type || "",
+          size: Number(f.size || 0),
+          excerpt: excerpt || "",
+        };
+      });
+    });
+    return Promise.all(tasks);
+  }
+
+  function _buildPromptCoachHistoryPayload(maxTurns) {
+    var rows = (_dgPromptCoachTurns || []).filter(function (t) {
+      return t && !t.pending && (t.role === "user" || t.role === "assistant");
+    });
+    if (rows.length && rows[rows.length - 1].role === "user") {
+      rows = rows.slice(0, -1);
+    }
+    return rows.slice(-(maxTurns || 8)).map(function (t) {
+      return { role: t.role, content: String(t.content || "").slice(0, 400) };
+    });
+  }
+
+  var _dgPromptCoachBusy = false;
+  var _dgPromptCoachTimer = null;
+  var _dgPromptCoachStartedAt = 0;
+  var _dgPromptCoachSendHtml = "";
+
+  function promptCoachFmtElapsed(sec) {
+    var s = Math.max(0, Math.floor(sec || 0));
+    var m = Math.floor(s / 60);
+    var r = s % 60;
+    return m > 0 ? m + " 分 " + r + " 秒" : r + " 秒";
+  }
+
+  function promptCoachStageText(elapsedSec) {
+    if (elapsedSec < 3) return "已收到，正在准备本轮请求…";
+    if (elapsedSec < 10) return "正在检索知识库…";
+    if (elapsedSec < 20) return "正在调用模型生成回复…";
+    if (elapsedSec < 60) return "模型生成中，请稍候…";
+    if (elapsedSec < 120) return "仍在等待模型返回（已超过 1 分钟）…";
+    if (elapsedSec < 180) return "仍在等待模型返回（已超过 2 分钟）…";
+    return "仍在等待模型返回，请勿关闭页面或重复点击…";
+  }
+
+  function promptCoachSetProgress(pct01, caption, running) {
+    var wrap = el("dg_prompt_chat_progress_wrap");
+    var bar = el("dg_prompt_chat_progress_bar");
+    var cap = el("dg_prompt_chat_progress_caption");
+    var head = el("dg_prompt_chat_progress_headline");
+    if (wrap) wrap.classList.remove("d-none");
+    var n = typeof pct01 === "number" && !isNaN(pct01) ? pct01 : 0;
+    n = Math.max(0, Math.min(1, n));
+    var p100 = Math.round(n * 100);
+    if (bar) {
+      bar.style.width = p100 + "%";
+      bar.textContent = p100 + "%";
+      bar.classList.remove("bg-success", "bg-danger");
+      if (running) {
+        bar.classList.add("progress-bar-striped", "progress-bar-animated", "bg-primary");
+      } else {
+        bar.classList.remove("progress-bar-striped", "progress-bar-animated");
+      }
+    }
+    if (cap) cap.textContent = caption || "";
+    if (head && running) head.textContent = "正在等待 AI 返回";
+  }
+
+  function promptCoachFormatTime(ts) {
+    var d = ts instanceof Date ? ts : ts ? new Date(ts) : null;
+    if (!d || isNaN(d.getTime())) return "";
+    function pad(n) {
+      return String(n).padStart(2, "0");
+    }
+    return (
+      d.getFullYear() +
+      "-" +
+      pad(d.getMonth() + 1) +
+      "-" +
+      pad(d.getDate()) +
+      " " +
+      pad(d.getHours()) +
+      ":" +
+      pad(d.getMinutes()) +
+      ":" +
+      pad(d.getSeconds())
+    );
+  }
+
+  function promptCoachHideProgress() {
+    promptCoachStopTimer();
+    var wrap = el("dg_prompt_chat_progress_wrap");
+    if (wrap) wrap.classList.add("d-none");
+    var bar = el("dg_prompt_chat_progress_bar");
+    if (bar) {
+      bar.style.width = "0%";
+      bar.textContent = "0%";
+      bar.classList.remove("bg-success", "bg-danger");
+      bar.classList.add("progress-bar-striped", "progress-bar-animated", "bg-primary");
+    }
+    var cap = el("dg_prompt_chat_progress_caption");
+    if (cap) cap.textContent = "";
+    var head = el("dg_prompt_chat_progress_headline");
+    if (head) head.textContent = "正在等待 AI 返回";
+  }
+
+  function promptCoachFinishProgress(ok, caption) {
+    promptCoachStopTimer();
+    if (ok) {
+      promptCoachHideProgress();
+      return;
+    }
+    var wrap = el("dg_prompt_chat_progress_wrap");
+    var bar = el("dg_prompt_chat_progress_bar");
+    var cap = el("dg_prompt_chat_progress_caption");
+    var head = el("dg_prompt_chat_progress_headline");
+    if (wrap) wrap.classList.remove("d-none");
+    if (bar) {
+      bar.style.width = "100%";
+      bar.textContent = "失败";
+      bar.classList.remove("progress-bar-striped", "progress-bar-animated", "bg-primary", "bg-success");
+      bar.classList.add("bg-danger");
+    }
+    if (cap) cap.textContent = caption || "本轮失败";
+    if (head) head.textContent = "本轮未完成";
+    window.setTimeout(function () {
+      if (!_dgPromptCoachBusy) promptCoachHideProgress();
+    }, 4000);
+  }
+
+  function promptCoachStopTimer() {
+    if (_dgPromptCoachTimer) {
+      window.clearInterval(_dgPromptCoachTimer);
+      _dgPromptCoachTimer = null;
+    }
+  }
+
+  function promptCoachDropPendingAssistant() {
+    var last = _dgPromptCoachTurns[_dgPromptCoachTurns.length - 1];
+    if (last && last.pending && last.role === "assistant") {
+      _dgPromptCoachTurns.pop();
+    }
+  }
+
+  function promptCoachSetControlsBusy(busy) {
+    ["dg_btn_prompt_chat_send", "dg_btn_prompt_chat_adopt_last", "dg_btn_prompt_chat_clear", "dg_btn_prompt_chat_pick_files", "dg_prompt_chat_input"].forEach(function (id) {
+      var n = el(id);
+      if (!n) return;
+      n.disabled = !!busy;
+    });
+    var send = el("dg_btn_prompt_chat_send");
+    if (send) {
+      if (busy) {
+        send.setAttribute("aria-busy", "true");
+      } else {
+        send.removeAttribute("aria-busy");
+      }
+    }
+  }
+
+  function promptCoachStartWaitUi(userMsg) {
+    promptCoachStopTimer();
+    _dgPromptCoachStartedAt = Date.now();
+    var wrap = el("dg_prompt_chat_progress_wrap");
+    if (wrap) {
+      wrap.classList.remove("d-none");
+      try {
+        wrap.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      } catch (_) {}
+    }
+    promptCoachSetProgress(0.08, "已发送，正在处理…", true);
+    var now = Date.now();
+    _dgPromptCoachTurns.push({ role: "user", content: userMsg, at: now });
+    _dgPromptCoachTurns.push({ role: "assistant", content: "正在生成回复…", pending: true, at: now });
+    renderPromptCoachHistory();
+    _dgPromptCoachTimer = window.setInterval(function () {
+      var elapsed = (Date.now() - _dgPromptCoachStartedAt) / 1000;
+      var stage = promptCoachStageText(elapsed);
+      var pct = Math.min(0.92, 0.08 + elapsed / 330);
+      promptCoachSetProgress(pct, stage + " 已等待 " + promptCoachFmtElapsed(elapsed), true);
+      var last = _dgPromptCoachTurns[_dgPromptCoachTurns.length - 1];
+      if (last && last.pending && last.content !== stage) {
+        last.content = stage;
+        renderPromptCoachHistory();
+      }
+    }, 500);
+  }
+
+  function sendPromptCoachMessage() {
+    var inp = el("dg_prompt_chat_input");
+    var msg = inp ? String(inp.value || "").trim() : "";
+    if (!msg) {
+      showMsg("请先输入本轮问题或修订要求", true);
+      return;
+    }
+    if (_dgPromptCoachBusy) {
+      showMsg("上一轮还在生成，请等它结束。连点会重复计费。", true);
+      return;
+    }
+    var providerVal = ((el("dg_provider") && el("dg_provider").value) || "").trim();
+    if (String(providerVal || "").toLowerCase() === "cursor") {
+      showMsg("提示词协作请改用 DeepSeek / 通义 / OpenAI / Claude。Cursor 耗时长，超时后仍会计费。", true);
+      return;
+    }
+    var btn = el("dg_btn_prompt_chat_send");
+    if (btn && !_dgPromptCoachSendHtml) _dgPromptCoachSendHtml = btn.innerHTML;
+    _dgPromptCoachBusy = true;
+    promptCoachSetControlsBusy(true);
+    if (btn) {
+      btn.innerHTML =
+        '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>正在等待 AI 返回…';
+    }
+    promptCoachStartWaitUi(msg);
+    promptCoachPersistNow().catch(function () {});
+    _buildPromptCoachAttachmentHints().then(function (attachmentHints) {
+      var body = {
+        message: msg,
+        history: _buildPromptCoachHistoryPayload(8),
+        attachmentHints: attachmentHints,
+        currentPrompt: (el("dg_user_prompt_append") && el("dg_user_prompt_append").value) || "",
+        provider: providerVal || null,
+        collection: (el("dg_collection") && el("dg_collection").value) || "regulations",
+        organizationId: dgCurrentOrganizationId() || null,
+        taskContext: {
+          templateNames: (function () {
+            try {
+              return selectedTemplateNames().slice(0, 8);
+            } catch (_) {
+              return [];
+            }
+          })(),
+          baseCaseId: (el("dg_base_case") && el("dg_base_case").value) || "",
+          projectMode: (el("dg_project_mode") && el("dg_project_mode").value) || "",
+          projectId: (el("dg_project_id") && el("dg_project_id").value) || "",
+          documentLanguage: (el("dg_doc_lang") && el("dg_doc_lang").value) || "",
+          draftStrategy: (el("dg_strategy") && el("dg_strategy").value) || "",
+          inplacePatch: !!(el("dg_inplace") && el("dg_inplace").value === "1"),
+        },
+      };
+      return api("/draft-gen/api/prompt-coach/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        timeoutMs: 360000,
+      });
+    }).then(function (x) {
+      promptCoachStopTimer();
+      if (!x || !x.ok || !x.json || x.json.ok === false) {
+        var fail = x && x.json && x.json.message;
+        if (fail && typeof fail !== "string") {
+          try {
+            fail = JSON.stringify(fail);
+          } catch (_) {
+            fail = "协作对话失败";
+          }
+        }
+        promptCoachDropPendingAssistant();
+        renderPromptCoachHistory();
+        promptCoachFinishProgress(false, fail || "协作对话失败");
+        promptCoachPersistSoon();
+        showMsg(fail || "协作对话失败", true);
+        return;
+      }
+      var aiText = String(x.json.answerDetail || x.json.answer || "").trim();
+      if (!aiText) {
+        promptCoachDropPendingAssistant();
+        renderPromptCoachHistory();
+        promptCoachFinishProgress(false, "AI 本轮未返回可用内容");
+        showMsg("AI 本轮未返回可用内容，请补充更具体约束后重试。", true);
+        return;
+      }
+      promptCoachDropPendingAssistant();
+      _dgPromptCoachTurns.push({
+        role: "assistant",
+        content: aiText,
+        at: Date.now(),
+        references: Array.isArray(x.json.references) ? x.json.references : [],
+      });
+      if (inp) inp.value = "";
+      var fa = el("dg_prompt_final_agreed");
+      if (fa && !String(fa.value || "").trim() && aiText) {
+        fa.value = aiText.slice(0, 12000);
+      }
+      renderPromptCoachHistory();
+      promptCoachFinishProgress(true, "本轮回复已返回");
+      promptCoachPersistNow().then(function () {
+        showMsg("本轮 AI 回复已返回（已保存，刷新后仍在）", false);
+      }).catch(function () {
+        showMsg("本轮回复已显示，但服务器保存失败。请不要关页，稍后重试发送或刷新前先点「新对话」旁确认是否已入库。", true);
+      });
+    }).catch(function (e) {
+      promptCoachStopTimer();
+      promptCoachDropPendingAssistant();
+      renderPromptCoachHistory();
+      var em = String((e && e.message) || e || "协作对话异常");
+      promptCoachFinishProgress(false, em);
+      showMsg(em, true);
+    }).finally(function () {
+      _dgPromptCoachBusy = false;
+      promptCoachSetControlsBusy(false);
+      if (btn) {
+        btn.innerHTML = _dgPromptCoachSendHtml || "发送给 AI（知识库增强）";
+      }
+    });
+  }
+
+  function adoptLastPromptCoachAnswer() {
+    var ta = el("dg_user_prompt_append");
+    if (!ta) return;
+    for (var i = _dgPromptCoachTurns.length - 1; i >= 0; i--) {
+      var t = _dgPromptCoachTurns[i];
+      if (t && !t.pending && t.role === "assistant" && String(t.content || "").trim()) {
+        var cur = String(ta.value || "").trim();
+        var add = String(t.content || "").trim();
+        ta.value = (cur ? cur + "\n\n" + add : add).slice(0, 8000);
+        showMsg("已采纳最近一轮 AI 结论到自定义提示", false);
+        return;
+      }
+    }
+    showMsg("暂无可采纳的 AI 回复", true);
+  }
+
+  function clearPromptCoachTurns() {
+    if (_dgPromptCoachBusy) {
+      showMsg("正在等待 AI 返回，请先等本轮结束。", true);
+      return;
+    }
+    promptCoachHideProgress();
+    promptCoachBlankUi(true);
+    promptCoachPersistSoon();
+    showMsg("已清空当前对话内容（历史对话仍可在下拉框中选择）", false);
+  }
+
+  function applyFinalAgreedPrompt() {
+    var src = el("dg_prompt_final_agreed");
+    var ta = el("dg_user_prompt_append");
+    if (!src || !ta) return;
+    var txt = _resolveFinalAgreedText();
+    if (!txt) {
+      showMsg("请先填写“双方一致的最终提示词”，或先完成一轮协作对话", true);
+      src.focus();
+      return;
+    }
+    src.value = txt.slice(0, 12000);
+    ta.value = txt.slice(0, 8000);
+    promptCoachPersistSoon();
+    showMsg("已将最终一致结果写入自定义提示", false);
+  }
+
+  function _defaultPromptTemplateName() {
+    var names = [];
+    try {
+      names = selectedTemplateNames();
+    } catch (_) {}
+    var head = names.length
+      ? String(names[0] || "").replace(/\.[^.]+$/, "").slice(0, 48)
+      : "协作定稿";
+    if (!head) head = "协作定稿";
+    var now = new Date();
+    var stamp =
+      now.getFullYear() +
+      "-" +
+      String(now.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(now.getDate()).padStart(2, "0") +
+      " " +
+      String(now.getHours()).padStart(2, "0") +
+      ":" +
+      String(now.getMinutes()).padStart(2, "0");
+    return (head + " · 协作定稿 " + stamp).slice(0, 128);
+  }
+
+  function _resolveFinalAgreedText() {
+    var src = el("dg_prompt_final_agreed");
+    var ta = el("dg_user_prompt_append");
+    var fromFinal = src ? String(src.value || "").trim() : "";
+    if (fromFinal) return fromFinal;
+    var fromCustom = ta ? String(ta.value || "").trim() : "";
+    if (fromCustom) return fromCustom;
+    for (var i = _dgPromptCoachTurns.length - 1; i >= 0; i--) {
+      var t = _dgPromptCoachTurns[i];
+      if (t && !t.pending && t.role === "assistant" && String(t.content || "").trim()) {
+        return String(t.content || "").trim();
+      }
+    }
+    return "";
+  }
+
+  function confirmFinalizeAndGenerate() {
+    var txt = _resolveFinalAgreedText();
+    if (!txt) {
+      showMsg("请先在协作对话中达成一致，或填写“双方一致的最终提示词”", true);
+      var src0 = el("dg_prompt_final_agreed");
+      if (src0) src0.focus();
+      return;
+    }
+    if (
+      !window.confirm(
+        "确认双方已达成一致？将依次：写回最终提示词、保存为模板、提交生成文档。"
+      )
+    ) {
+      return;
+    }
+    var src = el("dg_prompt_final_agreed");
+    var ta = el("dg_user_prompt_append");
+    if (src) src.value = txt.slice(0, 12000);
+    if (ta) ta.value = txt.slice(0, 8000);
+    var nameEl = el("dg_prompt_template_name");
+    if (nameEl && !String(nameEl.value || "").trim()) {
+      nameEl.value = _defaultPromptTemplateName();
+    }
+    if (_dgPromptCoachFiles && _dgPromptCoachFiles.length) {
+      draftMergeFiles(_dgInputFilesAccum, _dgPromptCoachFiles);
+      draftRenderFileList(_dgInputFilesAccum, "dg_input_files_list", "dg_input_files_count");
+    }
+    var btn = el("dg_btn_prompt_final_commit") || el("dg_btn_prompt_finalize_generate");
+    if (btn) btn.disabled = true;
+    savePromptTemplate({ silent: true, promptText: txt.slice(0, 8000) })
+      .then(function (ok) {
+        if (!ok) return;
+        showMsg("已定稿并保存模板，正在提交生成…", false);
+        submitJob();
+      })
+      .finally(function () {
+        if (btn) btn.disabled = false;
+      });
+  }
+
+  function _buildCoachConsensusBlock() {
+    var finalTxt = String((el("dg_prompt_final_agreed") && el("dg_prompt_final_agreed").value) || "").trim();
+    var turns = (_dgPromptCoachTurns || []).slice(-12);
+    if (!finalTxt && !turns.length) return "";
+    var lines = [];
+    lines.push("【协作对话沉淀】");
+    if (turns.length) {
+      lines.push("对话摘录:");
+      turns.forEach(function (t) {
+        var who = t.role === "assistant" ? "AI" : "用户";
+        lines.push(who + "：" + String(t.content || "").trim().slice(0, 300));
+      });
+    }
+    if (finalTxt) {
+      lines.push("最终一致提示词:");
+      lines.push(finalTxt);
+    }
+    return lines.join("\n");
+  }
+
   var DG_STATUS_ZH = {
     pending: "排队中",
     queued: "排队中",
@@ -1357,19 +2502,28 @@
       if (n) prev[n] = !!inp.checked;
     });
     box.innerHTML = "";
-    if (!templates || !templates.length) {
+    var trained = (templates || []).filter(function (row) {
+      return row && String(row.id != null ? row.id : "").trim();
+    });
+    if (!trained.length && !_dgExtraTemplateNames.length) {
       const p = document.createElement("p");
       p.className = "text-muted small mb-0";
-      p.textContent = "请先选择「模板项目案例」并刷新列表；无模板文件名时此处为空。";
+      p.textContent = "暂无已训练模板。可不选，直接上传参考文件作为模板；或在下方添加未训练的新文件名。";
       box.appendChild(p);
+    }
+    trained.forEach(function (row, idx) {
+      row.__tplOrder = idx;
+    });
+    var extraRows = (_dgExtraTemplateNames || []).map(function (nm) {
+      return { id: nm, label: nm + "（未训练）", diskBaseAvailable: false, extra: true };
+    });
+    var combined = trained.concat(extraRows);
+    if (!combined.length) {
       applyTemplateCheckboxFilter();
       updateTemplateSelectionSummary();
       return;
     }
-    templates.forEach(function (row, idx) {
-      row.__tplOrder = idx;
-    });
-    var ordered = templates.slice().sort(function (a, b) {
+    var ordered = combined.slice().sort(function (a, b) {
       var na = String(a.id != null ? a.id : "").trim();
       var nb = String(b.id != null ? b.id : "").trim();
       var ca = !!prev[na];
@@ -1390,8 +2544,10 @@
       inp.value = name;
       inp.setAttribute("data-template-name", name);
       inp.setAttribute("data-disk-base", row.diskBaseAvailable === false ? "0" : "1");
-      inp.checked = !!prev[name];
-      inp.disabled = !!disabledAll;
+      var isExtra = !!row.extra;
+      if (isExtra) inp.setAttribute("data-template-extra", "1");
+      inp.checked = isExtra ? prev[name] !== false : !!prev[name];
+      inp.disabled = !!disabledAll && !isExtra;
       inp.addEventListener("change", function () {
         updateBaseRequirementUI();
         reorderTemplateCheckboxesSelectedFirst();
@@ -1400,9 +2556,27 @@
       const lbl = document.createElement("label");
       lbl.className = "form-check-label";
       lbl.htmlFor = inp.id;
-      lbl.textContent = lab + (row.diskBaseAvailable === false ? "（服务器无原件，需上传 Base）" : "");
+      lbl.textContent = isExtra
+        ? lab
+        : lab + (row.diskBaseAvailable === false ? "（服务器无原件，需上传 Base）" : "");
       wrap.appendChild(inp);
       wrap.appendChild(lbl);
+      if (isExtra) {
+        var rm = document.createElement("button");
+        rm.type = "button";
+        rm.className = "btn btn-sm btn-link text-danger p-0 ms-2";
+        rm.textContent = "移除";
+        rm.addEventListener("click", function () {
+          _dgExtraTemplateNames = (_dgExtraTemplateNames || []).filter(function (n) {
+            return n !== name;
+          });
+          rebuildTemplateCheckboxes(
+            (lastBootstrap && lastBootstrap.templates) || [],
+            (el("dg_template_scope") && el("dg_template_scope").value) === "all"
+          );
+        });
+        wrap.appendChild(rm);
+      }
       box.appendChild(wrap);
     });
     applyTemplateCheckboxFilter();
@@ -2157,6 +3331,18 @@
     const isNewFromPage1 = pm.value === "new";
     if (wrap) wrap.style.display = isExisting ? "" : "none";
     if (wrapPage1) wrapPage1.style.display = isNewFromPage1 ? "" : "none";
+    var reqPid = el("dg_req_project_id");
+    if (reqPid) reqPid.classList.toggle("d-none", !isExisting);
+    var selPid = el("dg_project_id");
+    if (selPid) {
+      if (isExisting) selPid.setAttribute("required", "required");
+      else selPid.removeAttribute("required");
+      selPid.setAttribute("aria-required", isExisting ? "true" : "false");
+    }
+    var reqP1 = el("dg_req_page1_project");
+    if (reqP1) reqP1.classList.toggle("d-none", !isNewFromPage1);
+    var selP1 = el("dg_page1_project_id");
+    if (selP1) selP1.setAttribute("aria-required", isNewFromPage1 ? "true" : "false");
     if (isNewFromPage1) {
       loadSourceProjectsForDraft();
     }
@@ -2203,11 +3389,14 @@
     _dgBaseCaseUserTouched = false;
     _dgLinkedAcwProjectId = 0;
     _dgPendingSelectProjectId = 0;
+    _dgCoachSessionId = "";
+    _dgCoachList = [];
     updatePage1AcwLinkedLabel();
     updatePage1CreateBtnState();
-    return userRefreshDraftBootstrap("正在切换所属公司并刷新列表…").then(function () {
-      return loadJobList();
-    });
+    return userRefreshDraftBootstrap("正在切换所属公司并刷新列表…")
+      .then(function () {
+        return Promise.all([loadJobList(), loadPromptTemplates(true)]);
+      });
   }
 
   function loadDraftBootstrap(opts) {
@@ -2293,7 +3482,7 @@
         if (disp2) disp2.textContent = collEl.value;
       }
 
-      fillSelectThenCache("dg_base_case", b.cases || [], "id", "label", { value: "", label: "（请选择模板项目案例）" });
+      fillSelectThenCache("dg_base_case", b.cases || [], "id", "label", { value: "", label: "（可不选：无训练模板时留空）" });
       if (bcRaw && bcEl) {
         const ids = (b.cases || []).map(function (c) { return String(c.id); });
         if (ids.indexOf(bcRaw) >= 0) bcEl.value = bcRaw;
@@ -2484,6 +3673,44 @@
     });
   }
 
+  function addExtraTemplateName() {
+    var inp = el("dg_template_extra_name");
+    var raw = inp ? String(inp.value || "").trim() : "";
+    if (!raw) {
+      showMsg("请输入要新增的模板文件名", true);
+      return;
+    }
+    raw = raw.replace(/[\\/]/g, "").trim();
+    if (!raw) return;
+    if (!/\.[A-Za-z0-9]{2,8}$/.test(raw)) raw += ".docx";
+    var trained = ((lastBootstrap && lastBootstrap.templates) || [])
+      .map(function (t) { return String(t.id || "").trim(); })
+      .filter(Boolean);
+    if (trained.indexOf(raw) >= 0) {
+      var box = el("dg_template_files_box");
+      if (box) {
+        box.querySelectorAll("input[data-template-name]").forEach(function (cb) {
+          if ((cb.getAttribute("data-template-name") || "") === raw) cb.checked = true;
+        });
+      }
+      if (inp) inp.value = "";
+      updateTemplateSelectionSummary();
+      showMsg("该名称已在训练模板中，已勾选。", false);
+      return;
+    }
+    if ((_dgExtraTemplateNames || []).indexOf(raw) >= 0) {
+      showMsg("该文件名已添加", true);
+      return;
+    }
+    _dgExtraTemplateNames.push(raw);
+    if (inp) inp.value = "";
+    rebuildTemplateCheckboxes(
+      (lastBootstrap && lastBootstrap.templates) || [],
+      (el("dg_template_scope") && el("dg_template_scope").value) === "all"
+    );
+    showMsg("已添加未训练模板文件名：" + raw, false);
+  }
+
   function selectedTemplateNames() {
     const box = el("dg_template_files_box");
     if (!box) return [];
@@ -2537,7 +3764,7 @@
     var names = selectedTemplateNames();
     if (!names.length) {
       outEl.textContent =
-        "当前未勾选任何模板文件。勾选后，该项会自动移到列表上方，并在此处汇总已选文件名。";
+        "当前未勾选训练模板：将按参考文件生成（参考文件即模板）。也可添加未训练的新文件名。";
       return;
     }
     var maxShow = 8;
@@ -2555,15 +3782,20 @@
     const bc = parseInt(el("dg_base_case").value.trim() || "0", 10) || 0;
     const scope = (el("dg_template_scope") && el("dg_template_scope").value) || "selected";
     const tplList = (lastBootstrap && lastBootstrap.templates) ? lastBootstrap.templates.map(function (t) { return t.id; }) : [];
+    const trainedSet = {};
+    tplList.forEach(function (n) {
+      var s = String(n || "").trim();
+      if (s) trainedSet[s] = true;
+    });
 
     let names = [];
     if (scope === "all") {
       names = tplList.slice();
+      (_dgExtraTemplateNames || []).forEach(function (n) {
+        if (n && names.indexOf(n) < 0) names.push(n);
+      });
     } else {
       names = selectedTemplateNames();
-    }
-    if (scope === "selected" && !names.length && tplList.length) {
-      throw new Error("请至少勾选一个模板文件，或改为「该案例下全部模板文件」。");
     }
 
     var providerVal = ((el("dg_provider") && el("dg_provider").value) || "").trim();
@@ -2576,7 +3808,7 @@
       inplace_patch: el("dg_inplace").value === "1",
       save_as_case: el("dg_save_case").value === "1",
       multi_base_auto_route: el("dg_multi_route").value === "1",
-      draft_strategy: el("dg_strategy").value.trim() || "change",
+      draft_strategy: el("dg_strategy").value.trim() || "reuse",
       docx_track_changes: el("dg_docx_track").value === "1",
       persist_project_fields: false,
     };
@@ -2599,7 +3831,11 @@
       payload.project_id = _dgLinkedAcwProjectId;
     }
 
-    if (names.length) payload.template_file_names = names;
+    payload.template_file_names = names;
+    var hasTrained = names.some(function (n) { return !!trainedSet[n]; });
+    if (!names.length || !hasTrained) {
+      payload.skip_case_template_text = true;
+    }
 
     const extra = (el("dg_payload_extra").value || "").trim();
     if (extra) {
@@ -2614,7 +3850,22 @@
     }
     var uapEl = el("dg_user_prompt_append");
     var uap = uapEl ? String(uapEl.value || "").trim() : "";
-    if (uap) payload.user_prompt_append = uap.slice(0, 8000);
+    var coachBlock = _buildCoachConsensusBlock();
+    var mergedPrompt = uap;
+    if (coachBlock) {
+      mergedPrompt = mergedPrompt ? (mergedPrompt + "\n\n" + coachBlock) : coachBlock;
+    }
+    if (mergedPrompt) payload.user_prompt_append = mergedPrompt.slice(0, 8000);
+    var ptSel = el("dg_prompt_template_id");
+    if (ptSel && ptSel.value) {
+      var tid = String(ptSel.value || "").trim();
+      if (tid) {
+        payload.user_prompt_template_id = tid;
+        if (_dgPromptTemplateMap[tid] && _dgPromptTemplateMap[tid].name) {
+          payload.user_prompt_template_name = String(_dgPromptTemplateMap[tid].name || "");
+        }
+      }
+    }
     return payload;
   }
 
@@ -2791,8 +4042,10 @@
       return;
     }
     if (!payload.base_case_id) {
-      showMsg("请选择「模板项目案例」后再提交。", true);
-      return;
+      if (!_dgInputFilesAccum.length) {
+        showMsg("未选择模板案例时，请至少上传一个参考文件作为模板。", true);
+        return;
+      }
     }
     var projMode = el("dg_project_mode") && el("dg_project_mode").value;
     if (projMode === "new" && !_dgLinkedAcwProjectId) {
@@ -3013,6 +4266,10 @@
       if (snap.document_language && el("dg_doc_lang")) el("dg_doc_lang").value = snap.document_language;
       if (snap.collection && el("dg_collection")) el("dg_collection").value = snap.collection;
       if (snap.inplace_patch != null && el("dg_inplace")) el("dg_inplace").value = snap.inplace_patch ? "1" : "0";
+      if (snap.user_prompt_template_id && el("dg_prompt_template_id")) {
+        el("dg_prompt_template_id").value = String(snap.user_prompt_template_id);
+        onPromptTemplateSelected();
+      }
       var tplNames = x.json.templateNames || snap.template_file_names || [];
       if (Array.isArray(tplNames) && tplNames.length) {
         if (el("dg_template_scope")) el("dg_template_scope").value = "selected";
@@ -3167,6 +4424,48 @@
     if (b1) b1.addEventListener("click", saveLlmSettings);
     var b1t = el("dg_btn_test_llm");
     if (b1t) b1t.addEventListener("click", testLlmSettings);
+    var ptSel = el("dg_prompt_template_id");
+    if (ptSel) ptSel.addEventListener("change", onPromptTemplateSelected);
+    var bPs = el("dg_btn_prompt_save");
+    if (bPs) bPs.addEventListener("click", savePromptTemplate);
+    var bPr = el("dg_btn_prompt_refresh");
+    if (bPr) bPr.addEventListener("click", function () { loadPromptTemplates(false); });
+    var bPd = el("dg_btn_prompt_delete");
+    if (bPd) bPd.addEventListener("click", deletePromptTemplate);
+    var bPa = el("dg_btn_prompt_apply_append");
+    if (bPa) bPa.addEventListener("click", function () { applyPromptTemplate("append"); });
+    var bPp = el("dg_btn_prompt_apply_replace");
+    if (bPp) bPp.addEventListener("click", function () { applyPromptTemplate("replace"); });
+    var bPn = el("dg_btn_prompt_append_note");
+    if (bPn) bPn.addEventListener("click", appendPromptIterationNote);
+    var bChatSend = el("dg_btn_prompt_chat_send");
+    if (bChatSend) bChatSend.addEventListener("click", sendPromptCoachMessage);
+    var bChatAdopt = el("dg_btn_prompt_chat_adopt_last");
+    if (bChatAdopt) bChatAdopt.addEventListener("click", adoptLastPromptCoachAnswer);
+    var bChatClear = el("dg_btn_prompt_chat_clear");
+    if (bChatClear) bChatClear.addEventListener("click", clearPromptCoachTurns);
+    var bChatNew = el("dg_btn_prompt_chat_new");
+    if (bChatNew) bChatNew.addEventListener("click", startNewPromptCoachSession);
+    var bChatDel = el("dg_btn_prompt_chat_delete");
+    if (bChatDel) bChatDel.addEventListener("click", deleteCurrentPromptCoachSession);
+    var chatSess = el("dg_prompt_chat_session");
+    if (chatSess && chatSess.getAttribute("data-dg-wired") !== "1") {
+      chatSess.setAttribute("data-dg-wired", "1");
+      chatSess.addEventListener("change", onPromptCoachSessionSelectChange);
+    }
+    var bFinalApply = el("dg_btn_prompt_final_apply");
+    if (bFinalApply) bFinalApply.addEventListener("click", applyFinalAgreedPrompt);
+    var bFinalCommit = el("dg_btn_prompt_final_commit") || el("dg_btn_prompt_finalize_generate");
+    if (bFinalCommit) bFinalCommit.addEventListener("click", confirmFinalizeAndGenerate);
+    wirePromptCoachFiles();
+    renderPromptCoachHistory();
+    ["dg_prompt_final_agreed", "dg_user_prompt_append"].forEach(function (id) {
+      var n = el(id);
+      if (!n || n.getAttribute("data-dg-coach-persist") === "1") return;
+      n.setAttribute("data-dg-coach-persist", "1");
+      n.addEventListener("change", promptCoachPersistSoon);
+      n.addEventListener("blur", promptCoachPersistSoon);
+    });
     var b2 = el("dg_btn_refresh_bootstrap");
     if (b2) {
       b2.addEventListener("click", function () {
@@ -3181,6 +4480,17 @@
     if (tall) tall.addEventListener("click", function () { setTemplateCheckboxesAll(true); });
     var tnone = el("dg_btn_tpl_none");
     if (tnone) tnone.addEventListener("click", function () { setTemplateCheckboxesAll(false); });
+    var textra = el("dg_btn_template_extra_add");
+    if (textra) textra.addEventListener("click", addExtraTemplateName);
+    var textraInp = el("dg_template_extra_name");
+    if (textraInp) {
+      textraInp.addEventListener("keydown", function (ev) {
+        if (ev && ev.key === "Enter") {
+          ev.preventDefault();
+          addExtraTemplateName();
+        }
+      });
+    }
     var b3 = el("dg_btn_submit");
     if (b3) b3.addEventListener("click", submitJob);
     var b4 = el("dg_btn_download");
@@ -3270,7 +4580,16 @@
   }
 
   function loadDraftGenData() {
-    return Promise.all([loadLlmSettings(), loadJobList(), loadDraftBootstrap()]);
+    return Promise.all([loadLlmSettings(), loadJobList()])
+      .then(function () {
+        return loadDraftBootstrap();
+      })
+      .then(function () {
+        return loadPromptTemplates(true);
+      })
+      .then(function () {
+        return promptCoachRestore();
+      });
   }
 
   function bootDraftGenPage() {
