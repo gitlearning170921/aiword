@@ -4480,6 +4480,103 @@ def _aiprintword_batch_handoff_redirect(mode: str, upload_ids: list[str]) -> tup
     }, 200
 
 
+def _aiprintword_one_sign_json(upload_id: str) -> tuple[dict[str, Any], int]:
+    """单条任务交接签字工作台，返回与批量交接相同的 JSON。"""
+    from .app_settings import get_setting
+    import requests as _req
+
+    uid = (upload_id or "").strip()
+    upload_row = UploadRecord.query.get(uid) if uid else None
+    if not upload_row:
+        return {"ok": False, "error": "任务不存在"}, 404
+    if not _can_access_upload_template(upload_row):
+        return {"ok": False, "error": f"无权交接该任务：{upload_row.file_name or uid}"}, 403
+
+    raw, fname, err, reuse_ftp = _resolve_handoff_doc_for_print_sign(uid, mode="sign")
+    fname = _normalize_handoff_display_filename(fname or "document.docx")
+    reuse_ok = (reuse_ftp or "").strip()
+    if err or (raw is None and not reuse_ok):
+        return {
+            "ok": False,
+            "error": err or "无法读取文档",
+            "failures": [
+                {
+                    "upload_id": uid,
+                    "file_name": upload_row.file_name or "",
+                    "error": err or "无法读取文档",
+                }
+            ],
+        }, 400
+
+    base = (get_setting("AIPRINTWORD_BASE_URL") or "").strip().rstrip("/")
+    secret = (get_setting("AIPRINTWORD_HANDOFF_SECRET") or "").strip()
+    if not base or not secret:
+        return {
+            "ok": False,
+            "error": "请在系统配置中填写 AIPRINTWORD_BASE_URL 与 AIPRINTWORD_HANDOFF_SECRET",
+        }, 503
+
+    handoff_ctx = _build_aiprintword_handoff_context(upload_row)
+    post_data: dict[str, str] = {"purpose": "sign", "filename": fname}
+    if handoff_ctx:
+        post_data["handoff_context"] = json.dumps(handoff_ctx, ensure_ascii=False)
+    url = f"{base}/api/handoff"
+    try:
+        if reuse_ok:
+            post_data["reuse_ftp_path"] = reuse_ok
+            r = _req.post(
+                url,
+                headers={"X-Aiword-Handoff-Secret": secret},
+                data=post_data,
+                timeout=120,
+            )
+        else:
+            r = _req.post(
+                url,
+                headers={"X-Aiword-Handoff-Secret": secret},
+                files={"file": (fname, raw or b"")},
+                data=post_data,
+                timeout=120,
+            )
+    except _req.RequestException as e:
+        return {"ok": False, "error": f"连接 aiprintword 失败：{e}"}, 502
+    if r.status_code != 200:
+        return {"ok": False, "error": f"aiprintword 返回 HTTP {r.status_code}"}, 502
+    try:
+        payload = r.json()
+    except Exception:
+        return {"ok": False, "error": "aiprintword 返回非 JSON"}, 502
+    if not payload.get("ok"):
+        return {"ok": False, "error": str(payload.get("error") or "unknown")}, 502
+    token = (payload.get("token") or "").strip()
+    if not token:
+        return {"ok": False, "error": "未返回 token"}, 502
+    return {
+        "ok": True,
+        "redirect_url": f"{base}/sign?from=aiword&handoff_token={_urlquote(token)}",
+        "success_count": 1,
+        "failure_count": 0,
+        "failures": [],
+    }, 200
+
+
+def aiprintword_sign_handoff_payload(upload_ids: list[str]) -> tuple[dict[str, Any], int]:
+    """一条走单文件交接，多条走批量交接。交互与页面1「去签字 / 批量去签字」相同。"""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw in upload_ids or []:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        ids.append(sid)
+    if not ids:
+        return {"ok": False, "error": "没有可交接的任务"}, 400
+    if len(ids) == 1:
+        return _aiprintword_one_sign_json(ids[0])
+    return _aiprintword_batch_handoff_redirect("sign", ids)
+
+
 def _build_option_tree(records: list[UploadRecord]) -> list[dict[str, Any]]:
     projects: dict[str, dict[str, Any]] = {}
     for record in records:

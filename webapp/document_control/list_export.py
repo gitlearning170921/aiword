@@ -94,6 +94,11 @@ def _is_live_preview_row(row: Any) -> bool:
         return False
     if normalize_record_status(row.get("recordStatus")) == "discard":
         return False
+    if str(row.get("listRegion") or "").strip() == "registration":
+        return False
+    chapter = str(row.get("chapter") or row.get("processBranchLabel") or "").strip()
+    if chapter == "注册文件":
+        return False
     return bool(_display_name(row.get("fileName")))
 
 

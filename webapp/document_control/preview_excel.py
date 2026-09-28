@@ -45,11 +45,18 @@ def _preview_cell_text(item: dict[str, Any], key: str, seq: int) -> str:
     if key == "seq":
         return str(seq)
     if key == "recordStatus":
+        if str(item.get("listRegion") or "").strip() == "registration" or str(
+            item.get("chapter") or ""
+        ).strip() == "注册文件":
+            raw_submit = str(item.get("submissionStatus") or "").strip().lower()
+            if raw_submit in {"submitted", "1", "true", "yes", "已递交"}:
+                return "已递交"
+            return "未递交"
         raw = str(item.get("recordStatus") or "").strip().lower()
         return _RECORD_STATUS_LABELS.get(raw) or (str(item.get("recordStatus") or "").strip() or "选用")
     if key == "applied":
         raw = str(item.get("applied") or "").strip().lower()
-        return _APPLIED_LABELS.get(raw, "")
+        return _APPLIED_LABELS.get(raw) or "未下发"
     if key == "isSystemRecord":
         raw = item.get("isSystemRecord")
         if raw in {True, 1, "1", "true", "yes", "是"}:

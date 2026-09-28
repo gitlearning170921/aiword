@@ -2516,6 +2516,10 @@ def api_version_task_apply():
         if str(row.get("changeKind") or "").strip().lower() == "delete":
             skipped_status += 1
             continue
+        if str(row.get("listRegion") or "").strip() == "registration" or str(
+            row.get("chapter") or row.get("processBranchLabel") or ""
+        ).strip() == "注册文件":
+            continue
         if not str(row.get("fileName") or "").strip():
             continue
         issue_items.append(row)
@@ -2609,6 +2613,8 @@ def api_version_task_apply():
     updated = 0
     skipped_exist = 0
     upload_ids: list[str] = []
+    sign_upload_ids: list[str] = []
+    refresh_signoff = bool(payload.get("refreshSignoff"))
     issued_items: list[dict[str, str]] = []
     issued_keys: set[str] = set()
     by_version: dict[str, dict[str, int]] = {}
@@ -2680,6 +2686,16 @@ def api_version_task_apply():
                 skipped_exist += 1
                 _bump_apply_version(target_version, "skippedExist")
                 _remember_issued(file_name, task_type, author, target_version)
+                if refresh_signoff:
+                    existing.displayed_author = displayed_author
+                    existing.reviewer = reviewer
+                    existing.approver = approver
+                    existing.document_display_date = document_display_date
+                    existing.document_number = str(row.get("documentNumber") or "").strip() or None
+                    existing.file_version = str(row.get("fileVersion") or "").strip() or None
+                    db.session.add(existing)
+                if existing.id:
+                    sign_upload_ids.append(existing.id)
                 continue
             existing.organization_id = org_id
             existing.project_id = project.id
@@ -2703,6 +2719,7 @@ def api_version_task_apply():
             _apply_project_layer_fields(existing, project_layer)
             db.session.add(existing)
             upload_ids.append(existing.id)
+            sign_upload_ids.append(existing.id)
             updated += 1
             _bump_apply_version(target_version, "updated")
             _remember_issued(file_name, task_type, author, target_version)
@@ -2734,6 +2751,7 @@ def api_version_task_apply():
             db.session.flush()
             _ensure_generation_summary(created_row)
             upload_ids.append(created_row.id)
+            sign_upload_ids.append(created_row.id)
             created += 1
             _bump_apply_version(target_version, "created")
             _remember_issued(file_name, task_type, author, target_version)
@@ -2750,6 +2768,7 @@ def api_version_task_apply():
             "skippedStatus": skipped_status,
             "applyMode": apply_mode,
             "uploadIds": upload_ids,
+            "signUploadIds": sign_upload_ids,
             "issued": issued,
             "projectId": project.id,
             "projectName": project_label,
@@ -2795,12 +2814,171 @@ def api_version_task_apply():
             "skippedStatus": skipped_status,
             "applyMode": apply_mode,
             "uploadIds": upload_ids,
+            "signUploadIds": sign_upload_ids,
             "issued": issued,
             "projectId": project.id,
             "projectName": project_label,
             "byTargetVersion": version_stats,
             "issuedItems": issued_items,
             "message": f"已{mode_label}下发到任务列表：新增 {created} 条，更新 {updated} 条{extra_text}",
+        }
+    )
+
+
+def _public_sign_handoff_error(text: str) -> str:
+    """签字交接错误：超管保留原文，其余账号不出现服务名与配置键。"""
+    from webapp.user_facing import integration_error_message, user_sees_debug_messaging
+
+    raw = (text or "").strip() or "无法打开签字工作台"
+    if user_sees_debug_messaging():
+        return raw
+    lowered = raw.lower()
+    if "aiprintword" in lowered or "handoff" in lowered or "AIPRINTWORD" in raw:
+        if any(key in raw for key in ("未配置", "SECRET", "BASE_URL")):
+            return "签字服务未配置，请联系管理员"
+        return "无法打开签字工作台，请联系管理员"
+    if any(key in raw for key in ("无已生成", "无法读取文档", "模板文件不可用", "不支持签字", "无法加载模板")):
+        return "所选任务还没有可签字的文件，请先在任务列表上传模板或生成文档"
+    return integration_error_message(raw)
+
+
+@document_control_bp.post("/api/document-control/version-tasks/handoff-sign")
+def api_version_task_handoff_sign():
+    """版本任务清单下发到文件签字工作台，交互与项目管理「去签字」相同。"""
+    blocked = _require_feature()
+    if blocked is not None:
+        return blocked
+    wall = login_wall()
+    if wall is not None:
+        return wall
+    from webapp.app_settings import is_effective_feature_enabled
+    from webapp.user_facing import user_facing_text
+
+    if not is_effective_feature_enabled("FEATURE_PAGE1_SIGN"):
+        return jsonify(
+            {
+                "message": user_facing_text(
+                    "「页面1 · 去签字」功能未对本账号开放（请确认系统配置已开启，且账号未被单独禁止）",
+                    "签字功能未开放，请联系管理员",
+                )
+            }
+        ), 403
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        return jsonify({"message": "请先选择项目再下发到签字工作台"}), 400
+    project = Project.query.filter_by(id=project_id).first()
+    if not project:
+        return jsonify({"message": "未找到所选项目"}), 404
+    org_id, _ = _org_context()
+    if project.organization_id and str(project.organization_id).strip() != org_id:
+        return jsonify({"message": "所选项目不在当前公司作用域内"}), 403
+    if rbac_enforced() and not project_in_scope(project):
+        return jsonify({"message": "没有该项目权限"}), 403
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"message": "请勾选至少一条「选用」记录。下发签字不会新建任务。"}), 400
+
+    issue_items: list[dict[str, Any]] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("listRegion") or "").strip() == "registration" or str(
+            row.get("chapter") or row.get("processBranchLabel") or ""
+        ).strip() == "注册文件":
+            continue
+        if normalize_record_status(row.get("recordStatus")) != "adopt":
+            continue
+        if str(row.get("changeKind") or "").strip().lower() == "delete":
+            continue
+        if not str(row.get("fileName") or "").strip():
+            continue
+        issue_items.append(row)
+    if not issue_items:
+        return jsonify(
+            {"message": "没有可下发到签字工作台的选用记录。注册文件不参与签字，且不会新建任务。"}
+        ), 400
+
+    missing: list[str] = []
+    upload_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for row in expand_preview_items_by_author(issue_items):
+        file_name = str(row.get("fileName") or "").strip()
+        author = str(row.get("author") or "").strip() or "待分配"
+        task_type = str(row.get("taskType") or "").strip() or DEFAULT_VERSION_TASK_TYPE
+        target_version = normalize_target_version(row.get("targetVersion") or row.get("registrationVersion"))
+        existing = find_upload_task_duplicate_for_project(
+            project=project,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+            target_version=target_version,
+        )
+        label = file_name or "未命名"
+        if author and author != "待分配":
+            label = f"{label}（{author}）"
+        if existing is None or not getattr(existing, "id", None):
+            missing.append(label)
+            continue
+        uid = str(existing.id)
+        if uid not in seen_ids:
+            seen_ids.add(uid)
+            upload_ids.append(uid)
+    if missing:
+        shown = "、".join(missing[:8])
+        extra = f"等共 {len(missing)} 条" if len(missing) > 8 else ""
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    f"以下记录还没有对应任务，无法打开签字工作台：{shown}{extra}。"
+                    "请先使用「确认下发到任务列表」。下发签字不会新建或修改任务。"
+                ),
+            }
+        ), 400
+    if not upload_ids:
+        return jsonify({"ok": False, "message": "没有可交接的已有任务。下发签字不会新建任务。"}), 400
+
+    from webapp.routes import aiprintword_sign_handoff_payload
+
+    body, status = aiprintword_sign_handoff_payload(upload_ids)
+    if not body.get("ok"):
+        message = _public_sign_handoff_error(str(body.get("error") or body.get("message") or ""))
+        return jsonify(
+            {
+                "ok": False,
+                "message": message,
+                **api_debug_fields(detail=body.get("error"), failures=body.get("failures")),
+            }
+        ), status
+    failures = body.get("failures") if isinstance(body.get("failures"), list) else []
+    fail_bits: list[str] = []
+    for item in failures[:8]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("file_name") or "").strip()
+        err = _public_sign_handoff_error(str(item.get("error") or ""))
+        fail_bits.append(f"{name}：{err}" if name else err)
+    if fail_bits:
+        return jsonify(
+            {
+                "ok": False,
+                "message": "无法打开签字工作台：" + "；".join(fail_bits),
+                **api_debug_fields(failures=failures or None),
+            }
+        ), 400
+    message = "正在打开签字工作台"
+    redirect_url = str(body.get("redirect_url") or "").strip()
+    if not redirect_url:
+        return jsonify({"ok": False, "message": "无法打开签字工作台"}), 502
+    return jsonify(
+        {
+            "ok": True,
+            "redirectUrl": redirect_url,
+            "successCount": int(body.get("success_count") or 0),
+            "failureCount": int(body.get("failure_count") or len(failures)),
+            "message": message,
+            **api_debug_fields(failures=failures or None),
         }
     )
 

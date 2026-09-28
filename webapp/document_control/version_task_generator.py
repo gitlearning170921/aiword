@@ -1333,6 +1333,7 @@ CHANGE_FIELD_LABELS = {
     "explanation": "说明",
     "notes": "备注",
     "recordStatus": "状态",
+    "submissionStatus": "递交状态",
     "chapter": "章节分类",
     "isSystemRecord": "体系记录",
 }
@@ -1360,6 +1361,10 @@ def summarize_item_diff(
         if key == "recordStatus":
             left = RECORD_STATUS_LABELS.get(normalize_record_status(left), left)
             right = RECORD_STATUS_LABELS.get(normalize_record_status(right), right)
+        if key == "submissionStatus":
+            labels = {"submitted": "已递交", "pending": "未递交"}
+            left = labels.get(left, left)
+            right = labels.get(right, right)
         if key == "chapter":
             left = left or str(before.get("processBranchLabel") or "").strip()
             right = right or str(after.get("processBranchLabel") or "").strip()

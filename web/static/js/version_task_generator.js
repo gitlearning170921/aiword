@@ -7,15 +7,23 @@
 
   function toast(msg, level) {
     const lv = level || "info";
+    const text = String(msg || "").trim();
+    if (lv !== "info") {
+      const applyMsg = document.getElementById("vtgApplyMsg");
+      if (applyMsg) {
+        applyMsg.textContent = text;
+        applyMsg.classList.toggle("text-danger", lv === "danger" || lv === "warning");
+        applyMsg.classList.toggle("text-muted", lv !== "danger" && lv !== "warning");
+      }
+    }
     if (lv === "info") {
-      note(msg);
+      note(text);
       return;
     }
+    note(text);
     if (window.showPageToast) {
-      window.showPageToast(msg, lv);
-      return;
+      window.showPageToast(text, lv);
     }
-    note(msg);
   }
 
   function note(msg) {
@@ -94,6 +102,7 @@
     previewSelectHint: byId("vtgPreviewSelectHint"),
     previewHeadCheck: byId("vtgPreviewHeadCheck"),
     applyBtn: byId("vtgApplyBtn"),
+    applySignBtn: byId("vtgApplySignBtn"),
     exportSystemListBtn: byId("vtgExportSystemListBtn"),
     exportSystemListModal: byId("vtgExportSystemListModal"),
     exportSystemListCancel: byId("vtgExportSystemListCancel"),
@@ -165,6 +174,7 @@
   let rulePreviewItems = [];
   let previewItems = [];
   let previewVersionFilter = "";
+  let previewAddRegion = "";
   const previewCollapsedVersions = new Set();
   const previewSelectedKeys = new Set();
   let previewSelectionPersistMuted = false;
@@ -223,11 +233,13 @@
   let previewColDragOrigin = null;
   let previewColSuppressSort = false;
   const PREVIEW_VISIBLE_ROWS = 10;
+  const REGISTRATION_CHAPTER = "注册文件";
   const PREVIEW_CHAPTER_ORDER = [
     "软件变更管理",
     "系统追溯",
     "缺陷管理",
     "软件生产/发布管理",
+    REGISTRATION_CHAPTER,
   ];
   const COLLECTION_PAGE_SIZE = 20;
   let previewRulesOpen = false;
@@ -255,6 +267,7 @@
     explanation: "说明",
     notes: "备注",
     recordStatus: "状态",
+    submissionStatus: "递交状态",
     chapter: "章节分类",
     isSystemRecord: "体系记录",
   };
@@ -872,8 +885,10 @@
       item.documentNumber = val("documentNumber");
       item.fileVersion = val("fileVersion");
       item.taskType = val("taskType");
-      item.targetVersion = val("targetVersion");
-      item.registrationVersion = val("targetVersion") || item.registrationVersion;
+      const nextVersion = val("targetVersion");
+      item.targetVersion = nextVersion;
+      if (isRegistrationPreviewItem(item)) item.registrationVersion = nextVersion;
+      else item.registrationVersion = nextVersion || item.registrationVersion;
       item.author = val("author");
       item.displayedAuthor = val("displayedAuthor");
       item.reviewer = val("reviewer");
@@ -883,7 +898,10 @@
       item.belongingModule = val("belongingModule");
       item.explanation = val("explanation");
       item.notes = val("notes");
-      item.recordStatus = recordStatusOf({ recordStatus: val("recordStatus") });
+      const statusEl = row.querySelector('[data-vtg-field="recordStatus"]');
+      if (statusEl) item.recordStatus = recordStatusOf({ recordStatus: statusEl.value });
+      const submissionEl = row.querySelector('[data-vtg-field="submissionStatus"]');
+      if (submissionEl) item.submissionStatus = submissionStatusOf(submissionEl.value);
       const sysEl = row.querySelector('[data-vtg-field="isSystemRecord"]');
       if (sysEl) item.isSystemRecord = Boolean(sysEl.checked);
       const reasonEl = row.querySelector('[data-vtg-field="changeReason"]');
@@ -919,6 +937,59 @@
     return `<label class="vtg-system-check"><input type="checkbox" class="form-check-input" data-vtg-field="isSystemRecord"${
       on ? " checked" : ""
     }${disabled ? " disabled" : ""} title="勾选表示为质量管理体系记录"><span>${on ? "是" : "否"}</span></label>`;
+  }
+
+  function isRegistrationPreviewItem(item) {
+    if (!item) return false;
+    if (String(item.listRegion || "").trim() === "registration") return true;
+    return previewChapterKey(item) === REGISTRATION_CHAPTER;
+  }
+
+  function countRegistrationItems() {
+    return previewItems.filter((item) => {
+      if (!isRegistrationPreviewItem(item) || isHiddenPreviewItem(item)) return false;
+      if (typeof itemMatchesColFilters === "function" && !itemMatchesColFilters(item)) return false;
+      if (previewVersionFilter && previewVersionKey(item) !== previewVersionFilter) return false;
+      return true;
+    }).length;
+  }
+
+  function registrationCountText() {
+    const n = countRegistrationItems();
+    if (!n) {
+      if (!previewVersionFilter) return "";
+      const hasAny = previewItems.some(
+        (item) => isRegistrationPreviewItem(item) && !isHiddenPreviewItem(item)
+      );
+      return hasAny ? " · 注册文件 0" : "";
+    }
+    return ` · 注册文件 ${n}`;
+  }
+
+  function submissionStatusOf(value) {
+    const key = String(value == null ? "" : value).trim().toLowerCase();
+    if (key === "submitted" || key === "1" || key === "true" || key === "yes" || key === "已递交" || key === "递交") {
+      return "submitted";
+    }
+    return "pending";
+  }
+
+  function submissionStatusLabel(item) {
+    return submissionStatusOf(item && item.submissionStatus) === "submitted" ? "已递交" : "未递交";
+  }
+
+  function submissionStatusSelectHtml(item, disabled) {
+    const cur = submissionStatusOf(item && item.submissionStatus);
+    const opts = [
+      ["pending", "未递交"],
+      ["submitted", "已递交"],
+    ];
+    return `<select class="form-select form-select-sm vtg-status-select" data-vtg-field="submissionStatus"${disabled ? " disabled" : ""} title="标记该注册文件是否已递交">${opts
+      .map(
+        ([value, label]) =>
+          `<option value="${value}"${cur === value ? " selected" : ""}>${label}</option>`
+      )
+      .join("")}</select>`;
   }
 
   function recordStatusSelectHtml(status, disabled) {
@@ -994,6 +1065,7 @@
   }
 
   function canSelectPreview(item) {
+    if (isRegistrationPreviewItem(item)) return false;
     return recordStatusOf(item) === "adopt" && !isPreviewDeleted(item);
   }
 
@@ -1045,6 +1117,11 @@
       if (key === "recordStatus") {
         left = RECORD_STATUS_LABELS[recordStatusOf({ recordStatus: left })] || left;
         right = RECORD_STATUS_LABELS[recordStatusOf({ recordStatus: right })] || right;
+      }
+      if (key === "submissionStatus") {
+        const labels = { submitted: "已递交", pending: "未递交" };
+        left = labels[left] || left;
+        right = labels[right] || right;
       }
       if (key === "chapter") {
         left = left || String(before.processBranchLabel || "").trim();
@@ -1260,7 +1337,7 @@
     visiblePreviewRows().forEach((row) => {
       const idx = Number(row.getAttribute("data-vtg-preview-idx"));
       if (Number.isNaN(idx) || !previewItems[idx]) return;
-      if (!canSelectPreview(previewItems[idx])) return;
+      if (!canCheckPreview(previewItems[idx])) return;
       previewSelectedKeys.add(taskIdentity(previewItems[idx]));
     });
     updatePreviewSelectionUi();
@@ -1295,7 +1372,7 @@
       const item = previewItems[idx];
       if (!item) return;
       const status = recordStatusOf(item);
-      const adopted = canSelectPreview(item);
+      const registration = isRegistrationPreviewItem(item);
       const checkable = canCheckPreview(item);
       const key = taskIdentity(item);
       if (!checkable) previewSelectedKeys.delete(key);
@@ -1305,13 +1382,13 @@
         cb.disabled = !checkable;
         cb.checked = selected;
       }
-      row.classList.toggle("vtg-status-discard", status === "discard");
-      row.classList.toggle("vtg-status-pending", status === "pending");
+      row.classList.toggle("vtg-status-discard", !registration && status === "discard");
+      row.classList.toggle("vtg-status-pending", !registration && status === "pending");
       row.classList.toggle("vtg-change-delete", changeKindOf(item) === "delete");
       row.classList.toggle("vtg-change-add", changeKindOf(item) === "add");
       row.classList.toggle("vtg-change-update", changeKindOf(item) === "update");
-      if (adopted) visibleAdopt += 1;
-      if (selected && adopted) visibleSelected += 1;
+      if (checkable) visibleAdopt += 1;
+      if (selected && checkable) visibleSelected += 1;
     });
     if (els.previewHeadCheck) {
       els.previewHeadCheck.disabled = !previewItems.length || visibleAdopt === 0;
@@ -1337,9 +1414,9 @@
             itemMatchesColFilters(item) &&
             (!previewVersionFilter || previewVersionKey(item) === previewVersionFilter)
         ).length;
-        els.previewCount.textContent = `${n} / ${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
+        els.previewCount.textContent = `${n} / ${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}${registrationCountText()}`;
       } else {
-        els.previewCount.textContent = `${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}`;
+        els.previewCount.textContent = `${visiblePreviewItems().length} 条 · 已选 ${selectedCount} · 选用 ${adoptCount}${changeBit}${registrationCountText()}`;
       }
     }
     if (els.previewSelectHint) {
@@ -1703,7 +1780,8 @@
       if (isPreviewDeleted(item)) return;
       const name = previewFileNameKey(item && item.fileName);
       if (!name) return;
-      const key = `${previewVersionKey(item)}\0${name}`;
+      const region = isRegistrationPreviewItem(item) ? "registration" : "dhf";
+      const key = `${previewVersionKey(item)}\0${region}\0${name}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     });
@@ -1741,6 +1819,7 @@
         if (originKeyOf(row) === selfKey) return false;
         if (isPreviewDeleted(row)) return false;
         if (previewFileNameKey(row.fileName) !== name) return false;
+        if (isRegistrationPreviewItem(row) !== isRegistrationPreviewItem(item)) return false;
         return previewVersionKey(row) === ver;
       }) || null
     );
@@ -1864,7 +1943,10 @@
 
   function previewColValue(item, key) {
     if (key === "sortOrder") return String(Number((item && item.sortOrder) || 0) + 1);
-    if (key === "recordStatus") return RECORD_STATUS_LABELS[recordStatusOf(item)] || "";
+    if (key === "recordStatus") {
+      if (isRegistrationPreviewItem(item)) return submissionStatusLabel(item);
+      return RECORD_STATUS_LABELS[recordStatusOf(item)] || "";
+    }
     if (key === "applied") {
       const state = previewApplyState(item);
       if (state === "applied") return "已下发";
@@ -2321,11 +2403,114 @@
         btn.classList.toggle("is-active", val === (previewVersionFilter || ""));
       });
     }
+    const regCount = els.previewBody.querySelector("[data-vtg-reg-count]");
+    if (regCount) regCount.textContent = String(countRegistrationItems());
     updatePreviewSelectionUi();
     fitFilenameInputs();
     fitPreviewTableViewport();
     markPreviewFilenameConflicts();
     applyPreviewLocateUi();
+  }
+
+  function previewItemRowHtml(item, idx, ver, triggers) {
+    const registration = isRegistrationPreviewItem(item);
+    const targetVersion = item.targetVersion || item.registrationVersion || "";
+    const freq = previewArchiveFrequency(item) || "—";
+    const status = recordStatusOf(item);
+    const deleted = isPreviewDeleted(item);
+    const adopted = canSelectPreview(item);
+    const checkable = canCheckPreview(item);
+    const selected = checkable && previewSelectedKeys.has(taskIdentity(item));
+    const disabledAttr = deleted ? " disabled" : "";
+    const rowClass = [
+      registration ? "vtg-registration-row" : "",
+      !registration && status === "discard" ? "vtg-status-discard" : "",
+      !registration && status === "pending" ? "vtg-status-pending" : "",
+      registration && submissionStatusOf(item.submissionStatus) === "submitted" ? "vtg-submission-done" : "",
+      changeKindOf(item) === "delete" ? "vtg-change-delete" : "",
+      changeKindOf(item) === "add" ? "vtg-change-add" : "",
+      changeKindOf(item) === "update" ? "vtg-change-update" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const actionBtn = deleted
+      ? `<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" data-vtg-restore-preview="${idx}" title="撤销删除">还原</button>`
+      : `<button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="标记删除">×</button>`;
+    const statusHtml = registration
+      ? submissionStatusSelectHtml(item, deleted)
+      : recordStatusSelectHtml(status, deleted);
+    const checkTitle = deleted
+      ? "已删除，不能勾选"
+      : registration
+        ? "勾选后可调序、复制、删除或设置完成日期；注册文件不参与任务下发"
+        : adopted
+          ? "勾选后可下发或批量调整顺序"
+          : "勾选后可批量调整顺序；仅选用会下发";
+    const orderCell = `<span class="vtg-drag-handle" draggable="true" title="拖动调整顺序，也可拖到其他版本">⋮⋮</span><span class="text-muted small">${Number(item.sortOrder) + 1}</span>`;
+    const regionAttr = registration ? ' data-vtg-region="registration"' : "";
+    return `<tr data-vtg-preview-idx="${idx}" data-vtg-ver="${escapeHtml(ver)}" class="${rowClass}"${regionAttr}>
+          <td class="text-center" data-vtg-col="check"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${checkable ? "" : "disabled"} title="${checkTitle}"></td>
+          <td class="vtg-col-idx" data-vtg-col="sortOrder">${orderCell}</td>
+          <td data-vtg-col="recordStatus">${statusHtml}</td>
+          <td class="vtg-col-applied text-center" data-vtg-col="applied">${registration ? "—" : previewAppliedBadgeHtml(item)}</td>
+          <td class="vtg-col-system text-center" data-vtg-col="isSystemRecord">${isSystemRecordSelectHtml(item, deleted || registration)}</td>
+          <td class="vtg-change-cell" data-vtg-col="changeKind">${changeKindBadgeHtml(item)}</td>
+          <td class="vtg-col-filename" data-vtg-col="fileName"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}"${disabledAttr}>${escapeHtml(item.fileName || "")}</textarea></td>
+          <td data-vtg-col="taskType"><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"${disabledAttr}></td>
+          <td data-vtg-col="targetVersion"><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"${disabledAttr}></td>
+          <td data-vtg-col="author"><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}" placeholder="张三,李四"${disabledAttr} title="多人用英文逗号分隔，下发时拆成多条"></td>
+          <td data-vtg-col="dueDate"><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"${disabledAttr}></td>
+          <td data-vtg-col="documentDisplayDate"><input type="date" class="form-control form-control-sm${
+            isReleaseRecordName(item.fileName) ? " vtg-doc-date-alert" : ""
+          }" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"${
+            isReleaseRecordName(item.fileName)
+              ? ' title="发布记录的文档日期需与发布日对齐，请核对"'
+              : ""
+          }${disabledAttr}></td>
+          <td data-vtg-col="belongingModule"><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"${disabledAttr}></td>
+          <td class="vtg-col-docno" data-vtg-col="documentNumber"><input class="form-control form-control-sm font-monospace" data-vtg-field="documentNumber" value="${escapeHtml(item.documentNumber || "")}" placeholder="可从文控同步"${disabledAttr}></td>
+          <td class="vtg-col-filever" data-vtg-col="fileVersion"><input class="form-control form-control-sm" data-vtg-field="fileVersion" value="${escapeHtml(item.fileVersion || "")}" placeholder="如 V1.0"${disabledAttr}></td>
+          <td class="vtg-col-explanation" data-vtg-col="explanation"><input class="form-control form-control-sm" data-vtg-field="explanation" value="${escapeHtml(item.explanation || "")}" placeholder="说明"${disabledAttr}></td>
+          <td class="vtg-col-notes" data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="下发到任务"${disabledAttr}></td>
+          <td data-vtg-col="displayedAuthor"><input class="form-control form-control-sm" data-vtg-field="displayedAuthor" value="${escapeHtml(item.displayedAuthor || "")}" placeholder="默认同责任人"${disabledAttr} title="体现编写人员，默认与责任人相同"></td>
+          <td data-vtg-col="reviewer"><input class="form-control form-control-sm" data-vtg-field="reviewer" value="${escapeHtml(item.reviewer || "")}" placeholder="${DEFAULT_PREVIEW_REVIEWER}"${disabledAttr} title="审核人，默认陈亮"></td>
+          <td data-vtg-col="approver"><input class="form-control form-control-sm" data-vtg-field="approver" value="${escapeHtml(item.approver || "")}" placeholder="${DEFAULT_PREVIEW_APPROVER}"${disabledAttr} title="批准人，默认汪津"></td>
+          <td class="small text-muted" data-vtg-col="archiveFrequency">${escapeHtml(freq)}</td>
+          <td class="small text-muted" data-vtg-col="triggeredBy" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
+          <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
+          <td data-vtg-col="action">${actionBtn}</td>
+        </tr>`;
+  }
+
+  function appendRegistrationSection(html, regByVersion) {
+    html.push(
+      `<tr class="vtg-registration-section">
+        <td colspan="${PREVIEW_COLSPAN}">
+          <div class="vtg-ver-head">
+            <span class="vtg-ver-head-label">注册文件（<span data-vtg-reg-count>${countRegistrationItems()}</span>）</span>
+          </div>
+          <div class="small text-muted mt-1">与上方同一套版本筛选和工具栏。点本区域的行后，用「添加记录」插入；可拖动排序。勾选后可批量调序、复制到版本、按版本删除、设置完成日期。不参与任务下发。状态可标记是否已递交。</div>
+        </td>
+      </tr>`
+    );
+    const versions = Array.from(regByVersion.keys()).sort(comparePreviewVersions);
+    if (!versions.length) {
+      html.push(
+        `<tr class="vtg-registration-row" data-vtg-region="registration"><td colspan="${PREVIEW_COLSPAN}" class="text-muted small">尚未添加注册文件。点这里后，用上方「添加记录」插入到当前版本。</td></tr>`
+      );
+      return;
+    }
+    versions.forEach((ver) => {
+      const rows = (regByVersion.get(ver) || []).slice().sort((a, b) => {
+        return Number(a.item.sortOrder) - Number(b.item.sortOrder) || a.idx - b.idx;
+      });
+      html.push(
+        `<tr class="vtg-registration-ver" data-vtg-region="registration" data-vtg-ver="${escapeHtml(ver)}"><td colspan="${PREVIEW_COLSPAN}">版本 <span class="font-monospace">${escapeHtml(ver)}</span>（${rows.length}）</td></tr>`
+      );
+      rows.forEach(({ item, idx }) => {
+        html.push(previewItemRowHtml(item, idx, ver, formatTriggerBits(item.triggeredBy)));
+      });
+    });
   }
 
   function renderPreviewTable(items, options) {
@@ -2373,14 +2558,16 @@
     }
     ensureSortOrders(previewItems);
     const byVersion = new Map();
+    const regByVersion = new Map();
     previewItems.forEach((item, idx) => {
       if (isHiddenPreviewItem(item)) return;
       if (!itemMatchesColFilters(item)) return;
       const ver = previewVersionKey(item);
-      if (!byVersion.has(ver)) byVersion.set(ver, []);
-      byVersion.get(ver).push({ item, idx });
+      const bucket = isRegistrationPreviewItem(item) ? regByVersion : byVersion;
+      if (!bucket.has(ver)) bucket.set(ver, []);
+      bucket.get(ver).push({ item, idx });
     });
-    if (!byVersion.size) {
+    if (!byVersion.size && !regByVersion.size) {
       renderPreviewVersionBar();
       const hiddenDeletes = previewItems.filter((item) => isHiddenPreviewItem(item)).length;
       const onlyHidden = hiddenDeletes && !visiblePreviewItems().length;
@@ -2447,60 +2634,10 @@
           lastChapter = chapter;
         }
         const triggers = formatTriggerBits(item.triggeredBy);
-        const targetVersion = item.targetVersion || item.registrationVersion || "";
-        const freq = previewArchiveFrequency(item) || "—";
-        const status = recordStatusOf(item);
-        const deleted = isPreviewDeleted(item);
-        const adopted = canSelectPreview(item);
-        const checkable = canCheckPreview(item);
-        const selected = checkable && previewSelectedKeys.has(taskIdentity(item));
-        const disabledAttr = deleted ? " disabled" : "";
-        const rowClass = [
-          status === "discard" ? "vtg-status-discard" : "",
-          status === "pending" ? "vtg-status-pending" : "",
-          changeKindOf(item) === "delete" ? "vtg-change-delete" : "",
-          changeKindOf(item) === "add" ? "vtg-change-add" : "",
-          changeKindOf(item) === "update" ? "vtg-change-update" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const actionBtn = deleted
-          ? `<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" data-vtg-restore-preview="${idx}" title="撤销删除">还原</button>`
-          : `<button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" data-vtg-remove-preview="${idx}" title="标记删除">×</button>`;
-        html.push(`<tr data-vtg-preview-idx="${idx}" data-vtg-ver="${escapeHtml(ver)}" class="${rowClass}">
-          <td class="text-center" data-vtg-col="check"><input type="checkbox" class="form-check-input" data-vtg-select-row ${selected ? "checked" : ""} ${checkable ? "" : "disabled"} title="${deleted ? "已删除，不能勾选" : adopted ? "勾选后可下发或批量调整顺序" : "勾选后可批量调整顺序；仅选用会下发"}"></td>
-          <td class="vtg-col-idx" data-vtg-col="sortOrder"><span class="vtg-drag-handle" draggable="true" title="拖动调整顺序，也可拖到其他版本或章节">⋮⋮</span><span class="text-muted small">${Number(item.sortOrder) + 1}</span></td>
-          <td data-vtg-col="recordStatus">${recordStatusSelectHtml(status, deleted)}</td>
-          <td class="text-center" data-vtg-col="applied">${previewAppliedBadgeHtml(item)}</td>
-          <td class="vtg-col-system text-center" data-vtg-col="isSystemRecord">${isSystemRecordSelectHtml(item, deleted)}</td>
-          <td class="vtg-change-cell" data-vtg-col="changeKind">${changeKindBadgeHtml(item)}</td>
-          <td class="vtg-col-filename" data-vtg-col="fileName"><textarea class="form-control form-control-sm vtg-filename-input" data-vtg-field="fileName" rows="2" title="${escapeHtml(item.fileName || "")}"${disabledAttr}>${escapeHtml(item.fileName || "")}</textarea></td>
-          <td data-vtg-col="taskType"><input class="form-control form-control-sm" data-vtg-field="taskType" value="${escapeHtml(item.taskType || "")}"${disabledAttr}></td>
-          <td data-vtg-col="targetVersion"><input class="form-control form-control-sm font-monospace" data-vtg-field="targetVersion" value="${escapeHtml(targetVersion)}"${disabledAttr}></td>
-          <td data-vtg-col="author"><input class="form-control form-control-sm" data-vtg-field="author" value="${escapeHtml(item.author || "")}" placeholder="张三,李四"${disabledAttr} title="多人用英文逗号分隔，下发时拆成多条"></td>
-          <td data-vtg-col="dueDate"><input type="date" class="form-control form-control-sm" data-vtg-field="dueDate" value="${escapeHtml(item.dueDate || "")}"${disabledAttr}></td>
-          <td data-vtg-col="documentDisplayDate"><input type="date" class="form-control form-control-sm${
-            isReleaseRecordName(item.fileName) ? " vtg-doc-date-alert" : ""
-          }" data-vtg-field="documentDisplayDate" value="${escapeHtml(item.documentDisplayDate || "")}"${
-            isReleaseRecordName(item.fileName)
-              ? ' title="发布记录的文档日期需与发布日对齐，请核对"'
-              : ""
-          }${disabledAttr}></td>
-          <td data-vtg-col="belongingModule"><input class="form-control form-control-sm" data-vtg-field="belongingModule" value="${escapeHtml(item.belongingModule || "")}"${disabledAttr}></td>
-          <td class="vtg-col-docno" data-vtg-col="documentNumber"><input class="form-control form-control-sm font-monospace" data-vtg-field="documentNumber" value="${escapeHtml(item.documentNumber || "")}" placeholder="可从文控同步"${disabledAttr}></td>
-          <td class="vtg-col-filever" data-vtg-col="fileVersion"><input class="form-control form-control-sm" data-vtg-field="fileVersion" value="${escapeHtml(item.fileVersion || "")}" placeholder="如 V1.0"${disabledAttr}></td>
-          <td class="vtg-col-explanation" data-vtg-col="explanation"><input class="form-control form-control-sm" data-vtg-field="explanation" value="${escapeHtml(item.explanation || "")}" placeholder="说明"${disabledAttr}></td>
-          <td class="vtg-col-notes" data-vtg-col="notes"><input class="form-control form-control-sm" data-vtg-field="notes" value="${escapeHtml(item.notes || "")}" placeholder="下发到任务"${disabledAttr}></td>
-          <td data-vtg-col="displayedAuthor"><input class="form-control form-control-sm" data-vtg-field="displayedAuthor" value="${escapeHtml(item.displayedAuthor || "")}" placeholder="默认同责任人"${disabledAttr} title="体现编写人员，默认与责任人相同"></td>
-          <td data-vtg-col="reviewer"><input class="form-control form-control-sm" data-vtg-field="reviewer" value="${escapeHtml(item.reviewer || "")}" placeholder="${DEFAULT_PREVIEW_REVIEWER}"${disabledAttr} title="审核人，默认陈亮"></td>
-          <td data-vtg-col="approver"><input class="form-control form-control-sm" data-vtg-field="approver" value="${escapeHtml(item.approver || "")}" placeholder="${DEFAULT_PREVIEW_APPROVER}"${disabledAttr} title="批准人，默认汪津"></td>
-          <td class="small text-muted" data-vtg-col="archiveFrequency">${escapeHtml(freq)}</td>
-          <td class="small text-muted" data-vtg-col="triggeredBy" title="版本号格式 X.Y.Z.B，按最高变化位：X&gt;Y&gt;Z&gt;B">${triggers}</td>
-          <td data-vtg-col="changeReason"><input class="form-control form-control-sm" data-vtg-field="changeReason" value="${escapeHtml(item.changeReason || "")}" placeholder="可后补"></td>
-          <td data-vtg-col="action">${actionBtn}</td>
-        </tr>`);
+        html.push(previewItemRowHtml(item, idx, ver, triggers));
       });
     });
+    appendRegistrationSection(html, regByVersion);
     els.previewBody.innerHTML = html.join("");
     renderPreviewVersionBar();
     applyPreviewVersionUi();
@@ -2707,6 +2844,7 @@
     previewCollapsedVersions.delete(ver);
     Array.from(els.previewBody.querySelectorAll("tr[data-vtg-ver]")).forEach((tr) => {
       if ((tr.getAttribute("data-vtg-ver") || "") !== ver) return;
+      if (tr.getAttribute("data-vtg-region") === "registration") return;
       const filteredOut = Boolean(previewVersionFilter && ver !== previewVersionFilter);
       const isHeader = tr.classList.contains("vtg-version-row");
       tr.classList.toggle("vtg-preview-hidden", filteredOut || (!isHeader && previewCollapsedVersions.has(ver)));
@@ -2827,6 +2965,14 @@
       if (!chapter && cursor.classList.contains("vtg-chapter-row")) {
         chapter = String(cursor.getAttribute("data-vtg-chapter") || "").trim();
       }
+      if (cursor.classList.contains("vtg-registration-ver")) {
+        ver = cursor.getAttribute("data-vtg-ver") || "";
+        chapter = REGISTRATION_CHAPTER;
+        break;
+      }
+      if (cursor.classList.contains("vtg-registration-section")) {
+        chapter = REGISTRATION_CHAPTER;
+      }
       if (cursor.classList.contains("vtg-version-row")) {
         ver = cursor.getAttribute("data-vtg-ver") || "";
         break;
@@ -2853,9 +2999,15 @@
       item.targetVersion = "";
       item.registrationVersion = "";
     }
-    if (chapter) {
+    if (chapter === REGISTRATION_CHAPTER || (neighbor && isRegistrationPreviewItem(neighbor) && chapter !== REGISTRATION_CHAPTER && !ver)) {
+      item.listRegion = "registration";
+      item.chapter = REGISTRATION_CHAPTER;
+      item.processBranchLabel = REGISTRATION_CHAPTER;
+      if (!String(item.submissionStatus || "").trim()) item.submissionStatus = "pending";
+    } else if (chapter) {
       item.chapter = chapter;
       item.processBranchLabel = chapter;
+      if (chapter !== REGISTRATION_CHAPTER) item.listRegion = "";
     }
     if (ver && ver !== prevVer && neighbor) {
       if (neighbor.dueDate) item.dueDate = neighbor.dueDate;
@@ -2957,9 +3109,15 @@
       if (previewDragRow) return;
       if (ev.target.closest("button, a, .vtg-drag-handle")) return;
       const row = ev.target.closest("tr[data-vtg-preview-idx]");
-      if (!row) return;
+      if (!row) {
+        if (ev.target.closest("tr.vtg-registration-section, tr.vtg-registration-ver")) {
+          previewAddRegion = "registration";
+        }
+        return;
+      }
       const idx = Number(row.getAttribute("data-vtg-preview-idx"));
       if (Number.isNaN(idx) || !previewItems[idx]) return;
+      previewAddRegion = isRegistrationPreviewItem(previewItems[idx]) ? "registration" : "";
       if (previewLocateTimer) {
         window.clearTimeout(previewLocateTimer);
         previewLocateTimer = 0;
@@ -3134,6 +3292,7 @@
       explanation: String((item && item.explanation) || "").trim(),
       notes: String((item && item.notes) || "").trim(),
       recordStatus: recordStatusOf(item),
+      submissionStatus: isRegistrationPreviewItem(item) ? submissionStatusOf(item && item.submissionStatus) : "",
       isSystemRecord: isSystemRecordOf(item),
       chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
       archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
@@ -4101,14 +4260,21 @@
     }
     const destNames = new Set(
       livePreviewItemsForVersion(destKey)
-        .map((item) => previewFileNameKey(item.fileName))
+        .map((item) => {
+          const name = previewFileNameKey(item.fileName);
+          if (!name) return "";
+          return `${isRegistrationPreviewItem(item) ? "registration" : "dhf"}\0${name}`;
+        })
         .filter(Boolean)
     );
     const conflicts = [];
     incoming.forEach((item) => {
       const name = previewFileNameKey(item.fileName);
-      if (name && destNames.has(name)) conflicts.push(String(item.fileName || "").trim());
-      if (name) destNames.add(name);
+      const key = name
+        ? `${isRegistrationPreviewItem(item) ? "registration" : "dhf"}\0${name}`
+        : "";
+      if (key && destNames.has(key)) conflicts.push(String(item.fileName || "").trim());
+      if (key) destNames.add(key);
     });
     if (conflicts.length) {
       toast(
@@ -4370,6 +4536,11 @@
       addPreviewRow(locate, "after");
       return;
     }
+    if (previewAddRegion === "registration") {
+      hidePreviewOpPanels();
+      addPreviewRow(null, "after");
+      return;
+    }
     hidePreviewOpPanels();
     fillAddPreviewAnchorOptions();
     if (els.addPlaceSelect) els.addPlaceSelect.value = "after";
@@ -4427,6 +4598,18 @@
     };
     item.originKey = originKeyOf(item);
     ensurePreviewSignoffDefaults(item);
+    if ((anchor && isRegistrationPreviewItem(anchor)) || (!anchor && previewAddRegion === "registration")) {
+      item.listRegion = "registration";
+      item.chapter = REGISTRATION_CHAPTER;
+      item.processBranchLabel = REGISTRATION_CHAPTER;
+      item.submissionStatus = "pending";
+      if (!anchor) {
+        const filteredVer = String(previewVersionFilter || "").trim();
+        const nextVersion = filteredVer && filteredVer !== "未指定版本" ? filteredVer : "";
+        item.targetVersion = nextVersion;
+        item.registrationVersion = nextVersion;
+      }
+    }
     return item;
   }
 
@@ -5113,29 +5296,30 @@
     return Number(data.saved || 0);
   }
 
-  async function applyTasks(authorConflictAction) {
+  async function applyTasks(authorConflictAction, options) {
+    const opts = options || {};
     const projectId = String(els.projectId.value || "").trim();
     if (!projectId) {
       toast("请先选择项目再下发任务", "warning");
-      return;
+      return null;
     }
     const items = getPreviewItems();
     if (!items.length) {
       toast("预览任务清单为空，请先生成预览", "warning");
-      return;
+      return null;
     }
     const selectedItems = items.filter(
       (item) => canSelectPreview(item) && previewSelectedKeys.has(taskIdentity(item))
     );
     if (!selectedItems.length) {
       toast("请勾选至少一条「选用」且未删除的记录再下发", "warning");
-      return;
+      return null;
     }
     const conflicts = listPreviewFilenameConflicts(selectedItems);
     if (conflicts.length) {
       markPreviewFilenameConflicts();
       toast(formatFilenameConflicts(conflicts), "warning");
-      return;
+      return null;
     }
     const applyMode = currentApplyMode();
     const { out } = collectVersionReleaseDates();
@@ -5152,6 +5336,7 @@
           previewItems: items,
           applyMode,
           authorConflictAction: authorConflictAction || "",
+          refreshSignoff: !!opts.refreshSignoff,
           versionReleaseDates: out,
           fromVersion: String(els.fromVersion.value || "").trim(),
           toVersion: String(els.toVersion.value || "").trim(),
@@ -5164,9 +5349,9 @@
         const choice = await askAuthorConflictChoice(payload.authorConflicts || [], payload.message);
         if (!choice) {
           toast("已取消下发", "info");
-          return;
+          return null;
         }
-        return applyTasks(choice);
+        return applyTasks(choice, opts);
       }
       throw err;
     }
@@ -5175,13 +5360,52 @@
     if (els.applyMsg) {
       els.applyMsg.textContent = `${data.message || "下发完成"}${saved ? `（已记录反馈 ${saved} 条）` : ""}`;
     }
-    toast(data.message || "下发完成", "success");
+    if (!opts.quiet) toast(data.message || "下发完成", "success");
+    return data;
+  }
+
+  async function issueToSignWorkbench() {
+    syncPreviewItemsFromDom();
+    syncPreviewSelectionFromDom();
+    const projectId = String((els.projectId && els.projectId.value) || "").trim();
+    if (!projectId) {
+      throw new Error("请先选择项目再下发到签字工作台");
+    }
+    const items = selectedIssueItems().map((item) => ({
+      fileName: String((item && item.fileName) || "").trim(),
+      taskType: String((item && item.taskType) || "").trim(),
+      author: String((item && item.author) || "").trim(),
+      targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
+      recordStatus: recordStatusOf(item),
+      changeKind: changeKindOf(item),
+      listRegion: String((item && item.listRegion) || "").trim(),
+      chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
+    }));
+    if (!items.length) {
+      throw new Error("请勾选至少一条「选用」且未删除的记录。下发签字不会新建任务，请先确认下发到任务列表。");
+    }
+    const handoff = await requestJson("/api/document-control/version-tasks/handoff-sign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, items }),
+    });
+    const failureCount = Number((handoff && handoff.failureCount) || 0);
+    const redirectUrl = String((handoff && (handoff.redirectUrl || handoff.redirect_url)) || "").trim();
+    if (!handoff || handoff.ok === false || failureCount > 0 || !redirectUrl) {
+      throw new Error((handoff && handoff.message) || "无法打开签字工作台");
+    }
+    window.location.href = redirectUrl;
   }
 
   function collectListExportItems() {
     syncPreviewItemsFromDom();
     return (previewItems || [])
-      .filter((item) => !isHiddenPreviewItem(item) && recordStatusOf(item) !== "discard")
+      .filter(
+        (item) =>
+          !isHiddenPreviewItem(item) &&
+          recordStatusOf(item) !== "discard" &&
+          !isRegistrationPreviewItem(item)
+      )
       .map((item) => ({
         fileName: String((item && item.fileName) || "").trim(),
         documentNumber: String((item && item.documentNumber) || "").trim(),
@@ -5190,6 +5414,8 @@
         targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
         notes: String((item && item.notes) || "").trim(),
         explanation: String((item && item.explanation) || "").trim(),
+        chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
+        listRegion: String((item && item.listRegion) || "").trim(),
       }))
       .filter((item) => item.fileName);
   }
@@ -5211,7 +5437,11 @@
   async function exportVersionTaskLists(kinds) {
     const items = collectListExportItems();
     if (!items.length) {
-      toast("请先生成预览清单再导出", "warning");
+      const hasPreview = (previewItems || []).some((item) => !isHiddenPreviewItem(item));
+      toast(
+        hasPreview ? "没有可导出的体系文件，注册文件不计入本次导出" : "请先生成预览清单再导出",
+        "warning"
+      );
       return;
     }
     const selected = (Array.isArray(kinds) ? kinds : [])
@@ -5327,6 +5557,8 @@
         fileVersion: String((item && item.fileVersion) || "").trim(),
         explanation: String((item && item.explanation) || "").trim(),
         notes: String((item && item.notes) || "").trim(),
+        submissionStatus: isRegistrationPreviewItem(item) ? submissionStatusOf(item.submissionStatus) : "",
+        listRegion: isRegistrationPreviewItem(item) ? "registration" : "",
         archiveFrequency: String((item && item.archiveFrequency) || "").trim(),
         triggeredBy: Array.isArray(item && item.triggeredBy)
           ? item.triggeredBy
@@ -5561,6 +5793,13 @@
       els.applyBtn.addEventListener("click", () => {
         withButtonBusy(els.applyBtn, "下发中…", () => applyTasks()).catch((e) =>
           toast(e.message || "下发失败", "danger")
+        );
+      });
+    }
+    if (els.applySignBtn) {
+      els.applySignBtn.addEventListener("click", () => {
+        withButtonBusy(els.applySignBtn, "打开签字工作台…", () => issueToSignWorkbench()).catch((e) =>
+          toast(e.message || "无法打开签字工作台", "danger")
         );
       });
     }
@@ -5815,7 +6054,11 @@
               } else {
                 item.targetVersion = prevItem.targetVersion;
                 item.registrationVersion = prevItem.registrationVersion;
-                ev.target.value = prevItem.targetVersion || prevItem.registrationVersion || "";
+                if (ev.target.matches("select")) {
+                  ev.target.value = prevItem.targetVersion || "";
+                } else {
+                  ev.target.value = prevItem.targetVersion || prevItem.registrationVersion || "";
+                }
               }
               toast(
                 `同一版本下文件名不能重复：${previewVersionKey(other)} 已有「${String(
@@ -5826,6 +6069,20 @@
               markPreviewFilenameConflicts();
               return;
             }
+          }
+          if (field === "targetVersion") {
+            const nextVer = previewVersionKey(item);
+            if (previewVersionFilter && previewVersionFilter !== nextVer) previewVersionFilter = nextVer;
+            setPreviewLocateByItem(item);
+            renderPreviewTable(previewItems);
+            scrollPreviewItemIntoView(originKeyOf(item));
+            return;
+          }
+          if (field === "submissionStatus") {
+            row.classList.toggle(
+              "vtg-submission-done",
+              submissionStatusOf(item.submissionStatus) === "submitted"
+            );
           }
           if (field === "fileName") applyReleaseRecordDateUi(row, item.fileName);
           const changeCell = row.querySelector(".vtg-change-cell");
@@ -5891,7 +6148,19 @@
           return;
         }
         if (ev.target.closest(".vtg-drag-handle")) return;
-        if (ev.target.closest("input, select, textarea, a")) return;
+        const regHit = ev.target.closest("tr.vtg-registration-section, tr.vtg-registration-ver, tr.vtg-registration-row");
+        if (regHit && !ev.target.closest("tr[data-vtg-preview-idx]")) {
+          previewAddRegion = "registration";
+          const ver = regHit.getAttribute("data-vtg-ver") || previewVersionFilter || "";
+          const anchor = [...previewItems].reverse().find((item) => {
+            if (!isRegistrationPreviewItem(item) || isHiddenPreviewItem(item)) return false;
+            return !ver || previewVersionKey(item) === ver;
+          });
+          if (anchor) setPreviewLocateByItem(anchor);
+          else previewLocateOriginKey = "";
+          updatePreviewLocateHint();
+          return;
+        }
         const copyVerBtn = ev.target.closest("[data-vtg-copy-ver]");
         if (copyVerBtn) {
           ev.preventDefault();

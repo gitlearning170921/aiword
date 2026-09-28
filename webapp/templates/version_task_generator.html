@@ -212,6 +212,33 @@
     color: #1e3a5f;
     padding: 0.4rem 0.6rem;
   }
+  tr.vtg-registration-section td {
+    background: #ecfdf5;
+    color: #14532d;
+    font-weight: 650;
+    padding: 0.55rem 0.6rem;
+  }
+  tr.vtg-registration-ver td {
+    background: #f0fdf4;
+    color: #166534;
+    font-weight: 600;
+    padding: 0.35rem 0.6rem;
+  }
+  tr.vtg-submission-done td[data-vtg-col="recordStatus"] {
+    background: #dcfce7;
+  }
+  select.vtg-reg-version {
+    min-width: 8.5rem;
+  }
+  .vtg-registration-section .vtg-ver-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .vtg-registration-section .vtg-ver-actions select {
+    width: auto;
+    min-width: 8.5rem;
+  }
   .vtg-version-bar {
     display: flex;
     flex-wrap: wrap;
@@ -426,8 +453,8 @@
   .vtg-preview-table td {
     vertical-align: middle;
   }
-  .vtg-col-check { width: 2.2rem; white-space: nowrap; }
-  .vtg-col-idx { width: 3.2rem; white-space: nowrap; }
+  .vtg-col-check { width: 2.2rem; min-width: 2.2rem; white-space: nowrap; }
+  .vtg-col-idx { width: 3.2rem; min-width: 3.2rem; white-space: nowrap; }
   .vtg-drag-handle {
     cursor: grab;
     user-select: none;
@@ -481,9 +508,9 @@
   .vtg-move-anchor-wrap select {
     min-height: 10.5rem;
   }
-  .vtg-col-status { width: 5.8rem; }
-  .vtg-col-applied { width: 5.4rem; text-align: center; white-space: nowrap; }
-  .vtg-col-system { width: 4.2rem; white-space: nowrap; text-align: center; }
+  .vtg-col-status { width: 5.8rem; min-width: 5.8rem; }
+  .vtg-col-applied { width: 5.6rem; min-width: 5.6rem; text-align: center; white-space: nowrap; }
+  .vtg-col-system { width: 4.2rem; min-width: 4.2rem; white-space: nowrap; text-align: center; }
   .vtg-system-check {
     display: inline-flex;
     align-items: center;
@@ -498,24 +525,29 @@
     background-color: #fff1f2 !important;
     color: #9f1239;
   }
-  .vtg-col-change { width: 5.6rem; white-space: nowrap; }
+  .vtg-col-change { width: 5.6rem; min-width: 5.6rem; white-space: nowrap; }
   .vtg-preview-table {
     border-collapse: separate;
     border-spacing: 0;
   }
-  .vtg-col-filename { min-width: 22rem; width: 32%; }
+  .vtg-col-filename { min-width: 16rem; width: 18rem; max-width: 24rem; }
   .vtg-col-signoff { min-width: 5.2rem; }
   .vtg-preview-table [data-vtg-col].vtg-col-sticky-left {
     position: sticky;
   }
   .vtg-preview-table thead tr:first-child th.vtg-col-sticky-left {
+    z-index: 9;
+    background: #eef2f7;
+  }
+  .vtg-preview-table thead tr:first-child th.vtg-col-sticky-edge {
     z-index: 8;
   }
   .vtg-preview-table thead tr.vtg-preview-filter-row th.vtg-col-sticky-left {
     z-index: 7;
+    background: #f4f7fb;
   }
   .vtg-preview-table tbody td.vtg-col-sticky-left {
-    z-index: 2;
+    z-index: 4;
     background: #fff;
   }
   .vtg-preview-table tbody td.vtg-col-sticky-edge {
@@ -1104,7 +1136,7 @@
         <p class="vtg-subpanel-title" id="vtgStep4Title">
           <span class="badge text-bg-primary me-1">4</span>转换为任务列表
         </p>
-        <p class="vtg-subpanel-hint mb-2">仅勾选且状态为「选用」的记录会下发，并归入所选项目（与任务列表已有项目同一展示名，带上该项目已有的业务方/产品/国家等）。判重按「项目 + 文件名 + 任务类型 + 责任人 + 目标版本」：替换更新覆盖完全相同的已有任务，增量更新则跳过。责任人可用英文逗号写多人，下发时拆成多条。若单人责任人与已有记录不同，会提示你选择替换原记录或新增。</p>
+        <p class="vtg-subpanel-hint mb-2">仅勾选且状态为「选用」的记录会下发，并归入所选项目（与任务列表已有项目同一展示名，带上该项目已有的业务方/产品/国家等）。判重按「项目 + 文件名 + 任务类型 + 责任人 + 目标版本」：替换更新覆盖完全相同的已有任务，增量更新则跳过。责任人可用英文逗号写多人，下发时拆成多条。若单人责任人与已有记录不同，会提示你选择替换原记录或新增。「确认下发到任务列表」和「下发到签字工作台」是两步：签字只打开任务列表里已有任务的签字页，不会新建或修改任务。请先下发任务，且任务须已有模板或已生成文档。失败原因会显示在按钮下方。</p>
         <p id="vtgApplyCount" class="small fw-semibold mb-1">尚未勾选可下发记录</p>
         <ul id="vtgApplyPendingList" class="vtg-apply-pending-list"></ul>
         <div class="vtg-apply-mode">
@@ -1118,6 +1150,7 @@
           </div>
         </div>
         <button id="vtgApplyBtn" class="btn btn-success btn-sm" type="button">确认下发到任务列表</button>
+        <button id="vtgApplySignBtn" class="btn btn-outline-primary btn-sm ms-2" type="button">下发到签字工作台</button>
         <div id="vtgApplyMsg" class="small text-muted mt-2"></div>
         <div class="vtg-apply-ledger">
           <div class="vtg-apply-ledger-h">
