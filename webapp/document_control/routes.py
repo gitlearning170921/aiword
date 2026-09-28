@@ -2842,6 +2842,108 @@ def _public_sign_handoff_error(text: str) -> str:
     return integration_error_message(raw)
 
 
+def _preview_sign_context(project: Project, row: dict[str, Any]) -> dict[str, str]:
+    signoff = dict(row)
+    apply_preview_signoff_defaults(signoff)
+    ctx: dict[str, str] = {}
+    editor = str(signoff.get("displayedAuthor") or "").strip()
+    author = str(signoff.get("author") or "").strip()
+    if editor:
+        ctx["editor"] = editor
+    elif author:
+        ctx["editor"] = author
+    if author and author != "待分配":
+        ctx["writer"] = author
+    reviewer = str(signoff.get("reviewer") or "").strip()
+    approver = str(signoff.get("approver") or "").strip()
+    if reviewer:
+        ctx["reviewer"] = reviewer
+    if approver:
+        ctx["approver"] = approver
+    doc_date = str(row.get("documentDisplayDate") or "").strip()
+    if doc_date:
+        ctx["doc_date"] = doc_date[:10]
+    phase = str(row.get("taskType") or row.get("belongingModule") or "").strip()
+    if phase:
+        ctx["phase"] = phase
+    if project.id:
+        ctx["project_id"] = str(project.id)
+    project_name = _project_task_display_name(project)
+    if project_name:
+        ctx["project_name"] = project_name
+    project_code = str(getattr(project, "project_code", None) or "").strip()
+    if project_code:
+        ctx["project_code"] = project_code
+    country = str(getattr(project, "registered_country", None) or "").strip()
+    if country:
+        ctx["country"] = country
+    document_number = str(row.get("documentNumber") or "").strip()
+    if document_number:
+        ctx["document_number"] = document_number
+    return ctx
+
+
+def _readable_upload_sign_source(upload_id: str) -> tuple[bytes | None, str, str | None]:
+    from webapp.routes import _resolve_handoff_doc_for_print_sign
+
+    raw, fname, err, reuse = _resolve_handoff_doc_for_print_sign(upload_id, mode="sign")
+    reuse_ok = (reuse or "").strip()
+    if err or (raw is None and not reuse_ok):
+        return None, "", None
+    return raw, fname, reuse_ok or None
+
+
+def _preview_sign_documents(org_id: str, project: Project, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按清单生成签字交接。只读已有文件，不写入任务列表。"""
+    uploads = _project_upload_records(org_id, project)
+    docs: list[dict[str, Any]] = []
+    for row in rows:
+        file_name = str(row.get("fileName") or "").strip()
+        author = str(row.get("author") or "").strip() or "待分配"
+        task_type = str(row.get("taskType") or "").strip() or DEFAULT_VERSION_TASK_TYPE
+        target_version = normalize_target_version(row.get("targetVersion") or row.get("registrationVersion"))
+        name_keys = _file_name_keys(file_name)
+        ordered: list[UploadRecord] = []
+        seen: set[str] = set()
+        exact = find_upload_task_duplicate_for_project(
+            project=project,
+            file_name=file_name,
+            task_type=task_type,
+            author=author,
+            target_version=target_version,
+        )
+        if exact is not None and getattr(exact, "id", None):
+            ordered.append(exact)
+            seen.add(str(exact.id))
+        for rec in uploads:
+            rec_id = str(getattr(rec, "id", None) or "")
+            if not rec_id or rec_id in seen:
+                continue
+            if _file_name_keys(getattr(rec, "file_name", None)) & name_keys:
+                ordered.append(rec)
+                seen.add(rec_id)
+        raw = None
+        reuse = None
+        resolved_name = ""
+        for rec in ordered:
+            raw, resolved_name, reuse = _readable_upload_sign_source(str(rec.id))
+            if raw is not None or reuse:
+                break
+        display = file_name or resolved_name or "document.docx"
+        if display and not os.path.splitext(display)[1]:
+            ext = os.path.splitext(resolved_name or "")[1] or ".docx"
+            display = f"{display}{ext}"
+        docs.append(
+            {
+                "filename": display,
+                "raw": raw,
+                "reuse_ftp_path": reuse or "",
+                "context": _preview_sign_context(project, row),
+            }
+        )
+    return docs
+
+
 @document_control_bp.post("/api/document-control/version-tasks/handoff-sign")
 def api_version_task_handoff_sign():
     """版本任务清单下发到文件签字工作台，交互与项目管理「去签字」相同。"""
@@ -2858,8 +2960,8 @@ def api_version_task_handoff_sign():
         return jsonify(
             {
                 "message": user_facing_text(
-                    "「页面1 · 去签字」功能未对本账号开放（请确认系统配置已开启，且账号未被单独禁止）",
-                    "签字功能未开放，请联系管理员",
+                    "当前账号未允许「去签字」。系统配置里打开后仍不够：请在账号管理中把该账号的「去签字」设为「允许」。选「跟随系统」对这项仍然是禁止。",
+                    "当前账号没有签字权限。请联系管理员在账号功能权限中把「去签字」设为允许。",
                 )
             }
         ), 403
@@ -2877,71 +2979,34 @@ def api_version_task_handoff_sign():
         return jsonify({"message": "没有该项目权限"}), 403
     items = payload.get("items")
     if not isinstance(items, list) or not items:
-        return jsonify({"message": "请勾选至少一条「选用」记录。下发签字不会新建任务。"}), 400
+        return jsonify({"message": "请勾选至少一条记录。下发签字不会新建任务。"}), 400
 
     issue_items: list[dict[str, Any]] = []
     for row in items:
         if not isinstance(row, dict):
             continue
-        if str(row.get("listRegion") or "").strip() == "registration" or str(
-            row.get("chapter") or row.get("processBranchLabel") or ""
-        ).strip() == "注册文件":
-            continue
-        if normalize_record_status(row.get("recordStatus")) != "adopt":
-            continue
         if str(row.get("changeKind") or "").strip().lower() == "delete":
             continue
         if not str(row.get("fileName") or "").strip():
             continue
+        registration = str(row.get("listRegion") or "").strip() == "registration" or str(
+            row.get("chapter") or row.get("processBranchLabel") or ""
+        ).strip() == "注册文件"
+        if not registration and normalize_record_status(row.get("recordStatus")) != "adopt":
+            continue
         issue_items.append(row)
     if not issue_items:
         return jsonify(
-            {"message": "没有可下发到签字工作台的选用记录。注册文件不参与签字，且不会新建任务。"}
+            {"message": "没有可下发到签字工作台的记录。体系文件须为「选用」，注册文件勾选即可；不会写入任务列表。"}
         ), 400
 
-    missing: list[str] = []
-    upload_ids: list[str] = []
-    seen_ids: set[str] = set()
-    for row in expand_preview_items_by_author(issue_items):
-        file_name = str(row.get("fileName") or "").strip()
-        author = str(row.get("author") or "").strip() or "待分配"
-        task_type = str(row.get("taskType") or "").strip() or DEFAULT_VERSION_TASK_TYPE
-        target_version = normalize_target_version(row.get("targetVersion") or row.get("registrationVersion"))
-        existing = find_upload_task_duplicate_for_project(
-            project=project,
-            file_name=file_name,
-            task_type=task_type,
-            author=author,
-            target_version=target_version,
-        )
-        label = file_name or "未命名"
-        if author and author != "待分配":
-            label = f"{label}（{author}）"
-        if existing is None or not getattr(existing, "id", None):
-            missing.append(label)
-            continue
-        uid = str(existing.id)
-        if uid not in seen_ids:
-            seen_ids.add(uid)
-            upload_ids.append(uid)
-    if missing:
-        shown = "、".join(missing[:8])
-        extra = f"等共 {len(missing)} 条" if len(missing) > 8 else ""
-        return jsonify(
-            {
-                "ok": False,
-                "message": (
-                    f"以下记录还没有对应任务，无法打开签字工作台：{shown}{extra}。"
-                    "请先使用「确认下发到任务列表」。下发签字不会新建或修改任务。"
-                ),
-            }
-        ), 400
-    if not upload_ids:
-        return jsonify({"ok": False, "message": "没有可交接的已有任务。下发签字不会新建任务。"}), 400
+    docs = _preview_sign_documents(org_id, project, expand_preview_items_by_author(issue_items))
+    if not docs:
+        return jsonify({"ok": False, "message": "没有可交接的记录。本次不会写入任务列表。"}), 400
 
-    from webapp.routes import aiprintword_sign_handoff_payload
+    from webapp.routes import aiprintword_sign_handoff_documents
 
-    body, status = aiprintword_sign_handoff_payload(upload_ids)
+    body, status = aiprintword_sign_handoff_documents(docs)
     if not body.get("ok"):
         message = _public_sign_handoff_error(str(body.get("error") or body.get("message") or ""))
         return jsonify(

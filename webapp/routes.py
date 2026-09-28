@@ -4577,6 +4577,136 @@ def aiprintword_sign_handoff_payload(upload_ids: list[str]) -> tuple[dict[str, A
     return _aiprintword_batch_handoff_redirect("sign", ids)
 
 
+def aiprintword_sign_handoff_documents(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
+    """把清单上的文件交到签字工作台。不创建、不修改任务记录。
+
+    每条 doc：filename、context、raw（bytes，可空）、reuse_ftp_path（可空）。
+    没有文件内容时只交接文件名和编审批，由签字页选择文件。
+    """
+    from .app_settings import get_setting
+    import requests as _req
+
+    prepared: list[dict[str, Any]] = []
+    for doc in docs or []:
+        if not isinstance(doc, dict):
+            continue
+        filename = str(doc.get("filename") or "").strip() or "document.docx"
+        raw = doc.get("raw")
+        reuse = str(doc.get("reuse_ftp_path") or "").strip()
+        ctx = doc.get("context") if isinstance(doc.get("context"), dict) else {}
+        has_bytes = isinstance(raw, (bytes, bytearray)) and len(raw) > 0
+        prepared.append(
+            {
+                "filename": filename,
+                "context": ctx,
+                "raw": bytes(raw) if has_bytes else None,
+                "reuse_ftp_path": reuse,
+                "metadata_only": not reuse and not has_bytes,
+            }
+        )
+    if not prepared:
+        return {"ok": False, "error": "没有可交接的记录"}, 400
+
+    base = (get_setting("AIPRINTWORD_BASE_URL") or "").strip().rstrip("/")
+    secret = (get_setting("AIPRINTWORD_HANDOFF_SECRET") or "").strip()
+    if not base or not secret:
+        return {
+            "ok": False,
+            "error": "请在系统配置中填写 AIPRINTWORD_BASE_URL 与 AIPRINTWORD_HANDOFF_SECRET",
+        }, 503
+
+    headers = {"X-Aiword-Handoff-Secret": secret}
+    if len(prepared) == 1:
+        item = prepared[0]
+        post_data: dict[str, str] = {"purpose": "sign", "filename": item["filename"]}
+        if item["context"]:
+            post_data["handoff_context"] = json.dumps(item["context"], ensure_ascii=False)
+        files_payload = None
+        if item["reuse_ftp_path"]:
+            post_data["reuse_ftp_path"] = item["reuse_ftp_path"]
+        elif item["metadata_only"]:
+            post_data["metadata_only"] = "1"
+        else:
+            files_payload = {"file": (item["filename"], item["raw"] or b"")}
+        try:
+            response = _req.post(
+                f"{base}/api/handoff",
+                headers=headers,
+                files=files_payload,
+                data=post_data,
+                timeout=120,
+            )
+        except _req.RequestException as exc:
+            return {"ok": False, "error": f"连接签字服务失败：{exc}"}, 502
+        if response.status_code != 200:
+            return {"ok": False, "error": f"签字服务返回 HTTP {response.status_code}"}, 502
+        try:
+            payload = response.json()
+        except Exception:
+            return {"ok": False, "error": "签字服务返回非 JSON"}, 502
+        if not payload.get("ok"):
+            return {"ok": False, "error": str(payload.get("error") or "unknown")}, 502
+        token = (payload.get("token") or "").strip()
+        if not token:
+            return {"ok": False, "error": "未返回 token"}, 502
+        return {
+            "ok": True,
+            "redirect_url": f"{base}/sign?from=aiword&handoff_token={_urlquote(token)}",
+            "success_count": 1,
+            "failure_count": 0,
+            "failures": [],
+        }, 200
+
+    manifest: list[dict[str, Any]] = []
+    files_payload: dict[str, tuple[str, bytes]] = {}
+    for idx, item in enumerate(prepared):
+        entry: dict[str, Any] = {"purpose": "sign", "filename": item["filename"]}
+        if item["context"]:
+            entry["handoff_context"] = item["context"]
+        if item["reuse_ftp_path"]:
+            entry["reuse_ftp_path"] = item["reuse_ftp_path"]
+        elif item["metadata_only"]:
+            entry["metadata_only"] = True
+        else:
+            field = f"file_{idx}"
+            entry["file_field"] = field
+            files_payload[field] = (item["filename"], item["raw"] or b"")
+        manifest.append(entry)
+    try:
+        response = _req.post(
+            f"{base}/api/handoff/batch",
+            headers=headers,
+            files=files_payload or None,
+            data={"purpose": "sign", "manifest": json.dumps(manifest, ensure_ascii=False)},
+            timeout=180,
+        )
+    except _req.RequestException as exc:
+        return {"ok": False, "error": f"连接签字服务失败：{exc}"}, 502
+    if response.status_code != 200:
+        return {"ok": False, "error": f"签字服务返回 HTTP {response.status_code}"}, 502
+    try:
+        payload = response.json()
+    except Exception:
+        return {"ok": False, "error": "签字服务返回非 JSON"}, 502
+    if not payload.get("ok"):
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or "批量交接失败"),
+            "failures": payload.get("failures") if isinstance(payload.get("failures"), list) else [],
+        }, 502
+    batch_token = (payload.get("batch_token") or "").strip()
+    if not batch_token:
+        return {"ok": False, "error": "未返回 batch_token"}, 502
+    failures = payload.get("failures") if isinstance(payload.get("failures"), list) else []
+    return {
+        "ok": True,
+        "redirect_url": f"{base}/sign?from=aiword&handoff_batch_token={_urlquote(batch_token)}",
+        "success_count": int(payload.get("success_count") or len(prepared)),
+        "failure_count": len(failures),
+        "failures": failures,
+    }, 200
+
+
 def _build_option_tree(records: list[UploadRecord]) -> list[dict[str, Any]]:
     projects: dict[str, dict[str, Any]] = {}
     for record in records:

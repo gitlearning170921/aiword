@@ -1451,6 +1451,15 @@
     );
   }
 
+  function selectedSignItems() {
+    return (previewItems || []).filter((item) => {
+      if (!canCheckPreview(item) || !previewSelectedKeys.has(taskIdentity(item))) return false;
+      if (changeKindOf(item) === "delete") return false;
+      if (isRegistrationPreviewItem(item)) return true;
+      return canSelectPreview(item);
+    });
+  }
+
   function countIssueRecords(items) {
     return (items || []).reduce((n, item) => n + splitTaskAuthors(item && item.author).length, 0);
   }
@@ -2442,7 +2451,7 @@
     const checkTitle = deleted
       ? "已删除，不能勾选"
       : registration
-        ? "勾选后可调序、复制、删除或设置完成日期；注册文件不参与任务下发"
+        ? "勾选后可下发到签字工作台，也可调序、复制、删除或设置完成日期；不会写入任务列表"
         : adopted
           ? "勾选后可下发或批量调整顺序"
           : "勾选后可批量调整顺序；仅选用会下发";
@@ -2489,7 +2498,7 @@
           <div class="vtg-ver-head">
             <span class="vtg-ver-head-label">注册文件（<span data-vtg-reg-count>${countRegistrationItems()}</span>）</span>
           </div>
-          <div class="small text-muted mt-1">与上方同一套版本筛选和工具栏。点本区域的行后，用「添加记录」插入；可拖动排序。勾选后可批量调序、复制到版本、按版本删除、设置完成日期。不参与任务下发。状态可标记是否已递交。</div>
+          <div class="small text-muted mt-1">与上方同一套版本筛选和工具栏。点本区域的行后，用「添加记录」插入；可拖动排序。勾选后可下发到签字工作台，也可批量调序、复制到版本、按版本删除、设置完成日期。不会写入任务列表。状态可标记是否已递交。</div>
         </td>
       </tr>`
     );
@@ -5371,18 +5380,24 @@
     if (!projectId) {
       throw new Error("请先选择项目再下发到签字工作台");
     }
-    const items = selectedIssueItems().map((item) => ({
+    const items = selectedSignItems().map((item) => ({
       fileName: String((item && item.fileName) || "").trim(),
       taskType: String((item && item.taskType) || "").trim(),
       author: String((item && item.author) || "").trim(),
       targetVersion: String((item && (item.targetVersion || item.registrationVersion)) || "").trim(),
+      documentDisplayDate: String((item && item.documentDisplayDate) || "").trim(),
+      displayedAuthor: String((item && item.displayedAuthor) || "").trim(),
+      reviewer: String((item && item.reviewer) || "").trim(),
+      approver: String((item && item.approver) || "").trim(),
+      documentNumber: String((item && item.documentNumber) || "").trim(),
+      belongingModule: String((item && item.belongingModule) || "").trim(),
       recordStatus: recordStatusOf(item),
       changeKind: changeKindOf(item),
       listRegion: String((item && item.listRegion) || "").trim(),
       chapter: String((item && (item.chapter || item.processBranchLabel)) || "").trim(),
     }));
     if (!items.length) {
-      throw new Error("请勾选至少一条「选用」且未删除的记录。下发签字不会新建任务，请先确认下发到任务列表。");
+      throw new Error("请勾选至少一条记录。体系文件须为「选用」；注册文件勾选即可。下发签字不会新建任务。");
     }
     const handoff = await requestJson("/api/document-control/version-tasks/handoff-sign", {
       method: "POST",
